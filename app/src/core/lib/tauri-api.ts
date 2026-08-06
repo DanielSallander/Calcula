@@ -1874,6 +1874,31 @@ export async function getSplitWindow(): Promise<SplitConfig> {
 }
 
 // ============================================================================
+// PER-SHEET ZOOM API
+// ============================================================================
+
+/**
+ * Persist the ACTIVE sheet's zoom, as a REAL PERCENT (100 = 100%).
+ *
+ * PERCENT, deliberately — the backend, the file (`zoom` in metadata.json),
+ * Excel's `zoomScale` and the script contract (`Calcula.getZoom()`) all speak
+ * percent. The reducer's `state.zoom` is a RENDER FACTOR (1.0 = 100%); the
+ * conversion belongs at this boundary and nowhere else, because a second
+ * conversion site is exactly how the factor-vs-percent split-brain happened.
+ *
+ * Rejects out-of-range values rather than clamping (the backend enforces
+ * 10..400), so a caller with a bug hears about it.
+ */
+export async function setSheetZoom(zoomPercent: number): Promise<void> {
+  await invoke<void>("set_sheet_zoom", { zoom: zoomPercent });
+}
+
+/** The ACTIVE sheet's persisted zoom as a REAL PERCENT (100 = 100%). */
+export async function getSheetZoom(): Promise<number> {
+  return await invoke<number>("get_sheet_zoom", {});
+}
+
+// ============================================================================
 // SCROLL AREA API
 // ============================================================================
 

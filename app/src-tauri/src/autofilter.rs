@@ -969,7 +969,17 @@ fn recompute_hidden_rows(
 /// Apply an AutoFilter to a range, optionally with initial column filter.
 #[tauri::command]
 pub fn apply_auto_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    params: ApplyAutoFilterParams,
+) -> AutoFilterResult {
+    let result = apply_auto_filter_inner(&state, params);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn apply_auto_filter_inner(
+    state: &AppState,
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -1059,7 +1069,17 @@ pub fn apply_auto_filter(
 /// Clear filter criteria for a specific column.
 #[tauri::command]
 pub fn clear_column_criteria(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    column_index: u32,
+) -> AutoFilterResult {
+    let result = clear_column_criteria_inner(&state, column_index);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn clear_column_criteria_inner(
+    state: &AppState,
     column_index: u32,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -1113,7 +1133,16 @@ pub fn clear_column_criteria(
 /// Clear all filter criteria (but keep the AutoFilter range).
 #[tauri::command]
 pub fn clear_auto_filter_criteria(
+    app: tauri::AppHandle,
     state: State<AppState>,
+) -> AutoFilterResult {
+    let result = clear_auto_filter_criteria_inner(&state);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn clear_auto_filter_criteria_inner(
+    state: &AppState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut auto_filters = state.auto_filters.lock().unwrap();
@@ -1149,7 +1178,16 @@ pub fn clear_auto_filter_criteria(
 /// Reapply the AutoFilter (refresh filtering with current data).
 #[tauri::command]
 pub fn reapply_auto_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+) -> AutoFilterResult {
+    let result = reapply_auto_filter_inner(&state);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn reapply_auto_filter_inner(
+    state: &AppState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     // allowAutoFilter option gate.
@@ -1201,7 +1239,16 @@ pub fn reapply_auto_filter(
 /// Remove the AutoFilter from the sheet entirely.
 #[tauri::command]
 pub fn remove_auto_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+) -> AutoFilterResult {
+    let result = remove_auto_filter_inner(&state);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn remove_auto_filter_inner(
+    state: &AppState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut auto_filters = state.auto_filters.lock().unwrap();
@@ -1294,7 +1341,16 @@ pub fn get_hidden_rows(
 /// Set hidden rows for the Advanced Filter on the active sheet.
 #[tauri::command]
 pub fn set_advanced_filter_hidden_rows(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    rows: Vec<u32>,
+) {
+    set_advanced_filter_hidden_rows_inner(&state, rows);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+}
+
+fn set_advanced_filter_hidden_rows_inner(
+    state: &AppState,
     rows: Vec<u32>,
 ) {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -1309,7 +1365,15 @@ pub fn set_advanced_filter_hidden_rows(
 /// Clear advanced filter hidden rows for the active sheet.
 #[tauri::command]
 pub fn clear_advanced_filter_hidden_rows(
+    app: tauri::AppHandle,
     state: State<AppState>,
+) {
+    clear_advanced_filter_hidden_rows_inner(&state);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+}
+
+fn clear_advanced_filter_hidden_rows_inner(
+    state: &AppState,
 ) {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
@@ -1407,7 +1471,19 @@ pub fn get_filter_unique_values(
 /// Set filter criteria for a specific column using value selection.
 #[tauri::command]
 pub fn set_column_filter_values(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    column_index: u32,
+    values: Vec<String>,
+    include_blanks: bool,
+) -> AutoFilterResult {
+    let result = set_column_filter_values_inner(&state, column_index, values, include_blanks);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn set_column_filter_values_inner(
+    state: &AppState,
     column_index: u32,
     values: Vec<String>,
     include_blanks: bool,
@@ -1479,7 +1555,21 @@ pub fn set_column_filter_values(
 /// Set a custom filter for a specific column.
 #[tauri::command]
 pub fn set_column_custom_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    column_index: u32,
+    criterion1: String,
+    criterion2: Option<String>,
+    operator: Option<FilterOperator>,
+) -> AutoFilterResult {
+    let result =
+        set_column_custom_filter_inner(&state, column_index, criterion1, criterion2, operator);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn set_column_custom_filter_inner(
+    state: &AppState,
     column_index: u32,
     criterion1: String,
     criterion2: Option<String>,
@@ -1548,7 +1638,19 @@ pub fn set_column_custom_filter(
 /// Set a top/bottom filter for a specific column.
 #[tauri::command]
 pub fn set_column_top_bottom_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    column_index: u32,
+    filter_on: FilterOn,
+    value: u32,
+) -> AutoFilterResult {
+    let result = set_column_top_bottom_filter_inner(&state, column_index, filter_on, value);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn set_column_top_bottom_filter_inner(
+    state: &AppState,
     column_index: u32,
     filter_on: FilterOn,
     value: u32,
@@ -1825,7 +1927,17 @@ fn row_matches_any(values: &[String], criteria_rows: &[HashMap<u32, AdvParsedCri
 /// through the undoable batch path).
 #[tauri::command]
 pub fn run_advanced_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    params: AdvancedFilterParams,
+) -> AdvancedFilterResult {
+    let result = run_advanced_filter_inner(&state, params);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn run_advanced_filter_inner(
+    state: &AppState,
     params: AdvancedFilterParams,
 ) -> AdvancedFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -2180,7 +2292,18 @@ mod advanced_filter_tests {
 
 #[tauri::command]
 pub fn set_column_dynamic_filter(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    column_index: u32,
+    dynamic_criteria: DynamicFilterCriteria,
+) -> AutoFilterResult {
+    let result = set_column_dynamic_filter_inner(&state, column_index, dynamic_criteria);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn set_column_dynamic_filter_inner(
+    state: &AppState,
     column_index: u32,
     dynamic_criteria: DynamicFilterCriteria,
 ) -> AutoFilterResult {

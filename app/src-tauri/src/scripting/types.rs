@@ -100,10 +100,12 @@ pub fn build_app_info(state: &AppState) -> script_engine::types::AppInfo {
 /// `file_state` supplies the dirty flag (it lives outside AppState); pass None
 /// from surfaces that do not have it.
 ///
-/// `display_zeros`, `view_mode`, `zoom` and `display_headings` have no
-/// authoritative backend copy — they live in the Core grid state — so they come
-/// off the run request instead: pass the request's `view_state` here and it is
-/// merged over the defaults (see `apply_view_state`).
+/// `display_zeros`, `view_mode` and `display_headings` have no authoritative
+/// backend copy — they live in the Core grid state — so they come off the run
+/// request instead: pass the request's `view_state` here and it is merged over
+/// the defaults (see `apply_view_state`). `zoom` is no longer in that group:
+/// it is seeded from `AppState::sheet_zooms` and only OVERRIDDEN by the
+/// request.
 pub fn build_host_state(
     state: &AppState,
     file_state: Option<&FileState>,
@@ -111,6 +113,19 @@ pub fn build_host_state(
     view_state: Option<&HostViewState>,
 ) -> script_engine::types::HostState {
     let mut host = script_engine::types::HostState::default();
+
+    // Zoom now HAS a backend authority (`AppState::sheet_zooms`, a percent per
+    // sheet), so seed it here -- BEFORE the request's view state, which still
+    // wins. Surfaces that send no view state at all (MCP, scheduled jobs,
+    // writeback automation) used to get a hardcoded 100 no matter what the
+    // workbook was zoomed to; they now get the real value, and an interactive
+    // run that carries a fresher UI value still overrides it.
+    if let Ok(zooms) = state.sheet_zooms.lock() {
+        if let Some(z) = zooms.get(active_sheet) {
+            host.zoom = *z;
+        }
+    }
+
     if let Some(view) = view_state {
         apply_view_state(&mut host, view);
     }

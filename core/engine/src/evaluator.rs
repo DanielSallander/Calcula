@@ -27,6 +27,7 @@ use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
 use crate::lookup_cache;
+use crate::row_visibility::HiddenScope;
 use crate::style::StyleRegistry;
 
 use std::cell::RefCell;
@@ -75,6 +76,30 @@ macro_rules! charge_arith {
             return EvalResult::Error(CellError::Limit);
         }
     };
+}
+
+/// Which cells an outer aggregate skips because they are themselves aggregates.
+///
+/// Excel's rule differs per family: SUBTOTAL ignores nested SUBTOTALs at every
+/// function code; AGGREGATE ignores nested SUBTOTAL *and* AGGREGATE, but only
+/// for options 0-3 (options 4-7 do not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NestedSkip {
+    /// Skip nothing. AGGREGATE options 4, 5, 6, 7.
+    None,
+    /// Skip cells whose formula calls SUBTOTAL. SUBTOTAL, all codes.
+    Subtotal,
+    /// Skip cells whose formula calls SUBTOTAL or AGGREGATE.
+    /// AGGREGATE options 0, 1, 2, 3.
+    SubtotalAndAggregate,
+}
+
+/// The complete exclusion rule for one visibility-aware aggregate call:
+/// which rows are invisible to it, and which cells it must not double-count.
+#[derive(Debug, Clone, Copy)]
+struct AggregateScope {
+    hidden: HiddenScope,
+    nested: NestedSkip,
 }
 
 /// Comparison operator for criteria matching in SUMIF/COUNTIF etc.
@@ -399,9 +424,18 @@ pub struct EvalContext {
     pub row_heights: Option<HashMap<u32, f64>>,
     /// Column widths: col_index (0-indexed) -> width in pixels (for GET.COLUMN.WIDTH).
     pub column_widths: Option<HashMap<u32, f64>>,
-    /// Set of 0-indexed row indices that are hidden (by filter, grouping, or manual hide).
-    /// Used by SUBTOTAL function codes 101-111 to exclude hidden rows.
-    pub hidden_rows: Option<HashSet<u32>>,
+    /// Per-sheet hidden-row index for the visibility-aware aggregates
+    /// (SUBTOTAL, AGGREGATE). Carries the filter-hidden and user/outline-hidden
+    /// notions SEPARATELY — SUBTOTAL 1-11 and 101-111 disagree about the second
+    /// one, so a flat set cannot express Excel's semantics. See
+    /// `crate::row_visibility`.
+    ///
+    /// PRECEDENCE: this field is an explicit OVERRIDE. When it is `None` the
+    /// evaluator falls back to the pass-scoped snapshot installed by
+    /// `row_visibility::begin_pass` (the production path — built once per
+    /// recalculation, never per formula). When BOTH are absent the aggregates
+    /// behave as if nothing is hidden.
+    pub hidden_rows: Option<std::sync::Arc<crate::row_visibility::RowVisibility>>,
     /// Pre-fetched data for the CUBE function family (CUBEVALUE, CUBEMEMBER, ...).
     /// Built by an async pass in the app layer BEFORE this synchronous recalc
     /// (cube queries are async and cannot run under the recalc lock — see
@@ -726,6 +760,40 @@ impl<'a> Evaluator<'a> {
             }
             _ => self.grid,
         }
+    }
+
+    /// The row-visibility key for the sheet whose grid `get_grid_for_sheet`
+    /// would return for the same argument.
+    ///
+    /// THE TWO MUST AGREE, ALWAYS: if this resolved a different sheet than the
+    /// grid did, `SUBTOTAL(109, Sheet2!A1:A10)` would filter Sheet2's values
+    /// through some other sheet's hidden rows — the exact failure mode a flat,
+    /// sheet-blind hidden set produces. Every fallback branch below therefore
+    /// mirrors `get_grid_for_sheet`'s fallback to `self.grid` by returning the
+    /// CURRENT sheet's key. The empty string is the key of an evaluator with no
+    /// multi-sheet context (see `row_visibility::RowVisibility::single_sheet`).
+    fn visibility_key_for_sheet(&self, sheet: &Option<String>) -> String {
+        match (sheet, &self.multi_sheet) {
+            // Named sheet that actually resolves to a grid: that sheet's key.
+            (Some(sheet_name), Some(ctx)) if ctx.get_grid(sheet_name).is_some() => {
+                sheet_name.to_uppercase()
+            }
+            // Unnamed, or a name with no grid (get_grid_for_sheet fell back to
+            // self.grid): the current sheet.
+            (_, Some(ctx)) => ctx.current_sheet.to_uppercase(),
+            (_, None) => String::new(),
+        }
+    }
+
+    /// The row-visibility snapshot in force: the explicit `EvalContext`
+    /// override if present, otherwise the pass-scoped snapshot. `None` means
+    /// "nothing is hidden anywhere", which is what every caller that never
+    /// installed one gets.
+    fn row_visibility(&self) -> Option<std::sync::Arc<crate::row_visibility::RowVisibility>> {
+        if let Some(explicit) = &self.context.hidden_rows {
+            return Some(explicit.clone());
+        }
+        crate::row_visibility::active()
     }
 
     /// Evaluates an AST expression and returns the result.
@@ -2380,11 +2448,21 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    // ==================== SUBTOTAL Function ====================
+    // ==================== SUBTOTAL / AGGREGATE (visibility-aware) ==========
 
     /// SUBTOTAL(function_num, ref1, [ref2], ...)
-    /// Codes 1-11: include manually hidden rows, exclude rows hidden by other SUBTOTAL
-    /// Codes 101-111: exclude all hidden rows
+    ///
+    /// EXCEL SEMANTICS, implemented exactly (see `crate::row_visibility` for
+    /// why the two hidden notions must stay separate):
+    ///  - Codes **1-11** ignore rows hidden by a FILTER and INCLUDE rows the
+    ///    user hid by hand or collapsed with an outline group. (Including the
+    ///    detail rows of a collapsed group is the whole point of the automatic-
+    ///    subtotals feature, so outline-collapsed counts as "manually hidden".)
+    ///  - Codes **101-111** ignore filter-hidden rows AND manually hidden rows.
+    ///  - BOTH code ranges ignore cells whose own formula calls SUBTOTAL, so a
+    ///    grand total over a column of subtotals never double-counts.
+    ///  - Hiding COLUMNS never changes the result: SUBTOTAL is row-oriented.
+    ///
     /// 1/101=AVERAGE, 2/102=COUNT, 3/103=COUNTA, 4/104=MAX, 5/105=MIN,
     /// 6/106=PRODUCT, 7/107=STDEV, 8/108=STDEVP, 9/109=SUM, 10/110=VAR, 11/111=VARP
     fn fn_subtotal(&self, args: &[Expression]) -> EvalResult {
@@ -2399,30 +2477,33 @@ impl<'a> Evaluator<'a> {
             _ => return EvalResult::Error(CellError::Value),
         };
 
-        // Determine whether to exclude hidden rows (101-111) or not (1-11)
-        let (base_func, exclude_hidden) = if func_num >= 101 && func_num <= 111 {
-            (func_num - 100, true)
-        } else if func_num >= 1 && func_num <= 11 {
-            (func_num, false)
+        // 101-111 additionally exclude manually hidden rows; 1-11 do not.
+        let (base_func, hidden) = if (101..=111).contains(&func_num) {
+            (func_num - 100, HiddenScope::FilterAndManual)
+        } else if (1..=11).contains(&func_num) {
+            (func_num, HiddenScope::FilterOnly)
         } else {
             return EvalResult::Error(CellError::Value);
         };
 
-        // Collect values from the range arguments, optionally filtering hidden rows
-        let range_args = &args[1..];
+        let scope = AggregateScope {
+            hidden,
+            // Unconditional for SUBTOTAL, at every code.
+            nested: NestedSkip::Subtotal,
+        };
 
-        if exclude_hidden {
-            // Codes 101-111: collect values while skipping hidden rows
-            let values = self.collect_subtotal_values_filtered(range_args);
-            self.apply_subtotal_aggregate(base_func, values)
-        } else {
-            // Codes 1-11: collect all values (don't filter hidden rows)
-            let values = self.collect_subtotal_values(range_args);
-            self.apply_subtotal_aggregate(base_func, values)
+        match self.collect_visible_values(&args[1..], scope) {
+            Ok(values) => self.apply_subtotal_aggregate(base_func, values),
+            Err(e) => EvalResult::Error(e),
         }
     }
 
-    /// Collects values from range arguments without filtering hidden rows (codes 1-11).
+    /// Collects values from reference arguments without any visibility or
+    /// nested-aggregate filtering. Used for argument shapes that are not
+    /// resolvable references (array literals, computed arrays, 3D refs) — the
+    /// same carve-out Microsoft documents for AGGREGATE: "the function will not
+    /// ignore hidden rows, nested subtotals or nested aggregates if the array
+    /// argument includes a calculation".
     fn collect_subtotal_values(&self, args: &[Expression]) -> Vec<EvalResult> {
         let mut values = Vec::new();
         for arg in args {
@@ -2432,18 +2513,43 @@ impl<'a> Evaluator<'a> {
         values
     }
 
-    /// Collects values from range arguments, skipping values in hidden rows (codes 101-111).
-    fn collect_subtotal_values_filtered(&self, args: &[Expression]) -> Vec<EvalResult> {
-        let hidden = match &self.context.hidden_rows {
-            Some(h) if !h.is_empty() => h,
-            _ => return self.collect_subtotal_values(args), // No hidden rows, just collect all
-        };
+    /// THE visibility-aware collector, shared by SUBTOTAL and AGGREGATE.
+    ///
+    /// Walks each reference argument cell by cell so it can consult the hidden
+    /// state of THAT REFERENCE'S SHEET (`visibility_key_for_sheet` mirrors
+    /// `get_grid_for_sheet`, so the values and the hidden rows always come from
+    /// the same sheet) and skip cells that are themselves nested aggregates.
+    /// Non-reference arguments fall through to plain evaluation.
+    ///
+    /// Value conversion is byte-for-byte the same as `eval_range` /
+    /// `eval_column_ref` / `eval_row_ref`: `cell_value_to_result` per cell,
+    /// and a rectangle's absent cells materialize as `Number(0.0)` while a
+    /// whole-column/row reference contributes only populated cells. Changing
+    /// that here would silently change every SUBTOTAL result, hidden rows or
+    /// not.
+    ///
+    /// Returns `Err` when the evaluation budget trips — the rectangle walk is
+    /// pre-charged exactly like `eval_range`, so `SUBTOTAL(9, A1:XFD1048576)`
+    /// fails in microseconds instead of looping 1.7e10 times.
+    fn collect_visible_values(
+        &self,
+        args: &[Expression],
+        scope: AggregateScope,
+    ) -> Result<Vec<EvalResult>, CellError> {
+        let visibility = self.row_visibility();
+        // Fast path: nothing hidden anywhere AND no nested aggregates to hunt.
+        // Byte-identical to the pre-index behavior for the common workbook.
+        let nothing_hidden = visibility.as_ref().is_none_or(|v| v.is_empty());
+        if nothing_hidden && scope.nested == NestedSkip::None {
+            return Ok(self.collect_subtotal_values(args));
+        }
 
         let mut values = Vec::new();
         for arg in args {
             match arg {
                 Expression::Range { sheet, start, end, .. } => {
                     let grid = self.get_grid_for_sheet(sheet);
+                    let key = self.visibility_key_for_sheet(sheet);
                     if let (
                         Expression::CellRef { col: start_col, row: start_row, .. },
                         Expression::CellRef { col: end_col, row: end_row, .. },
@@ -2456,13 +2562,24 @@ impl<'a> Evaluator<'a> {
                         let max_r = sr.max(er);
                         let min_c = sc.min(ec);
                         let max_c = sc.max(ec);
+                        // BULK PRE-CHARGE before the walk, mirroring eval_range.
+                        let area = ((max_r - min_r) as u64 + 1)
+                            .saturating_mul((max_c - min_c) as u64 + 1);
+                        if self.budget.charge(fuel_units(area)).is_err() {
+                            return Err(CellError::Limit);
+                        }
                         for r in min_r..=max_r {
-                            if hidden.contains(&r) {
-                                continue; // Skip hidden rows
+                            if Self::row_is_hidden(&visibility, &key, r, scope.hidden) {
+                                continue;
                             }
                             for c in min_c..=max_c {
                                 let result = match grid.get_cell(r, c) {
-                                    Some(cell) => self.cell_value_to_result(&cell.value),
+                                    Some(cell) => {
+                                        if Self::is_nested_aggregate_cell(cell, scope.nested) {
+                                            continue;
+                                        }
+                                        self.cell_value_to_result(&cell.value)
+                                    }
                                     None => EvalResult::Number(0.0),
                                 };
                                 values.push(result);
@@ -2472,48 +2589,156 @@ impl<'a> Evaluator<'a> {
                 }
                 Expression::CellRef { sheet, col, row, .. } => {
                     let row_idx = row - 1;
-                    if !hidden.contains(&row_idx) {
+                    let key = self.visibility_key_for_sheet(sheet);
+                    if !Self::row_is_hidden(&visibility, &key, row_idx, scope.hidden) {
                         let grid = self.get_grid_for_sheet(sheet);
                         let col_idx = col_to_index(col);
-                        let result = match grid.get_cell(row_idx, col_idx) {
-                            Some(cell) => self.cell_value_to_result(&cell.value),
-                            None => EvalResult::Number(0.0),
-                        };
-                        values.push(result);
+                        match grid.get_cell(row_idx, col_idx) {
+                            Some(cell) => {
+                                if !Self::is_nested_aggregate_cell(cell, scope.nested) {
+                                    values.push(self.cell_value_to_result(&cell.value));
+                                }
+                            }
+                            None => values.push(EvalResult::Number(0.0)),
+                        }
                     }
                 }
                 Expression::ColumnRef { sheet, start_col, end_col, .. } => {
                     let grid = self.get_grid_for_sheet(sheet);
+                    let key = self.visibility_key_for_sheet(sheet);
+                    if self
+                        .budget
+                        .charge(fuel_units((grid.cells.len() as u64).saturating_add(1)))
+                        .is_err()
+                    {
+                        return Err(CellError::Limit);
+                    }
                     let sc = col_to_index(start_col);
                     let ec = col_to_index(end_col);
                     let min_c = sc.min(ec);
                     let max_c = sc.max(ec);
                     for (&(r, c), cell) in &grid.cells {
-                        if c >= min_c && c <= max_c && !hidden.contains(&r) {
+                        if c >= min_c
+                            && c <= max_c
+                            && !Self::row_is_hidden(&visibility, &key, r, scope.hidden)
+                            && !Self::is_nested_aggregate_cell(cell, scope.nested)
+                        {
                             values.push(self.cell_value_to_result(&cell.value));
                         }
                     }
                 }
                 Expression::RowRef { sheet, start_row, end_row, .. } => {
                     let grid = self.get_grid_for_sheet(sheet);
+                    let key = self.visibility_key_for_sheet(sheet);
+                    if self
+                        .budget
+                        .charge(fuel_units((grid.cells.len() as u64).saturating_add(1)))
+                        .is_err()
+                    {
+                        return Err(CellError::Limit);
+                    }
                     let sr = start_row - 1;
                     let er = end_row - 1;
                     let min_r = sr.min(er);
                     let max_r = sr.max(er);
                     for (&(r, _c), cell) in &grid.cells {
-                        if r >= min_r && r <= max_r && !hidden.contains(&r) {
+                        if r >= min_r
+                            && r <= max_r
+                            && !Self::row_is_hidden(&visibility, &key, r, scope.hidden)
+                            && !Self::is_nested_aggregate_cell(cell, scope.nested)
+                        {
                             values.push(self.cell_value_to_result(&cell.value));
                         }
                     }
                 }
                 _ => {
-                    // For non-range expressions, just evaluate normally
+                    // Not a resolvable reference (array literal, computed
+                    // array, 3D reference, nested function): evaluate normally.
+                    // Documented Excel carve-out — see collect_subtotal_values.
                     let result = self.evaluate(arg);
                     Self::flatten_into(&mut values, result);
                 }
             }
         }
-        values
+        Ok(values)
+    }
+
+    /// Row-hidden probe against an optional snapshot (None => nothing hidden).
+    #[inline]
+    fn row_is_hidden(
+        visibility: &Option<std::sync::Arc<crate::row_visibility::RowVisibility>>,
+        key: &str,
+        row: u32,
+        scope: HiddenScope,
+    ) -> bool {
+        visibility
+            .as_ref()
+            .is_some_and(|v| v.is_hidden(key, row, scope))
+    }
+
+    /// True when `cell` holds a nested aggregate the outer aggregate must not
+    /// double-count. Detection is by AST, ANYWHERE in the formula (so
+    /// `=SUBTOTAL(9,B1:B3)*1.2` is excluded too), and costs nothing for the
+    /// data cells that make up the bulk of any range — they have no AST.
+    fn is_nested_aggregate_cell(cell: &crate::cell::Cell, nested: NestedSkip) -> bool {
+        if nested == NestedSkip::None {
+            return false;
+        }
+        match cell.ast.as_deref() {
+            Some(ast) => Self::ast_calls_nested_aggregate(ast, nested),
+            None => false,
+        }
+    }
+
+    fn ast_calls_nested_aggregate(expr: &Expression, nested: NestedSkip) -> bool {
+        match expr {
+            Expression::FunctionCall { func, args, .. } => {
+                let is_hit = match func {
+                    BuiltinFunction::Subtotal => true,
+                    BuiltinFunction::Aggregate => nested == NestedSkip::SubtotalAndAggregate,
+                    _ => false,
+                };
+                is_hit
+                    || args
+                        .iter()
+                        .any(|a| Self::ast_calls_nested_aggregate(a, nested))
+            }
+            Expression::BinaryOp { left, right, .. } => {
+                Self::ast_calls_nested_aggregate(left, nested)
+                    || Self::ast_calls_nested_aggregate(right, nested)
+            }
+            Expression::UnaryOp { operand, .. }
+            | Expression::ImplicitIntersection { operand } => {
+                Self::ast_calls_nested_aggregate(operand, nested)
+            }
+            Expression::IndexAccess { target, index } => {
+                Self::ast_calls_nested_aggregate(target, nested)
+                    || Self::ast_calls_nested_aggregate(index, nested)
+            }
+            Expression::ListLiteral { elements } => elements
+                .iter()
+                .any(|e| Self::ast_calls_nested_aggregate(e, nested)),
+            Expression::DictLiteral { entries } => entries.iter().any(|(k, v)| {
+                Self::ast_calls_nested_aggregate(k, nested)
+                    || Self::ast_calls_nested_aggregate(v, nested)
+            }),
+            Expression::Sheet3DRef { reference, .. } => {
+                Self::ast_calls_nested_aggregate(reference, nested)
+            }
+            Expression::SpillRef { cell, .. } => {
+                Self::ast_calls_nested_aggregate(cell, nested)
+            }
+            Expression::Range { start, end, .. } => {
+                Self::ast_calls_nested_aggregate(start, nested)
+                    || Self::ast_calls_nested_aggregate(end, nested)
+            }
+            Expression::Literal(_)
+            | Expression::CellRef { .. }
+            | Expression::ColumnRef { .. }
+            | Expression::RowRef { .. }
+            | Expression::NamedRef { .. }
+            | Expression::TableRef { .. } => false,
+        }
     }
 
     /// Flattens an EvalResult into a Vec, expanding arrays/lists.
@@ -4913,6 +5138,25 @@ impl<'a> Evaluator<'a> {
 
     // ==================== AGGREGATE Function ====================
 
+    /// AGGREGATE(function_num, options, ref1, [ref2], ...) — or, for
+    /// function_num 14-19, AGGREGATE(function_num, options, array, k).
+    ///
+    /// OPTIONS (Microsoft's table, implemented exactly):
+    ///   0 (or omitted) Ignore nested SUBTOTAL and AGGREGATE functions
+    ///   1              Ignore hidden rows, nested SUBTOTAL and AGGREGATE
+    ///   2              Ignore error values, nested SUBTOTAL and AGGREGATE
+    ///   3              Ignore hidden rows, error values, nested SUBTOTAL/AGGREGATE
+    ///   4              Ignore nothing
+    ///   5              Ignore hidden rows
+    ///   6              Ignore error values
+    ///   7              Ignore hidden rows and error values
+    ///
+    /// "Ignore hidden rows" covers rows hidden by hand AND by a collapsed
+    /// outline group. Rows hidden by a FILTER are ALWAYS excluded, at every
+    /// option including 4 — exactly as SUBTOTAL 1-11 always excludes them.
+    /// (So options 1/3/5/7 line up with SUBTOTAL 101-111, and options 0/2/4/6
+    /// line up with SUBTOTAL 1-11.) Hiding COLUMNS never affects the result:
+    /// AGGREGATE is defined for vertical ranges.
     fn fn_aggregate(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 3 {
             return EvalResult::Error(CellError::Value);
@@ -4938,16 +5182,40 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let skip_errors = matches!(options, 1 | 2 | 3 | 5 | 6 | 7);
+        let skip_errors = matches!(options, 2 | 3 | 6 | 7);
+        let scope = AggregateScope {
+            hidden: if matches!(options, 1 | 3 | 5 | 7) {
+                HiddenScope::FilterAndManual
+            } else {
+                HiddenScope::FilterOnly
+            },
+            nested: if matches!(options, 0 | 1 | 2 | 3) {
+                NestedSkip::SubtotalAndAggregate
+            } else {
+                NestedSkip::None
+            },
+        };
 
+        // Function numbers 14-19 (LARGE/SMALL/PERCENTILE/QUARTILE) take a
+        // trailing k argument that is NOT data: it must be excluded from the
+        // collected values, and it is evaluated separately in its own arm.
+        let takes_k = (14..=19).contains(&func_num);
         let range_args = &args[2..];
-
-        // Collect values from ranges
-        let mut values = Vec::new();
-        for arg in range_args {
-            let result = self.evaluate(arg);
-            Self::flatten_into(&mut values, result);
+        if takes_k && range_args.len() < 2 {
+            return EvalResult::Error(CellError::Value);
         }
+        let data_args = if takes_k {
+            &args[2..args.len() - 1]
+        } else {
+            range_args
+        };
+
+        // Collect values from ranges, skipping invisible rows and nested
+        // aggregates per `scope`.
+        let mut values = match self.collect_visible_values(data_args, scope) {
+            Ok(v) => v,
+            Err(e) => return EvalResult::Error(e),
+        };
 
         // Optionally skip errors
         if skip_errors {
@@ -5077,17 +5345,7 @@ impl<'a> Evaluator<'a> {
                     Some(k) => k as usize,
                     None => return EvalResult::Error(CellError::Value),
                 };
-                // Recollect values from all but last arg
-                let mut nums = Vec::new();
-                for arg in &args[2..args.len()-1] {
-                    let result = self.evaluate(arg);
-                    let mut flat = Vec::new();
-                    Self::flatten_into(&mut flat, result);
-                    for v in flat {
-                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
-                        if let Some(n) = v.as_number() { nums.push(n); }
-                    }
-                }
+                let mut nums = extract_numbers();
                 if k_val < 1 || k_val > nums.len() { return EvalResult::Error(CellError::Value); }
                 nums.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
                 EvalResult::Number(nums[k_val - 1])
@@ -5099,16 +5357,7 @@ impl<'a> Evaluator<'a> {
                     Some(k) => k as usize,
                     None => return EvalResult::Error(CellError::Value),
                 };
-                let mut nums = Vec::new();
-                for arg in &args[2..args.len()-1] {
-                    let result = self.evaluate(arg);
-                    let mut flat = Vec::new();
-                    Self::flatten_into(&mut flat, result);
-                    for v in flat {
-                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
-                        if let Some(n) = v.as_number() { nums.push(n); }
-                    }
-                }
+                let mut nums = extract_numbers();
                 if k_val < 1 || k_val > nums.len() { return EvalResult::Error(CellError::Value); }
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 EvalResult::Number(nums[k_val - 1])
@@ -5120,16 +5369,7 @@ impl<'a> Evaluator<'a> {
                     Some(k) if (0.0..=1.0).contains(&k) => k,
                     _ => return EvalResult::Error(CellError::Value),
                 };
-                let mut nums = Vec::new();
-                for arg in &args[2..args.len()-1] {
-                    let result = self.evaluate(arg);
-                    let mut flat = Vec::new();
-                    Self::flatten_into(&mut flat, result);
-                    for v in flat {
-                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
-                        if let Some(n) = v.as_number() { nums.push(n); }
-                    }
-                }
+                let mut nums = extract_numbers();
                 if nums.is_empty() { return EvalResult::Error(CellError::Value); }
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = nums.len() as f64;
@@ -5150,16 +5390,7 @@ impl<'a> Evaluator<'a> {
                     _ => return EvalResult::Error(CellError::Value),
                 };
                 let k_val = q as f64 / 4.0;
-                let mut nums = Vec::new();
-                for arg in &args[2..args.len()-1] {
-                    let result = self.evaluate(arg);
-                    let mut flat = Vec::new();
-                    Self::flatten_into(&mut flat, result);
-                    for v in flat {
-                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
-                        if let Some(n) = v.as_number() { nums.push(n); }
-                    }
-                }
+                let mut nums = extract_numbers();
                 if nums.is_empty() { return EvalResult::Error(CellError::Value); }
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = nums.len() as f64;
@@ -5179,16 +5410,7 @@ impl<'a> Evaluator<'a> {
                     Some(k) if k > 0.0 && k < 1.0 => k,
                     _ => return EvalResult::Error(CellError::Value),
                 };
-                let mut nums = Vec::new();
-                for arg in &args[2..args.len()-1] {
-                    let result = self.evaluate(arg);
-                    let mut flat = Vec::new();
-                    Self::flatten_into(&mut flat, result);
-                    for v in flat {
-                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
-                        if let Some(n) = v.as_number() { nums.push(n); }
-                    }
-                }
+                let mut nums = extract_numbers();
                 if nums.is_empty() { return EvalResult::Error(CellError::Value); }
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = nums.len() as f64;
@@ -5210,16 +5432,7 @@ impl<'a> Evaluator<'a> {
                     _ => return EvalResult::Error(CellError::Value),
                 };
                 let k_val = q as f64 / 4.0;
-                let mut nums = Vec::new();
-                for arg in &args[2..args.len()-1] {
-                    let result = self.evaluate(arg);
-                    let mut flat = Vec::new();
-                    Self::flatten_into(&mut flat, result);
-                    for v in flat {
-                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
-                        if let Some(n) = v.as_number() { nums.push(n); }
-                    }
-                }
+                let mut nums = extract_numbers();
                 if nums.is_empty() { return EvalResult::Error(CellError::Value); }
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = nums.len() as f64;
@@ -15741,6 +15954,53 @@ mod tests {
 
     // ==================== SUBTOTAL Function Tests ====================
 
+    /// Helper: a visibility snapshot for the single grid these tests evaluate
+    /// against. Registered under BOTH keys the test evaluators can resolve to:
+    /// `""` for a bare `Evaluator::new(&grid)` (no multi-sheet context) and
+    /// "SHEET1" for the `MultiSheetContext::new("Sheet1")` the older tests
+    /// attach. See `visibility_key_for_sheet`.
+    fn visibility_snapshot(
+        filter_rows: HashSet<u32>,
+        user_rows: HashSet<u32>,
+    ) -> std::sync::Arc<crate::row_visibility::RowVisibility> {
+        let entry =
+            crate::row_visibility::SheetRowVisibility::new(filter_rows, user_rows);
+        std::sync::Arc::new(
+            crate::row_visibility::RowVisibility::new()
+                .with_sheet("", entry.clone())
+                .with_sheet("Sheet1", entry),
+        )
+    }
+
+    /// `rows` were hidden BY HAND — the notion SUBTOTAL 1-11 INCLUDES and
+    /// 101-111 excludes.
+    fn user_hidden(rows: HashSet<u32>) -> std::sync::Arc<crate::row_visibility::RowVisibility> {
+        visibility_snapshot(HashSet::new(), rows)
+    }
+
+    /// `rows` were hidden BY A FILTER — the notion BOTH SUBTOTAL code ranges
+    /// exclude.
+    fn filter_hidden(rows: HashSet<u32>) -> std::sync::Arc<crate::row_visibility::RowVisibility> {
+        visibility_snapshot(rows, HashSet::new())
+    }
+
+    fn rows(list: &[u32]) -> HashSet<u32> {
+        list.iter().copied().collect()
+    }
+
+    /// A SUBTOTAL/AGGREGATE-ready evaluator over `grid` with `snapshot`
+    /// installed through the EvalContext override.
+    fn eval_ctx_with(
+        snapshot: std::sync::Arc<crate::row_visibility::RowVisibility>,
+    ) -> EvalContext {
+        EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(snapshot),
+            ..Default::default()
+        }
+    }
+
     /// Helper: creates a range expression A1:A3
     fn range_a1_a3() -> Expression {
         Expression::Range {
@@ -15842,7 +16102,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -15861,7 +16121,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -15880,7 +16140,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -15899,7 +16159,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -15918,7 +16178,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -15937,7 +16197,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -16016,7 +16276,7 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
@@ -16035,13 +16295,570 @@ mod tests {
             cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
-            hidden_rows: Some(hidden),
+            hidden_rows: Some(user_hidden(hidden)),
             ..Default::default()
         };
         let ms = MultiSheetContext::new("Sheet1".to_string());
         let eval = Evaluator::with_context(&grid, ms, ctx);
         let expr = subtotal_expr(106.0, range_a1_a3());
         assert_eq!(eval.evaluate(&expr), EvalResult::Number(300.0));
+    }
+
+    // ============ SUBTOTAL / AGGREGATE visibility semantics ================
+    //
+    // The Excel contract under test (verified against Microsoft's SUBTOTAL and
+    // AGGREGATE references plus Exceljet/BetterSolutions):
+    //   SUBTOTAL 1-11    : exclude FILTER-hidden rows, INCLUDE manually hidden
+    //   SUBTOTAL 101-111 : exclude filter-hidden AND manually hidden
+    //   SUBTOTAL any code: exclude cells that are themselves SUBTOTALs
+    //   AGGREGATE        : exclude filter-hidden always; manually hidden only
+    //                      for options 1/3/5/7; nested SUBTOTAL/AGGREGATE only
+    //                      for options 0/1/2/3; errors only for options 2/3/6/7
+    //   Column hiding    : never affects either function
+
+    /// A1=10, A2=20, A3=30 on "Sheet1"; a second grid "Sheet2" with
+    /// A1=100, A2=200, A3=300.
+    fn make_two_sheet_grids() -> (Grid, Grid) {
+        let mut s1 = Grid::new();
+        s1.set_cell(0, 0, Cell::new_number(10.0));
+        s1.set_cell(1, 0, Cell::new_number(20.0));
+        s1.set_cell(2, 0, Cell::new_number(30.0));
+        let mut s2 = Grid::new();
+        s2.set_cell(0, 0, Cell::new_number(100.0));
+        s2.set_cell(1, 0, Cell::new_number(200.0));
+        s2.set_cell(2, 0, Cell::new_number(300.0));
+        (s1, s2)
+    }
+
+    fn range_on(sheet: Option<&str>, col: &str, r1: u32, r2: u32) -> Expression {
+        Expression::Range {
+            sheet: sheet.map(|s| s.to_string()),
+            start: Box::new(Expression::CellRef {
+                sheet: None,
+                col: col.to_string(),
+                row: r1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            end: Box::new(Expression::CellRef {
+                sheet: None,
+                col: col.to_string(),
+                row: r2,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            ref_site_id: Default::default(),
+        }
+    }
+
+    fn aggregate_expr(func_num: f64, options: f64, args: Vec<Expression>) -> Expression {
+        let mut all = vec![
+            Expression::Literal(Value::Number(func_num)),
+            Expression::Literal(Value::Number(options)),
+        ];
+        all.extend(args);
+        Expression::FunctionCall {
+            func: BuiltinFunction::Aggregate,
+            args: all,
+            ref_site_id: Default::default(),
+        }
+    }
+
+    // ---- 1-11 vs 101-111 against the two hidden notions ----
+
+    #[test]
+    fn subtotal_1_to_11_excludes_filter_hidden_rows() {
+        // THE HEADLINE FIX: codes 1-11 ignore rows hidden by a FILTER.
+        // Previously they summed everything: 60 instead of 40.
+        let grid = make_grid();
+        let ctx = eval_ctx_with(filter_hidden(rows(&[1]))); // A2 = 20 filtered out
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(40.0)
+        );
+    }
+
+    #[test]
+    fn subtotal_1_to_11_includes_manually_hidden_rows() {
+        // Codes 1-11 INCLUDE hand-hidden rows. This is the half that makes the
+        // filter-vs-user split load-bearing rather than cosmetic.
+        let grid = make_grid();
+        let ctx = eval_ctx_with(user_hidden(rows(&[1])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(60.0)
+        );
+    }
+
+    #[test]
+    fn subtotal_101_to_111_excludes_both_notions() {
+        let grid = make_grid();
+        // A1 filtered out, A3 hand-hidden => only A2 = 20 survives.
+        let snapshot = visibility_snapshot(rows(&[0]), rows(&[2]));
+        let ctx = eval_ctx_with(snapshot);
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(109.0, range_a1_a3())),
+            EvalResult::Number(20.0)
+        );
+        // ...while 9 keeps the hand-hidden A3: 20 + 30.
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(50.0)
+        );
+    }
+
+    #[test]
+    fn subtotal_average_and_count_agree_with_the_same_split() {
+        let grid = make_grid();
+        let ctx = eval_ctx_with(visibility_snapshot(rows(&[0]), rows(&[1])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        // 1 (AVERAGE): filter drops A1; hand-hidden A2 stays => (20+30)/2 = 25
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(1.0, range_a1_a3())),
+            EvalResult::Number(25.0)
+        );
+        // 101: both dropped => AVERAGE(30) = 30
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(101.0, range_a1_a3())),
+            EvalResult::Number(30.0)
+        );
+        // 2 (COUNT) = 2, 102 = 1
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(2.0, range_a1_a3())),
+            EvalResult::Number(2.0)
+        );
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(102.0, range_a1_a3())),
+            EvalResult::Number(1.0)
+        );
+    }
+
+    // ---- Cross-sheet: THE bug that blocked the naive flat-set fix ----
+
+    #[test]
+    fn subtotal_cross_sheet_uses_the_referenced_sheets_hidden_rows() {
+        let (s1, s2) = make_two_sheet_grids();
+        let mut ms = MultiSheetContext::new("Sheet1".to_string());
+        ms.add_grid("Sheet1".to_string(), &s1);
+        ms.add_grid("Sheet2".to_string(), &s2);
+
+        // Sheet1 hides row 0; Sheet2 hides row 2. A sheet-blind set would apply
+        // Sheet1's row 0 to Sheet2 and answer 500 instead of 300.
+        let index = std::sync::Arc::new(
+            crate::row_visibility::RowVisibility::new()
+                .with_sheet(
+                    "Sheet1",
+                    crate::row_visibility::SheetRowVisibility::new(rows(&[0]), HashSet::new()),
+                )
+                .with_sheet(
+                    "Sheet2",
+                    crate::row_visibility::SheetRowVisibility::new(rows(&[2]), HashSet::new()),
+                ),
+        );
+        let eval = Evaluator::with_context(&s1, ms, eval_ctx_with(index));
+
+        // Sheet2!A1:A3 with Sheet2's row 2 hidden = 100 + 200 = 300.
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(109.0, range_on(Some("Sheet2"), "A", 1, 3))),
+            EvalResult::Number(300.0)
+        );
+        // Sheet1 (implicit) with Sheet1's row 0 hidden = 20 + 30 = 50.
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(109.0, range_on(None, "A", 1, 3))),
+            EvalResult::Number(50.0)
+        );
+    }
+
+    #[test]
+    fn subtotal_on_a_sheet_with_no_hidden_entry_hides_nothing() {
+        let (s1, s2) = make_two_sheet_grids();
+        let mut ms = MultiSheetContext::new("Sheet1".to_string());
+        ms.add_grid("Sheet1".to_string(), &s1);
+        ms.add_grid("Sheet2".to_string(), &s2);
+        // Only Sheet1 has an entry. Sheet2 must not inherit it.
+        let index = std::sync::Arc::new(crate::row_visibility::RowVisibility::new().with_sheet(
+            "Sheet1",
+            crate::row_visibility::SheetRowVisibility::new(rows(&[0, 1, 2]), HashSet::new()),
+        ));
+        let eval = Evaluator::with_context(&s1, ms, eval_ctx_with(index));
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(109.0, range_on(Some("Sheet2"), "A", 1, 3))),
+            EvalResult::Number(600.0)
+        );
+    }
+
+    // ---- Nested SUBTOTAL exclusion ----
+
+    fn subtotal_cell(func_num: f64, col: &str, r1: u32, r2: u32) -> Cell {
+        Cell {
+            ast: Some(Box::new(subtotal_expr(
+                func_num,
+                range_on(None, col, r1, r2),
+            ))),
+            value: CellValue::Number(0.0),
+            style_index: 0,
+            rich_text: None,
+        }
+    }
+
+    #[test]
+    fn nested_subtotals_are_excluded_at_every_code() {
+        // A1=10, A2=20, A3=SUBTOTAL(9,A1:A2) whose cached value is 30.
+        // A grand total SUBTOTAL(9, A1:A3) must be 30, not 60.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        let mut nested = subtotal_cell(9.0, "A", 1, 2);
+        nested.value = CellValue::Number(30.0);
+        grid.set_cell(2, 0, nested);
+
+        let eval = Evaluator::new(&grid);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(30.0)
+        );
+        // Same at the 101-111 codes, with nothing hidden.
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(109.0, range_a1_a3())),
+            EvalResult::Number(30.0)
+        );
+    }
+
+    #[test]
+    fn nested_subtotal_is_detected_inside_a_larger_formula() {
+        // A3 = SUBTOTAL(9,A1:A2)*2 — still a nested subtotal.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        grid.set_cell(
+            2,
+            0,
+            Cell {
+                ast: Some(Box::new(Expression::BinaryOp {
+                    left: Box::new(subtotal_expr(9.0, range_on(None, "A", 1, 2))),
+                    op: BinaryOperator::Multiply,
+                    right: Box::new(Expression::Literal(Value::Number(2.0))),
+                })),
+                value: CellValue::Number(60.0),
+                style_index: 0,
+                rich_text: None,
+            },
+        );
+        let eval = Evaluator::new(&grid);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(30.0)
+        );
+    }
+
+    #[test]
+    fn a_plain_formula_cell_is_not_treated_as_nested() {
+        // A3 = SUM(A1:A2): a formula, but not a SUBTOTAL. It counts.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        grid.set_cell(
+            2,
+            0,
+            Cell {
+                ast: Some(Box::new(Expression::FunctionCall {
+                    func: BuiltinFunction::Sum,
+                    args: vec![range_on(None, "A", 1, 2)],
+                    ref_site_id: Default::default(),
+                })),
+                value: CellValue::Number(30.0),
+                style_index: 0,
+                rich_text: None,
+            },
+        );
+        let eval = Evaluator::new(&grid);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(60.0)
+        );
+    }
+
+    // ---- Column hiding must NOT affect SUBTOTAL ----
+
+    #[test]
+    fn hidden_columns_do_not_exist_for_subtotal() {
+        // The index carries rows only; a horizontal reference over "hidden"
+        // columns is unaffected. B1=5, B2=15 are summed regardless of row-3
+        // visibility because they are not in rows 0-1... this asserts the
+        // row-oriented contract directly: hiding ROW 2 changes A1:A3 but
+        // nothing about a same-row multi-column rectangle A1:B1.
+        let grid = make_grid();
+        let ctx = eval_ctx_with(user_hidden(rows(&[2])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        // A1:B1 = 10 + 5 = 15, untouched by any column notion.
+        let rect = Expression::Range {
+            sheet: None,
+            start: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".into(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            end: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "B".into(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(109.0, rect)),
+            EvalResult::Number(15.0)
+        );
+    }
+
+    // ---- Pass-scoped snapshot (the production wiring) ----
+
+    #[test]
+    fn pass_scoped_snapshot_drives_subtotal_without_an_evalcontext() {
+        let grid = make_grid();
+        {
+            let _guard =
+                crate::row_visibility::begin_pass(filter_hidden(rows(&[1])));
+            let eval = Evaluator::new(&grid);
+            assert_eq!(
+                eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+                EvalResult::Number(40.0)
+            );
+        }
+        // Outside the pass nothing is hidden again.
+        let eval = Evaluator::new(&grid);
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(60.0)
+        );
+    }
+
+    #[test]
+    fn evalcontext_snapshot_overrides_the_pass_snapshot() {
+        let grid = make_grid();
+        let _guard = crate::row_visibility::begin_pass(filter_hidden(rows(&[0, 1, 2])));
+        let eval = Evaluator::with_context(
+            &grid,
+            MultiSheetContext::new("Sheet1".into()),
+            eval_ctx_with(filter_hidden(rows(&[1]))),
+        );
+        assert_eq!(
+            eval.evaluate(&subtotal_expr(9.0, range_a1_a3())),
+            EvalResult::Number(40.0)
+        );
+    }
+
+    // ---- AGGREGATE ----
+
+    #[test]
+    fn aggregate_always_ignores_filter_hidden_rows_even_at_option_4() {
+        let grid = make_grid();
+        let ctx = eval_ctx_with(filter_hidden(rows(&[1])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        for option in [0.0, 2.0, 4.0, 6.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Number(40.0),
+                "AGGREGATE(9, {}) must drop the filtered row",
+                option
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_ignores_manually_hidden_rows_only_for_options_1_3_5_7() {
+        let grid = make_grid();
+        let ctx = eval_ctx_with(user_hidden(rows(&[1])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        for option in [1.0, 3.0, 5.0, 7.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Number(40.0),
+                "AGGREGATE(9, {}) must drop the hand-hidden row",
+                option
+            );
+        }
+        for option in [0.0, 2.0, 4.0, 6.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Number(60.0),
+                "AGGREGATE(9, {}) must KEEP the hand-hidden row",
+                option
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_error_options_are_2_3_6_7_only() {
+        // A3 replaced by #DIV/0!. Options 2/3/6/7 skip it; 0/1/4/5 propagate.
+        let mut grid = make_grid();
+        grid.set_cell(
+            2,
+            0,
+            Cell {
+                ast: None,
+                value: CellValue::Error(CellError::Div0),
+                style_index: 0,
+                rich_text: None,
+            },
+        );
+        let eval = Evaluator::new(&grid);
+        for option in [2.0, 3.0, 6.0, 7.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Number(30.0),
+                "AGGREGATE(9, {}) must ignore the error",
+                option
+            );
+        }
+        for option in [0.0, 1.0, 4.0, 5.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Error(CellError::Div0),
+                "AGGREGATE(9, {}) must propagate the error",
+                option
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_ignores_nested_subtotals_only_for_options_0_to_3() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        let mut nested = subtotal_cell(9.0, "A", 1, 2);
+        nested.value = CellValue::Number(30.0);
+        grid.set_cell(2, 0, nested);
+
+        let eval = Evaluator::new(&grid);
+        for option in [0.0, 1.0, 2.0, 3.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Number(30.0),
+                "AGGREGATE(9, {}) must ignore the nested SUBTOTAL",
+                option
+            );
+        }
+        for option in [4.0, 5.0, 6.0, 7.0] {
+            assert_eq!(
+                eval.evaluate(&aggregate_expr(9.0, option, vec![range_a1_a3()])),
+                EvalResult::Number(60.0),
+                "AGGREGATE(9, {}) must COUNT the nested SUBTOTAL",
+                option
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_ignores_nested_aggregates_for_options_0_to_3() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        grid.set_cell(
+            2,
+            0,
+            Cell {
+                ast: Some(Box::new(aggregate_expr(
+                    9.0,
+                    0.0,
+                    vec![range_on(None, "A", 1, 2)],
+                ))),
+                value: CellValue::Number(30.0),
+                style_index: 0,
+                rich_text: None,
+            },
+        );
+        let eval = Evaluator::new(&grid);
+        assert_eq!(
+            eval.evaluate(&aggregate_expr(9.0, 0.0, vec![range_a1_a3()])),
+            EvalResult::Number(30.0)
+        );
+        assert_eq!(
+            eval.evaluate(&aggregate_expr(9.0, 4.0, vec![range_a1_a3()])),
+            EvalResult::Number(60.0)
+        );
+    }
+
+    #[test]
+    fn aggregate_large_excludes_hidden_rows_and_keeps_k_out_of_the_data() {
+        // AGGREGATE(14, 5, A1:A3, 1) = LARGE ignoring hidden rows.
+        // A3 (=30) is hand-hidden, so the largest visible value is 20 — and the
+        // k argument (1) must not be mistaken for data.
+        let grid = make_grid();
+        let ctx = eval_ctx_with(user_hidden(rows(&[2])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        let expr = aggregate_expr(
+            14.0,
+            5.0,
+            vec![range_a1_a3(), Expression::Literal(Value::Number(1.0))],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(20.0));
+        // Option 4 keeps the hidden row: largest is 30.
+        let eval4 = Evaluator::with_context(
+            &grid,
+            MultiSheetContext::new("Sheet1".into()),
+            eval_ctx_with(user_hidden(rows(&[2]))),
+        );
+        let expr4 = aggregate_expr(
+            14.0,
+            4.0,
+            vec![range_a1_a3(), Expression::Literal(Value::Number(1.0))],
+        );
+        assert_eq!(eval4.evaluate(&expr4), EvalResult::Number(30.0));
+    }
+
+    #[test]
+    fn aggregate_small_ignores_filter_hidden_rows_at_every_option() {
+        let grid = make_grid();
+        let ctx = eval_ctx_with(filter_hidden(rows(&[0])));
+        let eval = Evaluator::with_context(&grid, MultiSheetContext::new("Sheet1".into()), ctx);
+        // A1 (=10) filtered out => SMALL #1 is 20, at option 4 too.
+        let expr = aggregate_expr(
+            15.0,
+            4.0,
+            vec![range_a1_a3(), Expression::Literal(Value::Number(1.0))],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(20.0));
+    }
+
+    #[test]
+    fn aggregate_cross_sheet_uses_the_referenced_sheets_hidden_rows() {
+        let (s1, s2) = make_two_sheet_grids();
+        let mut ms = MultiSheetContext::new("Sheet1".to_string());
+        ms.add_grid("Sheet1".to_string(), &s1);
+        ms.add_grid("Sheet2".to_string(), &s2);
+        let index = std::sync::Arc::new(
+            crate::row_visibility::RowVisibility::new()
+                .with_sheet(
+                    "Sheet1",
+                    crate::row_visibility::SheetRowVisibility::new(rows(&[0]), HashSet::new()),
+                )
+                .with_sheet(
+                    "Sheet2",
+                    crate::row_visibility::SheetRowVisibility::new(rows(&[1]), HashSet::new()),
+                ),
+        );
+        let eval = Evaluator::with_context(&s1, ms, eval_ctx_with(index));
+        // Sheet2 row 1 (=200) filtered out => 100 + 300 = 400.
+        assert_eq!(
+            eval.evaluate(&aggregate_expr(
+                9.0,
+                4.0,
+                vec![range_on(Some("Sheet2"), "A", 1, 3)]
+            )),
+            EvalResult::Number(400.0)
+        );
     }
 
     // ==================== Helper for new function tests ====================

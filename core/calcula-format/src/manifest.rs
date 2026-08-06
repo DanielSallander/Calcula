@@ -2,6 +2,7 @@
 //! Manifest (manifest.json) — the root descriptor of a .cala file.
 
 use identity::SheetId;
+use persistence::{DEFAULT_COLUMN_WIDTH_PX, DEFAULT_ROW_HEIGHT_PX};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -37,7 +38,10 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 ///
 /// v4 adds the user-hidden row/column sets
 /// (`USER_HIDDEN_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 4;
+///
+/// v5 adds the per-sheet view state -- zoom and split bars
+/// (`SHEET_VIEW_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 5;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -67,6 +71,17 @@ pub const PENDING_RECALC_MIN_FORMAT_VERSION: u32 = 3;
 /// Stamped ONLY when some sheet actually carries a user hide, so an ordinary
 /// workbook still writes v1-v3 and stays openable by older builds.
 pub const USER_HIDDEN_MIN_FORMAT_VERSION: u32 = 4;
+
+/// Minimum `.cala` format version a reader must be to handle the per-sheet
+/// VIEW state: `zoom` and the split-bar position.
+///
+/// Same test as the sets above, and it passes for the same reason: zoom and
+/// split live nowhere else. An older reader does not merely ignore them, it
+/// drops them on its next save -- a 60%-zoomed overview sheet comes back at
+/// 100% and a two-pane comparison layout comes back as one pane, with no
+/// error anywhere. Stamped only when a sheet actually carries a non-default
+/// zoom or a split, so ordinary workbooks stay openable by older builds.
+pub const SHEET_VIEW_MIN_FORMAT_VERSION: u32 = 5;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.
@@ -99,18 +114,18 @@ pub struct Manifest {
     /// Declares which optional feature sections are present in the archive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
-    /// Default row height in pixels (omitted when 20.0 — Excel's Calibri-11 default).
+    /// Default row height in pixels (omitted when `DEFAULT_ROW_HEIGHT_PX`).
     #[serde(default = "default_row_height", skip_serializing_if = "is_default_row_height")]
     pub default_row_height: f64,
-    /// Default column width in pixels (omitted when 64.29 — Excel's 8.47-char default).
+    /// Default column width in pixels (omitted when `DEFAULT_COLUMN_WIDTH_PX`).
     #[serde(default = "default_column_width", skip_serializing_if = "is_default_column_width")]
     pub default_column_width: f64,
 }
 
-fn default_row_height() -> f64 { 20.0 }
-fn default_column_width() -> f64 { 64.29 }
-fn is_default_row_height(v: &f64) -> bool { (*v - 20.0).abs() < f64::EPSILON }
-fn is_default_column_width(v: &f64) -> bool { (*v - 64.29).abs() < 1e-6 }
+fn default_row_height() -> f64 { DEFAULT_ROW_HEIGHT_PX }
+fn default_column_width() -> f64 { DEFAULT_COLUMN_WIDTH_PX }
+fn is_default_row_height(v: &f64) -> bool { (*v - DEFAULT_ROW_HEIGHT_PX).abs() < f64::EPSILON }
+fn is_default_column_width(v: &f64) -> bool { (*v - DEFAULT_COLUMN_WIDTH_PX).abs() < 1e-6 }
 
 /// Entry for a single sheet in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,8 +168,8 @@ impl Manifest {
             sheets,
             active_sheet,
             features: Vec::new(),
-            default_row_height: 20.0,
-            default_column_width: 64.29,
+            default_row_height: DEFAULT_ROW_HEIGHT_PX,
+            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
         }
     }
 
@@ -182,8 +197,8 @@ impl Manifest {
             sheets,
             active_sheet,
             features: Vec::new(),
-            default_row_height: 20.0,
-            default_column_width: 64.29,
+            default_row_height: DEFAULT_ROW_HEIGHT_PX,
+            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
         }
     }
 }

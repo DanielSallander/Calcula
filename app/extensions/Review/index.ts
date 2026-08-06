@@ -16,6 +16,7 @@ import { refreshAnnotationState, resetAnnotationStore } from "./lib/annotationSt
 // Handlers
 import { handleAnnotationClick } from "./handlers/clickHandler";
 import { handleSelectionChange } from "./handlers/selectionHandler";
+import { initHoverHandler, destroyHoverHandler, hidePreview } from "./handlers/hoverHandler";
 import {
   registerKeyboardShortcuts,
   unregisterKeyboardShortcuts,
@@ -100,6 +101,12 @@ function activate(context: ExtensionContext): void {
   const unregClick = context.grid.cellClicks.registerClickInterceptor(handleAnnotationClick);
   cleanupFns.push(unregClick);
 
+  // 4b. Mount the hover preview (Excel's primary way of READING a note: rest the
+  // pointer on the cell). It owns its own document listeners; destroyHoverHandler
+  // removes them and makes any pending timer inert.
+  initHoverHandler();
+  cleanupFns.push(destroyHoverHandler);
+
   // 5. Subscribe to selection changes
   const unsubSelection = ExtensionRegistry.onSelectionChange(handleSelectionChange);
   cleanupFns.push(unsubSelection);
@@ -108,7 +115,10 @@ function activate(context: ExtensionContext): void {
   const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     context.ui.overlays.hide(NOTE_EDITOR_OVERLAY_ID);
     context.ui.overlays.hide(COMMENT_PANEL_OVERLAY_ID);
-    context.ui.overlays.hide(ANNOTATION_PREVIEW_OVERLAY_ID);
+    // Through the hover handler, so its "a preview is showing for cell X" state
+    // is cleared too — hiding the overlay behind its back would leave it
+    // convinced the tooltip is still up for that cell.
+    hidePreview();
     refreshAnnotationState().then(() => {
       context.events.emit(AppEvents.GRID_REFRESH);
     });
@@ -126,6 +136,9 @@ function activate(context: ExtensionContext): void {
   // and the indicators are painted from its cache, so a frame drawn before it
   // resolves still shows the old triangles.
   const onAnnotationsStale = () => {
+    // The cached preview content (and the cell it belongs to) is about to move
+    // or change; drop it rather than show a stale note over a shifted cell.
+    hidePreview();
     void refreshAnnotationState().then(() => {
       context.events.emit(AppEvents.GRID_REFRESH);
     });

@@ -84,6 +84,11 @@ pub struct SheetDigest {
     pub show_gridlines: bool,
     pub page_setup: Value,
     pub split: Value,
+    /// Per-sheet zoom percent. In the digest for the same reason the
+    /// user-hidden sets are: without it a save/reload that dropped the zoom
+    /// produced a byte-identical digest, so the oracle was structurally blind
+    /// to losing it.
+    pub zoom: f64,
     pub scroll_area: Option<String>,
 }
 
@@ -247,6 +252,7 @@ pub fn get_workbook_state_digest(
         let gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
         let page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
         let scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
+        let sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
 
         for i in 0..sheet_count {
             // The active-sheet mirror is authoritative for the active sheet.
@@ -279,6 +285,7 @@ pub fn get_workbook_state_digest(
                     show_gridlines: true,
                     page_setup: Value::Null,
                     split: Value::Null,
+                    zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
                     scroll_area: None,
                 });
                 continue;
@@ -369,6 +376,10 @@ pub fn get_workbook_state_digest(
                     .get(i)
                     .map(to_value_or_null)
                     .unwrap_or(Value::Null),
+                zoom: sheet_zooms
+                    .get(i)
+                    .copied()
+                    .unwrap_or(persistence::DEFAULT_SHEET_ZOOM_PERCENT),
                 scroll_area: scroll_areas.get(i).cloned().flatten(),
             });
         }

@@ -82,6 +82,19 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
             }
         }
 
+        // ---- Zoom ----
+        // Excel's zoomScale is the same unit Calcula stores (a percent), so
+        // this is a straight copy. Written only when it differs from 100 so a
+        // normal sheet keeps producing the file Excel itself would.
+        {
+            let zoom = sheet.zoom.round();
+            if (zoom - crate::DEFAULT_SHEET_ZOOM_PERCENT).abs() >= 1.0
+                && (10.0..=400.0).contains(&zoom)
+            {
+                worksheet.set_zoom(zoom as u16);
+            }
+        }
+
         // ---- Column widths ----
         for (col, width) in &sheet.column_widths {
             // Inverse of the reader's px = w * 7.0 + 5.0 (xlsx_style_reader) so

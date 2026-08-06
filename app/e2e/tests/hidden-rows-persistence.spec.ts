@@ -620,15 +620,22 @@ async function fullCleanup(page: Page): Promise<void> {
 }
 
 /**
- * The default cell geometry every OTHER spec in this suite assumes.
+ * The app's default cell geometry — 64.29 x 20, Excel's defaults.
  *
- * `GridHelper.clickCell` computes pixel coordinates from hardcoded constants —
- * 64.29 x 20, the AppState defaults a freshly launched app starts with. But
- * `new_file` resets the backend defaults to 100 x 24 (persistence.rs), so any
- * spec that resets the workbook silently re-scales the grid for everything that
- * runs after it, and every later `clickCell` lands on the wrong cell and reads
- * an empty neighbour. Observed live: this file's `new_file` broke 26 tests
- * across the macro/VBA specs until it started restoring these.
+ * HISTORY (both halves are fixed now, and this stays as a cheap guard):
+ *   - `new_file` used to reset the backend defaults to 100 x 24 while app
+ *     launch was 64.29 x 20, so any spec that reset the workbook silently
+ *     re-scaled the grid for every spec after it. That cost 26 failures across
+ *     the macro/VBA specs. `new_file` and `AppState` now read ONE constant
+ *     (`persistence::DEFAULT_ROW_HEIGHT_PX` / `DEFAULT_COLUMN_WIDTH_PX`).
+ *   - `GridHelper.clickCell` used to compute pixel coordinates from hardcoded
+ *     constants, so it was only ever right by luck. It now reads the running
+ *     app's live geometry (`GridHelper.readGeometry`).
+ *
+ * What remains: this spec clicks real HEADER pixels, so it still wants a KNOWN
+ * geometry — an earlier spec that changed the workbook defaults would move
+ * every header. Restoring them here makes this file independent of run order
+ * rather than papering over a defect.
  */
 const DEFAULT_COL_WIDTH = 64.29;
 const DEFAULT_ROW_HEIGHT = 20;

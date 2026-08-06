@@ -6,8 +6,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, updateConfig, setDisplayGridlines } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, setFreezeConfig, updateConfig, setDisplayGridlines, scrollToPosition } from "../../state/gridActions";
 import { refreshUserHidden } from "../../lib/hiddenRowsCols";
+import { loadSheetViewState, persistSheetZoom } from "../../lib/sheetViewState";
 import { invoke } from "@tauri-apps/api/core";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
@@ -288,6 +289,38 @@ function SpreadsheetContent({
   }, [dispatch]);
 
   // -------------------------------------------------------------------------
+  // Helper: hydrate per-sheet VIEW state (zoom + split) from the backend
+  // -------------------------------------------------------------------------
+  //
+  // The last value this component pushed to, or pulled from, the backend. The
+  // write-back effect below compares against it so a hydrate does not
+  // immediately echo the value it just read back to the backend (which would
+  // dirty the document merely by switching sheets).
+  // Seeded with the CURRENT zoom so the effect's first run is a no-op: an
+  // app that just booted must not write a zoom nobody asked for.
+  const lastSyncedZoomFactorRef = useRef<number>(gridState.zoom);
+
+  const hydrateSheetView = useCallback(async () => {
+    const view = await loadSheetViewState();
+    lastSyncedZoomFactorRef.current = view.zoomFactor;
+    dispatch(setZoom(view.zoomFactor));
+    dispatch(setSplitConfig(view.splitRow, view.splitCol));
+    // Freeze too: it always persisted, but the only thing that ever read it
+    // back was the View menu's one-shot mount effect, so a freeze on sheet 2
+    // never appeared when you switched to sheet 2.
+    dispatch(setFreezeConfig(view.freezeRow, view.freezeCol));
+  }, [dispatch]);
+
+  // Write zoom back to the authority whenever the user actually changes it.
+  // Guarded by lastSyncedZoomFactorRef so hydration (mount / sheet switch)
+  // does not bounce straight back out as a write.
+  useEffect(() => {
+    if (lastSyncedZoomFactorRef.current === gridState.zoom) return;
+    lastSyncedZoomFactorRef.current = gridState.zoom;
+    void persistSheetZoom(gridState.zoom);
+  }, [gridState.zoom]);
+
+  // -------------------------------------------------------------------------
   // Menu Event Listeners for Cut/Copy/Paste
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -323,6 +356,10 @@ function SpreadsheetContent({
     invoke<boolean>("get_show_gridlines").then((show) => {
       dispatch(setDisplayGridlines(show));
     }).catch(() => { /* ignore if command not available */ });
+    // Zoom and split bars are per-sheet BACKEND state that round-trips the
+    // .cala file. Hydrate them the same way gridlines are, or a workbook saved
+    // at 60% with a split reopens at 100% with one pane.
+    hydrateSheetView();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -386,6 +423,11 @@ function SpreadsheetContent({
         dispatch(setDisplayGridlines(show));
       }).catch(() => {});
 
+      // Sync per-sheet zoom + split bars from the backend. Zoom is per SHEET
+      // in Excel and now here too, so switching sheets must adopt the new
+      // sheet's zoom rather than carrying the old one across.
+      hydrateSheetView();
+
       // Restore the new sheet's saved state if available
       const savedState = sheetStatesMap.get(newSheetIndex);
       if (savedState) {
@@ -399,6 +441,24 @@ function SpreadsheetContent({
         if (savedState.selection) {
           dispatch(setSelection(savedState.selection));
         }
+
+        // Restore the SCROLL POSITION too. `handleSheetSwitchStart` has always
+        // saved `viewport` (and logged it), but nothing ever applied it — the
+        // captured scroll was dead state, so switching away from a sheet and
+        // back dropped you at the top-left however far down you had been.
+        // Excel restores the top-left visible cell per sheet.
+        //
+        // `scrollToPosition` (not `setViewport`) on purpose: it re-derives
+        // startRow/startCol through `calculateScrollState` and CLAMPS to the
+        // current bounds, and it leaves viewport WIDTH/HEIGHT alone — those
+        // belong to the window, not to the sheet, so a window resized while
+        // another sheet was active must not be reverted by this restore.
+        //
+        // Dispatched after the selection so that if a selection restore ever
+        // scrolls to make its cell visible, the saved scroll still wins.
+        dispatch(
+          scrollToPosition(savedState.viewport.scrollX, savedState.viewport.scrollY)
+        );
       } else {
         // No saved state - set default selection to A1
         console.log(`[Spreadsheet] No saved state for sheet ${newSheetIndex}, using default A1`);
@@ -454,7 +514,7 @@ function SpreadsheetContent({
       window.removeEventListener("sheet:normalSwitch", handleSheetSwitch);
       window.removeEventListener("sheet:reorder", handleSheetReorder);
     };
-  }, [refreshDimensions, selection, viewport, gridState.virtualBounds, dispatch]);
+  }, [refreshDimensions, hydrateSheetView, selection, viewport, gridState.virtualBounds, dispatch]);
 
   // -------------------------------------------------------------------------
   // Clear Contents Handler

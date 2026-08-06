@@ -151,6 +151,16 @@ pub struct SheetMeta {
     pub row_style_xf: HashMap<u32, u32>,
     /// Freeze pane position (frozen_rows, frozen_cols)
     pub freeze_pane: Option<(u32, u32)>,
+    /// `<sheetView zoomScale="..">` — the sheet's zoom as a PERCENT.
+    /// `None` = the attribute was absent, i.e. 100%.
+    ///
+    /// Only zoom is imported from `<sheetView>`, not the SPLIT pane: Excel
+    /// stores a split's xSplit/ySplit in twentieths of a point of pane WIDTH,
+    /// not in row/column indices, so translating it needs the sheet's full
+    /// resolved layout. Guessing a row index there would silently place the
+    /// split bar somewhere the user never put it, which is worse than
+    /// importing no split at all.
+    pub zoom_scale: Option<u32>,
     /// Hidden columns (0-based)
     pub hidden_columns: Vec<u32>,
     /// Hidden rows (0-based)
@@ -965,6 +975,13 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                         // <sheetView showGridLines="0" ...>
                         if let Some(v) = get_attr(e, "showGridLines") {
                             meta.show_gridlines = v != "0" && v != "false";
+                        }
+                        // <sheetView zoomScale="60"> — a real percent.
+                        if let Some(z) = get_attr(e, "zoomScale").and_then(|v| v.parse::<u32>().ok())
+                        {
+                            if (10..=400).contains(&z) {
+                                meta.zoom_scale = Some(z);
+                            }
                         }
                     }
                     "pane" if in_sheet_views => {

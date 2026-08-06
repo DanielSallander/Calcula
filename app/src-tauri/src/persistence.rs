@@ -259,6 +259,53 @@ pub(crate) fn restore_user_hidden_from_workbook(
     Ok(())
 }
 
+/// Capture the per-sheet VIEW state (zoom + split bars) into a workbook sheet.
+///
+/// Zoom and split are AUTHORITIES with nowhere else to live -- the same shape
+/// as the user-hidden sets. Freeze panes were always saved; these two sat in
+/// `AppState` and were thrown away at every save, so a workbook designed at
+/// 60% with a two-pane split reopened at 100% with one pane.
+pub(crate) fn apply_sheet_view_to_sheet(
+    state: &AppState,
+    sheet: &mut persistence::Sheet,
+    sheet_index: usize,
+) {
+    if let Ok(split_configs) = state.split_configs.lock() {
+        if let Some(sc) = split_configs.get(sheet_index) {
+            sheet.split_row = sc.split_row;
+            sheet.split_col = sc.split_col;
+        }
+    }
+    if let Ok(zooms) = state.sheet_zooms.lock() {
+        if let Some(z) = zooms.get(sheet_index) {
+            sheet.zoom = *z;
+        }
+    }
+}
+
+/// Re-hydrate every sheet's zoom and split bars from a loaded workbook.
+///
+/// LOAD IS HALF THE FIX (see `restore_user_hidden_from_workbook`): the load
+/// path used to push a `SplitConfig::default()` per sheet, which is what threw
+/// away a saved split even once the save side wrote one.
+pub(crate) fn restore_sheet_view_from_workbook(
+    state: &AppState,
+    workbook: &Workbook,
+) -> Result<(), String> {
+    let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
+    let mut sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+    split_configs.clear();
+    sheet_zooms.clear();
+    for sheet in &workbook.sheets {
+        split_configs.push(crate::sheets::SplitConfig {
+            split_row: sheet.split_row,
+            split_col: sheet.split_col,
+        });
+        sheet_zooms.push(sheet.zoom);
+    }
+    Ok(())
+}
+
 /// Build a Workbook from the current AppState (used by save_file and export_as_package).
 ///
 /// Captures ALL sheets, not just the active one (BUG-0011: the old
@@ -538,6 +585,10 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
             workbook.sheets[i].freeze_col = fc.freeze_col;
         }
     }
+
+
+    // ---- Split bars + zoom (the per-sheet VIEW state) ----
+    apply_sheet_view_to_sheet(state, &mut workbook.sheets[i], i);
 
     // ---- Hidden rows/cols: the DERIVED effective-hidden cache ----
     // Rebuilt from every authority at every save, for the exporters that have
@@ -2256,14 +2307,16 @@ pub fn open_file(
             });
         }
 
-        // ---- Split configs (reset to defaults for each sheet) ----
-        let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
-        split_configs.clear();
-        for _ in &workbook.sheets {
-            split_configs.push(crate::sheets::SplitConfig::default());
-        }
+        // ---- Split configs + zoom for all sheets ----
+        // Restored from the file, not reset: this used to push a default for
+        // every sheet, which is what threw away the saved split.
+        restore_sheet_view_from_workbook(state.inner(), &workbook)?;
 
         // ---- Scroll areas (reset to None for each sheet) ----
+        // Deliberately NOT persisted, and this matches Excel: `ScrollArea` is
+        // a session restriction that Excel itself clears on every open (which
+        // is why VBA authors re-apply it from Workbook_Open). Saving it would
+        // make Calcula's file mean something Excel's does not.
         let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
         scroll_areas.clear();
         for _ in &workbook.sheets {
@@ -2936,6 +2989,24 @@ pub fn open_file(
     Ok(cells)
 }
 
+/// Put the workbook's DEFAULT grid geometry back to the shipped defaults.
+///
+/// A named function rather than two assignments inside `new_file` for one
+/// reason: `new_file` used to re-type the numbers (24.0 / 100.0) while
+/// `AppState` was initialized with Excel's (20.0 / 64.29), so File > New
+/// silently handed the user a differently-scaled grid than the one the app
+/// launched with. Both sides now read `persistence`'s constants, and the test
+/// that pins them together calls THIS, so it exercises the same code
+/// `new_file` does rather than a copy of it.
+pub(crate) fn reset_default_geometry(state: &AppState) {
+    if let Ok(mut h) = state.default_row_height.lock() {
+        *h = ::persistence::DEFAULT_ROW_HEIGHT_PX;
+    }
+    if let Ok(mut w) = state.default_column_width.lock() {
+        *w = ::persistence::DEFAULT_COLUMN_WIDTH_PX;
+    }
+}
+
 #[tauri::command]
 pub fn new_file(
     state: State<AppState>,
@@ -2986,9 +3057,8 @@ pub fn new_file(
         tables.clear();
         table_names.clear();
 
-        // Reset default dimensions
-        *state.default_row_height.lock().unwrap() = 24.0;
-        *state.default_column_width.lock().unwrap() = 100.0;
+        // Reset default dimensions (see `reset_default_geometry`).
+        reset_default_geometry(state.inner());
 
         // Reset freeze/split/scroll configs to single default sheet
         let mut freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
@@ -2998,6 +3068,10 @@ pub fn new_file(
         let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
         split_configs.clear();
         split_configs.push(crate::sheets::SplitConfig::default());
+
+        let mut sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+        sheet_zooms.clear();
+        sheet_zooms.push(::persistence::DEFAULT_SHEET_ZOOM_PERCENT);
 
         let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
         scroll_areas.clear();
@@ -4549,5 +4623,188 @@ mod scheduled_job_persistence_tests {
             "the save path must rewrite (here: remove) the section, never inherit it"
         );
         reset_jobs();
+    }
+}
+
+#[cfg(test)]
+mod default_geometry_and_sheet_view_tests {
+    //! Two defects, one theme: state the app owned in exactly one place, and a
+    //! second place that quietly disagreed with it.
+    //!
+    //! 1. `new_file` reset the default grid geometry to 24 x 100 while
+    //!    `AppState` launched at Excel's 20 x 64.29. File > New silently
+    //!    handed the user a differently-scaled grid, and any E2E spec that
+    //!    called `new_file` re-scaled the grid for every spec after it.
+    //! 2. Zoom and the split bars were session-only: `AppState` held the
+    //!    split and threw it away at save/load, and zoom had no backend copy
+    //!    at all.
+
+    use super::*;
+    use ::persistence::{
+        DEFAULT_COLUMN_WIDTH_PX, DEFAULT_ROW_HEIGHT_PX, DEFAULT_SHEET_ZOOM_PERCENT,
+    };
+
+    /// THE pin: app launch and File > New must produce the same grid, and both
+    /// must be the documented Excel defaults. Asserted against the ONE constant
+    /// so neither side can be "fixed" alone.
+    #[test]
+    fn new_file_geometry_equals_launch_geometry() {
+        let launched = crate::create_app_state();
+        assert_eq!(
+            *launched.default_row_height.lock().unwrap(),
+            DEFAULT_ROW_HEIGHT_PX,
+            "app launch must start at the documented default row height"
+        );
+        assert_eq!(
+            *launched.default_column_width.lock().unwrap(),
+            DEFAULT_COLUMN_WIDTH_PX,
+            "app launch must start at the documented default column width"
+        );
+
+        // A workbook that has been messed with, then reset the way File > New
+        // resets it (the same function `new_file` calls).
+        let after_new = crate::create_app_state();
+        *after_new.default_row_height.lock().unwrap() = 37.5;
+        *after_new.default_column_width.lock().unwrap() = 212.0;
+        reset_default_geometry(&after_new);
+
+        assert_eq!(
+            *after_new.default_row_height.lock().unwrap(),
+            *launched.default_row_height.lock().unwrap(),
+            "File > New must hand out the SAME row height the app launched with"
+        );
+        assert_eq!(
+            *after_new.default_column_width.lock().unwrap(),
+            *launched.default_column_width.lock().unwrap(),
+            "File > New must hand out the SAME column width the app launched with"
+        );
+    }
+
+    /// The .cala manifest's serde defaults are the same numbers, so a manifest
+    /// that omits them reconstructs the grid the app launches with rather than
+    /// a third set of values.
+    #[test]
+    fn the_cala_manifest_defaults_are_the_same_constant() {
+        let manifest = calcula_format::Manifest::from_sheet_names(&["Sheet1".to_string()], 0);
+        assert_eq!(manifest.default_row_height, DEFAULT_ROW_HEIGHT_PX);
+        assert_eq!(manifest.default_column_width, DEFAULT_COLUMN_WIDTH_PX);
+    }
+
+    /// A fresh workbook is at 100% with no split -- the values every "is this
+    /// default?" check compares against.
+    #[test]
+    fn a_fresh_workbook_is_unzoomed_and_unsplit() {
+        let state = crate::create_app_state();
+        assert_eq!(
+            *state.sheet_zooms.lock().unwrap(),
+            vec![DEFAULT_SHEET_ZOOM_PERCENT]
+        );
+        let splits = state.split_configs.lock().unwrap();
+        assert_eq!(splits.len(), 1);
+        assert!(splits[0].split_row.is_none() && splits[0].split_col.is_none());
+    }
+
+    /// Zoom is PER SHEET, and it round-trips the real .cala writer/reader --
+    /// not just the in-memory struct. Sheet 2's 60% must not leak onto sheet 1.
+    #[test]
+    fn zoom_is_per_sheet_and_survives_save_and_reload() {
+        let state = crate::create_app_state();
+        {
+            let mut zooms = state.sheet_zooms.lock().unwrap();
+            *zooms = vec![100.0, 60.0, 175.0];
+        }
+        {
+            let mut splits = state.split_configs.lock().unwrap();
+            *splits = vec![
+                crate::sheets::SplitConfig::default(),
+                crate::sheets::SplitConfig { split_row: Some(12), split_col: None },
+                crate::sheets::SplitConfig { split_row: None, split_col: Some(4) },
+            ];
+        }
+
+        // Save side: capture through the same helper the save command uses.
+        let mut workbook = ::persistence::Workbook::new();
+        workbook.sheets = (0..3)
+            .map(|i| ::persistence::Sheet::new(format!("Sheet{}", i + 1)))
+            .collect();
+        for i in 0..3 {
+            apply_sheet_view_to_sheet(&state, &mut workbook.sheets[i], i);
+        }
+        assert_eq!(workbook.sheets[1].zoom, 60.0, "the save must capture zoom");
+        assert_eq!(workbook.sheets[1].split_row, Some(12));
+
+        // Through the real archive.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("view.cala");
+        calcula_format::save_calcula(&workbook, &path).unwrap();
+        let loaded = calcula_format::load_calcula(&path).unwrap();
+
+        // Load side: hydrate a DIFFERENT, pristine AppState from the file.
+        let reopened = crate::create_app_state();
+        restore_sheet_view_from_workbook(&reopened, &loaded).unwrap();
+
+        assert_eq!(
+            *reopened.sheet_zooms.lock().unwrap(),
+            vec![100.0, 60.0, 175.0],
+            "each sheet must come back at ITS OWN zoom"
+        );
+        let splits = reopened.split_configs.lock().unwrap();
+        assert_eq!(splits[0].split_row, None);
+        assert_eq!(splits[0].split_col, None);
+        assert_eq!(splits[1].split_row, Some(12));
+        assert_eq!(splits[1].split_col, None);
+        assert_eq!(splits[2].split_row, None);
+        assert_eq!(splits[2].split_col, Some(4));
+    }
+
+    /// A split is not a freeze. Both persist, independently, on the same sheet.
+    #[test]
+    fn a_split_and_a_freeze_survive_together_without_being_confused() {
+        let mut workbook = ::persistence::Workbook::new();
+        workbook.sheets[0].freeze_row = Some(2);
+        workbook.sheets[0].freeze_col = Some(1);
+        workbook.sheets[0].split_row = Some(9);
+        workbook.sheets[0].split_col = Some(6);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("both.cala");
+        calcula_format::save_calcula(&workbook, &path).unwrap();
+        let loaded = calcula_format::load_calcula(&path).unwrap();
+
+        assert_eq!(loaded.sheets[0].freeze_row, Some(2));
+        assert_eq!(loaded.sheets[0].freeze_col, Some(1));
+        assert_eq!(loaded.sheets[0].split_row, Some(9));
+        assert_eq!(loaded.sheets[0].split_col, Some(6));
+    }
+
+    /// `new_file` must reset the view state too, or a new workbook inherits the
+    /// zoom and split of the one that was open -- the class of bug the
+    /// distribution-user-file tests above exist for.
+    #[test]
+    fn resetting_to_a_new_workbook_clears_zoom_and_split() {
+        let state = crate::create_app_state();
+        {
+            let mut zooms = state.sheet_zooms.lock().unwrap();
+            *zooms = vec![250.0, 60.0];
+        }
+        {
+            let mut splits = state.split_configs.lock().unwrap();
+            *splits = vec![
+                crate::sheets::SplitConfig { split_row: Some(3), split_col: Some(3) },
+                crate::sheets::SplitConfig::default(),
+            ];
+        }
+
+        // What `new_file` does to these two vectors.
+        let blank = ::persistence::Workbook::new();
+        restore_sheet_view_from_workbook(&state, &blank).unwrap();
+
+        assert_eq!(
+            *state.sheet_zooms.lock().unwrap(),
+            vec![DEFAULT_SHEET_ZOOM_PERCENT]
+        );
+        let splits = state.split_configs.lock().unwrap();
+        assert_eq!(splits.len(), 1);
+        assert!(splits[0].split_row.is_none() && splits[0].split_col.is_none());
     }
 }

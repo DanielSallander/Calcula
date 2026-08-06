@@ -8,6 +8,7 @@
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { DEFAULT_GRID_CONFIG } from "@api/types";
 import { useDialogWindow } from "@api/dialogWindow";
 import * as S from "./DimensionInputDialog.styles";
 
@@ -51,7 +52,18 @@ export function DimensionInputDialog(props: DialogProps): React.ReactElement | n
   const { onClose, data } = props;
   const d = (data ?? {}) as unknown as Partial<DimensionInputData>;
   const mode: DimensionMode = d.mode ?? "columnWidth";
-  const currentPx = d.currentPx ?? 64.29;
+  // Defensive fallback only (`currentPx` is required in DimensionInputData).
+  // It reads DEFAULT_GRID_CONFIG rather than repeating the number: those two
+  // defaults have exactly one definition each — the Rust consts in
+  // core/persistence, mirrored into DEFAULT_GRID_CONFIG and pinned to them by
+  // core/lib/__tests__/defaultGeometry.test.ts. A literal here would be the
+  // sixth copy of the pair that already drifted once. It is also MODE-AWARE:
+  // the old `?? 64.29` handed a row-height dialog a column width.
+  const currentPx =
+    d.currentPx ??
+    (mode === "columnWidth"
+      ? DEFAULT_GRID_CONFIG.defaultCellWidth
+      : DEFAULT_GRID_CONFIG.defaultCellHeight);
   const rangeLabel = d.rangeLabel;
   const onResult = d.onResult;
 

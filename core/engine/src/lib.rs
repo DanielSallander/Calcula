@@ -22,6 +22,7 @@ pub mod locale;
 pub mod navigation;
 pub mod lookup_cache;
 pub mod number_format;
+pub mod row_visibility;
 pub mod style;
 pub mod text_cmp;
 pub mod theme;
@@ -53,6 +54,10 @@ pub use navigation::{
 pub use formula_locale::{delocalize_formula, localize_formula};
 pub use locale::{LocaleCurrencyPosition, LocaleSettings};
 pub use number_format::{format_number, format_number_with_color, format_text_with_color};
+pub use row_visibility::{
+    active as active_row_visibility, begin_pass as begin_visibility_pass, HiddenScope,
+    RowVisibility, SheetRowVisibility, VisibilityPassGuard,
+};
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
     FontStyle, GradientDirection, NumberFormat, PatternType, StyleRegistry, TextAlign,

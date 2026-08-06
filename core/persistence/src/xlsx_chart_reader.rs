@@ -527,9 +527,13 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
         })
         .collect();
 
-    // Approximate pixel position from cell coordinates
-    let col_width = 100.0;
-    let row_height = 24.0;
+    // Approximate pixel position from cell coordinates, using the grid's
+    // DEFAULT geometry (the anchor is in cells; this reader has no access to
+    // the sheet's per-column overrides). Was a re-typed 100 x 24, which after
+    // the defaults were corrected placed every imported chart ~35% too far
+    // right and ~20% too far down.
+    let col_width = crate::DEFAULT_COLUMN_WIDTH_PX;
+    let row_height = crate::DEFAULT_ROW_HEIGHT_PX;
     let x = anchor.from_col as f64 * col_width;
     let y = anchor.from_row as f64 * row_height;
     let w = (anchor.to_col - anchor.from_col) as f64 * col_width;

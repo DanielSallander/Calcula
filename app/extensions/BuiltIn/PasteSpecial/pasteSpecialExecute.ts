@@ -21,6 +21,8 @@ import {
   indexToCol,
   addComment,
   setDataValidation,
+  clipboardSourceRow,
+  pasteRowDeltas,
 } from "@api/lib";
 import { cellEvents } from "@api";
 
@@ -149,6 +151,19 @@ export async function executePasteSpecial(
     }
 
     if (formulaEntries.length > 0) {
+      // A FILTERED COPY HAS NO SINGLE ROW DELTA. `cellsToPaste` matrix row `r`
+      // was captured from absolute sheet row `clipboard.sourceRows[r]`, which
+      // skips filter-hidden rows, so the visible rows slide together. Every row
+      // after the first hidden gap therefore shifts by a DIFFERENT amount, and
+      // the old shared `targetRow - sourceMinRow` mis-pointed all of them.
+      // For an unfiltered copy every delta is identical, i.e. unchanged.
+      const rowDeltas = pasteRowDeltas(
+        clipboard.sourceRows,
+        sourceMinRow,
+        targetRow,
+        sourceHeight
+      );
+
       // Calculate deltas accounting for transpose
       const inputs: FormulaShiftInput[] = formulaEntries.map((e) => {
         if (transpose) {
@@ -157,13 +172,14 @@ export async function executePasteSpecial(
           const destCol = targetCol + e.r;
           return {
             formula: e.formula,
-            rowDelta: destRow - (sourceMinRow + e.r),
+            rowDelta:
+              destRow - clipboardSourceRow(clipboard.sourceRows, sourceMinRow, e.r),
             colDelta: destCol - (sourceMinCol + e.c),
           };
         } else {
           return {
             formula: e.formula,
-            rowDelta: targetRow - sourceMinRow,
+            rowDelta: rowDeltas[e.r],
             colDelta: targetCol - sourceMinCol,
           };
         }

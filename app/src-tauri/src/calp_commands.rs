@@ -1355,8 +1355,19 @@ fn materialize_pulled_sheet_state(
     }
     {
         let mut v = state.split_configs.lock().map_err(|e| e.to_string())?;
-        for (idx, _) in &targets {
+        for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, crate::sheets::SplitConfig::default());
+            v[*idx] = crate::sheets::SplitConfig {
+                split_row: p.split_row,
+                split_col: p.split_col,
+            };
+        }
+    }
+    {
+        let mut v = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+            v[*idx] = p.zoom;
         }
     }
     {

@@ -360,6 +360,10 @@ fn partition_formula_cells(
 pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
+    // pass (never per formula) and read by the evaluator through the
+    // thread-local pass scope. Built BEFORE any grid lock is taken.
+    let _visibility_pass = crate::row_visibility::begin_pass(&state);
     // THE PASS OWNS THE CANCEL FLAG. `begin` clears anything a previous pass
     // left set; the guard clears it again on the way out (including on a panic)
     // so a cancelled pass cannot poison the resume the user is about to ask for.
@@ -763,6 +767,10 @@ pub(crate) fn recalculate_sheet_values(
 ) {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
+    // pass (never per formula) and read by the evaluator through the
+    // thread-local pass scope. Built BEFORE any grid lock is taken.
+    let _visibility_pass = crate::row_visibility::begin_pass(state);
     // BACKGROUND surface: the user did not personally start this pass (.calp
     // refresh, override revert/accept), but it WRITES CELLS, so it gets exactly
     // the same fuel an interactive edit gets. That equality is a requirement,
@@ -1066,4 +1074,381 @@ pub fn get_calculate_before_save(state: State<AppState>) -> bool {
 pub fn set_calculate_before_save(state: State<AppState>, enabled: bool) -> bool {
     *state.calculate_before_save.lock().unwrap() = enabled;
     enabled
+}
+
+// ============================================================================
+// VISIBILITY-DEPENDENT RECALCULATION (SUBTOTAL / AGGREGATE)
+// ============================================================================
+
+/// Cheap string prefilter for a formula that could depend on row VISIBILITY.
+///
+/// `Cell::formula_string()` renders the CANONICAL function name, so matching
+/// these two substrings catches every spelling and every nesting depth. It is
+/// deliberately over-broad (a defined name like `SUBTOTAL_HELPER` matches): a
+/// false positive costs one extra re-evaluation, a false negative leaves a
+/// wrong number on screen.
+fn formula_depends_on_visibility(formula: &str) -> bool {
+    let upper = formula.to_uppercase();
+    upper.contains("SUBTOTAL") || upper.contains("AGGREGATE")
+}
+
+/// Targeted recalc after ROW VISIBILITY changed — hide/unhide, an AutoFilter
+/// applied or cleared, an advanced filter, an outline group collapsed or
+/// expanded, and the undo of any of those.
+///
+/// WHY THIS EXISTS. SUBTOTAL and AGGREGATE are the only functions whose result
+/// depends on something that is not a cell value. Nothing in the dependency
+/// graph links them to "row 7 is now hidden": no cell was written, so no
+/// dependent was dirtied, so without this pass a `SUBTOTAL(109, A1:A100)` keeps
+/// displaying its pre-hide total until some unrelated edit happens to sweep it
+/// up. A stale total is exactly as wrong as the ignored-hidden-rows bug this
+/// change fixes — arguably worse, because it looks authoritative.
+///
+/// It is the `recalc_control_dependents_core` pattern with a different seed
+/// rule (GET.CONTROLVALUE cells -> SUBTOTAL/AGGREGATE cells), and it shares
+/// that path's helpers and its documented v1 limitations:
+///
+/// 1. **Other-sheet pass.** Every non-active sheet holding a visibility-
+///    dependent formula is recalculated whole via `recalculate_sheet_values`,
+///    together with every sheet that transitively depends on one of them, in
+///    sheet-level dependency order. No spill maintenance and no `CellData`
+///    reporting off the active sheet (the frontend refetches on sheet switch).
+/// 2. **Active-sheet pass.** Seeds = the active sheet's visibility-dependent
+///    cells, plus every active-sheet cell referencing a sheet recalculated in
+///    pass 1. Seeds and their dependents re-evaluate through the shared
+///    `reevaluate_formula_cell` cascade (so results SPILL and collapse exactly
+///    like an edit), then `cascade_cross_sheet_dependents` propagates forward.
+///
+/// A cross-sheet SUBTOTAL is covered from either direction: a formula on
+/// Sheet1 reading `Sheet2!A1:A10` is an active-sheet seed by its own text, and
+/// one on Sheet3 reading the same range is swept up by the other-sheet pass.
+///
+/// Callers must hold NO grid or store lock. Honours manual calculation mode,
+/// like every other dependent cascade. Returns the active-sheet cells to apply.
+pub(crate) fn recalc_visibility_dependents_core(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    control_states: Option<(
+        &crate::pane_control::PaneControlState,
+        &crate::ribbon_filter::RibbonFilterState,
+    )>,
+) -> Result<Vec<CellData>, String> {
+    use std::collections::{HashMap, HashSet};
+
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
+    // THE POINT OF THE PASS: the snapshot is rebuilt here, so these formulas
+    // re-evaluate against the visibility state that just changed.
+    let _visibility_pass = crate::row_visibility::begin_pass(state);
+    // BACKGROUND: the user hid a row; the cascade that follows writes cells.
+    let _pass = eval_budget::begin_pass(EvalSurface::Background, &state.calc_cancel);
+
+    {
+        let calc_mode = state.calculation_mode.lock().unwrap();
+        if *calc_mode != "automatic" {
+            return Ok(Vec::new());
+        }
+    }
+
+    let control_values =
+        crate::control_values::build_control_values_from_states(state, control_states);
+
+    // Pre-pass: sync the active-sheet mirror into `grids` (BUG-0016 discipline)
+    // and find the non-active sheets holding visibility-dependent formulas.
+    let (visibility_sheets, prepass_active_sheet) = {
+        let grid = state.grid.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if active_sheet < grids.len() {
+            grids[active_sheet] = grid.clone();
+        }
+        let list: Vec<usize> = grids
+            .iter()
+            .enumerate()
+            .filter(|&(idx, g)| {
+                idx != active_sheet
+                    && g.cells.values().any(|cell| {
+                        cell.formula_string()
+                            .is_some_and(|f| formula_depends_on_visibility(&f))
+                    })
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        (list, active_sheet)
+    };
+
+    // Sheet-level cross-sheet edges, and the active-sheet cells referencing
+    // each source sheet (reverse-propagation seeds). Brief locks, canonical
+    // order, no grid lock held.
+    let (sheet_edges, active_deps_by_source) = {
+        let sheet_names = state.sheet_names.lock().unwrap();
+        let cross = state.cross_sheet_dependents.lock().unwrap();
+        let mut edges: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut active_deps: HashMap<usize, Vec<(u32, u32)>> = HashMap::new();
+        for ((src_name, _r, _c), deps) in cross.iter() {
+            let Some(src_idx) = sheet_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(src_name))
+            else {
+                continue;
+            };
+            for &(dep_sheet, dep_row, dep_col) in deps.iter() {
+                if dep_sheet != src_idx {
+                    edges.entry(src_idx).or_default().insert(dep_sheet);
+                }
+                if dep_sheet == prepass_active_sheet && src_idx != prepass_active_sheet {
+                    active_deps
+                        .entry(src_idx)
+                        .or_default()
+                        .push((dep_row, dep_col));
+                }
+            }
+        }
+        (edges, active_deps)
+    };
+
+    // Pass 1: other sheets, whole-sheet recalc in sheet-level dependency order.
+    let other_recalc = crate::control_values::ordered_sheet_closure(
+        &visibility_sheets,
+        &sheet_edges,
+        prepass_active_sheet,
+    );
+    for &idx in &other_recalc {
+        recalculate_sheet_values(state, user_files_state, pivot_state, idx, control_states);
+    }
+
+    let extra_seeds: Vec<(u32, u32)> = {
+        let recalced: HashSet<usize> = other_recalc.iter().copied().collect();
+        let mut set: HashSet<(u32, u32)> = HashSet::new();
+        for (src_idx, deps) in active_deps_by_source.iter() {
+            if recalced.contains(src_idx) {
+                set.extend(deps.iter().copied());
+            }
+        }
+        let mut list: Vec<(u32, u32)> = set.into_iter().collect();
+        list.sort_unstable();
+        list
+    };
+
+    // Pass 2: active sheet, spill-aware, under the update_cell-style lock set.
+    let updated_cells = {
+        let user_files = user_files_state.files.lock().unwrap();
+        let sheet_names = state.sheet_names.lock().unwrap();
+        let mut grid = state.grid.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if active_sheet < grids.len() {
+            grids[active_sheet] = grid.clone();
+        }
+
+        let styles = state.style_registry.lock().unwrap();
+        let dependents_map = state.dependents.lock().unwrap();
+        let column_dependents_map = state.column_dependents.lock().unwrap();
+        let row_dependents_map = state.row_dependents.lock().unwrap();
+        let cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+        let merged_regions = state.merged_regions.lock().unwrap();
+        let locale = state.locale.lock().unwrap();
+        let cascade_tables = state.tables.lock().unwrap();
+        let cascade_table_names = state.table_names.lock().unwrap();
+        let cascade_named_ranges = state.named_ranges.lock().unwrap();
+
+        let mut seeds: Vec<(u32, u32)> = grid
+            .cells
+            .iter()
+            .filter_map(|(&(row, col), cell)| {
+                let formula = cell.formula_string()?;
+                formula_depends_on_visibility(&formula).then_some((row, col))
+            })
+            .collect();
+        seeds.sort_unstable();
+
+        {
+            let seed_set: HashSet<(u32, u32)> = seeds.iter().copied().collect();
+            for &coord in &extra_seeds {
+                if !seed_set.contains(&coord) {
+                    seeds.push(coord);
+                }
+            }
+        }
+
+        if seeds.is_empty() {
+            Vec::new()
+        } else {
+            let mut affected =
+                crate::control_values::multi_root_recalc_order(&seeds, &dependents_map);
+            let mut affected_set: HashSet<(u32, u32)> = affected.iter().copied().collect();
+            for &seed in &seeds {
+                let extra = crate::get_column_row_dependents(
+                    seed,
+                    &column_dependents_map,
+                    &row_dependents_map,
+                );
+                let mut extra: Vec<(u32, u32)> = extra
+                    .into_iter()
+                    .filter(|d| !affected_set.contains(d))
+                    .collect();
+                extra.sort_unstable();
+                for dep in extra {
+                    affected_set.insert(dep);
+                    affected.push(dep);
+                }
+            }
+
+            let merge_lookup: HashMap<(u32, u32), &crate::api_types::MergedRegion> =
+                merged_regions
+                    .iter()
+                    .map(|r| ((r.start_row, r.start_col), r))
+                    .collect();
+
+            let mut updated_cells: Vec<CellData> = Vec::new();
+            let mut cache_hits = 0u32;
+            let mut cache_misses = 0u32;
+            let include_cascade_formulas =
+                affected.len() <= crate::commands::data::CASCADE_FORMULA_LIMIT;
+
+            for &(row, col) in &affected {
+                let cell_opt = grid.get_cell(row, col).cloned();
+                if let Some(cell) = cell_opt {
+                    if let Some(formula) = cell.formula_string() {
+                        crate::commands::data::reevaluate_formula_cell(
+                            state,
+                            &mut grid,
+                            &mut grids,
+                            &sheet_names,
+                            active_sheet,
+                            row,
+                            col,
+                            &cell,
+                            &formula,
+                            &user_files,
+                            // No UDF / CUBE prefetch on this path: those
+                            // dependents PRESERVE their stored value (the
+                            // preserve-on-no-prefetch invariant), same as the
+                            // control-value cascade.
+                            None,
+                            None,
+                            control_values.as_ref(),
+                            &styles,
+                            &locale,
+                            &merge_lookup,
+                            &cascade_tables,
+                            &cascade_table_names,
+                            &cascade_named_ranges,
+                            &mut updated_cells,
+                            &mut cache_hits,
+                            &mut cache_misses,
+                            include_cascade_formulas,
+                        );
+                    }
+                }
+            }
+
+            let initial_changed: Vec<(u32, u32)> = {
+                let mut seen: HashSet<(u32, u32)> = HashSet::new();
+                updated_cells
+                    .iter()
+                    .filter(|c| c.sheet_index.is_none())
+                    .filter_map(|c| seen.insert((c.row, c.col)).then_some((c.row, c.col)))
+                    .collect()
+            };
+            let no_controls =
+                std::sync::Arc::new(crate::control_values::ControlValuesMap::new());
+            crate::commands::data::cascade_cross_sheet_dependents(
+                &mut grid,
+                &mut grids,
+                &sheet_names,
+                active_sheet,
+                &cross_sheet_dependents_map,
+                &dependents_map,
+                &user_files,
+                control_values.as_ref().unwrap_or(&no_controls),
+                &styles,
+                &locale,
+                &merge_lookup,
+                &initial_changed,
+                &affected,
+                &mut updated_cells,
+                include_cascade_formulas,
+            );
+
+            updated_cells
+        }
+    };
+
+    Ok(updated_cells)
+}
+
+/// Tauri wrapper for `recalc_visibility_dependents_core`.
+///
+/// Exposed as a command so the surfaces that change row visibility WITHOUT
+/// going through the backend hide command — an AutoFilter applied from the
+/// ribbon, an outline group collapsed — can request the dependent
+/// recalculation with one invoke.
+#[tauri::command]
+pub fn recalc_visibility_dependents(
+    state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+) -> Result<Vec<CellData>, String> {
+    recalc_visibility_dependents_core(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        Some((&pane_control_state, &ribbon_filter_state)),
+    )
+}
+
+/// Run the SUBTOTAL/AGGREGATE cascade after a row-visibility change, resolving
+/// every state it needs from the `AppHandle`.
+///
+/// WHY A HANDLE AND NOT FIVE `State` PARAMS: the surfaces that change row
+/// visibility without going through `set_rows_hidden` — every AutoFilter
+/// command, every outline collapse/expand — are ~17 commands whose signatures
+/// would each have to grow five parameters. Tauri injects `AppHandle` just as
+/// happily, and `Manager::state()` resolves the rest, so each of those commands
+/// pays ONE parameter and ONE call.
+///
+/// FAILURES ARE SWALLOWED ON PURPOSE, exactly as in
+/// `commands::dimensions::recalc_visibility_after_row_change`: the filter or
+/// collapse itself already succeeded, and a failed recalculation must not turn
+/// a successful, undoable user action into an error. The stale-value case is
+/// then no worse than before this pass existed.
+///
+/// Emits `grid:refresh` when cells actually changed — no cell was *written* by
+/// the visibility change itself, so nothing else would tell the frontend to
+/// refetch.
+///
+/// CALLERS MUST HOLD NO GRID OR STORE LOCK. Call it after the command body has
+/// returned and its locks have dropped (the `*_inner` split in autofilter.rs
+/// and grouping.rs exists for exactly this reason).
+///
+/// There is deliberately NO column counterpart: SUBTOTAL and AGGREGATE are
+/// row-oriented, and Microsoft's AGGREGATE reference states outright that
+/// hiding columns in a horizontal range does not affect the result.
+pub(crate) fn recalc_visibility_after_row_change_from_handle(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+
+    let state = app.state::<AppState>();
+    let user_files_state = app.state::<UserFilesState>();
+    let pivot_state = app.state::<PivotState>();
+    let pane_control_state = app.state::<crate::pane_control::PaneControlState>();
+    let ribbon_filter_state = app.state::<crate::ribbon_filter::RibbonFilterState>();
+
+    match recalc_visibility_dependents_core(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        Some((&pane_control_state, &ribbon_filter_state)),
+    ) {
+        Ok(cells) if !cells.is_empty() => {
+            let _ = app.emit("grid:refresh", ());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            crate::log_warn!("CMD", "visibility recalc after filter/outline change failed: {}", e);
+        }
+    }
 }

@@ -5,12 +5,15 @@
 //! all of these on save/reload (found by the save/reload round-trip oracle:
 //! BUG-0018 freeze panes, plus merges/notes/hyperlinks).
 
-use persistence::{SavedHyperlink, SavedMergedRegion, SavedNote, SavedPageSetup, Sheet};
+use persistence::{
+    SavedHyperlink, SavedMergedRegion, SavedNote, SavedPageSetup, Sheet,
+    DEFAULT_SHEET_ZOOM_PERCENT,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Sheet-level metadata for a single sheet (metadata.json).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -47,6 +50,44 @@ pub struct SheetMetadata {
     pub page_setup: Option<SavedPageSetup>,
     #[serde(default = "default_true")]
     pub show_gridlines: bool,
+    /// Per-sheet zoom as a REAL PERCENT (100 = 100%). Omitted at 100 so
+    /// ordinary sheets keep writing the same bytes they always did.
+    #[serde(default = "default_zoom", skip_serializing_if = "is_default_zoom")]
+    pub zoom: f64,
+    /// Split-bar row. Persisted separately from `freeze_row`: freeze locks a
+    /// pane, split gives the quadrants independent scroll, and only freeze
+    /// was ever written -- so a split layout silently reset on every reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_row: Option<u32>,
+    /// Split-bar column (see `split_row`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_col: Option<u32>,
+}
+
+/// Hand-written because `#[derive(Default)]` would give `zoom` f64's 0.0 --
+/// a sheet zoomed to 0%, which then serializes (0 != 100) and comes back as a
+/// blank grid. Every default here must be the value the field is OMITTED for.
+impl Default for SheetMetadata {
+    fn default() -> Self {
+        SheetMetadata {
+            merged_regions: Vec::new(),
+            freeze_row: None,
+            freeze_col: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
+            user_hidden_rows: Vec::new(),
+            user_hidden_cols: Vec::new(),
+            tab_color: String::new(),
+            visibility: default_visibility(),
+            notes: Vec::new(),
+            hyperlinks: Vec::new(),
+            page_setup: None,
+            show_gridlines: true,
+            zoom: DEFAULT_SHEET_ZOOM_PERCENT,
+            split_row: None,
+            split_col: None,
+        }
+    }
 }
 
 fn default_visibility() -> String {
@@ -55,6 +96,14 @@ fn default_visibility() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_zoom() -> f64 {
+    DEFAULT_SHEET_ZOOM_PERCENT
+}
+
+fn is_default_zoom(v: &f64) -> bool {
+    (*v - DEFAULT_SHEET_ZOOM_PERCENT).abs() < 1e-9
 }
 
 impl SheetMetadata {
@@ -81,6 +130,9 @@ impl SheetMetadata {
             hyperlinks: sheet.hyperlinks.clone(),
             page_setup: sheet.page_setup.clone(),
             show_gridlines: sheet.show_gridlines,
+            zoom: sheet.zoom,
+            split_row: sheet.split_row,
+            split_col: sheet.split_col,
         }
     }
 
@@ -99,6 +151,9 @@ impl SheetMetadata {
             && self.hyperlinks.is_empty()
             && self.page_setup.is_none()
             && self.show_gridlines
+            && is_default_zoom(&self.zoom)
+            && self.split_row.is_none()
+            && self.split_col.is_none()
     }
 
     pub fn apply_to_sheet(&self, sheet: &mut Sheet) {
@@ -115,6 +170,9 @@ impl SheetMetadata {
         sheet.hyperlinks = self.hyperlinks.clone();
         sheet.page_setup = self.page_setup.clone();
         sheet.show_gridlines = self.show_gridlines;
+        sheet.zoom = self.zoom;
+        sheet.split_row = self.split_row;
+        sheet.split_col = self.split_col;
     }
 }
 
@@ -173,6 +231,64 @@ mod tests {
         assert_eq!(restored.user_hidden_rows, sheet.user_hidden_rows);
         assert_eq!(restored.user_hidden_cols, sheet.user_hidden_cols);
         assert_eq!(restored.hidden_rows, sheet.hidden_rows);
+    }
+
+    /// Zoom and the split bar must round-trip as their own fields, and a
+    /// sheet carrying only one of them must still force metadata.json to be
+    /// written — otherwise the writer omits the file and the view is lost.
+    #[test]
+    fn test_zoom_and_split_roundtrip() {
+        let mut sheet = Sheet::new("Sheet1".to_string());
+        sheet.zoom = 60.0;
+        sheet.split_row = Some(8);
+        sheet.split_col = None;
+        // A freeze on the same sheet must stay its own, separate setting.
+        sheet.freeze_row = Some(1);
+
+        let meta = SheetMetadata::from_sheet(&sheet);
+        assert!(!meta.is_default());
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"zoom\""), "camelCase key expected: {json}");
+        assert!(json.contains("splitRow"), "camelCase key expected: {json}");
+        assert!(
+            !json.contains("splitCol"),
+            "an absent split column must not be written: {json}"
+        );
+
+        let parsed: SheetMetadata = serde_json::from_str(&json).unwrap();
+        let mut restored = Sheet::new("Sheet1".to_string());
+        parsed.apply_to_sheet(&mut restored);
+        assert_eq!(restored.zoom, 60.0);
+        assert_eq!(restored.split_row, Some(8));
+        assert_eq!(restored.split_col, None);
+        assert_eq!(restored.freeze_row, Some(1), "freeze is not the split");
+    }
+
+    /// A 100% sheet with no split writes neither field, and a metadata.json
+    /// that predates them still loads at 100% rather than at 0%.
+    #[test]
+    fn test_zoom_defaults_to_one_hundred_not_zero() {
+        let meta = SheetMetadata::default();
+        assert_eq!(meta.zoom, 100.0);
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("zoom"), "default zoom must be omitted: {json}");
+
+        // The shape written before zoom existed.
+        let legacy: SheetMetadata =
+            serde_json::from_str(r#"{"visibility":"visible","showGridlines":true}"#).unwrap();
+        assert_eq!(legacy.zoom, 100.0);
+        assert_eq!(legacy.split_row, None);
+        assert!(legacy.is_default());
+    }
+
+    /// A split alone forces metadata.json to be written.
+    #[test]
+    fn test_split_alone_forces_metadata_to_be_written() {
+        let meta = SheetMetadata {
+            split_col: Some(3),
+            ..Default::default()
+        };
+        assert!(!meta.is_default());
     }
 
     /// A sheet that ONLY has a user hide is not "default" — otherwise the

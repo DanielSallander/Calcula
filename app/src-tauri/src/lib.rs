@@ -101,6 +101,7 @@ pub mod ribbon_filter;
 pub mod pane_control;
 pub mod report;
 pub mod control_values;
+pub mod row_visibility;
 pub mod timeline_slicer;
 pub mod mcp;
 pub mod locale_commands;
@@ -276,6 +277,21 @@ pub struct AppState {
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
     /// Split window configurations per sheet
     pub split_configs: Mutex<Vec<SplitConfig>>,
+    /// Per-sheet zoom as a REAL PERCENT (100 = 100%) — Excel's `zoomScale`.
+    ///
+    /// A per-sheet Vec kept parallel to `sheet_names`, exactly like
+    /// `freeze_configs` / `split_configs` / `show_gridlines`: pushed on sheet
+    /// add, removed on delete, rotated on move, cloned on copy, rebuilt on
+    /// load. No "active mirror" companion — that pattern exists only where a
+    /// legacy single-sheet field had to keep working, and duplicating a value
+    /// is how it gets to disagree with itself.
+    ///
+    /// PERCENT, not the frontend's render factor. The public script contract
+    /// (`Calcula.getZoom()` / `api.setZoom`) and Excel both speak percent; the
+    /// factor is a rendering detail converted at the UI boundary, and storing
+    /// it here is what produced the factor-vs-percent split-brain that Wave 4
+    /// had to heal.
+    pub sheet_zooms: Mutex<Vec<f64>>,
     /// Per-sheet gridlines visibility (default true)
     pub show_gridlines: Mutex<Vec<bool>>,
     /// Merged cell regions for the current (active) sheet
@@ -489,8 +505,12 @@ pub fn create_app_state() -> AppState {
         user_hidden_cols: Mutex::new(HashSet::new()),
         all_user_hidden_rows: Mutex::new(vec![HashSet::new()]),
         all_user_hidden_cols: Mutex::new(vec![HashSet::new()]),
-        default_row_height: Mutex::new(20.0), // Excel default: Calibri 11 => 15pt = 20px
-        default_column_width: Mutex::new(64.29), // Excel default: 8.47 chars => 8.47*7+5 = 64.29px
+        // ONE definition of these, in `persistence` -- see
+        // DEFAULT_ROW_HEIGHT_PX. `new_file` used to re-type them as 24 / 100
+        // and File > New silently handed out a differently-scaled grid than
+        // app launch.
+        default_row_height: Mutex::new(::persistence::DEFAULT_ROW_HEIGHT_PX),
+        default_column_width: Mutex::new(::persistence::DEFAULT_COLUMN_WIDTH_PX),
         dependents: Mutex::new(DependencyMap::default()),
         dependencies: Mutex::new(DependencyMap::default()),
         calculation_mode: Mutex::new("automatic".to_string()),
@@ -506,6 +526,7 @@ pub fn create_app_state() -> AppState {
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         split_configs: Mutex::new(vec![SplitConfig::default()]),
+        sheet_zooms: Mutex::new(vec![::persistence::DEFAULT_SHEET_ZOOM_PERCENT]),
         show_gridlines: Mutex::new(vec![true]),
         merged_regions: Mutex::new(HashSet::new()),
         all_merged_regions: Mutex::new(Vec::new()),
@@ -4448,6 +4469,10 @@ pub fn run() {
             calculation::set_precision_as_displayed,
             calculation::get_calculate_before_save,
             calculation::set_calculate_before_save,
+            // SUBTOTAL/AGGREGATE depend on row VISIBILITY, which no cell write
+            // dirties — every surface that hides or reveals rows must ask for
+            // this cascade or those totals go stale.
+            calculation::recalc_visibility_dependents,
             // Formula library commands
             formula::get_functions_by_category,
             formula::get_all_functions,
@@ -4506,6 +4531,8 @@ pub fn run() {
             sheets::get_freeze_panes,
             sheets::set_split_window,
             sheets::get_split_window,
+            sheets::set_sheet_zoom,
+            sheets::get_sheet_zoom,
             sheets::move_sheet,
             sheets::copy_sheet,
             sheets::hide_sheet,

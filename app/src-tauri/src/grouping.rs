@@ -401,7 +401,18 @@ pub fn group_rows(
 /// and/or below stay grouped.
 #[tauri::command]
 pub fn ungroup_rows(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    start_row: u32,
+    end_row: u32,
+) -> GroupResult {
+    let result = ungroup_rows_inner(&state, start_row, end_row);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn ungroup_rows_inner(
+    state: &AppState,
     start_row: u32,
     end_row: u32,
 ) -> GroupResult {
@@ -566,7 +577,17 @@ pub fn ungroup_columns(
 /// nested groups can be collapsed independently.
 #[tauri::command]
 pub fn collapse_row_group(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    row: u32,
+) -> GroupResult {
+    let result = collapse_row_group_inner(&state, row);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn collapse_row_group_inner(
+    state: &AppState,
     row: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -607,7 +628,17 @@ pub fn collapse_row_group(
 /// Only expands the group whose button (summary) row matches.
 #[tauri::command]
 pub fn expand_row_group(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    row: u32,
+) -> GroupResult {
+    let result = expand_row_group_inner(&state, row);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn expand_row_group_inner(
+    state: &AppState,
     row: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -723,7 +754,18 @@ pub fn expand_column_group(
 /// Show/hide rows and columns up to a specific outline level
 #[tauri::command]
 pub fn show_outline_level(
+    app: tauri::AppHandle,
     state: State<AppState>,
+    row_level: Option<u8>,
+    col_level: Option<u8>,
+) -> GroupResult {
+    let result = show_outline_level_inner(&state, row_level, col_level);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn show_outline_level_inner(
+    state: &AppState,
     row_level: Option<u8>,
     col_level: Option<u8>,
 ) -> GroupResult {
@@ -877,7 +919,13 @@ pub fn set_outline_settings(
 
 /// Clear all outline/grouping for the current sheet
 #[tauri::command]
-pub fn clear_outline(state: State<AppState>) -> GroupResult {
+pub fn clear_outline(app: tauri::AppHandle, state: State<AppState>) -> GroupResult {
+    let result = clear_outline_inner(&state);
+    crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+fn clear_outline_inner(state: &AppState) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut outlines = state.outlines.lock().unwrap();
 

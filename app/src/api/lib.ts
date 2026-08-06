@@ -8,6 +8,11 @@
 
 export { getInternalClipboard } from "../core/hooks/useClipboard";
 export type { ClipboardData } from "../core/hooks/useClipboard";
+// A COPY over a filtered range collapses the filter-hidden rows away, so a
+// clipboard matrix row is NOT necessarily `sourceSelection.startRow + r`.
+// Anything that shifts relative references or re-reads the source by
+// coordinate must map through these instead of assuming contiguity.
+export { clipboardSourceRow, pasteRowDeltas } from "../core/lib/clipboardVisibility";
 
 // ============================================================================
 // Tauri API - Core spreadsheet operations

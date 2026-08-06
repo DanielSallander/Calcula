@@ -1499,9 +1499,42 @@ fn apply_default_dimension_restore(
     }
 }
 
+/// Recalculate SUBTOTAL/AGGREGATE after an undo/redo that moved ROW
+/// VISIBILITY.
+///
+/// `hidden_changed` is already the flag that tells the frontend "re-read the
+/// hidden sets, nothing in `updated_cells` reveals this" — and the same is true
+/// of the two functions whose value depends on visibility. Undoing a hide
+/// without this leaves the pre-undo total on screen and in the saved file.
+///
+/// Runs only when the flag is set, so the ordinary cell-edit undo pays one
+/// bool test. Errors are swallowed: the undo itself already succeeded.
+fn recalc_visibility_after_undo(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
+    result: &UndoResult,
+) {
+    if !result.success || !result.hidden_changed {
+        return;
+    }
+    crate::commands::dimensions::recalc_visibility_after_row_change(
+        app,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+    );
+}
+
 /// Perform undo operation.
 #[tauri::command]
 pub fn undo(
+    app: tauri::AppHandle,
     state: State<AppState>,
     file_state: State<FileState>,
     user_files_state: State<'_, UserFilesState>,
@@ -1534,12 +1567,15 @@ pub fn undo(
         }
     };
 
-    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, transaction, true)
+    let result = apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, transaction, true);
+    recalc_visibility_after_undo(&app, &state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state, &result);
+    result
 }
 
 /// Perform redo operation.
 #[tauri::command]
 pub fn redo(
+    app: tauri::AppHandle,
     state: State<AppState>,
     file_state: State<FileState>,
     user_files_state: State<'_, UserFilesState>,
@@ -1572,7 +1608,9 @@ pub fn redo(
         }
     };
 
-    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, transaction, false)
+    let result = apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, transaction, false);
+    recalc_visibility_after_undo(&app, &state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state, &result);
+    result
 }
 
 /// Clear undo/redo history (e.g., when opening a new file).

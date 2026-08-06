@@ -330,13 +330,15 @@ describe("setZoom parameterized", () => {
     { label: "250%", input: 2.5, expected: 2.5 },
     { label: "300%", input: 3.0, expected: 3.0 },
     { label: "400%", input: 4.0, expected: 4.0 },
-    { label: "500%", input: 5.0, expected: 5.0 },
+    // 400% is the ceiling, shared with the backend and `api.setZoom`; 500%
+    // clamps rather than being accepted as it once was.
+    { label: "500% clamps to the shared ceiling", input: 5.0, expected: ZOOM_MAX },
     // Edge cases: clamped
     { label: "below min (0)", input: 0, expected: ZOOM_MIN },
     { label: "below min (-1)", input: -1, expected: ZOOM_MIN },
     { label: "below min (0.01)", input: 0.01, expected: ZOOM_MIN },
     { label: "below min (0.05)", input: 0.05, expected: ZOOM_MIN },
-    { label: "above max (5.1)", input: 5.1, expected: ZOOM_MAX },
+    { label: "above max (4.1)", input: 4.1, expected: ZOOM_MAX },
     { label: "above max (10)", input: 10, expected: ZOOM_MAX },
     { label: "above max (100)", input: 100, expected: ZOOM_MAX },
     { label: "above max (999)", input: 999, expected: ZOOM_MAX },

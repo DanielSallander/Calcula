@@ -10,10 +10,8 @@ import {
   type OverlayRenderContext,
   type OverlayHitTestContext,
 } from "@api";
-
-// Size of the chevron button area (pixels)
-const BUTTON_SIZE = 18;
-const BUTTON_MARGIN = 1;
+import { getChevronRect, isPointInChevron } from "../lib/chevronGeometry";
+import { getCellCanvasRect } from "../lib/gridGeometry";
 
 /**
  * Render dropdown chevrons on cells with list validation + inCellDropdown.
@@ -35,10 +33,15 @@ export function renderDropdownChevrons(ctx: OverlayRenderContext): void {
 
   if (rowHeight <= 0 || colWidth <= 0) return; // Hidden row/col
 
-  // Position the button on the right side of the cell, vertically centered
-  const btnX = colX + colWidth - BUTTON_SIZE - BUTTON_MARGIN;
-  const btnY = rowY + BUTTON_MARGIN;
-  const btnHeight = rowHeight - BUTTON_MARGIN * 2;
+  // Position the button from the SHARED geometry, so the pixels drawn here are
+  // exactly the pixels the click interceptor claims.
+  const btn = getChevronRect({ x: colX, y: rowY, width: colWidth, height: rowHeight });
+  if (btn.width <= 0 || btn.height <= 0) return;
+
+  const btnX = btn.x;
+  const btnY = btn.y;
+  const btnWidth = btn.width;
+  const btnHeight = btn.height;
 
   canvasCtx.save();
 
@@ -48,11 +51,11 @@ export function renderDropdownChevrons(ctx: OverlayRenderContext): void {
   canvasCtx.lineWidth = 1;
 
   // Simple rectangle button
-  canvasCtx.fillRect(btnX, btnY, BUTTON_SIZE, btnHeight);
-  canvasCtx.strokeRect(btnX, btnY, BUTTON_SIZE, btnHeight);
+  canvasCtx.fillRect(btnX, btnY, btnWidth, btnHeight);
+  canvasCtx.strokeRect(btnX, btnY, btnWidth, btnHeight);
 
   // Draw down-arrow chevron centered in the button
-  const centerX = btnX + BUTTON_SIZE / 2;
+  const centerX = btnX + btnWidth / 2;
   const centerY = btnY + btnHeight / 2;
 
   canvasCtx.strokeStyle = "#333333";
@@ -70,16 +73,30 @@ export function renderDropdownChevrons(ctx: OverlayRenderContext): void {
 
 /**
  * Hit test for dropdown chevron buttons.
- * Returns true if the click is within a validation dropdown chevron area.
+ * Returns true only when the point is within the chevron BUTTON of the region's
+ * cell — the rest of the cell belongs to normal grid selection.
+ *
+ * The point is tested geometrically when the grid state is resolvable; if it is
+ * not, the test fails closed (false) rather than claiming the whole cell.
  */
 export function hitTestDropdownChevron(ctx: OverlayHitTestContext): boolean {
   const region = ctx.region;
   if (!region || region.type !== "validation-dropdown") return false;
 
-  // Check if the clicked cell has a dropdown region
-  if (ctx.row === region.startRow && ctx.col === region.startCol) {
-    return true;
-  }
+  // A region covers exactly one cell (see syncDropdownChevronRegions).
+  if (ctx.row !== region.startRow || ctx.col !== region.startCol) return false;
 
-  return false;
+  const cell = getCellCanvasRect(region.startRow, region.startCol);
+  if (!cell) return false;
+
+  return isPointInChevron(ctx.canvasX, ctx.canvasY, cell);
+}
+
+/**
+ * Cursor over a list-validated cell: a pointer on the chevron BUTTON, the grid's
+ * own cell cursor everywhere else. This is the affordance for the narrowed hit
+ * area — the arrow looks clickable, the cell body looks selectable.
+ */
+export function getDropdownChevronCursor(ctx: OverlayHitTestContext): string | null {
+  return hitTestDropdownChevron(ctx) ? "pointer" : null;
 }

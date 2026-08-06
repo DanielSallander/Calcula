@@ -16,7 +16,8 @@ use crate::features::scheduled_jobs::{
 };
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
-    PENDING_RECALC_MIN_FORMAT_VERSION, USER_HIDDEN_MIN_FORMAT_VERSION,
+    PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_VIEW_MIN_FORMAT_VERSION,
+    USER_HIDDEN_MIN_FORMAT_VERSION,
     CALA_MAX_SUPPORTED_FORMAT_VERSION,
 };
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
@@ -123,6 +124,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     {
         manifest.features.push("user_hidden".to_string());
         stamp_feature_format_version(&mut manifest, USER_HIDDEN_MIN_FORMAT_VERSION);
+    }
+    // Per-sheet zoom / split: same argument as the user-hidden sets. These
+    // live nowhere but metadata.json, so an older reader would drop them on
+    // its next save and hand the user back a 100%, single-pane workbook with
+    // no error. Stamped only when a sheet actually carries one.
+    if workbook.sheets.iter().any(|s| {
+        (s.zoom - persistence::DEFAULT_SHEET_ZOOM_PERCENT).abs() >= 1e-9
+            || s.split_row.is_some()
+            || s.split_col.is_some()
+    }) {
+        manifest.features.push("sheet_view".to_string());
+        stamp_feature_format_version(&mut manifest, SHEET_VIEW_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -552,10 +565,14 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
             hyperlinks: Vec::new(),
             page_setup: None,
             show_gridlines: true,
+            // Overwritten below by metadata.json when the sheet carries any.
+            zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
+            split_row: None,
+            split_col: None,
         };
 
-        // metadata.json — merges, freeze, hidden rows/cols, tab color,
-        // visibility, notes, hyperlinks, page setup, gridlines
+        // metadata.json — merges, freeze, split, zoom, hidden rows/cols, tab
+        // color, visibility, notes, hyperlinks, page setup, gridlines
         if let Some(metadata) = read_optional_json::<crate::sheet_metadata::SheetMetadata>(
             &mut archive,
             &format!("{}/metadata.json", base_path),
@@ -1106,6 +1123,9 @@ mod tests {
             hyperlinks: Vec::new(),
             page_setup: None,
             show_gridlines: true,
+            zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
+            split_row: None,
+            split_col: None,
         };
 
         Workbook {
@@ -1119,8 +1139,8 @@ mod tests {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
-            default_row_height: 24.0,
-            default_column_width: 100.0,
+            default_row_height: persistence::DEFAULT_ROW_HEIGHT_PX,
+            default_column_width: persistence::DEFAULT_COLUMN_WIDTH_PX,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
@@ -1522,6 +1542,59 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(manifest.format_version, USER_HIDDEN_MIN_FORMAT_VERSION);
         assert!(manifest.features.iter().any(|f| f == "user_hidden"));
+    }
+
+
+    /// Zoom and split round-trip the real archive, and stamp the format
+    /// version -- they live nowhere else, so an older reader would drop them on
+    /// its next save and hand back a 100%, single-pane workbook silently.
+    #[test]
+    fn test_zoom_and_split_roundtrip_and_stamp_the_version() {
+        let mut workbook = make_test_workbook();
+        workbook.sheets[0].zoom = 60.0;
+        workbook.sheets[0].split_row = Some(11);
+        workbook.sheets[0].split_col = Some(2);
+        // A freeze on the same sheet must stay a separate setting.
+        workbook.sheets[0].freeze_row = Some(1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("view.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.sheets[0].zoom, 60.0);
+        assert_eq!(loaded.sheets[0].split_row, Some(11));
+        assert_eq!(loaded.sheets[0].split_col, Some(2));
+        assert_eq!(loaded.sheets[0].freeze_row, Some(1));
+
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, SHEET_VIEW_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == "sheet_view"));
+    }
+
+    /// A 100%, unsplit workbook must NOT be stamped up the chain -- otherwise
+    /// every ordinary save demands a newer reader for nothing.
+    #[test]
+    fn test_no_zoom_or_split_means_no_version_stamp() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain-view.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.format_version < SHEET_VIEW_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == "sheet_view"));
+    }
+
+    /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.
+    #[test]
+    fn test_a_split_alone_stamps_the_version() {
+        let mut workbook = make_test_workbook();
+        workbook.sheets[0].split_col = Some(5);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("split-only.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, SHEET_VIEW_MIN_FORMAT_VERSION);
     }
 
     /// A workbook with no hand-hidden rows must NOT be stamped up the chain —

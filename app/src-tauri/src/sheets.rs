@@ -513,6 +513,10 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
         scroll_areas.push(None);
     }
     {
+        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        sheet_zooms.push(persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+    }
+    {
         // Keep page_setups parallel to the sheet list — open_file
         // materializes a default for every sheet, so a missing entry here
         // shows up as a save/reload digest diff.
@@ -769,6 +773,12 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
             scroll_areas.remove(index);
         }
     }
+    {
+        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        if index < sheet_zooms.len() {
+            sheet_zooms.remove(index);
+        }
+    }
     if index < tab_colors.len() {
         tab_colors.remove(index);
     }
@@ -954,24 +964,34 @@ pub fn get_freeze_panes(state: State<AppState>) -> FreezeConfig {
 // Split Window Commands
 // ============================================================================
 
+/// Set the ACTIVE sheet's split bars.
+///
+/// Marks the workbook dirty: the split now lives in the .cala and is written
+/// only by the save path, so without this a workbook whose only change was a
+/// split closes "clean" and the layout is silently discarded (the exact rule
+/// in `mark_workbook_modified`).
 #[tauri::command]
 pub fn set_split_window(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     split_row: Option<u32>,
     split_col: Option<u32>,
 ) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut split_configs = state.split_configs.lock().unwrap();
+    {
+        let mut split_configs = state.split_configs.lock().unwrap();
 
-    // Ensure split_configs has enough entries
-    while split_configs.len() <= active_sheet {
-        split_configs.push(SplitConfig::default());
+        // Ensure split_configs has enough entries
+        while split_configs.len() <= active_sheet {
+            split_configs.push(SplitConfig::default());
+        }
+
+        split_configs[active_sheet] = SplitConfig {
+            split_row,
+            split_col,
+        };
     }
-
-    split_configs[active_sheet] = SplitConfig {
-        split_row,
-        split_col,
-    };
+    crate::persistence::mark_workbook_modified(&file_state);
 
     Ok(())
 }
@@ -982,6 +1002,71 @@ pub fn get_split_window(state: State<AppState>) -> SplitConfig {
     let split_configs = state.split_configs.lock().unwrap();
 
     split_configs.get(active_sheet).cloned().unwrap_or_default()
+}
+
+// ============================================================================
+// Zoom Commands
+// ============================================================================
+
+/// Set the ACTIVE sheet's zoom, as a REAL PERCENT (100 = 100%).
+///
+/// Out-of-range values are rejected rather than clamped: a caller asking for
+/// 0% or 5000% has a bug, and silently substituting a different number hides
+/// it. The accepted band matches `script_engine::types::ZOOM_MIN/MAX_PERCENT`
+/// so the script API and the UI cannot disagree about what is legal.
+///
+/// Marks the workbook dirty (Excel does too): zoom now lives in the .cala and
+/// is written only by the save path, so a workbook whose only change was a
+/// zoom would otherwise close "clean" and lose it — which is the very bug this
+/// state exists to fix. A no-op write (same zoom) does NOT dirty the document,
+/// so re-reading the value on a sheet switch cannot fake a change.
+#[tauri::command]
+pub fn set_sheet_zoom(
+    state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
+    zoom: f64,
+) -> Result<(), String> {
+    if set_sheet_zoom_inner(&state, zoom)? {
+        crate::persistence::mark_workbook_modified(&file_state);
+    }
+    Ok(())
+}
+
+/// The zoom write itself. Split out from the command so it can be tested:
+/// a `tauri::State` cannot be constructed in a unit test, and the validation
+/// plus the "did it actually change?" answer are the parts worth pinning.
+///
+/// Returns whether the stored value actually changed.
+pub(crate) fn set_sheet_zoom_inner(state: &AppState, zoom: f64) -> Result<bool, String> {
+    if !zoom.is_finite()
+        || !(script_engine::types::ZOOM_MIN_PERCENT..=script_engine::types::ZOOM_MAX_PERCENT)
+            .contains(&zoom)
+    {
+        return Err(format!(
+            "zoom must be a percent between {} and {} (got {zoom})",
+            script_engine::types::ZOOM_MIN_PERCENT,
+            script_engine::types::ZOOM_MAX_PERCENT
+        ));
+    }
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let mut sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+    while sheet_zooms.len() <= active_sheet {
+        sheet_zooms.push(persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+    }
+    let changed = (sheet_zooms[active_sheet] - zoom).abs() >= 1e-9;
+    sheet_zooms[active_sheet] = zoom;
+    Ok(changed)
+}
+
+/// Read the ACTIVE sheet's zoom as a REAL PERCENT.
+#[tauri::command]
+pub fn get_sheet_zoom(state: State<AppState>) -> f64 {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_zooms = state.sheet_zooms.lock().unwrap();
+    sheet_zooms
+        .get(active_sheet)
+        .copied()
+        .unwrap_or(persistence::DEFAULT_SHEET_ZOOM_PERCENT)
 }
 
 // ============================================================================
@@ -1066,6 +1151,11 @@ pub fn move_sheet(
         let mut scroll_areas = state.scroll_areas.lock().unwrap();
         ensure_vec_len(&mut scroll_areas, count);
         rotate_element(&mut *scroll_areas, from_index, to_index);
+    }
+    {
+        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        ensure_vec_len_with(&mut *sheet_zooms, count, || persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+        rotate_element(&mut *sheet_zooms, from_index, to_index);
     }
     {
         let mut sheet_ids = state.sheet_ids.lock().unwrap();
@@ -1259,6 +1349,14 @@ pub fn copy_sheet(
         ensure_vec_len(&mut scroll_areas, count);
         let cloned_scroll = scroll_areas[source_index].clone();
         scroll_areas.insert(insert_at, cloned_scroll);
+    }
+    {
+        // A copied sheet keeps the original's zoom — the copy is meant to look
+        // like what was copied.
+        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        ensure_vec_len_with(&mut *sheet_zooms, count, || persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+        let cloned_zoom = sheet_zooms[source_index];
+        sheet_zooms.insert(insert_at, cloned_zoom);
     }
     tab_colors.insert(insert_at, cloned_tab_color);
     sheet_visibility.insert(insert_at, "visible".to_string()); // Copy is always visible
@@ -1700,5 +1798,127 @@ mod remap_tests {
                 .expect("every spill cell's origin range survives on the same sheet");
             assert!(cells.contains(&(row, col)));
         }
+    }
+}
+
+#[cfg(test)]
+mod sheet_zoom_tests {
+    //! `sheet_zooms` is a per-sheet vector kept PARALLEL to `sheet_names`, like
+    //! `freeze_configs` / `split_configs` / `show_gridlines`. Every parallel
+    //! vector has the same failure mode: one of the four lifecycle sites is
+    //! missed, the vectors desynchronise, and from then on every sheet reads
+    //! its neighbour's setting. There is no way to build a `tauri::State` in a
+    //! unit test, so the lifecycle sites are guarded at the SOURCE level --
+    //! which is the level the mistake is actually made at.
+
+    const SHEETS_SRC: &str = include_str!("sheets.rs");
+
+    /// Return the body of a `pub fn NAME(` in this file, up to the next
+    /// top-level `pub fn`.
+    fn function_body(name: &str) -> &'static str {
+        let needle = format!("pub fn {name}(");
+        let start = SHEETS_SRC
+            .find(&needle)
+            .unwrap_or_else(|| panic!("sheets.rs no longer defines `pub fn {name}(`"));
+        let rest = &SHEETS_SRC[start + needle.len()..];
+        match rest.find("\npub fn ") {
+            Some(end) => &rest[..end],
+            None => rest,
+        }
+    }
+
+    /// Every sheet lifecycle operation must maintain `sheet_zooms` alongside
+    /// the split configs it sits next to. Adding a sheet and forgetting this is
+    /// how sheet 3 ends up rendering at sheet 2's zoom.
+    #[test]
+    fn every_sheet_lifecycle_op_maintains_the_zoom_vector() {
+        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+            let body = function_body(op);
+            assert!(
+                body.contains("split_configs"),
+                "test is out of date: `{op}` no longer touches split_configs"
+            );
+            assert!(
+                body.contains("sheet_zooms"),
+                "`{op}` maintains split_configs but NOT sheet_zooms -- the \
+                 per-sheet vectors will desynchronise and every sheet after \
+                 the change will read its neighbour's zoom"
+            );
+        }
+    }
+
+    /// The setter must reject nonsense rather than clamp it: a caller asking
+    /// for 0% or 5000% has a bug, and substituting a different number hides it.
+    /// The band must be the SAME one the script API enforces.
+    #[test]
+    fn the_zoom_setter_shares_one_band_with_the_script_api() {
+        let body = function_body("set_sheet_zoom");
+        assert!(
+            body.contains("ZOOM_MIN_PERCENT") && body.contains("ZOOM_MAX_PERCENT"),
+            "set_sheet_zoom must validate against script_engine's band, not a \
+             re-typed literal -- the UI and the script API disagreeing about \
+             the legal range is the split-brain this replaced"
+        );
+        assert!(
+            body.contains("return Err("),
+            "set_sheet_zoom must REJECT an out-of-range zoom, not clamp it"
+        );
+    }
+
+    /// The percent band itself: 10..400, matching Excel and `api.setZoom`.
+    #[test]
+    fn the_zoom_band_is_ten_to_four_hundred_percent() {
+        assert_eq!(script_engine::types::ZOOM_MIN_PERCENT, 10.0);
+        assert_eq!(script_engine::types::ZOOM_MAX_PERCENT, 400.0);
+    }
+
+    /// Writing a zoom stores it on the ACTIVE sheet and reports the change, so
+    /// the command knows to dirty the workbook. Re-writing the SAME zoom
+    /// reports no change — otherwise the sheet-switch hydration, which reads a
+    /// value and hands it straight back, would dirty a document nobody edited
+    /// and produce a spurious "save your changes?" on close.
+    #[test]
+    fn writing_a_zoom_reports_a_real_change_but_a_no_op_write_does_not() {
+        let state = crate::create_app_state();
+        {
+            let mut names = state.sheet_names.lock().unwrap();
+            *names = vec!["Sheet1".into(), "Sheet2".into()];
+        }
+        {
+            let mut zooms = state.sheet_zooms.lock().unwrap();
+            *zooms = vec![100.0, 100.0];
+        }
+        *state.active_sheet.lock().unwrap() = 1;
+
+        assert!(super::set_sheet_zoom_inner(&state, 60.0).unwrap());
+        assert!(
+            !super::set_sheet_zoom_inner(&state, 60.0).unwrap(),
+            "re-writing the same zoom is not a change"
+        );
+
+        let zooms = state.sheet_zooms.lock().unwrap();
+        assert_eq!(zooms[0], 100.0, "only the ACTIVE sheet may be written");
+        assert_eq!(zooms[1], 60.0);
+    }
+
+    /// Out-of-band and non-finite zooms are REJECTED, not clamped and not
+    /// silently stored — a NaN zoom reaching the renderer blanks the grid.
+    #[test]
+    fn an_illegal_zoom_is_refused_and_leaves_the_stored_value_alone() {
+        let state = crate::create_app_state();
+        for bad in [0.0, 9.9, 400.1, 5000.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                super::set_sheet_zoom_inner(&state, bad).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        assert_eq!(
+            *state.sheet_zooms.lock().unwrap(),
+            vec![persistence::DEFAULT_SHEET_ZOOM_PERCENT]
+        );
+
+        // The edges themselves are legal.
+        assert!(super::set_sheet_zoom_inner(&state, 10.0).is_ok());
+        assert!(super::set_sheet_zoom_inner(&state, 400.0).is_ok());
     }
 }

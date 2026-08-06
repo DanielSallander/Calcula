@@ -6,6 +6,28 @@
 //          reset empty rows to the default height. Extension-rendered content
 //          (pivot overlays, filter buttons) participates via the
 //          @api/autoFitContributors registry.
+//
+// HIDDEN ROWS/COLUMNS ARE DELIBERATELY NOT CONSULTED HERE.
+//   Excel's AutoFit measures every cell in the column, hidden and filtered
+//   rows included — it is a long-standing complaint, not an oversight: the
+//   whole family of "autofit visible cells only" VBA recipes
+//   (`SpecialCells(xlCellTypeVisible).EntireColumn.AutoFit`, or looping over
+//   columns testing `.Hidden = False`) exists precisely because
+//   `EntireColumn.AutoFit` takes hidden rows and columns into account and
+//   there is no native way to tell it otherwise. Blogs claiming AutoFit
+//   "ignores hidden rows" are SEO filler and contradict those workarounds.
+//   So passing the full cell list from getCellsInCols/getCellsInRows — which
+//   is what the callers do — is the Excel-correct behaviour. Do NOT filter
+//   the input by dimensions.hiddenRows/hiddenCols: a column would silently
+//   change width whenever a filter is applied or cleared, and re-widen on
+//   unhide, which Excel never does.
+//
+//   Not covered here: Excel also UNHIDES a hidden row/column that you
+//   autofit (its hidden flag is a zero size, so assigning a size reveals it).
+//   Calcula keeps hidden-ness in its own per-sheet state, orthogonal to
+//   height/width, so an autofit resizes a hidden line without revealing it.
+//   That is a gesture-level decision for the resize handler, not a
+//   measurement one, and it must never apply to filter-hidden lines.
 
 import type { CellData, StyleData, RichTextRun } from "../../../types";
 import {

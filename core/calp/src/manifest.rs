@@ -314,6 +314,23 @@ pub struct PublishedSheetMetadata {
     pub page_setup: Option<persistence::SavedPageSetup>,
     #[serde(default = "default_true")]
     pub show_gridlines: bool,
+    /// Per-sheet zoom as a REAL PERCENT (100 = 100%). Carried so a published
+    /// report opens at the zoom its author designed it for.
+    #[serde(default = "default_zoom", skip_serializing_if = "is_default_zoom")]
+    pub zoom: f64,
+    /// Split-bar row/column (see the .cala `SheetMetadata`; a split is not a
+    /// freeze).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_row: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_col: Option<u32>,
+}
+
+fn default_zoom() -> f64 {
+    persistence::DEFAULT_SHEET_ZOOM_PERCENT
+}
+fn is_default_zoom(v: &f64) -> bool {
+    (*v - persistence::DEFAULT_SHEET_ZOOM_PERCENT).abs() < 1e-9
 }
 
 fn default_visibility() -> String {
@@ -339,6 +356,9 @@ impl Default for PublishedSheetMetadata {
             hyperlinks: Vec::new(),
             page_setup: None,
             show_gridlines: true,
+            zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
+            split_row: None,
+            split_col: None,
         }
     }
 }
@@ -360,6 +380,9 @@ impl PublishedSheetMetadata {
             hyperlinks: sheet.hyperlinks.clone(),
             page_setup: sheet.page_setup.clone(),
             show_gridlines: sheet.show_gridlines,
+            zoom: sheet.zoom,
+            split_row: sheet.split_row,
+            split_col: sheet.split_col,
         }
     }
 

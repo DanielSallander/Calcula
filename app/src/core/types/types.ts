@@ -11,10 +11,18 @@
 //          per Microkernel Architecture (Find is a feature, not a kernel primitive)
 
 /**
- * Zoom constants.
+ * Zoom constants, as RENDER FACTORS (1.0 = 100%).
+ *
+ * The band mirrors the persisted/scripted band exactly (10%..400% — see
+ * `ZOOM_PERCENT_MIN/MAX` in core/lib/sheetViewState.ts, the backend's
+ * `set_sheet_zoom`, and `script_engine::types::ZOOM_MIN/MAX_PERCENT`). It used
+ * to stop at 5.0 while everything else stopped at 400%, so a user could zoom
+ * to 500%, have `Calcula.getZoom()` report 500, and have `api.setZoom(500)`
+ * reject the number the getter had just given them — and the zoom could not be
+ * saved at all. One band, everywhere.
  */
 export const ZOOM_MIN = 0.1;
-export const ZOOM_MAX = 5.0;
+export const ZOOM_MAX = 4.0;
 export const ZOOM_DEFAULT = 1.0;
 export const ZOOM_STEP = 0.1;
 export const ZOOM_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
@@ -234,6 +242,15 @@ export interface GridConfig {
 
 /**
  * Default grid configuration values.
+ */
+/**
+ * NOTE ON THE TWO GEOMETRY NUMBERS BELOW: the AUTHORITY is Rust —
+ * `persistence::DEFAULT_ROW_HEIGHT_PX` / `DEFAULT_COLUMN_WIDTH_PX`, which
+ * `AppState`, `new_file` and the .cala manifest all read. These are the
+ * pre-hydration values the canvas draws with for the few frames before
+ * `getDefaultDimensions()` answers; they must MIRROR the Rust constants, and
+ * the mirror is checked by app/src/core/lib/__tests__/defaultGeometry.test.ts,
+ * which reads the Rust source. Do not "fix" one side alone.
  */
 export const DEFAULT_GRID_CONFIG: GridConfig = {
   defaultCellWidth: 64.29, // Excel default column width: 8.47 chars => 8.47*7+5 = 64.29px

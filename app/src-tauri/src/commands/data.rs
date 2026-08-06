@@ -8,7 +8,6 @@ use crate::api_types::{
     SortOrientation, SortRangeParams, SortRangeResult, SpillRangeInfo, UpdateCellResult,
     UsedRangeResult,
 };
-use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
     evaluate_formula_multi_sheet_with_files,
     evaluate_formula_raw_with_files_and_pivot,
@@ -870,6 +869,10 @@ fn update_cell_impl(
 
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
+    // pass (never per formula) and read by the evaluator through the
+    // thread-local pass scope. Built BEFORE any grid lock is taken.
+    let _visibility_pass = crate::row_visibility::begin_pass(state);
     // THE INTERACTIVE SURFACE. This edit and every dependent it cascades into
     // gets `DEFAULT_CELL_FUEL` — the reference ceiling that every other
     // cell-writing surface is defined as EQUAL to, so a formula's value never
@@ -2207,6 +2210,10 @@ pub fn update_cells_batch(
 
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
+    // pass (never per formula) and read by the evaluator through the
+    // thread-local pass scope. Built BEFORE any grid lock is taken.
+    let _visibility_pass = crate::row_visibility::begin_pass(&state);
     // GET.CONTROLVALUE snapshot: built ONCE per batch, BEFORE the grid locks
     // in the core (canonical lock order); shared across every evaluation.
     let control_values = crate::control_values::build_control_values(
@@ -5713,6 +5720,10 @@ pub fn fill_range(
 ) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
+    // pass (never per formula) and read by the evaluator through the
+    // thread-local pass scope. Built BEFORE any grid lock is taken.
+    let _visibility_pass = crate::row_visibility::begin_pass(&state);
     // Fill/autofill writes and evaluates a whole rectangle of formulas —
     // Interactive ceiling, cancellable (a fill down a million rows is a
     // genuinely long operation started by one gesture).

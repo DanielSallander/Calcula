@@ -30,6 +30,38 @@ use std::collections::{HashMap, HashSet};
 pub const META_SHEET_NAME: &str = "_calcula_meta";
 
 // ============================================================================
+// DEFAULT GRID GEOMETRY -- ONE DEFINITION, EVERY CONSUMER
+// ============================================================================
+//
+// These two numbers used to be written out as literals in five places
+// (`Workbook::new`, `Workbook::from_grid`, the .cala manifest's serde
+// defaults, the app's `AppState` initializer, and `new_file`). They drifted:
+// the app launched with Excel's 20 x 64.29 while File > New silently handed
+// out 24 x 100, so a brand-new workbook rendered at a different scale from
+// the one the app started with -- and every E2E spec that ran after a spec
+// which called `new_file` clicked the wrong cells.
+//
+// `persistence` is the lowest crate every consumer already depends on, so the
+// values live here and NOBODY re-types them. If a default has to change, it
+// changes once.
+
+/// Default row height in pixels: Excel's Calibri 11 row (15pt = 20px @ 96 DPI).
+pub const DEFAULT_ROW_HEIGHT_PX: f64 = 20.0;
+
+/// Default column width in pixels: Excel's 8.47-character column
+/// (8.47 * 7 + 5 = 64.29px).
+pub const DEFAULT_COLUMN_WIDTH_PX: f64 = 64.29;
+
+/// Default per-sheet zoom, as a REAL PERCENT (100 = 100%).
+///
+/// Percent, not a render factor: the public script contract
+/// (`Calcula.getZoom()` / `api.setZoom`) and Excel's own `zoomScale` are both
+/// percents, and the one place that stored a factor instead is exactly where
+/// the factor-vs-percent split-brain came from. The frontend's render factor
+/// is a presentation detail converted at the UI boundary.
+pub const DEFAULT_SHEET_ZOOM_PERCENT: f64 = 100.0;
+
+// ============================================================================
 // WORKBOOK
 // ============================================================================
 
@@ -51,9 +83,9 @@ pub struct Workbook {
     pub scripts: Vec<SavedScript>,
     /// Workbook-embedded notebooks
     pub notebooks: Vec<SavedNotebook>,
-    /// Default row height in pixels (24.0 when not customized)
+    /// Default row height in pixels (`DEFAULT_ROW_HEIGHT_PX` when not customized)
     pub default_row_height: f64,
-    /// Default column width in pixels (100.0 when not customized)
+    /// Default column width in pixels (`DEFAULT_COLUMN_WIDTH_PX` when not customized)
     pub default_column_width: f64,
     /// Document properties (author, title, subject, etc.)
     pub properties: WorkbookProperties,
@@ -523,8 +555,8 @@ impl Workbook {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
-            default_row_height: 24.0,
-            default_column_width: 100.0,
+            default_row_height: DEFAULT_ROW_HEIGHT_PX,
+            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
@@ -563,8 +595,8 @@ impl Workbook {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
-            default_row_height: 24.0,
-            default_column_width: 100.0,
+            default_row_height: DEFAULT_ROW_HEIGHT_PX,
+            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
@@ -653,6 +685,22 @@ pub struct Sheet {
     pub row_styles: HashMap<u32, usize>,
     /// Default style index per COLUMN (Excel's `<col s="..">` tier).
     pub column_styles: HashMap<u32, usize>,
+    /// Per-sheet zoom as a REAL PERCENT (100 = 100%), Excel's `zoomScale`.
+    ///
+    /// An AUTHORITY, like `user_hidden_rows`: before this field zoom lived
+    /// only in the frontend reducer, so it was lost on every save/reload and
+    /// on every sheet switch, and the script getters had to be fed the value
+    /// out-of-band on each run request because no backend copy existed.
+    pub zoom: f64,
+    /// Split-bar row for this sheet (`None` = no horizontal split).
+    ///
+    /// Distinct from `freeze_row`: a freeze locks the pane, a split gives the
+    /// quadrants independent scroll. Both were per-sheet backend state, but
+    /// only freeze was ever written to the file — the split silently reset to
+    /// "no split" on every reload.
+    pub split_row: Option<u32>,
+    /// Split-bar column for this sheet (`None` = no vertical split).
+    pub split_col: Option<u32>,
 }
 
 impl Sheet {
@@ -679,6 +727,9 @@ impl Sheet {
             show_gridlines: true,
             row_styles: HashMap::new(),
             column_styles: HashMap::new(),
+            zoom: DEFAULT_SHEET_ZOOM_PERCENT,
+            split_row: None,
+            split_col: None,
         }
     }
 
@@ -717,6 +768,9 @@ impl Sheet {
             show_gridlines: true,
             row_styles: grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
             column_styles: grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+            zoom: DEFAULT_SHEET_ZOOM_PERCENT,
+            split_row: None,
+            split_col: None,
         }
     }
 

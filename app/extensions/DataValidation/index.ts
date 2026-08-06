@@ -11,11 +11,14 @@ import {
   hideDialog,
   cellEvents,
   getValidationPrompt,
-  hasInCellDropdown,
   registerCommitGuard,
   type OverlayRegistration,
 } from "@api";
-import { renderDropdownChevrons, hitTestDropdownChevron } from "./rendering/dropdownChevronRenderer";
+import {
+  renderDropdownChevrons,
+  hitTestDropdownChevron,
+  getDropdownChevronCursor,
+} from "./rendering/dropdownChevronRenderer";
 import { renderInvalidCells, hitTestInvalidCell } from "./rendering/invalidCellRenderer";
 import {
   refreshValidationState,
@@ -29,20 +32,22 @@ import {
 } from "./lib/validationStore";
 import { validationCommitGuard, clearErrorAlertResolver } from "./handlers/commitGuardHandler";
 import { registerDataValidationMenuItems } from "./handlers/dataMenuBuilder";
+import { handleDropdownChevronClick } from "./handlers/dropdownHandler";
+import { getCellClientRect } from "./lib/gridGeometry";
+import {
+  registerValidationKeyboardShortcuts,
+  unregisterValidationKeyboardShortcuts,
+} from "./handlers/keyboardHandler";
+import {
+  DROPDOWN_OVERLAY_ID,
+  PROMPT_OVERLAY_ID,
+  ERROR_DIALOG_ID,
+  CONFIG_DIALOG_ID,
+} from "./lib/overlayIds";
 import { DataValidationDialog } from "./components/DataValidationDialog";
 import { ErrorAlertModal } from "./components/ErrorAlertModal";
 import ListDropdownOverlay from "./components/ListDropdownOverlay";
 import InputPromptTooltip from "./components/InputPromptTooltip";
-import type { ListDropdownData } from "./types";
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-const DROPDOWN_OVERLAY_ID = "validation-list-dropdown";
-const PROMPT_OVERLAY_ID = "validation-prompt";
-const ERROR_DIALOG_ID = "data-validation-error";
-const CONFIG_DIALOG_ID = "data-validation-dialog";
 
 // ============================================================================
 // State
@@ -68,6 +73,7 @@ function activate(context: ExtensionContext): void {
     type: "validation-dropdown",
     render: renderDropdownChevrons,
     hitTest: hitTestDropdownChevron,
+    getCursor: getDropdownChevronCursor,
     priority: 15,
   } as OverlayRegistration);
   cleanupFns.push(unregChevronOverlay);
@@ -113,51 +119,20 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister(CONFIG_DIALOG_ID));
 
-  // 7. Register cell click interceptor for dropdown chevron clicks
-  const unregClick = context.grid.cellClicks.registerClickInterceptor(async (row, col, event) => {
-    // Check if this cell has an in-cell dropdown
-    let hasDropdown = false;
-    try {
-      hasDropdown = await hasInCellDropdown(row, col);
-    } catch {
-      return false;
-    }
-
-    if (!hasDropdown) return false;
-
-    const currentOpen = getOpenDropdownCell();
-    if (currentOpen && currentOpen.row === row && currentOpen.col === col) {
-      // Close the dropdown if clicking the same cell
-      hideOverlay(DROPDOWN_OVERLAY_ID);
-      setOpenDropdownCell(null);
-      return true;
-    }
-
-    // Open the dropdown for this cell
-    setOpenDropdownCell({ row, col });
-
-    const anchorRect = {
-      x: event.clientX - 50,
-      y: event.clientY + 10,
-      width: 0,
-      height: 0,
-    };
-
-    const dropdownData: ListDropdownData = {
-      row,
-      col,
-      values: [], // Loaded by the overlay component
-      currentValue: "",
-    };
-
-    showOverlay(DROPDOWN_OVERLAY_ID, {
-      data: dropdownData as unknown as Record<string, unknown>,
-      anchorRect,
-    });
-
-    return true; // Prevent default cell selection
-  });
+  // 7. Register cell click interceptor for dropdown chevron clicks.
+  //
+  // It claims ONLY the chevron button (see handlers/dropdownHandler +
+  // lib/chevronGeometry). Claiming the whole cell — as this once did — made
+  // list-validated cells unselectable: no formula bar, and no click-drag
+  // selection across a validated region.
+  const unregClick = context.grid.cellClicks.registerClickInterceptor(
+    handleDropdownChevronClick
+  );
   cleanupFns.push(unregClick);
+
+  // 7b. Alt+Down / Alt+Up: the keyboard equivalent of the chevron button.
+  registerValidationKeyboardShortcuts();
+  cleanupFns.push(unregisterValidationKeyboardShortcuts);
 
   // 8. Register the commit guard
   const unregGuard = registerCommitGuard(validationCommitGuard);
@@ -189,10 +164,11 @@ function activate(context: ExtensionContext): void {
       if (prompt && prompt.showPrompt && (prompt.title || prompt.message)) {
         setPromptState(true, { row: activeRow, col: activeCol });
 
-        // Position the tooltip relative to the click/selection
-        // Use a small offset from the selection coordinates
-        const anchorRect = {
-          x: activeCol * 80 + 60, // Approximate, will be adjusted
+        // Anchor the tooltip to the active cell's real on-screen rectangle.
+        // (The old fixed 80x20 arithmetic ignored scroll, zoom and custom
+        // row/column sizes, so the tip drifted away from the cell.)
+        const anchorRect = getCellClientRect(activeRow, activeCol) ?? {
+          x: activeCol * 80 + 60,
           y: activeRow * 20 + 40,
           width: 80,
           height: 20,

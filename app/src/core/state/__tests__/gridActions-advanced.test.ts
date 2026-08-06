@@ -565,7 +565,10 @@ describe("gridActions-advanced - zoom edge cases", () => {
 
   it("setZoom(Infinity) clamps to ZOOM_MAX", () => {
     const action = setZoom(Infinity);
-    expect(action.payload.zoom).toBe(5.0);
+    // 4.0 = 400%, the SAME ceiling the backend and `api.setZoom` enforce.
+    // It used to be 5.0 here alone, so a user could reach a zoom that could
+    // not be persisted and that the script API rejected.
+    expect(action.payload.zoom).toBe(4.0);
   });
 
   it("SET_ZOOM updates state zoom", () => {

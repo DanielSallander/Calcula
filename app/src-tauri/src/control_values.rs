@@ -238,7 +238,7 @@ fn formula_mentions_control_value(formula: &str) -> bool {
 /// Seeds come first (a seed fed by another member is ordered after its
 /// precedents); members on dependency cycles are appended at the end so they
 /// still get recalculated (same policy as `get_recalculation_order`).
-fn multi_root_recalc_order(
+pub(crate) fn multi_root_recalc_order(
     seeds: &[(u32, u32)],
     dependents: &crate::DependencyMap,
 ) -> Vec<(u32, u32)> {
@@ -259,7 +259,7 @@ fn multi_root_recalc_order(
 /// walk that pass runs). Sheets on a sheet-level dependency cycle are
 /// appended at the end so they are still recalculated once (order imperfect —
 /// documented residual gap).
-fn ordered_sheet_closure(
+pub(crate) fn ordered_sheet_closure(
     seed_sheets: &[usize],
     edges: &HashMap<usize, HashSet<usize>>,
     active_sheet: usize,
@@ -405,6 +405,10 @@ pub(crate) fn recalc_control_dependents_core(
 ) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
+    // pass (never per formula) and read by the evaluator through the
+    // thread-local pass scope. Built BEFORE any grid lock is taken.
+    let _visibility_pass = crate::row_visibility::begin_pass(state);
     // BACKGROUND: moving a slider cascades into every GET.CONTROLVALUE
     // dependent and WRITES the results, so it gets the persisting ceiling.
     // Cancellable — dragging a slider over a heavy model is one of the easiest

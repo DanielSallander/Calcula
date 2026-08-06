@@ -4360,7 +4360,10 @@ mod sheet_aware_shift_tests {
 /// Records one `obj_cross_sheet_formulas` entry per affected sheet; the active
 /// sheet is already covered by the caller's `GridSnapshot`.
 fn shift_cross_sheet_formulas(
-    state: &AppState,
+    // Unused today: the shift is driven entirely by `grids` + `sheet_names`.
+    // Kept (underscored) because all four callers already hold it and the
+    // sheet-aware shift is the natural place to need workbook state again.
+    _state: &AppState,
     undo_stack: &mut engine::UndoStack,
     grids: &mut [engine::Grid],
     active_sheet: usize,

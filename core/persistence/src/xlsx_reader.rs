@@ -308,6 +308,16 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             hyperlinks,
             page_setup,
             show_gridlines,
+            // <sheetView zoomScale="..">, a percent, defaulting to 100 when
+            // Excel omitted it. The SPLIT bar is deliberately not imported --
+            // see `SheetMeta::zoom_scale` for why its units make a faithful
+            // translation impossible without a full layout pass.
+            zoom: sheet_meta
+                .and_then(|m| m.zoom_scale)
+                .map(|z| z as f64)
+                .unwrap_or(crate::DEFAULT_SHEET_ZOOM_PERCENT),
+            split_row: None,
+            split_col: None,
             // <row s=".."> / <col s=".."> translated from RAW xlsx xf indices
             // through the same map the cells use, so a column that Excel styled
             // wholesale stays one entry here instead of becoming a style on
@@ -346,8 +356,10 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         theme: engine::theme::ThemeDefinition::default(),
         scripts: Vec::new(),
         notebooks: Vec::new(),
-        default_row_height: 24.0,
-        default_column_width: 100.0,
+        // The shared authority, not a re-typed literal: an imported xlsx must
+        // land on the same grid the app launches with and File > New produces.
+        default_row_height: crate::DEFAULT_ROW_HEIGHT_PX,
+        default_column_width: crate::DEFAULT_COLUMN_WIDTH_PX,
         properties: crate::WorkbookProperties::default(),
         charts: Vec::new(),
         sparklines: Vec::new(),

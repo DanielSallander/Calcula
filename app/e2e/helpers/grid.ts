@@ -5,21 +5,50 @@
  * selectors cannot target individual cells. Instead we calculate pixel
  * coordinates from grid geometry and simulate mouse/keyboard events.
  *
- * Default grid dimensions (from core/types/types.ts):
- *   rowHeaderWidth  = 22 px (2-digit Excel gutter; auto-widens with row number)
- *   colHeaderHeight = 20 px
- *   defaultCellWidth  = 64.29 px (Excel 8.47 chars)
- *   defaultCellHeight = 20 px
+ * THE GEOMETRY IS READ FROM THE RUNNING APP, NOT HARDCODED.
+ *
+ * It used to be four module constants copied from core/types/types.ts. That
+ * made every helper silently wrong the moment the app was not at its launch
+ * geometry, and one spec could break every spec after it: `new_file` handed
+ * out a 24 x 100 grid while launch was 20 x 64.29, so any spec that created a
+ * new file re-scaled the grid for the rest of the run and `clickCell("B2")`
+ * clicked somewhere else entirely. (That is a 32-failure cascade, observed.)
+ * The defaults agree now, but a helper that ASSUMES them can only be right by
+ * luck — a zoom, a resized column or a changed default breaks it again.
+ *
+ * `readGeometry()` therefore asks `__CALCULA_GRID_STATE__` every time, and
+ * accounts for per-column/row size overrides, hidden lines and zoom. The
+ * fallbacks below apply only when that global is unavailable (e.g. the page
+ * has not booted), and exist so a helper call fails as a normal assertion
+ * rather than a TypeError.
  */
 import { type Page, type Locator, expect } from "@playwright/test";
 
-// ---- Grid geometry constants (must match core/types/types.ts defaults) ----
-// NOTE: rowHeaderWidth auto-widens with the largest visible row number; 22 is the
-// 2-digit default that holds while the top rows (1..99) are in view.
-const ROW_HEADER_WIDTH = 22;
-const COL_HEADER_HEIGHT = 20;
-const DEFAULT_CELL_WIDTH = 64.29;
-const DEFAULT_CELL_HEIGHT = 20;
+// ---- Last-resort fallbacks (used ONLY when __CALCULA_GRID_STATE__ is absent) ----
+// These mirror DEFAULT_GRID_CONFIG in core/types/types.ts, which in turn
+// mirrors the Rust authority (persistence::DEFAULT_ROW_HEIGHT_PX /
+// DEFAULT_COLUMN_WIDTH_PX). Never read them when the app is up.
+const FALLBACK_ROW_HEADER_WIDTH = 22;
+const FALLBACK_COL_HEADER_HEIGHT = 20;
+const FALLBACK_CELL_WIDTH = 64.29;
+const FALLBACK_CELL_HEIGHT = 20;
+
+/** Live grid geometry, in LOGICAL (pre-zoom) pixels plus the zoom factor. */
+interface GridGeometry {
+  rowHeaderWidth: number;
+  colHeaderHeight: number;
+  defaultCellWidth: number;
+  defaultCellHeight: number;
+  /** Per-column width overrides, col index -> logical px. */
+  columnWidths: Record<number, number>;
+  /** Per-row height overrides, row index -> logical px. */
+  rowHeights: Record<number, number>;
+  hiddenCols: number[];
+  hiddenRows: number[];
+  zoom: number;
+  scrollX: number;
+  scrollY: number;
+}
 
 // ---- Selectors ----
 const SEL_CANVAS = "canvas";
@@ -82,33 +111,118 @@ export class GridHelper {
   // -------------------------------------------------------------------
 
   /**
-   * Returns the centre pixel of the given cell relative to the canvas element.
-   * Does NOT account for scroll offset or custom column/row sizes — fine for
-   * cells visible in the initial viewport.
+   * Read the grid's LIVE geometry out of the running app.
+   *
+   * One round-trip, converted to plain JSON inside the page (Maps and Sets do
+   * not survive every serializer, and a silently-empty Map here would look
+   * exactly like "no custom column widths").
    */
-  cellCenter(ref: string): { x: number; y: number } {
-    const { row, col } = parseCellRef(ref);
+  async readGeometry(): Promise<GridGeometry> {
+    const geo = await this.page.evaluate(() => {
+      const gs = (window as any).__CALCULA_GRID_STATE__;
+      if (!gs) return null;
+      const cfg = gs.config ?? {};
+      const dims = gs.dimensions ?? {};
+      const toRecord = (m: unknown): Record<number, number> => {
+        const out: Record<number, number> = {};
+        if (m instanceof Map) {
+          for (const [k, v] of m.entries()) out[Number(k)] = Number(v);
+        } else if (m && typeof m === "object") {
+          for (const [k, v] of Object.entries(m as Record<string, number>)) {
+            out[Number(k)] = Number(v);
+          }
+        }
+        return out;
+      };
+      const toArray = (s: unknown): number[] => {
+        if (s instanceof Set) return Array.from(s as Set<number>);
+        if (Array.isArray(s)) return s as number[];
+        return [];
+      };
+      return {
+        rowHeaderWidth: cfg.rowHeaderWidth,
+        colHeaderHeight: cfg.colHeaderHeight,
+        defaultCellWidth: cfg.defaultCellWidth,
+        defaultCellHeight: cfg.defaultCellHeight,
+        columnWidths: toRecord(dims.columnWidths),
+        rowHeights: toRecord(dims.rowHeights),
+        hiddenCols: toArray(dims.hiddenCols),
+        hiddenRows: toArray(dims.hiddenRows),
+        zoom: gs.zoom,
+        scrollX: gs.viewport?.scrollX ?? 0,
+        scrollY: gs.viewport?.scrollY ?? 0,
+      };
+    });
+
     return {
-      x: ROW_HEADER_WIDTH + col * DEFAULT_CELL_WIDTH + DEFAULT_CELL_WIDTH / 2,
-      y: COL_HEADER_HEIGHT + row * DEFAULT_CELL_HEIGHT + DEFAULT_CELL_HEIGHT / 2,
+      rowHeaderWidth: geo?.rowHeaderWidth ?? FALLBACK_ROW_HEADER_WIDTH,
+      colHeaderHeight: geo?.colHeaderHeight ?? FALLBACK_COL_HEADER_HEIGHT,
+      defaultCellWidth: geo?.defaultCellWidth ?? FALLBACK_CELL_WIDTH,
+      defaultCellHeight: geo?.defaultCellHeight ?? FALLBACK_CELL_HEIGHT,
+      columnWidths: geo?.columnWidths ?? {},
+      rowHeights: geo?.rowHeights ?? {},
+      hiddenCols: geo?.hiddenCols ?? [],
+      hiddenRows: geo?.hiddenRows ?? [],
+      zoom: geo?.zoom ?? 1,
+      scrollX: geo?.scrollX ?? 0,
+      scrollY: geo?.scrollY ?? 0,
     };
   }
 
   /**
+   * The cell's centre in CANVAS CSS pixels, from the app's live geometry:
+   * per-column/row overrides, hidden lines (size 0), the scroll offset and the
+   * zoom factor are all accounted for.
+   */
+  async cellCenterFrom(
+    ref: string,
+    geo: GridGeometry,
+    opts: { applyScroll?: boolean } = {}
+  ): Promise<{ x: number; y: number }> {
+    const { row, col } = parseCellRef(ref);
+    const applyScroll = opts.applyScroll !== false;
+    const hiddenCols = new Set(geo.hiddenCols);
+    const hiddenRows = new Set(geo.hiddenRows);
+
+    const colWidth = (c: number): number =>
+      hiddenCols.has(c) ? 0 : geo.columnWidths[c] ?? geo.defaultCellWidth;
+    const rowHeight = (r: number): number =>
+      hiddenRows.has(r) ? 0 : geo.rowHeights[r] ?? geo.defaultCellHeight;
+
+    let xOffset = 0;
+    for (let c = 0; c < col; c++) xOffset += colWidth(c);
+    let yOffset = 0;
+    for (let r = 0; r < row; r++) yOffset += rowHeight(r);
+
+    // Logical (pre-zoom) coordinates, then scaled: the canvas is drawn under
+    // setTransform(dpr * zoom, ...), so a logical point lands at logical*zoom
+    // CSS pixels. Scroll offsets are logical too.
+    const logicalX =
+      geo.rowHeaderWidth + xOffset + colWidth(col) / 2 - (applyScroll ? geo.scrollX : 0);
+    const logicalY =
+      geo.colHeaderHeight + yOffset + rowHeight(row) / 2 - (applyScroll ? geo.scrollY : 0);
+
+    return { x: logicalX * geo.zoom, y: logicalY * geo.zoom };
+  }
+
+  /**
+   * Returns the centre pixel of the given cell relative to the canvas element,
+   * IGNORING the current scroll offset — the "cell is in the initial viewport"
+   * case. Still reads the live geometry, so a resized column or a non-default
+   * grid does not throw the answer off.
+   */
+  async cellCenter(ref: string): Promise<{ x: number; y: number }> {
+    const geo = await this.readGeometry();
+    return this.cellCenterFrom(ref, geo, { applyScroll: false });
+  }
+
+  /**
    * Returns the cell centre in viewport-relative pixels, accounting for the
-   * current grid scroll offset.  Falls back to the no-scroll calculation if
-   * the global state is unavailable.
+   * current grid scroll offset (and everything else `readGeometry` knows).
    */
   async cellCenterScrollAware(ref: string): Promise<{ x: number; y: number }> {
-    const { row, col } = parseCellRef(ref);
-    const scroll = await this.page.evaluate(() => {
-      const gs = (window as any).__CALCULA_GRID_STATE__;
-      return { scrollX: gs?.viewport?.scrollX ?? 0, scrollY: gs?.viewport?.scrollY ?? 0 };
-    });
-    return {
-      x: ROW_HEADER_WIDTH + col * DEFAULT_CELL_WIDTH + DEFAULT_CELL_WIDTH / 2 - scroll.scrollX,
-      y: COL_HEADER_HEIGHT + row * DEFAULT_CELL_HEIGHT + DEFAULT_CELL_HEIGHT / 2 - scroll.scrollY,
-    };
+    const geo = await this.readGeometry();
+    return this.cellCenterFrom(ref, geo);
   }
 
   // -------------------------------------------------------------------
@@ -117,16 +231,30 @@ export class GridHelper {
 
   /** Single-click a cell to select it. Scrolls to the cell first if off-screen. */
   async clickCell(ref: string) {
-    // Get scroll-aware position
-    let { x, y } = await this.cellCenterScrollAware(ref);
+    // Get scroll-aware position from the app's LIVE geometry
+    let geo = await this.readGeometry();
+    let { x, y } = await this.cellCenterFrom(ref, geo);
     const canvasBox = await this.canvas.boundingBox();
 
-    // If the cell is off-screen, scroll to it via Name Box
-    if (canvasBox && (y < COL_HEADER_HEIGHT || y > canvasBox.height - DEFAULT_CELL_HEIGHT
-                   || x < ROW_HEADER_WIDTH || x > canvasBox.width - DEFAULT_CELL_WIDTH)) {
+    // If the cell is off-screen, scroll to it via Name Box. The margins are
+    // the header sizes and cell size the app is ACTUALLY using, scaled by
+    // zoom, not the launch-time defaults.
+    const leftMargin = geo.rowHeaderWidth * geo.zoom;
+    const topMargin = geo.colHeaderHeight * geo.zoom;
+    const rightMargin = geo.defaultCellWidth * geo.zoom;
+    const bottomMargin = geo.defaultCellHeight * geo.zoom;
+    if (
+      canvasBox &&
+      (y < topMargin ||
+        y > canvasBox.height - bottomMargin ||
+        x < leftMargin ||
+        x > canvasBox.width - rightMargin)
+    ) {
       await this.navigateTo(ref);
-      // After navigating, re-read scroll offset for the correct click position
-      ({ x, y } = await this.cellCenterScrollAware(ref));
+      // After navigating, re-read geometry (scroll AND header width, which
+      // widens as bigger row numbers come into view) for the click position
+      geo = await this.readGeometry();
+      ({ x, y } = await this.cellCenterFrom(ref, geo));
     }
 
     await this.canvas.click({ position: { x, y }, force: true });

@@ -380,6 +380,9 @@ pub fn pull(
             show_gridlines: metadata.show_gridlines,
             row_styles: pulled_row_styles,
             column_styles: pulled_column_styles,
+            zoom: metadata.zoom,
+            split_row: metadata.split_row,
+            split_col: metadata.split_col,
         };
 
         pulled_sheets.push(PulledSheet {

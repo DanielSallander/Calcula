@@ -333,30 +333,64 @@ pub(crate) fn collect_hidden_rows_for_sheet(
     state: &AppState,
     sheet_index: usize,
 ) -> std::collections::HashSet<u32> {
-    let mut hidden: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    hidden.extend(
-        crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index)
-            .into_iter(),
-    );
+    let sources = hidden_row_sources_for_sheet(state, sheet_index);
+    let mut hidden = sources.filter_hidden;
+    hidden.extend(sources.user_hidden);
+    hidden
+}
+
+/// The hidden rows of `sheet_index`, still split by the distinction Excel's
+/// SUBTOTAL/AGGREGATE semantics turn on, before the union above collapses it.
+///
+/// This is the SAME read of the SAME four authorities as
+/// `collect_hidden_rows_for_sheet` — that function is now defined as this
+/// function's union, so the formula engine and the renderer can never end up
+/// with two different notions of "hidden". Anything that needs the split (the
+/// row-visibility snapshot the evaluator consults) must come through here
+/// rather than re-deriving it from the state.
+///
+/// The split is BY EXCEL'S RULE, not by our storage:
+///  - `filter_hidden` = AutoFilter criteria + an applied advanced filter. Every
+///    SUBTOTAL code and every AGGREGATE option excludes these.
+///  - `user_hidden` = rows hidden by hand + rows inside a COLLAPSED OUTLINE
+///    GROUP. Excel calls both "manually hidden": only SUBTOTAL 101-111 and
+///    AGGREGATE options 1/3/5/7 exclude them. Grouping belongs on this side
+///    precisely because `SUBTOTAL(9, ...)` must keep counting the detail rows
+///    of a collapsed group — that is what the automatic-subtotals feature is.
+pub(crate) struct HiddenRowSources {
+    pub filter_hidden: std::collections::HashSet<u32>,
+    pub user_hidden: std::collections::HashSet<u32>,
+}
+
+pub(crate) fn hidden_row_sources_for_sheet(
+    state: &AppState,
+    sheet_index: usize,
+) -> HiddenRowSources {
+    let mut user_hidden =
+        crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index);
+    let mut filter_hidden: std::collections::HashSet<u32> = std::collections::HashSet::new();
     {
         let auto_filters = state.auto_filters.lock().unwrap();
         if let Some(af) = auto_filters.get(&sheet_index) {
-            hidden.extend(af.hidden_rows.iter().copied());
+            filter_hidden.extend(af.hidden_rows.iter().copied());
         }
     }
     {
         let adv = state.advanced_filter_hidden_rows.lock().unwrap();
         if let Some(rows) = adv.get(&sheet_index) {
-            hidden.extend(rows.iter().copied());
+            filter_hidden.extend(rows.iter().copied());
         }
     }
     {
         let outlines = state.outlines.lock().unwrap();
         if let Some(outline) = outlines.get(&sheet_index) {
-            hidden.extend(outline.get_hidden_rows());
+            user_hidden.extend(outline.get_hidden_rows());
         }
     }
-    hidden
+    HiddenRowSources {
+        filter_hidden,
+        user_hidden,
+    }
 }
 
 /// Columns hidden on `sheet_index`: collapsed outline groups, plus the columns

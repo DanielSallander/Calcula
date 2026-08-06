@@ -348,14 +348,73 @@ pub(crate) fn set_user_hidden_for_sheet(
 /// Range-taking rather than per-index: "Hide" on a 500-row selection must be
 /// ONE IPC call and ONE undo step. Returns the resulting user-hidden row set
 /// (ascending) so the caller can update its view without a second read.
+///
+/// ALSO RECALCULATES SUBTOTAL/AGGREGATE. Row visibility is a formula input for
+/// exactly those two functions, and hiding a row writes no cell, so nothing in
+/// the dependency graph dirties them. Without the cascade below,
+/// `SUBTOTAL(109, A1:A100)` would keep showing its pre-hide total until some
+/// unrelated edit swept it up — and would be SAVED that way. The cascade runs
+/// after the mutation, holding no locks, and the resulting values reach the
+/// screen through `grid:refresh` (the same event the .calp refresh path uses),
+/// so the command's own return contract is unchanged.
 #[tauri::command]
 pub fn set_rows_hidden(
+    app: tauri::AppHandle,
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     rows: Vec<u32>,
     hidden: bool,
 ) -> Result<Vec<u32>, String> {
-    set_rows_hidden_inner(&state, &file_state, &rows, hidden)
+    let result = set_rows_hidden_inner(&state, &file_state, &rows, hidden)?;
+    recalc_visibility_after_row_change(
+        &app,
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+    );
+    Ok(result)
+}
+
+/// Run the SUBTOTAL/AGGREGATE cascade and tell the frontend to refetch.
+///
+/// Callers must hold no grid or store lock. Failures are swallowed on purpose:
+/// the visibility change itself already succeeded and is undoable, and a failed
+/// recalculation must not turn a successful hide into an error the user cannot
+/// act on. (The stale-value case is then no worse than before this existed.)
+///
+/// There is deliberately NO column counterpart. SUBTOTAL and AGGREGATE are
+/// row-oriented — Microsoft's AGGREGATE reference states outright that hiding
+/// columns in a horizontal range does not affect the result — so
+/// `set_cols_hidden` has nothing to recalculate.
+pub(crate) fn recalc_visibility_after_row_change(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) {
+    use tauri::Emitter;
+    match crate::calculation::recalc_visibility_dependents_core(
+        state,
+        user_files_state,
+        pivot_state,
+        Some((pane_control_state, ribbon_filter_state)),
+    ) {
+        Ok(cells) if !cells.is_empty() => {
+            let _ = app.emit("grid:refresh", ());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            crate::log_warn!("CMD", "visibility recalc after row hide failed: {}", e);
+        }
+    }
 }
 
 /// State-only body of `set_rows_hidden` (unit-testable without a Tauri State).

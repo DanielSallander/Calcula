@@ -34,16 +34,33 @@ import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
 import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
 import { checkRangeGuards } from "../lib/editGuards";
+import { captureClipboardCells, pasteRowDeltas } from "../lib/clipboardVisibility";
 
 /**
  * Internal clipboard data structure.
  * We store both the raw text and structured cell data.
  */
 export interface ClipboardData {
-  /** Source selection when copy/cut was performed */
+  /**
+   * Source selection when copy/cut was performed.
+   *
+   * This is the selection the USER made — it is NOT a promise about the shape
+   * of `cells`. A copy that spanned filter-hidden rows collapses those rows
+   * away, so the matrix can be shorter than the selection. Map matrix rows
+   * back to the sheet with `sourceRows`, never with `sourceSelection.startRow + r`.
+   */
   sourceSelection: Selection;
-  /** Cell data matrix [row][col] relative to source selection */
+  /** Cell data matrix [row][col]; column c is sourceSelection's min col + c */
   cells: (CellData | null)[][];
+  /**
+   * Absolute sheet row each matrix row came from, one entry per row of `cells`.
+   *
+   * Equal to minRow, minRow+1, ... for an ordinary capture; for a COPY over a
+   * filtered range it skips the filter-hidden rows (Excel copies visible cells
+   * only and slides them together). Anything that shifts relative references
+   * or re-reads the source by coordinate MUST consult this.
+   */
+  sourceRows: number[];
   /** Whether this was a cut operation (cells should be cleared on paste) */
   isCut: boolean;
   /** Plain text representation for system clipboard */
@@ -105,19 +122,19 @@ export function getInternalClipboard(): ClipboardData | null {
  */
 async function fetchCollectionTexts(
   cells: (CellData | null)[][],
-  selection: Selection,
+  sourceRows: number[],
+  minCol: number,
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>();
-  const minRow = Math.min(selection.startRow, selection.endRow);
-  const minCol = Math.min(selection.startCol, selection.endCol);
 
-  // Collect absolute coordinates of collection cells
+  // Collect absolute coordinates of collection cells. The absolute row comes
+  // from sourceRows — a collapsed (filtered) copy has gaps.
   const collectionCoords: { r: number; c: number; absRow: number; absCol: number }[] = [];
   for (let r = 0; r < cells.length; r++) {
     for (let c = 0; c < (cells[r]?.length ?? 0); c++) {
       const cell = cells[r][c];
       if (cell?.display && (cell.display.startsWith("[List(") || cell.display.startsWith("[Dict("))) {
-        collectionCoords.push({ r, c, absRow: minRow + r, absCol: minCol + c });
+        collectionCoords.push({ r, c, absRow: sourceRows[r], absCol: minCol + c });
       }
     }
   }
@@ -146,16 +163,15 @@ async function fetchCollectionTexts(
  */
 async function fetchComments(
   cells: (CellData | null)[][],
-  selection: Selection,
+  sourceRows: number[],
+  minCol: number,
 ): Promise<Map<string, Comment>> {
   const result = new Map<string, Comment>();
-  const minRow = Math.min(selection.startRow, selection.endRow);
-  const minCol = Math.min(selection.startCol, selection.endCol);
 
   for (let r = 0; r < cells.length; r++) {
     for (let c = 0; c < (cells[r]?.length ?? 0); c++) {
       try {
-        const comment = await getComment(minRow + r, minCol + c);
+        const comment = await getComment(sourceRows[r], minCol + c);
         if (comment) {
           result.set(`${r},${c}`, comment);
         }
@@ -174,16 +190,15 @@ async function fetchComments(
  */
 async function fetchValidations(
   cells: (CellData | null)[][],
-  selection: Selection,
+  sourceRows: number[],
+  minCol: number,
 ): Promise<Map<string, DataValidation>> {
   const result = new Map<string, DataValidation>();
-  const minRow = Math.min(selection.startRow, selection.endRow);
-  const minCol = Math.min(selection.startCol, selection.endCol);
 
   for (let r = 0; r < cells.length; r++) {
     for (let c = 0; c < (cells[r]?.length ?? 0); c++) {
       try {
-        const validation = await getDataValidation(minRow + r, minCol + c);
+        const validation = await getDataValidation(sourceRows[r], minCol + c);
         if (validation) {
           result.set(`${r},${c}`, validation);
         }
@@ -240,47 +255,52 @@ async function writeToSystemClipboard(text: string, html: string): Promise<void>
  */
 export function useClipboard(): UseClipboardReturn {
   const { state, dispatch } = useGridContext();
-  const { selection, config, clipboard, sheetContext } = state;
-  
+  const { selection, config, clipboard, sheetContext, dimensions } = state;
+
+  // The FILTER source only. Hand hides and outline collapses are copied by
+  // Excel, so the effective union (dimensions.hiddenRows) must not be used here.
+  const filterHiddenRows = dimensions.filterHiddenRows;
+
   // Ref to track cut source for clearing after paste
   const cutSourceRef = useRef<Selection | null>(null);
 
   /**
-   * Get cell data for a range.
+   * Get cell data for a range, applying Excel's hidden-row rule.
+   *
+   * @param includeFilterHidden true for CUT (whole rectangle), false for COPY
+   *        (filter-hidden rows are left behind and the block collapses).
    */
   const getCellRange = useCallback(
-    async (sel: Selection): Promise<(CellData | null)[][]> => {
+    async (
+      sel: Selection,
+      includeFilterHidden: boolean
+    ): Promise<{ cells: (CellData | null)[][]; sourceRows: number[]; minCol: number }> => {
       const minRow = Math.min(sel.startRow, sel.endRow);
       const maxRow = Math.max(sel.startRow, sel.endRow);
       const minCol = Math.min(sel.startCol, sel.endCol);
       const maxCol = Math.max(sel.startCol, sel.endCol);
 
-      // Guard against unreasonably large ranges (e.g. select-all on 1M x 16K grid)
-      const MAX_CLIPBOARD_CELLS = 5_000_000;
-      const totalCells = (maxRow - minRow + 1) * (maxCol - minCol + 1);
-      if (totalCells > MAX_CLIPBOARD_CELLS) {
-        console.warn(`[useClipboard] Range too large for clipboard (${totalCells} cells). Skipping.`);
-        return [];
+      const capture = await captureClipboardCells<CellData>({
+        minRow,
+        maxRow,
+        minCol,
+        maxCol,
+        filterHiddenRows,
+        includeFilterHidden,
+        readCell: async (r, c) => (await getCell(r, c)) || null,
+      });
+
+      if (capture.tooLarge) {
+        // Guard against unreasonably large ranges (e.g. select-all on 1M x 16K grid)
+        console.warn(
+          `[useClipboard] Range too large for clipboard ` +
+          `(${(maxRow - minRow + 1) * (maxCol - minCol + 1)} cells). Skipping.`
+        );
       }
 
-      const cells: (CellData | null)[][] = [];
-
-      for (let r = minRow; r <= maxRow; r++) {
-        const row: (CellData | null)[] = [];
-        for (let c = minCol; c <= maxCol; c++) {
-          try {
-            const cellData = await getCell(r, c);
-            row.push(cellData || null);
-          } catch {
-            row.push(null);
-          }
-        }
-        cells.push(row);
-      }
-
-      return cells;
+      return { cells: capture.cells, sourceRows: capture.sourceRows, minCol };
     },
-    []
+    [filterHiddenRows]
   );
 
   /**
@@ -319,14 +339,25 @@ export function useClipboard(): UseClipboardReturn {
     console.log("[Clipboard] Copying selection:", selection);
 
     try {
-      const cells = await getCellRange(selection);
+      // COPY takes VISIBLE rows only: a range spanning filter-hidden rows
+      // copies just the displayed cells, which then slide together and paste
+      // as a contiguous rectangle (Excel's filtered-copy rule).
+      const { cells, sourceRows, minCol } = await getCellRange(selection, false);
+
+      if (cells.length === 0) {
+        // Nothing capturable (every row filtered away, or the range was
+        // refused as too large). Leave the previous clipboard alone rather
+        // than replacing it with an empty payload that pastes nothing.
+        console.warn("[Clipboard] Nothing to copy in this selection");
+        return;
+      }
 
       // Detect collection cells and fetch their JSON representations
-      const collectionTexts = await fetchCollectionTexts(cells, selection);
+      const collectionTexts = await fetchCollectionTexts(cells, sourceRows, minCol);
 
       // Fetch comments and validations for paste special support
-      const comments = await fetchComments(cells, selection);
-      const validations = await fetchValidations(cells, selection);
+      const comments = await fetchComments(cells, sourceRows, minCol);
+      const validations = await fetchValidations(cells, sourceRows, minCol);
 
       const text = cellsToText(cells, collectionTexts);
 
@@ -334,6 +365,7 @@ export function useClipboard(): UseClipboardReturn {
       internalClipboard = {
         sourceSelection: { ...selection },
         cells,
+        sourceRows,
         isCut: false,
         text,
         collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
@@ -367,14 +399,24 @@ export function useClipboard(): UseClipboardReturn {
     console.log("[Clipboard] Cutting selection:", selection);
 
     try {
-      const cells = await getCellRange(selection);
+      // CUT takes the WHOLE rectangle, filter-hidden rows included — Excel
+      // "will cut everything in between the top and bottom of your selection".
+      // The source-clearing pass below clears that same whole rectangle, so
+      // the two halves of the gesture stay in agreement and nothing is
+      // silently left behind or silently erased.
+      const { cells, sourceRows, minCol } = await getCellRange(selection, true);
+
+      if (cells.length === 0) {
+        console.warn("[Clipboard] Nothing to cut in this selection");
+        return;
+      }
 
       // Detect collection cells and fetch their JSON representations
-      const collectionTexts = await fetchCollectionTexts(cells, selection);
+      const collectionTexts = await fetchCollectionTexts(cells, sourceRows, minCol);
 
       // Fetch comments and validations for paste special support
-      const comments = await fetchComments(cells, selection);
-      const validations = await fetchValidations(cells, selection);
+      const comments = await fetchComments(cells, sourceRows, minCol);
+      const validations = await fetchValidations(cells, sourceRows, minCol);
 
       const text = cellsToText(cells, collectionTexts);
 
@@ -382,6 +424,7 @@ export function useClipboard(): UseClipboardReturn {
       internalClipboard = {
         sourceSelection: { ...selection },
         cells,
+        sourceRows,
         isCut: true,
         text,
         collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
@@ -492,12 +535,22 @@ export function useClipboard(): UseClipboardReturn {
       const sourceSel = internalClipboard.sourceSelection;
       const sourceMinRow = Math.min(sourceSel.startRow, sourceSel.endRow);
       const sourceMinCol = Math.min(sourceSel.startCol, sourceSel.endCol);
-      const rowDelta = targetRow - sourceMinRow;
+      // PER-ROW deltas: a copy that collapsed filter-hidden rows has no single
+      // row offset — matrix row r came from sourceRows[r] and lands on
+      // targetRow + r. For an ordinary (uncollapsed) copy every entry is the
+      // same value, so this is identical to the old single-delta behaviour.
+      const rowDeltas = pasteRowDeltas(
+        internalClipboard.sourceRows,
+        sourceMinRow,
+        targetRow,
+        pasteHeight
+      );
       const colDelta = targetCol - sourceMinCol;
 
-      if (rowDelta !== 0 || colDelta !== 0) {
+      if (colDelta !== 0 || rowDeltas.some((d) => d !== 0)) {
         const formulaEntries: { r: number; c: number; formula: string }[] = [];
         for (let r = 0; r < pasteHeight; r++) {
+          if (rowDeltas[r] === 0 && colDelta === 0) continue;
           for (let c = 0; c < pasteWidth; c++) {
             const cell = cellsToPaste![r]?.[c];
             if (cell?.formula) {
@@ -509,7 +562,7 @@ export function useClipboard(): UseClipboardReturn {
         if (formulaEntries.length > 0) {
           const inputs: FormulaShiftInput[] = formulaEntries.map((e) => ({
             formula: e.formula,
-            rowDelta,
+            rowDelta: rowDeltas[e.r],
             colDelta,
           }));
           const shiftedFormulas = await shiftFormulasBatch(inputs);

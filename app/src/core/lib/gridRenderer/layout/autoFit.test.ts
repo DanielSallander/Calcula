@@ -302,6 +302,29 @@ describe("measureOptimalRowHeight (Excel semantics)", () => {
   });
 });
 
+describe("hidden rows/columns (Excel: AutoFit measures them anyway)", () => {
+  // Excel's EntireColumn.AutoFit takes hidden and filtered rows into account;
+  // the SpecialCells(xlCellTypeVisible) recipe corpus exists precisely because
+  // it cannot be told not to. These pin that measurement stays hidden-blind so
+  // nobody "fixes" it into a filter-dependent width.
+  it("the widest cell wins even when its row is hidden on the sheet", () => {
+    // Row 7 is (say) filter-hidden; the caller still hands it to us.
+    const cells = [
+      makeCell({ row: 0, display: "ab" }),
+      makeCell({ row: 7, display: "a very long hidden value" }),
+    ];
+    // 24 chars * 10px + 3*2 padding + 2 margin
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(248);
+  });
+
+  it("takes no hidden-set argument at all — width cannot depend on a filter", () => {
+    // 5 params: col, cells, styles, theme, minWidth. Adding a hidden set here
+    // would make a column resize itself whenever a filter is toggled.
+    expect(measureOptimalColumnWidth.length).toBe(5);
+    expect(measureOptimalRowHeight.length).toBe(8);
+  });
+});
+
 describe("autoFitContributors registry", () => {
   it("register returns a cleanup that unregisters", () => {
     const cleanup = registerAutoFitContributor({ id: "test-a" });
