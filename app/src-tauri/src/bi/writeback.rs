@@ -660,7 +660,7 @@ pub async fn bi_writeback_set_value(
         .map_err(|e| e.to_string())?;
     drop(engine);
 
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 

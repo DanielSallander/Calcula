@@ -24,7 +24,7 @@ use std::collections::HashSet;
 /// sized for both sheets.
 fn two_sheet_state() -> AppState {
     let state = crate::create_app_state();
-    state.grids.lock().unwrap().push(engine::Grid::new());
+    state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
     state.sheet_names.lock().unwrap().push("Sheet2".to_string());
     state
         .sheet_ids
@@ -47,14 +47,14 @@ fn set_of(v: &[u32]) -> HashSet<u32> {
 fn hiding_rows_reaches_the_backend_and_marks_the_document_dirty() {
     let state = crate::create_app_state();
     let file_state = FileState::default();
-    assert!(!*file_state.is_modified.lock().unwrap());
+    assert!(!file_state.is_dirty());
 
     let result = set_rows_hidden_inner(&state, &file_state, &[4, 5, 6], true).unwrap();
 
     assert_eq!(result, vec![4, 5, 6], "the command answers with the new set");
     assert_eq!(user_hidden_rows_for_sheet(&state, 0), set_of(&[4, 5, 6]));
     assert!(
-        *file_state.is_modified.lock().unwrap(),
+        file_state.is_dirty(),
         "hiding a row is a document mutation, not a view preference — it MUST dirty the file"
     );
 }
@@ -67,7 +67,7 @@ fn hiding_columns_reaches_the_backend_and_marks_the_document_dirty() {
     let result = set_cols_hidden_inner(&state, &file_state, &[2], true).unwrap();
 
     assert_eq!(result, vec![2]);
-    assert!(*file_state.is_modified.lock().unwrap());
+    assert!(file_state.is_dirty());
 }
 
 #[test]

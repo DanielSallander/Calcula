@@ -53,8 +53,12 @@ pub fn set_cell_style(
         crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "format cells")?;
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -97,7 +101,7 @@ pub fn set_cell_style(
         });
 
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
         Some(CellData {
             row,
@@ -130,7 +134,7 @@ pub fn set_cell_style(
         undo_stack.record_cell_change(row, col, previous_cell);
 
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
         // Displayed index resolves the row/column tiers; the cell above keeps
         // the caller's explicit index.
@@ -183,8 +187,12 @@ pub fn apply_formatting(
         )?;
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -468,7 +476,7 @@ pub fn apply_formatting(
 
     // Mark workbook as dirty
     if !updated_cells.is_empty() {
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(FormattingResult {
@@ -503,7 +511,11 @@ pub fn apply_formatting_to_sheets(
         crate::protection::check_sheet_action(&state, sheet_idx, "formatCells", "format cells")?;
     }
 
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -639,7 +651,7 @@ pub fn apply_formatting_to_sheets(
 
     // Mark workbook as dirty
     if !sheet_indices.is_empty() {
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(())
@@ -1020,8 +1032,12 @@ pub fn set_cell_rich_text(
         crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -1066,7 +1082,7 @@ pub fn set_cell_rich_text(
     };
 
     // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(Some(CellData {
         row,
@@ -1120,8 +1136,12 @@ pub fn apply_border_preset(
         crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "apply borders")?;
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -1302,7 +1322,7 @@ pub fn apply_border_preset(
     }
 
     if !updated_cells.is_empty() {
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(FormattingResult {

@@ -957,7 +957,7 @@ pub async fn bi_model_upsert_measure(
         Ok(edited)
     })
     .await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!("BI", "model editor: upserted measure '{}' (conn {})", name, connection_id);
     Ok(infos.measures().iter().map(measure_info).collect())
 }
@@ -979,7 +979,7 @@ pub async fn bi_model_delete_measure(
         delete_measure_model(base, calculated, &target)
     })
     .await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!("BI", "model editor: deleted measure '{}' (conn {})", name, connection_id);
     Ok(infos.measures().iter().map(measure_info).collect())
 }
@@ -2436,7 +2436,7 @@ where
 {
     let _ = editable_base(bi_state, connection_id)?;
     let new_base = apply_model_edit(bi_state, connection_id, edit).await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     let bindings = {
         let conns = bi_state.connections.lock().unwrap();
         conns
@@ -4836,7 +4836,7 @@ pub async fn bi_model_undo(
     };
     install_base_model(&bi_state, &connection_id, &prev).await?;
     emit_model_changed(&bi_state, &model_key, &current_base, &prev, "undo", None);
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(build_overview(&prev, &bindings, true, None))
 }
 
@@ -4874,7 +4874,7 @@ pub async fn bi_model_redo(
     };
     install_base_model(&bi_state, &connection_id, &next).await?;
     emit_model_changed(&bi_state, &model_key, &current_base, &next, "redo", None);
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(build_overview(&next, &bindings, true, None))
 }
 
@@ -5136,7 +5136,7 @@ pub async fn bi_model_batch_cancel(
     reclaim_expired_script_batches(&bi_state).await;
     guard_no_live_script_batch(&bi_state, connection_id)?;
     let prev = rollback_model_batch(&bi_state, &connection_id, None).await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     let bindings = {
         let conns = bi_state.connections.lock().unwrap();
         conns
@@ -5247,7 +5247,7 @@ pub async fn bi_model_extension_data(
                 Ok(base.with_extension_data(data))
             })
             .await?;
-            *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+            let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
             crate::log_info!(
                 "BI",
                 "model editor: extension_data {} '{}' (conn {})",
@@ -5886,7 +5886,7 @@ async fn gateway_batch(
                 Ok(serde_json::json!({ "ok": true, "edits": batch.edits }))
             } else {
                 rollback_model_batch(bi_state, &connection_id, Some(script_id.to_string())).await?;
-                *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+                let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
                 Ok(serde_json::json!({ "ok": true, "rolledBack": batch.edits }))
             }
         }
@@ -6730,7 +6730,7 @@ pub async fn bi_model_import_tables(
     drop(guard);
     emit_model_changed(&bi_state, &model_key, &base, &new_base, "user", None);
 
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!(
         "BI",
         "model editor: imported {} table(s) (conn {})",
@@ -6892,7 +6892,7 @@ pub async fn bi_model_import_sql_source(
     drop(guard);
     emit_model_changed(&bi_state, &model_key, &base, &new_base, "user", None);
 
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!(
         "BI",
         "model editor: imported SQL source '{}' (conn {})",
@@ -7513,7 +7513,7 @@ pub async fn bi_model_create_blank(
         model_json,
     )
     .await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(info)
 }
 
@@ -7589,7 +7589,7 @@ pub async fn bi_model_import_from_file(
         json_value,
     )
     .await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(info)
 }
 

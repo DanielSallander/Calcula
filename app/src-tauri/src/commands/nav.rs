@@ -32,8 +32,8 @@ fn with_sheet_grid<T>(
 ) -> Result<T, String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
-    let grids = state.grids.lock().unwrap();
-    let active_grid = state.grid.lock().unwrap();
+    let grids = state.grids.read().unwrap();
+    let active_grid = state.grid.read().unwrap();
     let grid: &engine::Grid = if target_sheet == active_sheet {
         &active_grid
     } else if target_sheet < grids.len() {
@@ -88,7 +88,7 @@ pub fn detect_data_region(
     row: u32,
     col: u32,
 ) -> Option<(u32, u32, u32, u32)> {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     navigation::current_region(&grid, row, col)
 }
 
@@ -113,7 +113,7 @@ pub fn find_ctrl_arrow_target(
     let Some(dir) = EdgeDirection::parse(&direction) else {
         return (row, col);
     };
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     navigation::range_edge(&grid, row, col, dir, max_row, max_col)
 }
 
@@ -183,7 +183,7 @@ pub fn go_to_special(
     criteria: String,
     search_range: Option<(u32, u32, u32, u32)>,
 ) -> GoToSpecialResult {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
 
     // Determine search bounds
@@ -658,8 +658,8 @@ mod special_cells_tests {
         // Seed rows 0..=6 in column 0 on the active sheet (both the live grid
         // and the grids vec, as commands do).
         {
-            let mut grid = state.grid.lock().unwrap();
-            let mut grids = state.grids.lock().unwrap();
+            let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+            let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             for r in 0..=6u32 {
                 let cell = Cell::new_number(r as f64);
                 grid.set_cell(r, 0, cell.clone());
@@ -697,7 +697,7 @@ mod special_cells_tests {
         let hidden_cols = collect_hidden_cols_for_sheet(&state, 0);
         assert!(hidden_cols.is_empty());
 
-        let grid = state.grid.lock().unwrap();
+        let grid = state.grid.read().unwrap();
         let (visible, truncated) =
             compute_special_cells(&grid, 0, 0, 6, 0, "visible", &hidden_rows, &hidden_cols)
                 .unwrap();

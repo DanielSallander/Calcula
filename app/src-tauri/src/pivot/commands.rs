@@ -303,7 +303,7 @@ pub fn create_pivot_inner(
     check_pivot_overlap(&state, dest_sheet_idx, destination)?;
 
     // Get grid data for source
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid = grids
         .get(source_sheet_idx)
         .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
@@ -405,7 +405,7 @@ pub fn create_pivot_inner(
     // Write pivot output to destination grid (empty for now, but reserves the space)
     {
         let mut styles = state.style_registry.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
 
         // Verify destination sheet exists
         if dest_sheet_idx >= grids.len() {
@@ -439,7 +439,7 @@ pub fn create_pivot_inner(
             // IMPORTANT: If dest_sheet is the currently active sheet, sync state.grid
             let active_sheet = *state.active_sheet.lock().unwrap();
             if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
+                let mut grid = state.grid.write(&effect).unwrap();
                 // Copy the cells we just wrote to state.grid as well
                 for ((r, c), cell) in dest_grid.cells.iter() {
                     grid.set_cell(*r, *c, cell.clone());
@@ -552,7 +552,7 @@ pub fn revert_pivot_operation(
         }
 
         // Re-write grid with the old view
-        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
         Ok(())
     } else {
@@ -618,11 +618,11 @@ pub fn undo_pivot_overwrite(
                                 store_view(&pivot_state, pivot_id, &view);
                                 drop(pivot_tables);
 
-                                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+                                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
                                 // Restore cells that were overwritten by the pivot expansion
                                 if !snapshot.overwritten_cells.is_empty() {
-                                    let mut grids = state.grids.lock().unwrap();
+                                    let mut grids = state.grids.write(&effect).unwrap();
                                     if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
                                         for sc in &snapshot.overwritten_cells {
                                             dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
@@ -630,7 +630,7 @@ pub fn undo_pivot_overwrite(
                                     }
                                     let active_sheet = *state.active_sheet.lock().unwrap();
                                     if snapshot.dest_sheet_idx == active_sheet {
-                                        let mut grid = state.grid.lock().unwrap();
+                                        let mut grid = state.grid.write(&effect).unwrap();
                                         for sc in &snapshot.overwritten_cells {
                                             grid.set_cell(sc.row, sc.col, sc.cell.clone());
                                         }
@@ -903,7 +903,7 @@ pub async fn update_pivot_fields(
 
     // Update pivot in grid (clears old region, writes new view)
     let t2 = Instant::now();
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
     let grid_write_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     // Auto-fit column widths if enabled
@@ -1111,7 +1111,7 @@ pub fn toggle_pivot_group(
 
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
-                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
                 record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1146,7 +1146,7 @@ pub fn toggle_pivot_group(
             // when pivot shrinks after collapse)
             let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
             response.overwritten_cell_count = saved_cells.len() as u32;
-            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some((&*pane_control_state, &*ribbon_filter_state)));
+            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some((&*pane_control_state, &*ribbon_filter_state)));
             record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1181,7 +1181,7 @@ pub fn toggle_pivot_group(
     // Clear old cells and write updated view to grid, then update region bounds
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
     record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1328,7 +1328,7 @@ pub fn delete_pivot_table(
     
     // Clear the pivot area from the grid
     if let Some(ref region) = old_region {
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             clear_pivot_region_from_grid(
                 dest_grid,
@@ -1341,7 +1341,7 @@ pub fn delete_pivot_table(
             // Sync to state.grid if this is the active sheet
             let active_sheet = *state.active_sheet.lock().unwrap();
             if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
+                let mut grid = state.grid.write(&effect).unwrap();
                 for row in region.start_row..=region.end_row {
                     for col in region.start_col..=region.end_col {
                         grid.clear_cell(row, col);
@@ -1424,7 +1424,7 @@ pub fn relocate_pivot(
     };
 
     // 4. Clear old region and write new cells at new destination
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
+    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
 
     // 5. Update protected region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
@@ -1475,7 +1475,7 @@ pub fn get_pivot_source_data(
         .as_deref()
         .and_then(|name| index_of_sheet(&sheet_names_snapshot, name))
         .unwrap_or(0);
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid = grids
         .get(source_sheet_idx)
         .ok_or_else(|| "Source sheet not found".to_string())?;
@@ -1793,7 +1793,7 @@ pub async fn refresh_pivot_cache(
             drop(pivot_tables);
 
             // Get fresh data from grid (needs grids lock, but briefly)
-            let grids = state.grids.lock().unwrap();
+            let grids = state.grids.read().unwrap();
             let grid = grids
                 .get(source_sheet_idx)
                 .ok_or_else(|| "Source sheet not found".to_string())?;
@@ -1895,7 +1895,7 @@ pub async fn refresh_pivot_cache(
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Update pivot in grid
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
 
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -2410,7 +2410,7 @@ pub async fn change_pivot_data_source(
 
     // Clamp source_end to grid's actual data extent (handles full-column refs)
     {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         let grid = grids
             .get(source_sheet_idx)
             .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
@@ -2446,7 +2446,7 @@ pub async fn change_pivot_data_source(
         drop(pivot_tables);
 
         // Build new cache from grid
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         let grid = grids
             .get(source_sheet_idx)
             .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
@@ -2475,7 +2475,7 @@ pub async fn change_pivot_data_source(
     // Write to grid
     emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
     let overwritten = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     // Store updated cache
     {
@@ -2637,7 +2637,7 @@ pub fn update_pivot_layout(
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_layout pivot_id={}", request.pivot_id);
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2691,7 +2691,7 @@ pub fn update_pivot_layout(
 
     // Update pivot in grid
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2866,7 +2866,7 @@ pub fn add_pivot_hierarchy(
         request.axis
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2939,7 +2939,7 @@ pub fn add_pivot_hierarchy(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2962,7 +2962,7 @@ pub fn remove_pivot_hierarchy(
         request.position
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3014,7 +3014,7 @@ pub fn remove_pivot_hierarchy(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3037,7 +3037,7 @@ pub fn move_pivot_field(
         request.target_axis
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3147,7 +3147,7 @@ pub fn move_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3170,7 +3170,7 @@ pub fn set_pivot_aggregation(
         request.summarize_by
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3199,7 +3199,7 @@ pub fn set_pivot_aggregation(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3222,7 +3222,7 @@ pub fn set_pivot_number_format(
         request.number_format
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3250,7 +3250,7 @@ pub fn set_pivot_number_format(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3279,7 +3279,7 @@ pub async fn apply_pivot_filter(
     // `None` = the changed field is a calculation group and needs a BI
     // re-query; `Some(response)` = handled locally.
     let local_response: Option<PivotViewResponse> = {
-        let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+        let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
         let (definition, cache) = pivot_tables
             .get_mut(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3395,7 +3395,7 @@ pub async fn apply_pivot_filter(
             drop(pivot_tables);
 
             response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
             Some(response)
         }
@@ -3440,7 +3440,7 @@ pub async fn clear_pivot_filter(
     // the await below (the Tauri command future must be Send). `None` = the
     // cleared field is a calculation group and needs a BI re-query.
     let local_response: Option<PivotViewResponse> = {
-        let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+        let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
         let (definition, cache) = pivot_tables
             .get_mut(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3493,7 +3493,7 @@ pub async fn clear_pivot_filter(
             drop(pivot_tables);
 
             response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
             Some(response)
         }
@@ -3533,7 +3533,7 @@ pub fn sort_pivot_field(
         request.sort_by
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3568,7 +3568,7 @@ pub fn sort_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3673,7 +3673,7 @@ pub fn set_pivot_item_visibility(
         request.visible
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3720,7 +3720,7 @@ pub fn set_pivot_item_visibility(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3852,7 +3852,7 @@ pub fn set_pivot_item_expanded(
         request.is_expanded
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3893,7 +3893,7 @@ pub fn set_pivot_item_expanded(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3917,7 +3917,7 @@ pub fn expand_collapse_level(
         request.expand
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3955,7 +3955,7 @@ pub fn expand_collapse_level(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3977,7 +3977,7 @@ pub fn expand_collapse_all(
         request.expand
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4000,7 +4000,7 @@ pub fn expand_collapse_all(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -4159,7 +4159,7 @@ pub fn group_pivot_field(
         request.grouping
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4192,7 +4192,7 @@ pub fn group_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -4216,7 +4216,7 @@ pub fn create_manual_group(
         request.member_items
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4267,7 +4267,7 @@ pub fn create_manual_group(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -4289,7 +4289,7 @@ pub fn ungroup_pivot_field(
         request.field_index
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4322,7 +4322,7 @@ pub fn ungroup_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -4589,7 +4589,7 @@ pub async fn drill_through_to_sheet(
 
             let grids = state
                 .grids
-                .lock()
+                .read()
                 .map_err(|e| format!("grids lock poisoned: {}", e))?;
             let grid = grids
                 .get(0)
@@ -4715,13 +4715,15 @@ pub async fn drill_through_to_sheet(
 
     // Create new sheet
     let mut sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    let current_grid = state.grid.lock_pending().unwrap();
     // Drill-through APPENDS A WHOLE NEW SHEET of detail rows. The non-verb name is
     // exactly why a mutating-verb heuristic missed it; the sheet and its per-sheet
     // vectors are persisted like any other.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grids = grids.authorize(&effect);
+    let mut current_grid = current_grid.authorize(&effect);
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
 
     // Generate a unique sheet name
@@ -5434,11 +5436,11 @@ pub async fn create_pivot_from_bi_model(
     // Write empty pivot placeholder to grid
     {
         let mut styles = state.style_registry.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let active_sheet = *state.active_sheet.lock().unwrap();
             let pivot_merges = if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
+                let mut grid = state.grid.write(&effect).unwrap();
                 let merges = write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
                 grid.recalculate_bounds();
                 merges
@@ -5644,7 +5646,7 @@ pub async fn update_bi_pivot_fields(
                 drop(pivot_tables);
 
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-                update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+                update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
                 if auto_fit {
                     auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
                 }
@@ -5708,7 +5710,7 @@ pub async fn update_bi_pivot_fields(
         drop(pt);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
         return Ok(response);
     }
 
@@ -5768,7 +5770,7 @@ pub async fn update_bi_pivot_fields(
         drop(pivot_tables);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
         return Ok(response);
     }
 
@@ -6295,7 +6297,7 @@ pub async fn update_bi_pivot_fields(
                 drop(pivot_tables);
 
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
                 return Ok(response);
             }
             return Err(crate::bi::commands::friendly_bi_query_error("BI query failed", &e));
@@ -6886,7 +6888,7 @@ pub async fn update_bi_pivot_fields(
     // Update grid (clear old region + write new)
     let t_grid = Instant::now();
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
     if auto_fit {
         auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
     }
@@ -7033,7 +7035,7 @@ pub fn show_report_filter_pages(
     // Past every refusal (pivot exists, field is a filter, values non-empty). This
     // generates one NEW SHEET per filter value -- a large document change behind a
     // name that reads like a view action.
-    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut created_sheets = Vec::new();
 
     for (_vid, value_label) in &unique_values {
@@ -7063,7 +7065,7 @@ pub fn show_report_filter_pages(
 
         // Use AppState to create the sheet and write the pivot view
         let mut sheet_names = state.sheet_names.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
 
         // Skip if sheet already exists
         if sheet_names.contains(&sheet_name) {
@@ -7141,7 +7143,7 @@ pub fn add_calculated_field(
     pivot_engine::calculated::parse_calc_formula(&request.formula)
         .map_err(|e| format!("Invalid formula: {}", e))?;
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7165,7 +7167,7 @@ pub fn add_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -7192,7 +7194,7 @@ pub fn update_calculated_field(
     pivot_engine::calculated::parse_calc_formula(&request.formula)
         .map_err(|e| format!("Invalid formula: {}", e))?;
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7224,7 +7226,7 @@ pub fn update_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -7246,7 +7248,7 @@ pub fn remove_calculated_field(
         request.field_index
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7273,7 +7275,7 @@ pub fn remove_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -7304,7 +7306,7 @@ pub fn add_calculated_item(
     pivot_engine::calculated::parse_calc_formula(&request.formula)
         .map_err(|e| format!("Invalid formula: {}", e))?;
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7328,7 +7330,7 @@ pub fn add_calculated_item(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -7350,7 +7352,7 @@ pub fn remove_calculated_item(
         request.item_index
     );
 
-    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7377,7 +7379,7 @@ pub fn remove_calculated_item(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }

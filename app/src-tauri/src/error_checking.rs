@@ -40,7 +40,7 @@ pub fn get_error_indicators(
     end_row: u32,
     end_col: u32,
 ) -> Vec<CellErrorIndicator> {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let mut indicators = Vec::new();
 
     for row in start_row..=end_row {

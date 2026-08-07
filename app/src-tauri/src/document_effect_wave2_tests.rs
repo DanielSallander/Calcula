@@ -42,14 +42,19 @@ use crate::{create_app_state, AppState};
 use engine::{Cell, CellValue};
 
 fn dirty(fs: &FileState) -> bool {
-    *fs.is_modified.lock().unwrap()
+    fs.is_dirty()
 }
 
 /// A one-sheet workbook with a small header + data block for the filter to bite on.
 fn seeded_state() -> AppState {
     let state = create_app_state();
     {
-        let mut grids = state.grids.lock().unwrap();
+        // Harness seeding, not a document edit: the fixture stands in for a workbook
+        // that was loaded, and no save follows. Same arm the integration harness uses.
+        let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut grids = state.grids.write(&effect).unwrap();
         let grid = &mut grids[0];
         grid.set_cell(0, 0, Cell::new_text("Region".to_string()));
         grid.set_cell(1, 0, Cell::new_text("North".to_string()));
@@ -186,7 +191,7 @@ fn clearing_advanced_filter_rows_that_were_set_does_dirty() {
     let state = seeded_state();
     let fs = FileState::default();
     set_advanced_filter_hidden_rows_inner(&state, &fs, vec![1]);
-    *fs.is_modified.lock().unwrap() = false; // isolate the clear
+    crate::document_effect::mark_saved(&fs); // isolate the clear
 
     clear_advanced_filter_hidden_rows_inner(&state, &fs);
 
@@ -244,7 +249,7 @@ fn the_fixture_really_has_filterable_data() {
     // could pass for the wrong reason (a refusal that happens to be clean is NOT what
     // that test means to assert).
     let state = seeded_state();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     assert_eq!(
         grids[0].get_cell(0, 0).map(|c| c.value.clone()),
         Some(CellValue::Text("Region".to_string()))

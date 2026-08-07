@@ -7,6 +7,16 @@ import type { PropertyDefinition } from "../lib/types";
 /** All property definitions for an Image control. */
 export const IMAGE_PROPERTIES: PropertyDefinition[] = [
   // -- Source --
+  //
+  // READ-ONLY, deliberately. `src` holds a `media:{sha256}` handle the host
+  // issued for bytes it read and validated itself; it is not text a user
+  // authors. As a free-text box this was a hole with no bottom: anyone could
+  // type `https://tracker.example/pixel.gif` into a document property and get a
+  // beacon that fires on every open, on every machine the file reaches — with
+  // the CSP's `img-src 'self' data: blob:` as the ONLY thing stopping it. A
+  // security control that exists in one line of `tauri.conf.json` and nowhere
+  // else is not a control, it is a coincidence. The picture is chosen through
+  // Insert > Image, which is the one door that validates.
   {
     key: "src",
     label: "Source",
@@ -14,6 +24,10 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     defaultValue: "",
     supportsFormula: false,
     group: "Image",
+    readOnly: true,
+    readOnlyHint:
+      "Set by Insert > Image. The picture is stored inside this document and " +
+      "referenced by content hash.",
   },
 
   // -- Transform --

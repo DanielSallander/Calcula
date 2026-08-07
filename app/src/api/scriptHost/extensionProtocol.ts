@@ -498,6 +498,15 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
   // so listing them would only add rows that fail closed.
   "cap.fileExportText",
   "cap.fileImportText",
+  // cap.fileImportMedia is deliberately NOT here, and the reason is that it
+  // would be DEAD CONSENT TEXT rather than that it would be unsafe — it is in
+  // fact the safest row of the family (the host reads, validates and stores the
+  // file; the caller gets an inert handle). But a handle is only good for two
+  // things, api.createPicture and a picture's `src` property, and a sandboxed
+  // extension mounts RESTRICTED so it can reach neither: createPicture is
+  // unlocked-tier and object.setState is pinned to an object an extension does
+  // not have. Offering it would put a line in a consent dialog for reach the
+  // extension cannot use. Add it the day an extension can place a picture.
   // "export this report as a PDF" is the other half of the same reason an
   // add-in exists, and it is safe here for a STRONGER reason than the two rows
   // above: the extension does not even supply the bytes. It names a file; the

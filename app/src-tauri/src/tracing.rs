@@ -108,7 +108,7 @@ fn group_into_ranges(
 /// Reads from the `dependencies` map (what this formula references).
 #[tauri::command]
 pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResult {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let dependencies = state.dependencies.lock().unwrap();
     let column_dependencies = state.column_dependencies.lock().unwrap();
@@ -175,7 +175,7 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
 
             // Check if the referenced cell is an error
             // We need to look at the other grid if it exists
-            let grids = state.grids.lock().unwrap();
+            let grids = state.grids.read().unwrap();
             let is_error = if sheet_idx < grids.len() {
                 cell_is_error(&grids[sheet_idx], cs_row, cs_col)
             } else {
@@ -210,7 +210,7 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
 /// Reads from the `dependents` map (what formulas reference this cell).
 #[tauri::command]
 pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResult {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let dependents = state.dependents.lock().unwrap();
     let column_dependents = state.column_dependents.lock().unwrap();
@@ -276,7 +276,7 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
             };
 
             // Check if the dependent cell is an error
-            let grids = state.grids.lock().unwrap();
+            let grids = state.grids.read().unwrap();
             let is_error = if sheet_idx < grids.len() {
                 cell_is_error(&grids[sheet_idx], cs_row, cs_col)
             } else {

@@ -361,6 +361,9 @@ export const METHOD_DEADLINES_MS: Record<string, number> = {
   // handlers, which carry their own 3s deadline in host.ts.
   "cap.fileExportText": UI_DIALOG_DEADLINE_MS,
   "cap.fileImportText": UI_DIALOG_DEADLINE_MS,
+  // Same picker, plus the host's read + magic-byte validation + hashing after
+  // the user chooses. The human is still the slow part.
+  "cap.fileImportMedia": UI_DIALOG_DEADLINE_MS,
   // Same picker, plus a PDF render before it opens.
   "cap.filePrintPdf": UI_DIALOG_DEADLINE_MS,
   "api.workbookSaveAs": UI_DIALOG_DEADLINE_MS,

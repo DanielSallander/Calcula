@@ -483,7 +483,7 @@ async fn op_install(
         Ok(edited)
     })
     .await?;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!(
         "BI",
         "script source '{}' installed ({} table(s), conn {})",
@@ -666,7 +666,7 @@ async fn op_remove_bind(
         .lock()
         .unwrap()
         .remove(&(model_key, source_id.to_string()));
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!(
         "BI",
         "script source '{}' removed (conn {})",

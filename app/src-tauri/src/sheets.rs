@@ -427,14 +427,14 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     // never make it dirty or the close prompt stops meaning anything. Declared rather
     // than omitted: `rg deliberately_clean` lists every such decision. When
     // `active_sheet` is onboarded to `Persisted<T>` this is the effect it will pass.
-    let _effect = crate::document_effect::DocumentEffect::deliberately_clean(
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
         crate::document_effect::CleanReason::Navigation,
     );
     let (result, switched) = {
     let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
@@ -529,9 +529,9 @@ pub fn add_sheet(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let result = {
     let mut sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -654,9 +654,9 @@ pub fn delete_sheet(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let result = {
     let mut sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -953,15 +953,25 @@ pub fn delete_sheet(
 }
 
 #[tauri::command]
-pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> Result<SheetsResult, String> {
+pub fn rename_sheet(
+    state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
+    index: usize,
+    new_name: String,
+) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "rename a sheet")?;
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
-    let mut grids = state.grids.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    // Locked but UNDECIDED: the three validation gates below can still refuse,
+    // and this command previously took no `FileState` at all -- renaming a sheet
+    // rewrote every cross-sheet formula in the workbook and left the document
+    // looking clean. `lock_pending` lets the gates read under the lock they
+    // already hold and postpones the dirty decision past the last `return Err`.
+    let grids = state.grids.lock_pending().unwrap();
+    let current_grid = state.grid.lock_pending().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -977,6 +987,10 @@ pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> R
             return Err(format!("Sheet '{}' already exists", trimmed_name));
         }
     }
+
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grids = grids.authorize(&effect);
+    let mut current_grid = current_grid.authorize(&effect);
 
     let old_name = sheet_names[index].clone();
     sheet_names[index] = trimmed_name.clone();
@@ -1097,7 +1111,7 @@ pub fn set_split_window(
             split_col,
         };
     }
-    crate::persistence::mark_workbook_modified(&file_state);
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(())
 }
@@ -1133,7 +1147,7 @@ pub fn set_sheet_zoom(
     zoom: f64,
 ) -> Result<(), String> {
     if set_sheet_zoom_inner(&state, zoom)? {
-        crate::persistence::mark_workbook_modified(&file_state);
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
     Ok(())
 }
@@ -1191,9 +1205,9 @@ pub fn move_sheet(
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -1391,9 +1405,9 @@ pub fn copy_sheet(
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
-    let mut current_grid = state.grid.lock().unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();

@@ -97,6 +97,34 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
     }
+    // Content-addressed binary media (pictures). A manifest FEATURE ID, and
+    // DELIBERATELY NO LINK IN THE FORMAT-VERSION CHAIN.
+    //
+    // The chain's own test (manifest.rs, "why a feature ever gets a link"):
+    // a link exists when an older reader would MISHANDLE the document, not
+    // merely lose state. Weigh `media/` against the three sections that hold
+    // links today. `pending_recalc` turns a knowingly-stale workbook into one
+    // that silently claims to be calculated; `user_hidden` resurrects rows the
+    // author hid to keep data out of a report; `sheet_display_flags` hands back
+    // values where the author left formulas. Every one of them makes the
+    // document LIE, invisibly.
+    //
+    // A dropped picture does none of that. The reader loses `media/`, the
+    // control's `src` handle resolves to nothing, and a picture that is simply
+    // NOT THERE is the loudest possible signal — nobody mistakes a missing logo
+    // for a correct document. Visible loss, not silent corruption. Stamping v7
+    // would instead make every workbook containing one image unopenable by an
+    // older build, which is a strictly worse trade for the same information.
+    //
+    // The feature id still earns its keep: it lets `read_calcula_manifest`
+    // answer "does this document carry embedded binary?" without materializing
+    // the workbook, exactly as `scheduled_jobs` answers "does opening this run
+    // code on a timer?". The READ below is nevertheless unconditional (the
+    // named_ranges/sparklines precedent), so bytes written by a build that
+    // forgot to push the id are still recovered rather than silently dropped.
+    if !workbook.media.is_empty() {
+        manifest.features.push("media".to_string());
+    }
     // Scheduled jobs ride in user_files (see features::scheduled_jobs for why
     // that home is the .calp firewall), but they get their OWN manifest feature
     // id and their own link in the format-version chain: "this document runs
@@ -329,6 +357,33 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     for (conn_id, files) in &workbook.bi_connection_caches {
         for (rel, bytes) in files {
             zip.start_file(format!("bi_cache/{}/{}", conn_id, rel), options.clone())?;
+            zip.write_all(bytes)?;
+        }
+    }
+
+    // Write content-addressed media blobs as raw binary entries under
+    // media/{sha256}. Modelled on bi_cache/{connId}/{relfile} above: raw bytes,
+    // no JSON envelope, recovered by a prefix scan.
+    //
+    // STORED, not Deflated, and this is not a micro-optimisation: every format
+    // the validator admits (PNG/JPEG/GIF/WebP) is ALREADY entropy-coded, so
+    // deflating it burns CPU proportional to the image on every single save and
+    // typically grows the entry. The archive is written on the user's Ctrl+S
+    // path, so that cost is paid in front of them.
+    //
+    // The key is the SHA-256 the writer of the map computed, so the file NAME is
+    // the integrity check: a reader can re-hash the bytes and compare with no
+    // side table. It is also hex, so it is inert as a path component — no
+    // separators, no traversal, nothing to sanitize.
+    {
+        let stored = FileOptions::<()>::default().compression_method(CompressionMethod::Stored);
+        // Deterministic entry order across saves — a HashMap iteration order
+        // would churn the archive bytes for identical content.
+        let mut hashes: Vec<&String> = workbook.media.keys().collect();
+        hashes.sort();
+        for hash in hashes {
+            let bytes = &workbook.media[hash];
+            zip.start_file(format!("media/{}", hash), stored.clone())?;
             zip.write_all(bytes)?;
         }
     }
@@ -801,6 +856,50 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read content-addressed media blobs: media/{sha256} -> raw bytes.
+    //
+    // UNCONDITIONAL — no `manifest.features` gate — following the
+    // named_ranges/sparklines precedent rather than the bi_cache one. The
+    // feature id is written for the manifest-only question ("does this document
+    // carry embedded binary?"), but gating the read on it would mean a single
+    // missed `features.push` silently discards the user's pictures on the next
+    // save. An archive with no media/ entries simply loads an empty map, which
+    // is exactly what every pre-media `.cala` produces.
+    //
+    // The entry NAME is the content hash the writer computed. It is NOT
+    // re-verified here: `.cala` integrity is the archive's problem (and, when
+    // encrypted, the AEAD tag's), and a mismatch would leave us choosing between
+    // discarding the user's picture and failing their open. The `.calp` path,
+    // where the bytes crossed a trust boundary, DOES verify — that is what
+    // `verify_version_artifacts` is for.
+    let mut media: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    {
+        let media_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("media/") && !name.ends_with('/') {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for name in media_names {
+            let key = name["media/".len()..].to_string();
+            // Sub-paths under media/ are not part of the layout; a flat hash is
+            // the only shape written. Skip anything else rather than inventing
+            // a meaning for it.
+            if key.is_empty() || key.contains('/') {
+                continue;
+            }
+            let mut entry = archive.by_name(&name).map_err(FormatError::Zip)?;
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content)?;
+            media.insert(key, content);
+        }
+    }
+
     // Read ribbon filters
     let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
     if manifest.features.contains(&"ribbon_filters".to_string()) {
@@ -1007,6 +1106,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         bi_connection_roles,
         bi_connections,
         bi_connection_caches,
+        media,
         extension_data,
         conditional_formats,
         data_validations,
@@ -1177,6 +1277,7 @@ mod tests {
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
             bi_connection_caches: std::collections::HashMap::new(),
+            media: std::collections::HashMap::new(),
             extension_data: Default::default(),
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
@@ -1235,6 +1336,138 @@ mod tests {
         // Check styles
         assert_eq!(loaded.sheets[0].styles.len(), 3);
         assert!(loaded.sheets[0].styles[1].font.bold);
+    }
+
+    // -----------------------------------------------------------------------
+    // media/{sha256} — content-addressed binary section
+    // -----------------------------------------------------------------------
+
+    /// A byte-exact PNG header. Real bytes, so the archive carries a real
+    /// binary rather than a string that happens to be opaque.
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut v: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&width.to_be_bytes());
+        v.extend_from_slice(&height.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        v
+    }
+
+    #[test]
+    fn media_blobs_round_trip_byte_for_byte() {
+        let mut workbook = make_test_workbook();
+        let logo = png_bytes(64, 64);
+        let banner = png_bytes(1200, 200);
+        workbook.media.insert("a".repeat(64), logo.clone());
+        workbook.media.insert("b".repeat(64), banner.clone());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("media.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.media.len(), 2);
+        assert_eq!(loaded.media.get(&"a".repeat(64)), Some(&logo));
+        assert_eq!(loaded.media.get(&"b".repeat(64)), Some(&banner));
+    }
+
+    #[test]
+    fn a_workbook_with_no_media_declares_no_feature_and_loads_an_empty_map() {
+        // The pre-media corpus: every .cala already on the user's disk. It must
+        // load with an empty map, not fail and not invent one.
+        let workbook = make_test_workbook();
+        assert!(workbook.media.is_empty());
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert!(!manifest.features.contains(&"media".to_string()));
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert!(loaded.media.is_empty());
+    }
+
+    #[test]
+    fn media_declares_a_feature_id_but_never_raises_the_format_version() {
+        // The decision recorded at the write site: losing a picture is VISIBLE
+        // loss, not silent corruption, so it fails the format-version chain's
+        // own test (manifest.rs). Stamping v7 would make every workbook holding
+        // one image unopenable by an older build for no protective gain.
+        //
+        // This is the assertion that will fail if someone "tidies up" by adding
+        // a stamp, so the reasoning has to be revisited rather than lost.
+        let mut workbook = make_test_workbook();
+        workbook.media.insert("c".repeat(64), png_bytes(10, 10));
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert!(
+            manifest.features.contains(&"media".to_string()),
+            "the manifest must be able to answer 'does this carry embedded binary?' alone"
+        );
+        assert_eq!(
+            manifest.format_version, CALA_BASE_FORMAT_VERSION,
+            "media must not take a link in the format-version chain"
+        );
+    }
+
+    #[test]
+    fn identical_bytes_stored_twice_are_one_entry() {
+        // Content addressing is the dedup: the same logo on twenty sheets is
+        // one key, so it is written once no matter how many controls point at it.
+        let mut workbook = make_test_workbook();
+        let logo = png_bytes(64, 64);
+        let hash = "d".repeat(64);
+        workbook.media.insert(hash.clone(), logo.clone());
+        workbook.media.insert(hash.clone(), logo.clone());
+        assert_eq!(workbook.media.len(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dedup.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert_eq!(loaded.media.len(), 1);
+        assert_eq!(loaded.media.get(&hash), Some(&logo));
+    }
+
+    #[test]
+    fn media_entries_are_stored_uncompressed_and_in_a_deterministic_order() {
+        // STORED: re-deflating already-compressed image data burns CPU on the
+        // user's Ctrl+S path for no gain. Deterministic order: a HashMap
+        // iteration order would churn the archive bytes for identical content,
+        // which is what makes .calp checksums and diffs stable.
+        let mut workbook = make_test_workbook();
+        for tag in ['9', '1', '5'] {
+            workbook
+                .media
+                .insert(std::iter::repeat(tag).take(64).collect(), png_bytes(8, 8));
+        }
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut seen = Vec::new();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            if entry.name().starts_with("media/") {
+                assert_eq!(
+                    entry.compression(),
+                    CompressionMethod::Stored,
+                    "media must not be deflated"
+                );
+                seen.push(entry.name().to_string());
+            }
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        assert_eq!(seen, sorted, "media entries must be written in hash order");
+        assert_eq!(seen.len(), 3);
+
+        // Byte-identical archives for identical content.
+        let again = write_calcula_bytes(&workbook).unwrap();
+        let media_of = |b: &[u8]| {
+            let mut a = zip::ZipArchive::new(std::io::Cursor::new(b.to_vec())).unwrap();
+            (0..a.len())
+                .map(|i| a.by_index(i).unwrap().name().to_string())
+                .filter(|n| n.starts_with("media/"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(media_of(&bytes), media_of(&again));
     }
 
     #[test]

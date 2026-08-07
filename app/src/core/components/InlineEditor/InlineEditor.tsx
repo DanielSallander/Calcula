@@ -2,10 +2,16 @@
 // PURPOSE: Inline cell editor component that renders directly over the cell being edited.
 // CONTEXT: Refactored to separate styles into .styles.ts file using styled-components.
 
-import React, { useRef, useEffect, useCallback, useState } from "react";
+import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
 import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
 import { useGridContext } from "../../state/GridContext";
+import { getViewportCells } from "../../lib/tauri-api";
+import {
+  EDITOR_CHROME_PX,
+  computeExpandedEditorWidth,
+  measureEditorTextWidth,
+} from "./expansion";
 import * as S from "./InlineEditor.styles";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder, isGlobalFormulaMode, setGlobalCursorPosition, getGlobalCursorPosition } from "../../hooks/useEditing";
@@ -153,6 +159,51 @@ function getMergedHeight(
 }
 
 /**
+ * How many columns to the right the editor is ever willing to look at. Bounds
+ * both the neighbour lookup and the expansion walk; nothing sensible needs more
+ * than a screen's worth of columns.
+ */
+const MAX_EXPANSION_COLUMNS = 64;
+
+/** Cell font when the live computed style cannot be read (tests, early mount).
+ *  Excel's Calibri 11pt = 11 * 96/72 px. */
+const FALLBACK_FONT_PX = 11 * (96 / 72);
+const FALLBACK_FONT_FAMILY = "Calibri, sans-serif";
+/** Character-width estimate used where no canvas exists to measure with. */
+const FALLBACK_CHAR_RATIO = 0.6;
+
+/**
+ * The columns to the right of `col` that could be covered, and how wide each is.
+ * Stops at the viewport edge, so the walk never considers a column the user
+ * cannot see anyway.
+ */
+function neighbourColumnWidths(
+  col: number,
+  editorX: number,
+  editorWidth: number,
+  viewportRight: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): { columns: number[]; widths: number[] } {
+  const columns: number[] = [];
+  const widths: number[] = [];
+  let right = editorX + editorWidth;
+  const lastCol = (config.totalCols ?? 0) - 1;
+
+  for (let n = 1; n <= MAX_EXPANSION_COLUMNS; n++) {
+    const c = col + n;
+    if (lastCol >= 0 && c > lastCol) break;
+    if (right >= viewportRight) break;
+    if (dimensions.hiddenCols?.has(c)) continue;
+    const w = getColumnWidth(c, config, dimensions);
+    columns.push(c);
+    widths.push(w);
+    right += w;
+  }
+  return { columns, widths };
+}
+
+/**
  * Calculate the position and visibility of the inline editor.
  */
 function calculateEditorPosition(
@@ -239,10 +290,143 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
   // Calculate position in logical coords then scale by zoom for CSS positioning
   const logicalPos = calculateEditorPosition(editing, config, viewport, dims);
+
+  // ==========================================================================
+  // Excel-parity expansion over adjacent EMPTY cells
+  // ==========================================================================
+  //
+  // Which neighbours hold data. Read once per edited cell (and per sheet), not
+  // per keystroke: an entry can only grow while the user types, and refetching
+  // on every character would put an IPC round trip in the typing path.
+  const [occupiedNeighbours, setOccupiedNeighbours] = useState<{
+    row: number;
+    col: number;
+    sheetIndex: number;
+    occupied: Set<number>;
+  } | null>(null);
+
+  // Logical right edge the editor may not cross.
+  const viewportRight = (typeof window !== "undefined" ? window.innerWidth : 0) / (zoom || 1);
+
+  const neighbours = useMemo(
+    () =>
+      neighbourColumnWidths(
+        editing.col,
+        logicalPos.x,
+        logicalPos.width,
+        viewportRight,
+        config,
+        dims
+      ),
+    // `dims` is rebuilt on every render when the caller passes nothing, so key
+    // on the maps it actually reads rather than on the object identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editing.col, logicalPos.x, logicalPos.width, viewportRight, config, dims.columnWidths, dims.hiddenCols]
+  );
+
+  useEffect(() => {
+    if (!logicalPos.visible || disabled) return;
+    const cols = neighbours.columns;
+    if (cols.length === 0) {
+      setOccupiedNeighbours({
+        row: editing.row,
+        col: editing.col,
+        sheetIndex: currentSheetIndex,
+        occupied: new Set(),
+      });
+      return;
+    }
+    let cancelled = false;
+    const firstCol = cols[0];
+    const lastColumn = cols[cols.length - 1];
+    void getViewportCells(editing.row, firstCol, editing.row, lastColumn)
+      .then((cells) => {
+        if (cancelled) return;
+        const occupied = new Set<number>();
+        for (const cell of cells) {
+          if (cell.row !== editing.row) continue;
+          const shown = cell.display ?? "";
+          if (shown !== "") occupied.add(cell.col);
+        }
+        setOccupiedNeighbours({
+          row: editing.row,
+          col: editing.col,
+          sheetIndex: currentSheetIndex,
+          occupied,
+        });
+      })
+      .catch(() => {
+        // Unknown stays unknown, and unknown means "do not cover it".
+        if (!cancelled) setOccupiedNeighbours(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately NOT keyed on the neighbour column list: it changes with the
+    // editor's own width, and refetching from inside the expansion would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing.row, editing.col, currentSheetIndex, logicalPos.visible, disabled]);
+
+  const expandedWidth = useMemo(() => {
+    // A merged cell already spans its columns; growing past a merge is not a
+    // thing Excel does, and the geometry below assumes single-column steps.
+    if ((editing.colSpan ?? 1) > 1) return logicalPos.width;
+
+    const knownFor =
+      occupiedNeighbours &&
+      occupiedNeighbours.row === editing.row &&
+      occupiedNeighbours.col === editing.col &&
+      occupiedNeighbours.sheetIndex === currentSheetIndex
+        ? occupiedNeighbours.occupied
+        : null;
+    // No answer yet -> every neighbour is "unknown" -> no expansion.
+    const neighbourOccupied = knownFor
+      ? neighbours.columns.map((c) => knownFor.has(c))
+      : [];
+
+    const el = inputRef.current;
+    let font = "";
+    let fontPx = FALLBACK_FONT_PX;
+    if (el && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+      const cs = window.getComputedStyle(el);
+      const parsed = parseFloat(cs.fontSize);
+      if (Number.isFinite(parsed) && parsed > 0) fontPx = parsed / (zoom || 1);
+      if (cs.font) font = cs.font;
+    }
+    if (!font) font = `${fontPx}px ${FALLBACK_FONT_FAMILY}`;
+
+    const textWidth = measureEditorTextWidth(
+      editing.value,
+      font,
+      fontPx * FALLBACK_CHAR_RATIO
+    );
+
+    return computeExpandedEditorWidth({
+      x: logicalPos.x,
+      baseWidth: logicalPos.width,
+      desiredWidth: textWidth + EDITOR_CHROME_PX,
+      neighbourWidths: neighbours.widths,
+      neighbourOccupied,
+      maxRight: viewportRight,
+    });
+  }, [
+    editing.value,
+    editing.row,
+    editing.col,
+    editing.colSpan,
+    currentSheetIndex,
+    occupiedNeighbours,
+    neighbours,
+    logicalPos.x,
+    logicalPos.width,
+    viewportRight,
+    zoom,
+  ]);
+
   const position = {
     x: logicalPos.x * zoom,
     y: logicalPos.y * zoom,
-    width: logicalPos.width * zoom,
+    width: expandedWidth * zoom,
     height: logicalPos.height * zoom,
     visible: logicalPos.visible,
   };
@@ -724,6 +908,12 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   return (
     <S.EditorInput
       ref={inputRef}
+      // Stable hook for tests and for anything that must find the live editor
+      // in the DOM. styled-components hashes the class name, so `[class*=...]`
+      // does not work here (the same trap documented for E2E dialog
+      // selectors); the editor is otherwise an anonymous <input> among the
+      // formula bar and the Name Box.
+      data-inline-editor="true"
       $x={position.x}
       $y={position.y}
       $width={position.width}

@@ -175,8 +175,12 @@ pub(crate) fn apply_named_style_impl(
         }
     };
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -279,9 +283,7 @@ pub(crate) fn apply_named_style_impl(
 
     // Mark workbook as dirty
     if !updated_cells.is_empty() {
-        if let Ok(mut modified) = file_state.is_modified.lock() {
-            *modified = true;
-        }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(FormattingResult {
@@ -322,7 +324,7 @@ mod rect_apply_tests {
             .expect("built-in style")
             .style_index;
         {
-            let grid = state.grid.lock().unwrap();
+            let grid = state.grid.read().unwrap();
             for r in 1..=3u32 {
                 for c in 0..=1u32 {
                     assert_eq!(
@@ -336,7 +338,7 @@ mod rect_apply_tests {
             }
         }
         assert!(
-            *file_state.is_modified.lock().unwrap(),
+            file_state.is_dirty(),
             "applying a style dirties the workbook"
         );
 
@@ -361,8 +363,8 @@ mod rect_apply_tests {
             .expect_err("must refuse");
         assert!(err.contains("not found"), "got: {}", err);
         assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 0);
-        assert!(state.grid.lock().unwrap().get_cell(0, 0).is_none());
-        assert!(!*file_state.is_modified.lock().unwrap());
+        assert!(state.grid.read().unwrap().get_cell(0, 0).is_none());
+        assert!(!file_state.is_dirty());
     }
 }
 

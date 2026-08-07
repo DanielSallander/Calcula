@@ -236,8 +236,8 @@ pub fn get_workbook_state_digest(
 
     // ---- Per-sheet content ----
     {
-        let grids = state.grids.lock().map_err(|e| e.to_string())?;
-        let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        let active_grid = state.grid.read().map_err(|e| e.to_string())?;
         let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
         let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;

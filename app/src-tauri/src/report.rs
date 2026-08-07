@@ -149,7 +149,7 @@ fn snapshot_box_cells(
     bounds: (u32, u32, u32, u32),
 ) -> Vec<(u32, u32, Option<Cell>)> {
     let (sr, sc, er, ec) = bounds;
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid = match grids.get(sheet_idx) {
         Some(g) => g,
         None => return Vec::new(),
@@ -318,7 +318,7 @@ fn count_report_overwrites(
     let end_col = dest_col + view.col_count as u32 - 1;
 
     let old = get_report_region(state, report_id);
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid = match grids.get(sheet_idx) {
         Some(g) => g,
         None => return 0,
@@ -346,6 +346,7 @@ fn count_report_overwrites(
 /// region (region_type "report"). Mirrors `update_pivot_in_grid` for reports.
 fn write_report_to_grid(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     report_id: ReportId,
     sheet_idx: usize,
     dest: (u32, u32),
@@ -355,7 +356,7 @@ fn write_report_to_grid(
 
     {
         let mut styles = state.style_registry.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(sheet_idx) {
             if let Some(ref r) = old {
                 if r.sheet_index == sheet_idx {
@@ -365,7 +366,7 @@ fn write_report_to_grid(
 
             let active_sheet = *state.active_sheet.lock().unwrap();
             let merges = if sheet_idx == active_sheet {
-                let mut active_grid = state.grid.lock().unwrap();
+                let mut active_grid = state.grid.write(&effect).unwrap();
                 if let Some(ref r) = old {
                     if r.sheet_index == sheet_idx {
                         active_grid.clear_region(r.start_row, r.start_col, r.end_row, r.end_col);
@@ -424,18 +425,18 @@ fn write_report_to_grid(
     });
 }
 
-fn clear_report_region(state: &AppState, report_id: ReportId) {
+fn clear_report_region(state: &AppState, effect: &crate::document_effect::DocumentEffect, report_id: ReportId) {
     let old = get_report_region(state, report_id);
     if let Some(r) = old {
         {
-            let mut grids = state.grids.lock().unwrap();
+            let mut grids = state.grids.write(&effect).unwrap();
             if let Some(dest_grid) = grids.get_mut(r.sheet_index) {
                 clear_pivot_region_from_grid(dest_grid, r.start_row, r.start_col, r.end_row, r.end_col);
             }
         }
         let active_sheet = *state.active_sheet.lock().unwrap();
         if r.sheet_index == active_sheet {
-            let mut active_grid = state.grid.lock().unwrap();
+            let mut active_grid = state.grid.write(&effect).unwrap();
             active_grid.clear_region(r.start_row, r.start_col, r.end_row, r.end_col);
             active_grid.recalculate_bounds();
         }
@@ -457,10 +458,9 @@ fn clear_report_region(state: &AppState, report_id: ReportId) {
 #[allow(clippy::too_many_arguments)]
 fn materialize(
     // Required so a caller cannot materialize a report without first deciding what it
-    // does to the saved document. Currently unused in the body only because the cells it
-    // writes live in `AppState.grids`, which is not a `Persisted<T>` yet; when it is,
-    // this becomes the token those writes present.
-    _effect: &crate::document_effect::DocumentEffect,
+    // does to the saved document. It is now genuinely CONSUMED: `AppState.grids` is a
+    // `Persisted<T>`, so the cells this writes present exactly this token.
+    effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
     pivot_state: &PivotState,
     pane_control_state: &crate::pane_control::PaneControlState,
@@ -470,7 +470,7 @@ fn materialize(
     dest: (u32, u32),
     view: &pivot_engine::PivotView,
 ) {
-    write_report_to_grid(state, report_id, sheet_idx, dest, view);
+    write_report_to_grid(state, effect, report_id, sheet_idx, dest, view);
     recalculate_sheet_formulas(state, pivot_state, Some((pane_control_state, ribbon_filter_state)));
 }
 
@@ -508,7 +508,7 @@ pub async fn create_report(
     let bounds = (request.anchor_row, request.anchor_col, end_row, end_col);
 
     {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         if request.sheet_index >= grids.len() {
             return Err(format!("Sheet {} does not exist.", request.sheet_index + 1));
         }
@@ -592,7 +592,7 @@ pub async fn refresh_report(
     }
 
     {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         if sheet_idx >= grids.len() {
             return Err(format!(
                 "This report's sheet (sheet {}) no longer exists.",
@@ -677,7 +677,7 @@ pub fn delete_report(
         record_report_undo(&state, sheet_idx, bounds, "Delete report");
     }
 
-    clear_report_region(&state, report_id);
+    clear_report_region(&state, &effect, report_id);
     state.report_definitions.lock().unwrap().retain(|d| d.id != report_id);
     sync_reports_to_extension_data(&state, &effect);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&pane_control_state, &ribbon_filter_state)));
@@ -711,7 +711,7 @@ pub fn restore_report(
     let mut report = report;
 
     {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         if report.sheet_index >= grids.len() {
             return Err(format!(
                 "Report '{}' targets sheet {} but this workbook has {} sheet(s).",

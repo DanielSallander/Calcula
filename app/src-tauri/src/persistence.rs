@@ -22,14 +22,25 @@ use tauri::{Emitter, State};
 #[derive(Default)]
 pub struct FileState {
     pub current_path: Mutex<Option<PathBuf>>,
-    /// The workbook dirty flag. NOT a bare `Mutex<bool>`: `DirtyFlag` announces
-    /// every clean<->dirty TRANSITION on the `document:dirty-changed` Tauri
-    /// event, which is how the title-bar asterisk learns about a mutation that
-    /// did not originate in the frontend. See `document_effect::DirtyFlag` for
-    /// why the announcement lives on the flag rather than at the ~60 call sites.
-    /// The API is `Mutex`-shaped, so `.lock()` / `.unwrap()` / `.map_err(..)?`
-    /// read and write exactly as before.
-    pub is_modified: crate::document_effect::DirtyFlag,
+    /// The workbook dirty flag. **PRIVATE, and deliberately so.**
+    ///
+    /// It gates the close-without-saving prompt AND AutoRecover, so a mutation
+    /// that fails to set it loses the user's work silently. A census of 746
+    /// Tauri commands found 256 mutating ones that never touched it -- which is
+    /// why the rule is now enforced by the compiler instead of by review:
+    ///
+    ///   * READ it with [`FileState::is_dirty`], which is free.
+    ///   * WRITE it only through [`FileState::set_dirty`], which demands a
+    ///     `document_effect::DirtyWrite`. That token has a private constructor,
+    ///     so it can only be minted inside `document_effect` -- by
+    ///     `DocumentEffect::mutates` (set) and `document_effect::mark_saved`
+    ///     (clear). There is no third way in, from anywhere in the crate.
+    ///
+    /// `DirtyFlag` rather than `Mutex<bool>` because it announces every
+    /// clean<->dirty TRANSITION on `document:dirty-changed`, which is how the
+    /// title-bar asterisk learns about a mutation that did not originate in the
+    /// frontend. See `document_effect::DirtyFlag`.
+    is_modified: crate::document_effect::DirtyFlag,
     /// Session passphrase for the currently-open encrypted workbook.
     /// `None` = the document is plain (unencrypted). Held only in memory,
     /// zeroized when replaced/cleared; never persisted to disk, logged, or
@@ -40,24 +51,34 @@ pub struct FileState {
     pub is_encrypted: Mutex<bool>,
 }
 
-/// Mark the workbook dirty.
-///
-/// Any command that mutates state which lives in the .cala but is written only
-/// by the save path must call this: the close prompt and auto-recover both gate
-/// on `is_modified`, so a mutation that never sets it is silently discarded at
-/// close on an otherwise-clean document.
-///
-/// PREFER `document_effect::DocumentEffect::mutates(&file_state)` IN NEW CODE.
-/// This function states the rule but cannot enforce it -- 256 mutating commands
-/// documented here and still forgot, because nothing made them call it.
-/// `DocumentEffect` inverts that: a persisted store (`Persisted<T>`) cannot be
-/// written without one, so silence is a compile error. This remains only for the
-/// stores that have not been onboarded to `Persisted<T>` yet; once they all are,
-/// `FileState::is_modified` should become private and `DocumentEffect` the sole
-/// writer.
-pub(crate) fn mark_workbook_modified(file_state: &FileState) {
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
+impl FileState {
+    /// Does the in-memory document differ from what is on disk?
+    ///
+    /// Free, and announces nothing -- which matters because the frontend calls
+    /// this from inside the very listener `document:dirty-changed` feeds. A read
+    /// that announced would be an infinite loop.
+    pub fn is_dirty(&self) -> bool {
+        self.is_modified.lock().map(|m| *m).unwrap_or(false)
+    }
+
+    /// Set or clear the dirty flag. Callable only with a
+    /// [`document_effect::DirtyWrite`], which only `document_effect` can mint --
+    /// see the field's own doc for why.
+    ///
+    /// The token is consumed rather than borrowed so it cannot be stashed and
+    /// replayed later from outside the moment that justified it.
+    pub(crate) fn set_dirty(&self, _proof: crate::document_effect::DirtyWrite, value: bool) {
+        if let Ok(mut modified) = self.is_modified.lock() {
+            *modified = value;
+        }
+    }
+
+    /// The flag itself, for the tests that assert on its ANNOUNCEMENTS rather
+    /// than its value (`DirtyFlag::set_observer`). Test-only: production code
+    /// has exactly two writers and one reader, all above.
+    #[cfg(test)]
+    pub(crate) fn dirty_flag(&self) -> &crate::document_effect::DirtyFlag {
+        &self.is_modified
     }
 }
 
@@ -400,8 +421,8 @@ pub fn build_workbook_for_save(
     state: &State<AppState>,
     user_files_state: &State<UserFilesState>,
 ) -> Result<Workbook, String> {
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
-    let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
+    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -460,6 +481,13 @@ pub fn build_workbook_for_save(
     workbook.charts = collect_charts_for_save(state, &sheet_ids);
     workbook.sparklines = collect_sparklines_for_save(state, &sheet_ids);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
+    // Content-addressed media (pictures). The FULL session store is attached
+    // here so every workbook-building path carries it; the unreferenced ones are
+    // swept off the archive at the one real save chokepoint
+    // (`assemble_workbook_for_save`), never off the session store. See
+    // `media::sweep_unreferenced_media` for why that split is what keeps undo
+    // honest.
+    workbook.media = state.media.read().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.read().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
@@ -1642,7 +1670,7 @@ fn restore_pivot_definitions(
     // Clear any existing pivot state
     pivot_tables.clear();
 
-    let grids = match state.grids.lock() {
+    let grids = match state.grids.read() {
         Ok(g) => g,
         Err(_) => return,
     };
@@ -1909,6 +1937,15 @@ fn assemble_workbook_for_save(
     // `workbook` above — the schedule is bound to the code this very save is
     // writing, not to whatever happens to be in memory.
     persist_scheduled_jobs(&mut workbook);
+
+    // Media garbage collection, and it runs LAST for the same reason
+    // `persist_scheduled_jobs` does: it reads back every section this save has
+    // finished assembling. A sweep run earlier would scan a half-built workbook
+    // and delete bytes a section not yet attached still points at.
+    let dropped = crate::media::sweep_unreferenced_media(&mut workbook);
+    if dropped > 0 {
+        log::debug!("[media] dropped {} unreferenced blob(s) from the archive", dropped);
+    }
 
     // Sheet-level metadata was already enriched by build_workbook_for_save.
     drop(sheet_ids_save);
@@ -2279,7 +2316,7 @@ pub fn save_file(
     }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
+    crate::document_effect::mark_saved(&file_state);
 
     Ok(())
 }
@@ -2384,7 +2421,7 @@ pub fn open_file(
         *state.active_sheet.lock().map_err(|e| e.to_string())? = active_idx;
 
         // Set the active grid (clone from the all_grids vec)
-        let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
+        let mut grid = state.grid.write(&load_effect).map_err(|e| e.to_string())?;
         *grid = all_grids[active_idx].clone();
 
         // Set active sheet dimensions
@@ -2396,7 +2433,7 @@ pub fn open_file(
         // Store per-sheet grids and dimensions
         // Note: set_active_sheet swaps between grids[i] and state.grid,
         // so the active sheet slot in grids holds a copy too.
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&load_effect).map_err(|e| e.to_string())?;
         *grids = all_grids;
 
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
@@ -2769,8 +2806,8 @@ pub fn open_file(
         // already cloned out of `all_grids` earlier in this function, so writing
         // only `grids[idx]` would leave the active sheet un-imported.
         let active_sheet = *state.active_sheet.lock().unwrap();
-        let mut active_grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut active_grid = state.grid.write(&load_effect).unwrap();
+        let mut grids = state.grids.write(&load_effect).unwrap();
         let mut styles = state.style_registry.lock().unwrap();
         for entry in &workbook.sheet_protections {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
@@ -2837,6 +2874,29 @@ pub fn open_file(
             &mut controls,
             |sid| Some(sheet_id_to_index(&workbook, sid)),
         );
+
+        // Restore content-addressed media, then migrate the LEGACY corpus: every
+        // document produced by the shipped Insert > Image carries whole files
+        // base64'd into a control property. Those are real pictures in real user
+        // documents and they must keep working, so they are decoded, revalidated
+        // and re-filed under their content hash, with the property rewritten to a
+        // `media:` handle.
+        //
+        // Both halves share the `load_effect` (CleanReason::LoadingFromDisk): a
+        // user who merely OPENS a file must not be told it changed. The migration
+        // is a normalisation of what was already on disk, not an edit.
+        if let Ok(mut media) = state.media.write(&load_effect) {
+            media.clear();
+            media.extend(workbook.media.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let report = crate::media::migrate_legacy_data_urls(&mut controls, &mut media);
+            if report.migrated > 0 || report.refused > 0 {
+                log::info!(
+                    "[media] migrated {} inline image(s) into the media store; {} refused and left inline",
+                    report.migrated,
+                    report.refused
+                );
+            }
+        }
     }
 
     // Restore cell-type assignments (granular bricks: typed cells).
@@ -3106,9 +3166,9 @@ pub fn open_file(
     }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
+    crate::document_effect::mark_saved(&file_state);
 
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
     let merged = state.merged_regions.lock().map_err(|e| e.to_string())?;
@@ -3183,7 +3243,7 @@ pub fn new_file(
         crate::document_effect::CleanReason::LoadingFromDisk,
     );
     {
-        let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
+        let mut grid = state.grid.write(&reset_effect).map_err(|e| e.to_string())?;
         let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
         let mut col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
         let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
@@ -3198,7 +3258,7 @@ pub fn new_file(
         deps.clear();
 
         // Reset per-sheet grids to a single empty sheet
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&reset_effect).map_err(|e| e.to_string())?;
         grids.clear();
         grids.push(engine::grid::Grid::new());
 
@@ -3330,6 +3390,11 @@ pub fn new_file(
     // Clear controls
     state.controls.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
+    // Clear embedded media. A new document carries no pictures, and leaving the
+    // previous document's blobs resident would both leak its content into the
+    // next save and hold its bytes in memory for the rest of the session.
+    state.media.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+
     // Clear cell-type assignments
     state.cell_types.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
@@ -3445,7 +3510,7 @@ pub fn new_file(
     }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
-    *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
+    crate::document_effect::mark_saved(&file_state);
     // A new (blank) document is never encrypted; drop any session passphrase.
     *file_state.session_password.lock().map_err(|e| e.to_string())? = None;
     *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = false;
@@ -3464,7 +3529,7 @@ pub fn get_current_file_path(file_state: State<FileState>) -> Option<String> {
 
 #[tauri::command]
 pub fn is_file_modified(file_state: State<FileState>) -> bool {
-    file_state.is_modified.lock().map(|m| *m).unwrap_or(false)
+    file_state.is_dirty()
 }
 
 /// Whether the currently-open document is encrypted. Used by the frontend to
@@ -3502,9 +3567,7 @@ pub fn clear_session_password(file_state: State<FileState>) -> Result<(), String
 
 #[tauri::command]
 pub fn mark_file_modified(file_state: State<FileState>) {
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 }
 
 // ============================================================================
@@ -3629,9 +3692,7 @@ pub fn create_virtual_file(
     files.insert(path.clone(), bytes);
 
     // Mark file as modified
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
     let _ = app_handle.emit("virtual-file-changed", &path);
@@ -3662,9 +3723,7 @@ pub fn create_virtual_folder(
     files.insert(folder_marker, Vec::new());
 
     // Mark file as modified
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(())
 }
@@ -3697,9 +3756,7 @@ pub fn delete_virtual_file(
     }
 
     // Mark file as modified
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
     let _ = app_handle.emit("virtual-file-changed", &path);
@@ -3756,9 +3813,7 @@ pub fn rename_virtual_file(
     }
 
     // Mark file as modified
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
     let _ = app_handle.emit("virtual-file-changed", &old_path);
@@ -3775,10 +3830,10 @@ pub fn get_ai_context(
     state: State<AppState>,
     options: AiSerializeOptions,
 ) -> Result<String, String> {
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
 
     // Build sheet inputs — use stored grids for non-active sheets, active grid for current.
@@ -4187,7 +4242,7 @@ pub fn auto_recover_save(
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // Only save if the file is dirty
-    let is_modified = *file_state.is_modified.lock().map_err(|e| e.to_string())?;
+    let is_modified = file_state.is_dirty();
     if !is_modified {
         return Err("not_dirty".to_string());
     }

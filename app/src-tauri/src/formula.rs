@@ -154,7 +154,7 @@ pub fn evaluate_expressions(
 ) -> Result<Vec<String>, String> {
     log_enter!("CMD", "evaluate_expressions", "count={}", expressions.len());
 
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let user_files = user_files_state.files.lock().map_err(|e| e.to_string())?;
@@ -328,7 +328,7 @@ pub fn evaluate_formula_typed(
 ) -> Result<Vec<TypedEvalResult>, String> {
     log_enter!("CMD", "evaluate_formula_typed", "count={}", expressions.len());
 
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;

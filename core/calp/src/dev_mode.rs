@@ -8,6 +8,7 @@
 //! `dev: true`. They resolve by reading the source .cala directly instead of
 //! going through the registry.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use identity::SheetId;
@@ -63,6 +64,7 @@ pub fn pull_dev(
         tables: workbook.tables,
         named_ranges: workbook.named_ranges,
         controls: workbook.controls,
+        media: workbook.media,
     })
 }
 
@@ -74,6 +76,17 @@ pub struct DevPullResult {
     /// Cell-anchored controls per sheet (keyed by SOURCE sheet id), so the
     /// dev preview matches what a real subscriber would receive.
     pub controls: Vec<persistence::SavedSheetControls>,
+    /// Content-addressed binary media the source document holds: sha256 hex ->
+    /// raw bytes. Carried for the same reason the controls are — a dev pull
+    /// exists to show the author what a subscriber gets, and without the bytes
+    /// every picture in the preview resolves to nothing and paints "Image
+    /// Unavailable". Re-validated host-side like any other foreign media.
+    ///
+    /// The WHOLE source store travels, not just what the pulled sheets
+    /// reference: a real publish filters, but a dev pull has no manifest to be
+    /// unreachable from, and the host's save-time sweep drops whatever the
+    /// document ends up not pointing at.
+    pub media: HashMap<String, Vec<u8>>,
 }
 
 /// A sheet pulled from a dev source.

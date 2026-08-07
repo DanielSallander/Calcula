@@ -25,7 +25,7 @@ use crate::persistence::FileState;
 use crate::{create_app_state, AppState};
 
 fn dirty(fs: &FileState) -> bool {
-    *fs.is_modified.lock().unwrap()
+    fs.is_dirty()
 }
 
 fn cf_params() -> AddCFParams {

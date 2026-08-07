@@ -1126,7 +1126,12 @@ pub fn rename_sheet(handle: &AppHandle, index: usize, new_name: &str) -> Result<
             .cloned()
             .ok_or_else(|| format!("Sheet index {} out of range. Use list_sheets.", index))?
     };
-    crate::sheets::rename_sheet(handle.state::<AppState>(), index, new_name.to_string())?;
+    crate::sheets::rename_sheet(
+        handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
+        index,
+        new_name.to_string(),
+    )?;
 
     let _ = handle.emit("sheets:refresh", ());
     let _ = handle.emit("grid:refresh", ());
@@ -1434,7 +1439,7 @@ mod tests {
         let sheet =
             delete_chart_core(&state, &effect, &drop_id).expect("delete should succeed");
         assert!(
-            *fs.is_modified.lock().unwrap(),
+            fs.is_dirty(),
             "an AI-driven chart delete must dirty the document: the MCP path never runs              the frontend, so nothing else would"
         );
         assert_eq!(sheet, 1);

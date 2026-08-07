@@ -658,7 +658,7 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
 /// Get unique values from a table column.
 fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
     let tables = state.tables.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
@@ -715,7 +715,7 @@ fn get_table_available_values(
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
     let tables = state.tables.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 

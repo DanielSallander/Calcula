@@ -1021,7 +1021,7 @@ pub fn get_formula_eval_plan(
     row: u32,
     col: u32,
 ) -> Result<FormulaEvalPlan, String> {
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
 

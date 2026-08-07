@@ -143,8 +143,8 @@ pub fn data_table_one_var(
         return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -166,7 +166,9 @@ pub fn data_table_one_var(
     }
 
     // Past the protection gate and the orientation check: results are written below.
-    let _effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
 
     let mut result_cells = Vec::new();
     let mut updated_cells = Vec::new();
@@ -379,8 +381,8 @@ pub fn data_table_two_var(
         return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -405,7 +407,9 @@ pub fn data_table_two_var(
     };
 
     // Past the protection gate and the "top-left cell must contain a formula" check.
-    let _effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
 
     // Save original input cell values
     let original_row_input = grids[sheet_idx]

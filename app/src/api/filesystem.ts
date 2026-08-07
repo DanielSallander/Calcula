@@ -169,6 +169,77 @@ export async function importTextViaPicker(
   return { name: fileNameOf(chosen), content };
 }
 
+// ============================================================================
+// Picker-mediated IMAGE import (binary ingress)
+// ============================================================================
+
+/**
+ * A handle to binary media stored inside the document, plus what its HEADER
+ * said about it. Mirrors `media::MediaRef` in Rust exactly.
+ *
+ * There is no `data` field and there must never be one. The bytes stay in the
+ * privileged process; what crosses IPC is an opaque handle and four integers.
+ * That is what makes it safe to hand this to a sandboxed caller: a script can
+ * PLACE a picture the user chose and can lay it out correctly, but it cannot
+ * read the bytes, cannot synthesise new ones, and cannot turn the handle into
+ * anything that leaves the machine.
+ */
+export interface MediaRef {
+  /** The document handle: `media:{sha256}`. Opaque — never a path or a URL. */
+  ref: string;
+  /** IANA type proved by the file's MAGIC BYTES, not by its extension. */
+  mimeType: string;
+  width: number;
+  height: number;
+  byteLength: number;
+}
+
+/** Formats the document will embed. Deliberately not SVG and not BMP — see
+ *  `core/calcula-format/src/media.rs` for why each is refused. */
+export const EMBEDDABLE_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp"] as const;
+
+export interface ImportImageViaPickerRequest {
+  /** Native dialog title. */
+  title: string;
+}
+
+/**
+ * Open a picker, and have the HOST read, validate and store the image the user
+ * chose. Returns the handle, or null when the user cancelled.
+ *
+ * THROWS, with the host's message, when the file is not an admissible image —
+ * wrong format, over the byte cap, over a dimension cap, or a malformed header.
+ * A refusal is the correct outcome and must surface: the path this replaces
+ * fell back to a 200x150 placeholder and embedded the file anyway.
+ *
+ * Note what does NOT happen here: no `FileReader`, no `readAsDataURL`, no
+ * base64, and no bytes in the WebView at all. The picker yields a path, the path
+ * goes to Rust, and only the handle comes back.
+ */
+export async function importImageViaPicker(
+  request: ImportImageViaPickerRequest,
+): Promise<MediaRef | null> {
+  const chosen = await openFileDialog({
+    title: request.title,
+    multiple: false,
+    directory: false,
+    filters: pickerFilters("Images", [...EMBEDDABLE_IMAGE_EXTENSIONS]),
+  });
+  if (typeof chosen !== "string" || chosen.length === 0) return null;
+  return invokeBackend<MediaRef>("read_media_file", { path: chosen });
+}
+
+/**
+ * Resolve a `media:{sha256}` handle to a data URL the renderer can paint.
+ *
+ * The one route from a handle back to pixels, and it is HOST-side: the MIME
+ * type in the returned URL is re-derived from the bytes every time rather than
+ * taken from anything a caller or a package claimed.
+ */
+export async function resolveMediaRef(ref: string): Promise<string> {
+  return invokeBackend<string>("resolve_media_ref", { mediaRef: ref });
+}
+
 /** Filter rows for a native picker; "All Files" is always offered so the user
  *  is never trapped by a filter a script chose. */
 function pickerFilters(

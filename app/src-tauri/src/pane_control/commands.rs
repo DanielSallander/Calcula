@@ -142,7 +142,7 @@ pub fn create_pane_control(
     }
 
     // Pane controls are persisted workbook entities — mark the file dirty.
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(control)
 }
@@ -179,7 +179,7 @@ pub fn delete_pane_control(
     }
 
     // Pane controls are persisted workbook entities — mark the file dirty.
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(())
 }
@@ -256,7 +256,7 @@ pub fn update_pane_control(
     }
 
     // Pane controls are persisted workbook entities — mark the file dirty.
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(control.clone())
 }
@@ -302,7 +302,7 @@ pub fn set_pane_control_value(
 
     // The published value is persisted with the workbook — mark the file
     // dirty so a committed slider drag survives close-without-save prompts.
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(())
 }
@@ -367,7 +367,7 @@ pub fn get_all_control_values(
             let controls = state.controls.read().unwrap();
             controls.clone()
         };
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         result.extend(crate::pane_control::values::on_grid_named_values(&on_grid, &grids));
     }
     result

@@ -303,7 +303,7 @@ pub async fn build_cube_prefetch(
     edited: Option<(u32, u32, String)>,
 ) -> CubePrefetch {
     // --- 1. Snapshot all needed state synchronously (no std Mutex across await) ---
-    let grid = state.grid.lock().unwrap().clone();
+    let grid = state.grid.read().unwrap().clone();
     let locale = state.locale.lock().unwrap().clone();
     let dependents = state.dependents.lock().unwrap().clone();
 

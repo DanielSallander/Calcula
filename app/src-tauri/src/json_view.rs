@@ -150,13 +150,13 @@ pub fn get_object_json(
             let active = *state.active_sheet.lock().unwrap();
             let cells: std::collections::HashMap<(u32, u32), ::persistence::SavedCell> =
                 if idx == active {
-                    let grid = state.grid.lock().unwrap();
+                    let grid = state.grid.read().unwrap();
                     grid.cells
                         .iter()
                         .map(|(&rc, c)| (rc, ::persistence::SavedCell::from_cell(c)))
                         .collect()
                 } else {
-                    let grids = state.grids.lock().unwrap();
+                    let grids = state.grids.read().unwrap();
                     let grid = grids
                         .get(idx)
                         .ok_or_else(|| format!("Sheet {} not found", idx))?;

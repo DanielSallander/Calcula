@@ -19,8 +19,19 @@ import type { Page } from "@playwright/test";
  * script/api.setNote case and exactly this case.
  *
  * Without it the store stays empty, no triangle is ever painted, and the
- * goldens named `...-cell-with-indicator` contain no indicator. VERIFIED: the
- * previously committed goldens hold zero #FF0000 and zero #7B68EE pixels.
+ * goldens named `...-cell-with-indicator` would contain no indicator. The
+ * committed goldens DO contain theirs — the notes golden holds 10 px of the
+ * note triangle and 15 px of a neighbouring comment triangle.
+ *
+ * DO NOT verify that by counting #FF0000 / #7B68EE pixels. Those are the source
+ * constants in `Review/rendering/triangleRenderer.ts`, but the renderer paints
+ * through the skin/theme, so the literal constant never lands in a frame: the
+ * triangles decode as `226,57,34` and `124,111,229`. An exact-constant count
+ * reports "no indicator" on a frame that plainly has one, which is exactly the
+ * wrong conclusion this comment used to record. Count near-matches, or diff the
+ * frame against the same frame with the decoration unregistered — the technique
+ * `gridRenderer/cellDecorationZOrder.test.ts` and the live journey assertion in
+ * `journeys/correctness-cluster.spec.ts` (test 10) both use.
  */
 async function announceAnnotationsChanged(page: Page): Promise<void> {
   await page.evaluate(() => {

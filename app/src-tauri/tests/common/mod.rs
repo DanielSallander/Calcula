@@ -43,7 +43,7 @@ impl TestHarness {
         let harness = Self::new();
         {
             let mut names = harness.state.sheet_names.lock().unwrap();
-            let mut grids = harness.state.grids.lock().unwrap();
+            let mut grids = harness.state.grids.write(&app_lib::document_effect::DocumentEffect::deliberately_clean(app_lib::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             // Harness seeding of per-sheet view state; not a document edit, and no
             // save follows. `freeze_configs` is a `Persisted<T>` because freeze panes
             // ARE written into the .cala -- see `app_lib::document_effect`.
@@ -63,8 +63,8 @@ impl TestHarness {
 
     /// Set a cell value directly.
     pub fn set_cell(&self, row: u32, col: u32, cell: Cell) {
-        let mut grid = self.state.grid.lock().unwrap();
-        let mut grids = self.state.grids.lock().unwrap();
+        let mut grid = self.state.grid.write(&app_lib::document_effect::DocumentEffect::deliberately_clean(app_lib::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+        let mut grids = self.state.grids.write(&app_lib::document_effect::DocumentEffect::deliberately_clean(app_lib::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grid.set_cell(row, col, cell);
         if !grids.is_empty() {
             grids[0].set_cell(row, col, grid.get_cell(row, col).unwrap().clone());
@@ -73,7 +73,7 @@ impl TestHarness {
 
     /// Get cell value (raw).
     pub fn get_cell_value(&self, row: u32, col: u32) -> Option<CellValue> {
-        let grid = self.state.grid.lock().unwrap();
+        let grid = self.state.grid.read().unwrap();
         grid.get_cell(row, col).map(|c| c.value.clone())
     }
 }
@@ -98,7 +98,7 @@ impl TestHarness {
         end: (u32, u32),
         has_headers: bool,
     ) -> (PivotCache, Vec<String>) {
-        let grid = self.state.grid.lock().unwrap();
+        let grid = self.state.grid.read().unwrap();
         let (start_row, start_col) = start;
         let (end_row, end_col) = end;
         let col_count = (end_col - start_col + 1) as usize;

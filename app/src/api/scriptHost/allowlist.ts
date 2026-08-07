@@ -33,6 +33,8 @@ import {
   vCFSpec, vCFUpdate, vCFRuleId, vCFList, vCFClear, MAX_CF_RANGES,
   vDialogMessage, vDialogPrompt, vDialogForm,
   vFileExport, vFileImport, MAX_FILE_TEXT_CHARS, MAX_FILE_NAME,
+  vCreatePicture, MAX_MEDIA_BYTES, MAX_MEDIA_PIXELS,
+  vCreateShape,
   vShortcutBind, vShortcutUnbind,
   vEvaluate, MAX_EVAL_EXPRESSIONS, MAX_EVAL_EXPRESSION_CHARS,
   vStatusBar, MAX_STATUS_BAR_CHARS, vBeginBatch, vRunMacro,
@@ -695,6 +697,38 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Delete a named range (formulas using the name will break)" },
   "api.createPivot":       { tier: "unlocked", class: "mutate", validate: vCreatePivot,
                              desc: "Create a pivot table over a block of cells and lay out its fields" },
+  // PICTURES. Same bar as the rows above and for the same reason: a picture the
+  // workbook already holds is document content, nothing leaves the file, so no
+  // capability is involved. What makes that true is the SHAPE of the call — the
+  // only image argument is a `media:` HANDLE. There is no bytes parameter and no
+  // path parameter to refuse, so this row cannot become an ingress however it is
+  // called; introducing bytes needs caps.file.importImage, which opens a picker
+  // a human drives. ACTIVE SHEET only (api.createTable's rule, for the same
+  // reason: control geometry comes from the active sheet's dimensions and the
+  // overlay regions are sheet-blind).
+  "api.createPicture":     { tier: "unlocked", class: "mutate", validate: vCreatePicture,
+                             desc: "Place a picture that is already stored in this workbook onto the sheet currently shown (it can name a picture, never supply one)" },
+  // SHAPES. Same bar as every row in this section, for the reason the section
+  // header states: a shape is document content that lives INSIDE the file, so
+  // no capability is involved. Unlike a picture there is not even a handle to
+  // supply — the only thing a script names is a CATALOG ID, one of the 123
+  // shapes Calcula already knows how to draw. There is no parameter here that
+  // could carry bytes, a path, a URL or source code (`onSelect` and `macroRef`
+  // are refused by name at the property door, and this row cannot write them at
+  // all), so the row's reach is exactly "draw a rectangle".
+  //
+  // The catalog is deliberately NOT enumerated in these desc strings: 123 ids
+  // in a consent sentence is noise a user cannot read, and the ids are
+  // discoverable from the refusal — an unknown id throws with the full list.
+  //
+  // ACTIVE SHEET only, api.createTable's rule for api.createTable's reason: a
+  // control's pixel geometry is derived from the live sheet's row heights and
+  // column widths, and the overlay hit-test regions are sheet-blind, so a
+  // control created "for" another sheet paints on the one in front of the user.
+  "api.createShape":       { tier: "unlocked", class: "mutate", validate: vCreateShape,
+                             desc: "Draw a shape (rectangle, arrow, star and so on) on the sheet currently shown — NOT undoable: Ctrl+Z will not remove it" },
+  "api.deleteShape":       { tier: "unlocked", class: "mutate", validate: vObjectId,
+                             desc: "Delete a shape, button or picture from the sheet currently shown, along with any script attached to it — NOT undoable: Ctrl+Z will not bring it back" },
   "api.deletePivot":       { tier: "unlocked", class: "mutate", validate: vObjectId,
                              desc: "Delete a pivot table" },
   // Refresh-all is ONE row rather than a loop over api.pivot(id).refresh(): the
@@ -988,6 +1022,36 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              validate: vFileImport,
                              limits: { maxChars: MAX_FILE_TEXT_CHARS },
                              desc: "Ask you to pick a text file and read what is inside it (only the one file you pick, and only its contents and its name)" },
+  // THE FOURTH ARM, and the narrowest of the four. Same capability, same
+  // mechanism, same sentence a user already consented to — "the user picks one
+  // file and the host does the I/O" is exactly this — so it rides file.picker
+  // rather than minting an id nobody asked to be asked about twice.
+  //
+  // IT IS NARROWER THAN cap.fileImportText IN THE ONE WAY THAT MATTERS: the
+  // text arm hands the script the file's CONTENTS, and it does so through
+  // read_text_file, which reads the bytes and then STRINGIFIES them with a
+  // Windows-1252 lossy fallback — so a binary file picked there comes back as
+  // mojibake rather than as an error, and the script holds it. This arm must
+  // not repeat that, and structurally cannot: the host reads the file, proves
+  // it is a picture from its MAGIC BYTES (never its extension), enforces the
+  // byte and pixel caps, files the bytes under their SHA-256 inside the
+  // document, and hands back an inert `media:` handle and four integers. THE
+  // BYTES NEVER CROSS INTO THE SANDBOX — there is no field on the result that
+  // could carry them, and the host executor re-projects the response field by
+  // field so a future one could not appear by accident.
+  //
+  // No options object, deliberately. The picker's format filter is the HOST's
+  // decision, not the caller's: the admitted formats are exactly the ones
+  // core/calcula-format/src/media.rs will validate, and letting a script widen
+  // the filter to "All Files" would put the old unvalidated ingress back behind
+  // a nicer name.
+  "cap.fileImportMedia":   { tier: "restricted", capability: "file.picker", class: "file",
+                             validate: vNone,
+                             // Both enforced in Rust (media.rs); stated here so
+                             // the transparency panel shows the ceiling a user
+                             // is agreeing to. A test pins them to the source.
+                             limits: { maxBytes: MAX_MEDIA_BYTES, maxPixels: MAX_MEDIA_PIXELS },
+                             desc: "Ask you to pick a picture and store it in this workbook (only the one file you pick; it is given a reference to the picture, never the picture's data)" },
   // PRINTING (G4), and the only shape of it that can be honest. The script
   // supplies a FILE NAME and NOTHING ELSE — no bytes, no page setup, no range —
   // and the HOST renders the PDF from the workbook's own print settings through

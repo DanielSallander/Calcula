@@ -127,6 +127,22 @@ pub struct Workbook {
     /// Only locally-authored connections are embedded. Stored as raw zip entries
     /// (not JSON) so binary Arrow data isn't base64-bloated.
     pub bi_connection_caches: HashMap<String, HashMap<String, Vec<u8>>>,
+    /// Content-addressed binary media embedded in the document. Key = lowercase
+    /// hex SHA-256 of the value; value = the raw, VALIDATED image bytes exactly
+    /// as they arrived from disk. Referenced from elsewhere in the document by
+    /// the opaque handle `media:{sha256}` — never inlined, never base64.
+    ///
+    /// Content addressing is not a nicety here: the same logo dropped on twenty
+    /// sheets is stored once, and the key doubles as the integrity check (a
+    /// reader can re-hash and compare without a side-table).
+    ///
+    /// This is deliberately NOT `user_files`. `user_files` is the user-visible
+    /// virtual filesystem — the user can delete their own logo out from under a
+    /// picture — it is `String`/`Option<String>`-shaped at its creation door so
+    /// it cannot carry a PNG, and `.calp` EXCLUDES it wholesale as
+    /// subscriber-local. Media is the opposite of all three: opaque to the user,
+    /// binary, and the point of publishing a report.
+    pub media: HashMap<String, Vec<u8>>,
     /// Generic per-extension persisted state (extension id -> arbitrary JSON).
     /// The persistence layer treats each value as an opaque blob — the owning
     /// extension defines its own shape. This is the sanctioned way for ANY
@@ -570,6 +586,7 @@ impl Workbook {
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
             bi_connection_caches: HashMap::new(),
+            media: HashMap::new(),
             extension_data: HashMap::new(),
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
@@ -610,6 +627,7 @@ impl Workbook {
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
             bi_connection_caches: HashMap::new(),
+            media: HashMap::new(),
             extension_data: HashMap::new(),
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),

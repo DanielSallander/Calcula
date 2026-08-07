@@ -129,24 +129,22 @@ export interface IBiConnectionService {
 // Pane Control Store Interface
 // ============================================================================
 
-/**
- * Access to CELL-ANCHORED form controls (buttons, checkboxes, shapes),
- * registered by the Controls extension. These are the objects an object script
- * mounts as objectType "shape"/"button" (instanceId "control-{sheet}-{row}-{col}"),
- * so this is what api.listObjects("shape") enumerates. Read-only: creating a
- * control is a canvas-placement gesture, not a data operation.
- */
-export interface IControlStoreService {
-  /** Every control on ONE sheet, as identity + anchor rows. Never the property
-   *  VALUES (those can be formulas over the user's data — a separate read). */
-  listControls(sheetIndex: number): Promise<Array<{
-    sheetIndex: number;
-    row: number;
-    col: number;
-    controlType: string;
-    name?: string;
-  }>>;
-}
+// CELL-ANCHORED form controls (buttons, shapes, pictures) USED to live here, as
+// a list-only `IControlStoreService` whose doc comment read: "Read-only:
+// creating a control is a canvas-placement gesture, not a data operation."
+//
+// That sentence was never a principle — it was a description of a missing
+// feature, and it is now false. Placing a shape from a script is a data
+// operation: it writes persisted control metadata, it travels in the saved
+// `.cala` and in published `.calp` artifacts, and it is undone and redone like
+// any other document change. So enumeration and creation live in ONE contract,
+// `@api/controlsService`, alongside the shape catalog and the delete path.
+//
+// This registry keeps what it is for: component STORES (slicer, timeline,
+// chart, pivot, BI connections, pane controls). The whole on-grid control
+// surface — `listControls`, `listShapeCatalog`, `createShape`, `deleteControl` —
+// is `registerControlsProvider` / `requireControlsProvider` in
+// `app/src/api/controlsService.ts`.
 
 /** Access to pane controls (Controls pane), registered by the ControlsPane
  *  extension. Lets the script host seed a pane-hosted custom control's shape
@@ -167,7 +165,6 @@ let timelineStore: ITimelineStoreService | null = null;
 let chartStore: IChartStoreService | null = null;
 let pivotStore: IPivotStoreService | null = null;
 let biConnectionService: IBiConnectionService | null = null;
-let controlStore: IControlStoreService | null = null;
 let paneControlStore: IPaneControlStoreService | null = null;
 
 export function registerSlicerStoreService(service: ISlicerStoreService): void {
@@ -208,14 +205,6 @@ export function getPivotStoreService(): IPivotStoreService | null {
 
 export function getBiConnectionService(): IBiConnectionService | null {
   return biConnectionService;
-}
-
-export function registerControlStoreService(service: IControlStoreService | null): void {
-  controlStore = service;
-}
-
-export function getControlStoreService(): IControlStoreService | null {
-  return controlStore;
 }
 
 export function registerPaneControlStoreService(service: IPaneControlStoreService | null): void {

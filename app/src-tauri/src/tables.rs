@@ -599,7 +599,7 @@ pub fn create_table(
     }
 
     // Read header text from grid cells (or generate generic names)
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let col_count = (max_col - min_col + 1) as usize;
     let mut header_names: Vec<String> = Vec::with_capacity(col_count);
 
@@ -722,8 +722,8 @@ pub fn delete_table(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut grids = state.grids.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
 
     // Clone before removal: the ref rewrite below needs the table still present
     // in the registry to resolve `Table1[Col]` into a concrete range.
@@ -853,8 +853,8 @@ pub fn rename_table(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut grids = state.grids.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
 
     // Check if new name already exists
     let upper_new = new_name.to_uppercase();
@@ -1191,8 +1191,8 @@ pub fn set_totals_row_function(
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1264,8 +1264,8 @@ pub fn toggle_totals_row(
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1670,8 +1670,8 @@ pub fn convert_to_range(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut grids = state.grids.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
 
     // Find the table
     let table = match tables
@@ -1725,8 +1725,8 @@ pub fn check_table_auto_expand(
     // persisted table, so the write must still be authorised rather than skipped.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut tables = state.tables.write(&effect).unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
 
     let sheet_tables = tables.get_mut(&active_sheet)?;
 
@@ -2138,8 +2138,8 @@ pub fn set_calculated_column(
             }
         };
 
-        let mut grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grid = state.grid.write(&effect).unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let sheet_names = state.sheet_names.lock().unwrap();
         let table_names = state.table_names.read().unwrap();
         let user_files = user_files_state.files.lock().unwrap();

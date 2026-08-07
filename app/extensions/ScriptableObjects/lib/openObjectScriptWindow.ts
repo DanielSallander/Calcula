@@ -12,6 +12,7 @@ import {
   onEditorReady,
 } from "./crossWindowEvents";
 import type { ScriptDraft } from "./crossWindowEvents";
+import { editorUrlForDocument } from "./editorTarget";
 import { getWorkbookScript } from "@api/workbookScripts";
 
 // ============================================================================
@@ -29,8 +30,15 @@ let editorWindow: WebviewWindow | null = null;
 /**
  * Focus the editor window (creating it if needed) and then hand it whatever it
  * should open. `deliver` runs once the window is guaranteed to be listening.
+ *
+ * `documentId` is the identity of the document being opened. It is stamped into
+ * a NEW window's URL so the editor knows what to select before any event, timer
+ * or backend listing lands — see `editorTarget.ts`.
  */
-async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
+async function withEditorWindow(
+  documentId: string | null,
+  deliver: () => Promise<void>,
+): Promise<void> {
   // If window already exists, focus it and transfer the selection
   if (editorWindow) {
     try {
@@ -43,16 +51,25 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
     }
   }
 
-  // Deliver EXACTLY ONCE, whichever trigger fires first: the editor announcing
-  // its listeners are live (the deterministic path), or a timer fallback (so a
-  // window that never emits READY — an old build, a failed listen — still gets
-  // its payload rather than opening blank).
-  let delivered = false;
+  // Two triggers can deliver: the editor announcing its listeners are live (the
+  // deterministic path), and a timer (so a window that never emits READY — an
+  // old build, a failed listen — still gets its payload rather than opening
+  // blank).
+  //
+  // READY IS DEFINITIVE; the timer is not. A timer firing before the editor has
+  // registered its listeners delivers into a void and the payload is simply
+  // LOST — which is how a slow-booting editor ended up showing whatever sorted
+  // first instead of the macro that was double-clicked. So a timer delivery does
+  // not close the channel: if READY arrives afterwards, the payload is sent
+  // again. Re-delivery is safe by the editor's own contract — opening a document
+  // that is already open SELECTS it and keeps its unsaved edits.
+  let deliveredBy: "ready" | "timer" | null = null;
   let unlistenReady: (() => void) | null = null;
-  const deliverOnce = (): void => {
-    if (delivered) return;
-    delivered = true;
-    if (unlistenReady) {
+  const deliverVia = (via: "ready" | "timer"): void => {
+    if (deliveredBy === "ready") return;
+    if (deliveredBy === via) return;
+    deliveredBy = via;
+    if (via === "ready" && unlistenReady) {
       unlistenReady();
       unlistenReady = null;
     }
@@ -63,14 +80,14 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
   // race ahead of us. A cold editor whose React tree mounts well after any fixed
   // timer used to LOSE the open event and show an empty editor; waiting for its
   // own "ready" removes the guesswork.
-  void onEditorReady(() => deliverOnce()).then((fn) => {
-    if (delivered) fn();
+  void onEditorReady(() => deliverVia("ready")).then((fn) => {
+    if (deliveredBy === "ready") fn();
     else unlistenReady = fn;
   });
 
   // Create new window
   editorWindow = new WebviewWindow(WINDOW_LABEL, {
-    url: "/objectScript.html",
+    url: editorUrlForDocument(documentId),
     title: "Calcula - Object Script Editor",
     width: 1060,
     height: 740,
@@ -82,7 +99,7 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
 
   // Fallback only: a generous window for the editor to boot and announce itself.
   editorWindow.once("tauri://created", () => {
-    setTimeout(() => deliverOnce(), 4000);
+    setTimeout(() => deliverVia("timer"), 4000);
   });
 
   editorWindow.once("tauri://error", (e) => {
@@ -124,7 +141,7 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
  * @param scriptId - Optional script ID to open/navigate to
  */
 export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
-  await withEditorWindow(() => emitOpenWithScript(scriptId));
+  await withEditorWindow(scriptId ?? null, () => emitOpenWithScript(scriptId));
 }
 
 /**
@@ -135,7 +152,8 @@ export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
  * editor, which runs the ordinary compile gate + `save_object_script` path.
  */
 export async function openObjectScriptEditorWithDraft(draft: ScriptDraft): Promise<void> {
-  await withEditorWindow(() => emitOpenWithDraft(draft));
+  // A draft has no stored identity to stamp: it exists only in the payload.
+  await withEditorWindow(null, () => emitOpenWithDraft(draft));
 }
 
 /**
@@ -154,7 +172,7 @@ export async function openMacroInEditor(macroId: string): Promise<void> {
   // caller must throw here — a caller (a menu action) turns that into a message,
   // never a window that opens on nothing.
   const macro = await getWorkbookScript(macroId);
-  await withEditorWindow(() =>
+  await withEditorWindow(macro.id, () =>
     emitOpenWithModuleMacro({
       macroId: macro.id,
       name: macro.name,

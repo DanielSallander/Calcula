@@ -52,7 +52,7 @@ impl Workbook {
         assert!(sheets >= 1);
         let state = crate::create_app_state();
         for i in 1..sheets {
-            state.grids.lock().unwrap().push(engine::Grid::new());
+            state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
             state.sheet_names.lock().unwrap().push(format!("Sheet{}", i + 1));
             state.all_column_widths.lock().unwrap().push(HashMap::new());
             state.all_row_heights.lock().unwrap().push(HashMap::new());
@@ -101,6 +101,27 @@ impl Workbook {
         .unwrap_or_else(|e| panic!("update_cell({},{}) failed: {}", row, col, e))
     }
 
+    /// Several writes committed as ONE undo transaction — the shape a grouped
+    /// bulk run leaves on the stack (`begin_undo_transaction` + N edits +
+    /// `commit_undo_transaction`, which is how the scripting host, the Model
+    /// Editor CLI batch and find-and-replace all group their work).
+    ///
+    /// Deliberately writes cell BY cell, because that is what those callers do:
+    /// each write cascades before the next is recorded, which is precisely how
+    /// a formula cell recorded late in a transaction ends up carrying a
+    /// mid-transaction value.
+    fn bulk(&self, writes: &[(u32, u32, &str)]) {
+        self.state
+            .undo_stack
+            .lock()
+            .unwrap()
+            .begin_transaction("Bulk write");
+        for &(row, col, value) in writes {
+            self.set(row, col, value);
+        }
+        self.state.undo_stack.lock().unwrap().commit_transaction();
+    }
+
     /// The recalculation-relevant half of `set_active_sheet` (which needs a
     /// `State<AppState>` and so cannot be called here): swap the active-sheet
     /// mirror, then rebuild the sheet-less dependency maps for the new sheet.
@@ -108,9 +129,9 @@ impl Workbook {
     /// maps the only surviving description of the sheets you left.
     fn switch_to(&self, index: usize) {
         {
-            let mut grids = self.state.grids.lock().unwrap();
+            let mut grids = self.state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             let mut active = self.state.active_sheet.lock().unwrap();
-            let mut mirror = self.state.grid.lock().unwrap();
+            let mut mirror = self.state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             let old = *active;
             if old == index {
                 return;
@@ -123,7 +144,7 @@ impl Workbook {
     }
 
     fn value(&self, sheet: usize, row: u32, col: u32) -> CellValue {
-        self.state.grids.lock().unwrap()[sheet]
+        self.state.grids.read().unwrap()[sheet]
             .get_cell(row, col)
             .map(|c| c.value.clone())
             .unwrap_or(CellValue::Empty)
@@ -148,8 +169,8 @@ impl Workbook {
     /// `sort_range_recalculates_the_range_it_rewrote` pins from source that it
     /// still calls the recalculation afterwards.
     fn permute_active(&self, moves: &[((u32, u32), (u32, u32))]) {
-        let mut grid = self.state.grid.lock().unwrap();
-        let mut grids = self.state.grids.lock().unwrap();
+        let mut grid = self.state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+        let mut grids = self.state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         let active = *self.state.active_sheet.lock().unwrap();
         // Read every source cell BEFORE writing any destination, so a
         // permutation cannot read a cell another move already overwrote.
@@ -438,7 +459,7 @@ fn a_chain_that_returns_to_the_active_sheet_updates_the_mirror_too() {
     let mirror = wb
         .state
         .grid
-        .lock()
+        .read()
         .unwrap()
         .get_cell(0, 2)
         .map(|c| c.value.clone())
@@ -727,12 +748,12 @@ fn a_sort_that_moved_nothing_recalculates_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// UNDO — what the restore does and does NOT propagate
+// UNDO / REDO — the restore AND the cascade it owes
 // ---------------------------------------------------------------------------
 
 /// Pop one undo transaction and apply it through the REAL restore
 /// (`undo_commands::apply_changes`, which `undo`/`redo` both delegate to).
-fn undo_once(wb: &Workbook) {
+fn undo_once(wb: &Workbook) -> crate::undo_commands::UndoResult {
     let transaction = wb
         .state
         .undo_stack
@@ -750,13 +771,36 @@ fn undo_once(wb: &Workbook) {
         &wb.pane,
         transaction,
         true,
-    );
+    )
+}
+
+/// The mirror image: pop one REDO transaction and apply it through the same
+/// restore with `is_undo = false`, exactly as the `redo` command does.
+fn redo_once(wb: &Workbook) -> crate::undo_commands::UndoResult {
+    let transaction = wb
+        .state
+        .undo_stack
+        .lock()
+        .unwrap()
+        .pop_redo()
+        .expect("nothing on the redo stack");
+    crate::undo_commands::apply_changes(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        &wb.slicer,
+        &wb.filters,
+        &wb.pane,
+        transaction,
+        false,
+    )
 }
 
 #[test]
 fn undo_restores_the_edited_cell() {
-    // The half that works, pinned so the assertion below is unambiguous about
-    // WHICH half is broken.
+    // The half that always worked, kept so a failure below is unambiguous about
+    // WHICH half broke.
     let wb = budget_workbook();
     wb.set(4, 2, "6950");
     assert_eq!(wb.number(0, 4, 2), 6950.0);
@@ -765,25 +809,18 @@ fn undo_restores_the_edited_cell() {
     assert_eq!(wb.number(0, 4, 2), 6450.0, "the edited cell is restored");
 }
 
-/// KNOWN GAP, pinned rather than asserted away — undo is a value RESTORE, not a
-/// recalculation, and only the cells the caller explicitly recorded
-/// (`record_cell_change`) are in the transaction. The dependents that the
-/// forward cascade re-evaluated were never recorded, and `apply_changes`
-/// re-evaluates nothing for a plain cell restore (its only recalc is the
-/// whole-sheet pass for `script_grid_cells` / `sheet_merge_regions` /
-/// `sheet_structural_snapshot` off-sheet restores).
+/// THE DEFECT THIS CLOSES. Undo was a value RESTORE and nothing else: only the
+/// cells a caller passed to `record_cell_change` were in the transaction, the
+/// dependents its forward cascade re-evaluated never were, and `apply_changes`
+/// re-evaluated nothing for a plain cell restore. So undoing an edit left EVERY
+/// dependent at its post-edit value — same-sheet first, which is why this was
+/// its own defect rather than a BUG-0019 variant, and why the cross-sheet fix
+/// neither caused it nor could have cured it.
 ///
-/// So after undoing an edit, EVERY dependent keeps its post-edit value —
-/// same-sheet first, so this is not a cross-sheet defect and BUG-0019's fix
-/// neither caused it nor could have fixed it. It is recorded here because
-/// "undo" is on the list of edit paths a cross-sheet cascade must cover, and
-/// the honest answer is that undo does not cascade at all.
-///
-/// Fixing it means either recording cascade dependents into the transaction or
-/// re-cascading from the restored cells after `apply_changes` — a decision with
-/// undo-size and correctness trade-offs that belongs to whoever owns undo.
+/// It made every forward-path cascade fix only half a guarantee: correct going
+/// forward and stale coming back.
 #[test]
-fn undo_does_not_recalculate_dependents_pinning_a_known_gap() {
+fn undo_recalculates_its_same_sheet_and_cross_sheet_dependents() {
     let wb = budget_workbook();
     wb.set(4, 2, "6950"); // Sheet1!C5
 
@@ -793,29 +830,269 @@ fn undo_does_not_recalculate_dependents_pinning_a_known_gap() {
 
     undo_once(&wb);
 
-    assert_eq!(wb.number(0, 4, 2), 6450.0, "the edited cell IS restored");
-    assert_eq!(
-        wb.number(0, 8, 2),
-        27800.0,
-        "KNOWN GAP: Sheet1!C9 keeps its post-edit total — undo restores \
-         recorded cells only and re-evaluates nothing. Same-sheet, so this is \
-         not a cross-sheet defect. If this assertion starts failing, undo \
-         learned to cascade: delete the pin and assert 27300 instead."
-    );
-    assert_eq!(
-        wb.number(1, 2, 1),
-        27800.0,
-        "KNOWN GAP: and Sheet2!B3 with it"
-    );
-
-    // The load path still disagrees with the restored state, which is the
-    // cheapest possible statement of the gap.
-    wb.recalculate_every_sheet();
+    assert_eq!(wb.number(0, 4, 2), 6450.0, "the edited cell");
     assert_eq!(
         wb.number(0, 8, 2),
         27300.0,
-        "a full recalculation DOES produce the pre-edit total, so the values \
-         above are stale rather than correct-by-another-route"
+        "Sheet1!C9 = SUM(C4:C8) — the SAME-sheet dependent, which was never in \
+         the transaction and used to keep its post-edit total forever"
+    );
+    assert_eq!(
+        wb.number(1, 2, 1),
+        27300.0,
+        "Sheet2!B3 = Sheet1!C9 — one hop across the sheet boundary"
+    );
+    assert_eq!(
+        wb.number(1, 3, 1),
+        0.0,
+        "Sheet2!B4 = B2-B3 — a same-sheet dependent on the NON-active sheet, \
+         which only the shared cross-sheet walk resolves"
+    );
+
+    // THE ORACLE. Whatever the undo leaves must equal what loading the same
+    // document produces; that equality is the whole definition of the bug.
+    wb.recalculate_every_sheet();
+    assert_eq!(wb.number(0, 8, 2), 27300.0);
+    assert_eq!(wb.number(1, 2, 1), 27300.0);
+    assert_eq!(wb.number(1, 3, 1), 0.0);
+}
+
+#[test]
+fn undo_reports_the_recalculated_dependents_to_the_frontend() {
+    // Correct values in `grids` are not enough — exactly as on the edit path
+    // (`the_edit_reports_the_off_sheet_cells_it_changed`), the frontend
+    // repaints and re-caches only what the command RETURNS, and off-sheet
+    // cells must carry their own sheet index.
+    let wb = budget_workbook();
+    wb.set(4, 2, "6950");
+    let result = undo_once(&wb);
+
+    let same_sheet: Vec<(u32, u32)> = result
+        .updated_cells
+        .iter()
+        .filter(|c| c.sheet_index.is_none())
+        .map(|c| (c.row, c.col))
+        .collect();
+    assert!(
+        same_sheet.contains(&(8, 2)),
+        "Sheet1!C9 missing from the undo's reported cells: {:?}",
+        same_sheet
+    );
+
+    let off_sheet: Vec<(u32, u32)> = result
+        .updated_cells
+        .iter()
+        .filter(|c| c.sheet_index == Some(1))
+        .map(|c| (c.row, c.col))
+        .collect();
+    assert!(
+        off_sheet.contains(&(2, 1)),
+        "Sheet2!B3 missing from the undo's reported cells: {:?}",
+        off_sheet
+    );
+    assert!(
+        off_sheet.contains(&(3, 1)),
+        "Sheet2!B4 missing from the undo's reported cells: {:?}",
+        off_sheet
+    );
+}
+
+#[test]
+fn redo_recalculates_dependents_too() {
+    // Redo runs the same `apply_changes` with the inverse transaction, so it
+    // had the identical gap. Fixing one and leaving the other would leave the
+    // workbook wrong on every other keystroke.
+    let wb = budget_workbook();
+    wb.set(4, 2, "6950");
+    undo_once(&wb);
+    assert_eq!(wb.number(0, 8, 2), 27300.0);
+
+    redo_once(&wb);
+
+    assert_eq!(wb.number(0, 4, 2), 6950.0, "the redone edit");
+    assert_eq!(wb.number(0, 8, 2), 27800.0, "Sheet1!C9");
+    assert_eq!(wb.number(1, 2, 1), 27800.0, "Sheet2!B3");
+    assert_eq!(wb.number(1, 3, 1), -500.0, "Sheet2!B4");
+
+    wb.recalculate_every_sheet();
+    assert_eq!(wb.number(0, 8, 2), 27800.0);
+    assert_eq!(wb.number(1, 2, 1), 27800.0);
+    assert_eq!(wb.number(1, 3, 1), -500.0);
+}
+
+#[test]
+fn undo_redo_undo_round_trips_every_dependent() {
+    // The values must be stable across repeated traversals, not merely right
+    // once: `apply_changes` builds the inverse transaction from the values it
+    // is about to overwrite, so an asymmetry between the two directions shows
+    // up on the second lap rather than the first.
+    let wb = budget_workbook();
+    wb.set(4, 2, "6950");
+
+    for lap in 0..2 {
+        undo_once(&wb);
+        assert_eq!(wb.number(0, 8, 2), 27300.0, "lap {} undo: C9", lap);
+        assert_eq!(wb.number(1, 2, 1), 27300.0, "lap {} undo: Sheet2!B3", lap);
+        assert_eq!(wb.number(1, 3, 1), 0.0, "lap {} undo: Sheet2!B4", lap);
+
+        redo_once(&wb);
+        assert_eq!(wb.number(0, 8, 2), 27800.0, "lap {} redo: C9", lap);
+        assert_eq!(wb.number(1, 2, 1), 27800.0, "lap {} redo: Sheet2!B3", lap);
+        assert_eq!(wb.number(1, 3, 1), -500.0, "lap {} redo: Sheet2!B4", lap);
+    }
+}
+
+#[test]
+fn undo_of_a_grouped_bulk_write_restores_the_total_once() {
+    // A bulk op is ONE transaction with many `SetCell` changes. The dependent
+    // they share (`C9 = SUM(C4:C8)`) must be recalculated to the pre-op total
+    // exactly once — not left stale, and not applied per restored cell.
+    let wb = budget_workbook();
+    wb.bulk(&[(3, 2, "13000"), (4, 2, "6950"), (5, 2, "2000")]);
+
+    // 13000 + 6950 + 2000 + 1750 + 5000
+    assert_eq!(wb.number(0, 8, 2), 28700.0);
+    assert_eq!(wb.number(1, 2, 1), 28700.0);
+
+    undo_once(&wb);
+
+    assert_eq!(wb.number(0, 3, 2), 12000.0, "C4");
+    assert_eq!(wb.number(0, 4, 2), 6450.0, "C5");
+    assert_eq!(wb.number(0, 5, 2), 2100.0, "C6");
+    assert_eq!(wb.number(0, 8, 2), 27300.0, "C9 — restored once, from the sum");
+    assert_eq!(wb.number(1, 2, 1), 27300.0, "Sheet2!B3");
+    assert_eq!(wb.number(1, 3, 1), 0.0, "Sheet2!B4");
+
+    wb.recalculate_every_sheet();
+    assert_eq!(wb.number(0, 8, 2), 27300.0);
+    assert_eq!(wb.number(1, 2, 1), 27300.0);
+}
+
+/// THE CASE THAT DECIDED THE DESIGN, and the reason restored cells are
+/// re-derived rather than believed.
+///
+/// A transaction is NOT required to capture its `previous` cells before it
+/// starts writing. This one overwrites `C5` and then `C9` — the SUM itself —
+/// in a single grouped run, and each write cascades before the next is
+/// recorded. So `C9`'s recorded `previous` is `=SUM(C4:C8)` cached at **27800**:
+/// the total after the C5 write, a value that never existed before the
+/// operation began.
+///
+/// Treating the transaction's cells as authoritative therefore restores a
+/// number out of thin air (27800, with `Sheet2!B3` following it) and the undo
+/// disagrees with the document. Re-deriving the restored FORMULA from the
+/// restored precedents — while leaving restored LITERALS exactly as recorded —
+/// is what makes a transaction that carries its own dependent converge with one
+/// that does not.
+#[test]
+fn a_transaction_carrying_its_own_dependent_still_ends_consistent() {
+    let wb = budget_workbook();
+    wb.bulk(&[(4, 2, "6950"), (8, 2, "99999")]);
+
+    assert_eq!(wb.number(0, 8, 2), 99999.0, "the literal overwrote the SUM");
+    assert_eq!(wb.number(1, 2, 1), 99999.0, "and Sheet2!B3 followed it");
+
+    undo_once(&wb);
+
+    assert_eq!(wb.number(0, 4, 2), 6450.0, "C5 — a restored LITERAL, as recorded");
+    assert_eq!(
+        wb.number(0, 8, 2),
+        27300.0,
+        "C9 — the restored FORMULA re-derived from the restored C5. Its \
+         recorded value was 27800, the mid-transaction total; believing it \
+         would restore a state the document never had"
+    );
+    assert_eq!(wb.number(1, 2, 1), 27300.0, "Sheet2!B3");
+    assert_eq!(wb.number(1, 3, 1), 0.0, "Sheet2!B4");
+
+    wb.recalculate_every_sheet();
+    assert_eq!(wb.number(0, 8, 2), 27300.0);
+    assert_eq!(wb.number(1, 2, 1), 27300.0);
+    assert_eq!(wb.number(1, 3, 1), 0.0);
+}
+
+#[test]
+fn undoing_a_formula_edit_restores_its_dependency_edges() {
+    // Restoring the CELL is not enough: the dependency maps are derived from
+    // the formulas in the grid, and `apply_changes` only rebuilt them for a
+    // structural restore. Overwriting a formula with a literal drops its edges
+    // (`update_dependencies` with no refs), and undoing put the formula back
+    // while leaving the edges dropped — so the restored formula was inert for
+    // the rest of the session and the NEXT edit to its precedent silently
+    // failed to reach it. Same class as BUG-0019's fourth cause: a map that
+    // describes the grid stops describing it.
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "5");
+    wb.set(1, 0, "=A1*2");
+    assert_eq!(wb.number(0, 1, 0), 10.0);
+
+    wb.set(1, 0, "999"); // the formula is gone, and so is the edge A1 -> A2
+    undo_once(&wb);
+    assert_eq!(wb.number(0, 1, 0), 10.0, "the formula and its value are back");
+
+    // The edge has to be back too, which only a LATER edit can show.
+    wb.set(0, 0, "7");
+    assert_eq!(
+        wb.number(0, 1, 0),
+        14.0,
+        "A2 = A1*2 was restored but never re-registered as a dependent of A1, \
+         so editing A1 left it stale"
+    );
+}
+
+#[test]
+fn undo_of_a_style_only_change_leaves_values_untouched() {
+    // Style edits record `SetCell` too (styles.rs, named_styles_cmd.rs,
+    // protection.rs), so the cascade seeds must be filtered to cells whose
+    // VALUE or FORMULA moved. This asserts the observable half of that: an
+    // undo whose restored cells are value-identical changes no number and
+    // reports no recalculated dependent.
+    let wb = budget_workbook();
+
+    // A restore that puts back exactly what is already there — the shape a
+    // style-only transaction has as far as the cascade is concerned.
+    wb.set(4, 2, "6450");
+    let result = undo_once(&wb);
+
+    assert_eq!(wb.number(0, 4, 2), 6450.0);
+    assert_eq!(wb.number(0, 8, 2), 27300.0);
+    assert_eq!(wb.number(1, 2, 1), 27300.0);
+    assert!(
+        result
+            .updated_cells
+            .iter()
+            .all(|c| c.sheet_index.is_none() && (c.row, c.col) == (4, 2)),
+        "a value-identical restore seeded the cascade anyway: {:?}",
+        result
+            .updated_cells
+            .iter()
+            .map(|c| (c.sheet_index, c.row, c.col))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn undo_cascades_through_the_one_shared_walk() {
+    // The whole point of `recalc_after_active_sheet_bulk_rewrite` +
+    // `cascade_cross_sheet_dependents` is that there is one walk. BUG-0019 was
+    // four hand-copied ones drifting apart, and undo is the fourth edit path to
+    // need it. This fails if undo grows its own.
+    const UNDO_RS: &str = include_str!("../undo_commands.rs");
+    assert!(
+        UNDO_RS.contains("recalc_after_active_sheet_bulk_rewrite("),
+        "`apply_changes` restores cells without recalculating their dependents \
+         — the values it leaves disagree with loading the same document"
+    );
+    assert!(
+        !UNDO_RS.contains("recalc_order_from_seeds("),
+        "undo_commands.rs re-implements the topological recalc ordering instead \
+         of going through the shared bulk-rewrite recalc"
+    );
+    assert!(
+        !UNDO_RS.contains("cascade_cross_sheet_dependents("),
+        "undo_commands.rs calls the cross-sheet walk directly instead of through \
+         `recalc_after_active_sheet_bulk_rewrite`, which is what supplies it with \
+         a correctly ordered same-sheet pass first"
     );
 }
 

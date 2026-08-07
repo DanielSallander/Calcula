@@ -217,7 +217,79 @@ pub fn get_control_metadata(
     controls.get(&(sheet_index, row, col)).cloned()
 }
 
+/// Hard cap on a single persisted control property value: 64 KiB of characters.
+///
+/// WHY THIS EXISTS AT ALL. `object.setState` is tier `restricted` with NO
+/// capability, and its validator accepts `shape.setProperty` with no key
+/// allowlist and no length bound. The chain — contextShims -> host ->
+/// the Controls extension -> `set_control_property` -> here — therefore let a
+/// restricted, DISTRIBUTED script write an arbitrary multi-megabyte string into
+/// persisted document state. A policy sentence somewhere else does not close
+/// that; a bound at the door does, and this IS the door: every route (UI,
+/// script broker, MCP, `.calp` materialization through `set_control_metadata`)
+/// arrives at one of these two commands.
+///
+/// WHY 64 KiB. The largest legitimate value is inline `onSelect` script source;
+/// 64 KiB is roughly 1,500 lines, far past anything a button handler needs. A
+/// `media:{sha256}` handle is 70 characters. Everything else — text, a colour, a
+/// formula — is tens of bytes. The number is chosen to be uninteresting to
+/// honest callers and decisive against the megabyte case.
+///
+/// A refusal here is loud (the command errors, the promise rejects) rather than
+/// a silent truncation, because a truncated formula or a truncated script is
+/// corrupt data that looks like good data.
+pub const MAX_CONTROL_PROPERTY_CHARS: usize = 64 * 1024;
+
+fn check_property_size(name: &str, value: &str) -> Result<(), String> {
+    if value.chars().count() > MAX_CONTROL_PROPERTY_CHARS {
+        return Err(format!(
+            "Control property '{}' is {} characters; the limit is {}. \
+             Large binary content belongs in the document's media store \
+             (read_media_file), referenced by a media: handle.",
+            name,
+            value.chars().count(),
+            MAX_CONTROL_PROPERTY_CHARS
+        ));
+    }
+    Ok(())
+}
+
+/// May a property write proceed, given the type the control ALREADY has and the
+/// type the caller passed?
+///
+/// * existing, caller says nothing        -> yes (the ordinary property write)
+/// * existing, caller agrees              -> yes
+/// * existing, caller DISAGREES           -> NO. This was the corruption.
+/// * absent, caller names a type          -> yes (creation)
+/// * absent, caller says nothing          -> no, there is nothing to create
+fn check_control_type_transition(
+    existing: Option<&str>,
+    requested: &str,
+) -> Result<(), String> {
+    match existing {
+        Some(current) if !requested.is_empty() && current != requested => Err(format!(
+            "this is a '{}'; a property write cannot change it to a '{}'. \
+             Delete the control and create the new one.",
+            current, requested
+        )),
+        Some(_) => Ok(()),
+        None if requested.is_empty() => Err(
+            "no control exists here, and no controlType was supplied to create one."
+                .to_string(),
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Set a single property on a control. Creates the control metadata if it doesn't exist.
+///
+/// A control's TYPE is immutable after creation. It used to be overwritten with
+/// whatever the caller passed, and that was a live corruption path rather than a
+/// theoretical one: the shape property handler hardcodes `"shape"`, so a single
+/// script property write against an IMAGE control silently converted it to a
+/// shape and it stopped rendering — with the backend reporting success. The type
+/// decides which renderer owns the cell, so it is decided once, at creation, by
+/// the code that builds the control.
 #[tauri::command]
 pub fn set_control_property(
     state: State<AppState>,
@@ -229,32 +301,48 @@ pub fn set_control_property(
     property_name: String,
     value_type: String,
     value: String,
-) -> ControlMetadata {
+) -> Result<ControlMetadata, String> {
+    check_property_size(&property_name, &value)?;
+
+    // Gate, then decide, WITHOUT releasing the lock in between: Tauri dispatches
+    // commands on a thread pool, so a read()-drop-write() pair would leave a
+    // TOCTOU window in which another command changes the control's type between
+    // the check and the write. `lock_pending()` holds the mutex across both, and
+    // `authorize(&effect)` is the only route from it to `&mut` -- so the
+    // gate-before-dirty ORDER is the only order the types accept.
+    let key = (sheet_index, row, col);
+    let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
+    check_control_type_transition(
+        pending.get(&key).map(|m| m.control_type.as_str()),
+        &control_type,
+    )
+    .map_err(|why| format!("Control at sheet {} r{}c{}: {}", sheet_index, row, col, why))?;
+
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
     let effect = DocumentEffect::mutates(&file_state);
-    let mut controls = state.controls.write(&effect).unwrap();
-    let key = (sheet_index, row, col);
+    let mut controls = pending.authorize(&effect);
 
     let metadata = controls.entry(key).or_insert_with(|| ControlMetadata {
         control_type: control_type.clone(),
         properties: HashMap::new(),
     });
 
-    // Update control type if provided (allows changing control type)
-    if !control_type.is_empty() {
-        metadata.control_type = control_type;
-    }
-
     metadata.properties.insert(
         property_name,
         ControlPropertyValue { value_type, value },
     );
 
-    metadata.clone()
+    Ok(metadata.clone())
 }
 
 /// Set the full control metadata for a cell (replaces existing).
+///
+/// This is control CREATION (and wholesale replacement), so it is the one door
+/// that legitimately decides a type. The same per-property size bound applies:
+/// it is the route `.calp` materialization and the floating-control builders
+/// use, so leaving it unbounded would leave the megabyte case open under a
+/// different name.
 #[tauri::command]
 pub fn set_control_metadata(
     state: State<AppState>,
@@ -263,13 +351,20 @@ pub fn set_control_metadata(
     row: u32,
     col: u32,
     metadata: ControlMetadata,
-) -> ControlMetadata {
+) -> Result<ControlMetadata, String> {
+    for (name, prop) in &metadata.properties {
+        check_property_size(name, &prop.value)?;
+    }
+    if metadata.control_type.is_empty() {
+        return Err("A control must have a controlType.".to_string());
+    }
+
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
     let effect = DocumentEffect::mutates(&file_state);
-    let mut controls = state.controls.write(&effect).unwrap();
+    let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
     controls.insert((sheet_index, row, col), metadata.clone());
-    metadata
+    Ok(metadata)
 }
 
 /// Remove control metadata for a specific cell.
@@ -404,6 +499,66 @@ mod persistence_tests {
     }
 
     #[test]
+    fn a_property_write_cannot_change_an_images_control_type_to_a_shape() {
+        // THE DEFECT, restated as a test. The shape property handler hardcodes
+        // controlType "shape", so before this a single script property write
+        // against an IMAGE silently converted it — and the backend reported
+        // success while the picture stopped rendering.
+        let err = check_control_type_transition(Some("image"), "shape").unwrap_err();
+        assert!(err.contains("'image'") && err.contains("'shape'"), "{}", err);
+    }
+
+    #[test]
+    fn an_ordinary_property_write_and_a_creation_both_still_work() {
+        // The fix must not break the two shapes every caller actually uses:
+        // writing a property without restating the type, and creating a control.
+        assert!(check_control_type_transition(Some("image"), "").is_ok());
+        assert!(check_control_type_transition(Some("button"), "button").is_ok());
+        assert!(check_control_type_transition(None, "image").is_ok());
+    }
+
+    #[test]
+    fn a_property_write_against_nothing_with_no_type_is_refused() {
+        // Otherwise it would create a control whose type is the empty string —
+        // one no renderer claims, i.e. an invisible control, which is the exact
+        // failure mode the buttonControlService precedent exists to prevent.
+        assert!(check_control_type_transition(None, "").is_err());
+    }
+
+    #[test]
+    fn a_control_property_over_the_size_cap_is_refused() {
+        // The mechanical half of "a restricted script must not write a
+        // multi-megabyte string into persisted document state". The bound lives
+        // at the command, not in a policy sentence upstream, because every route
+        // — UI, script broker, MCP, .calp materialization — arrives here.
+        let over = "x".repeat(MAX_CONTROL_PROPERTY_CHARS + 1);
+        let err = check_property_size("src", &over).unwrap_err();
+        assert!(err.contains("limit is"), "the refusal must state the limit: {}", err);
+        assert!(
+            err.contains("media"),
+            "and must point at the right home for binary: {}",
+            err
+        );
+
+        // Exactly at the cap is allowed: this is a boundary, not a blanket ban.
+        assert!(check_property_size("src", &"x".repeat(MAX_CONTROL_PROPERTY_CHARS)).is_ok());
+        // A media handle — the shape that replaces the megabyte data URL — is 70
+        // characters, three orders of magnitude inside the cap.
+        let handle = format!("media:{}", "a".repeat(64));
+        assert_eq!(handle.len(), 70);
+        assert!(check_property_size("src", &handle).is_ok());
+    }
+
+    #[test]
+    fn the_cap_counts_characters_not_bytes() {
+        // A multi-byte string must not be refused for being non-ASCII: a caption
+        // in Swedish or Japanese is not a size problem.
+        let text = "å".repeat(MAX_CONTROL_PROPERTY_CHARS);
+        assert!(text.len() > MAX_CONTROL_PROPERTY_CHARS, "precondition: 2 bytes per char");
+        assert!(check_property_size("text", &text).is_ok());
+    }
+
+    #[test]
     fn sanitize_strips_onselect_but_keeps_presentation() {
         // Distributed onSelect is inline script source — it must never
         // materialize from a package (consent-model bypass); the button's
@@ -439,7 +594,7 @@ pub fn resolve_control_properties(
     // Release the controls lock before acquiring grids
     drop(controls);
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     // Build evaluator once for all formulas

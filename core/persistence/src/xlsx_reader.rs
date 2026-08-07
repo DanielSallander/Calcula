@@ -380,6 +380,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         bi_connection_roles: Vec::new(),
         bi_connections: Vec::new(),
         bi_connection_caches: std::collections::HashMap::new(),
+        media: std::collections::HashMap::new(),
         extension_data: Default::default(),
         conditional_formats: Vec::new(),
         data_validations: Vec::new(),

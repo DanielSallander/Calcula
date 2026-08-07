@@ -11,7 +11,7 @@
 //      in the direction of movement to avoid getting stuck.
 // FIX: Preserve entry column/row when exiting merged cells vertically/horizontally.
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection } from "../state/gridActions";
 import { findCtrlArrowTarget, getMergeInfo, getUsedRange, type ArrowDirection } from "../lib/tauri-api";
@@ -90,6 +90,71 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
   const { state, dispatch } = useGridContext();
   const { config, viewport, selection, dimensions } = state;
 
+  // ==========================================================================
+  // Serialised navigation
+  // ==========================================================================
+  //
+  // THE BUG THIS EXISTS FOR. Every keyboard navigation asks the backend for
+  // merge information before it dispatches (`getMergeInfo`), so a keypress does
+  // not change the selection until an IPC round trip completes. The handler,
+  // meanwhile, computed its target from the `selection` captured in the React
+  // render that was current when the key arrived. Two keys inside one round
+  // trip therefore BOTH started from the same cell, and the second one's
+  // dispatch landed last and won — so the first navigation was silently
+  // discarded.
+  //
+  // Ctrl+Home followed quickly by ArrowRight is the case that was reported as
+  // "Ctrl+Home is intermittently swallowed": from A5 it produced B5 (ArrowRight
+  // applied to the PRE-Ctrl+Home selection) instead of B1. Nothing was swallowed
+  // — the navigation ran and was then overwritten.
+  //
+  // The fix is two refs and no timing assumptions:
+  //   * `liveSelectionRef` is the selection keyboard navigation reasons from. It
+  //     is updated the moment a navigation resolves, so the next one chains off
+  //     the real result rather than off a React render that has not happened yet.
+  //   * `navChainRef` serialises the navigations themselves, so a slow one can
+  //     never be overtaken by a later, faster one.
+  //
+  // While the chain is busy the ref is authoritative; when it drains, React
+  // state takes over again so a mouse click or a Name Box jump is picked up.
+  const liveSelectionRef = useRef(selection);
+  const navChainRef = useRef<Promise<void>>(Promise.resolve());
+  const navPendingRef = useRef(0);
+
+  useEffect(() => {
+    if (navPendingRef.current === 0) {
+      liveSelectionRef.current = selection;
+    }
+  }, [selection]);
+
+  /**
+   * Dispatch a new selection AND make it the basis for the next navigation.
+   * Every keyboard navigation must go through this — a bare `dispatch` leaves
+   * the chain reasoning from a stale cell.
+   */
+  const commitSelection = useCallback(
+    (next: NonNullable<typeof selection>) => {
+      liveSelectionRef.current = next;
+      dispatch(setSelection(next));
+    },
+    [dispatch]
+  );
+
+  /**
+   * Queue a navigation behind whatever is already in flight.
+   */
+  const enqueueNavigation = useCallback((run: () => Promise<void>) => {
+    navPendingRef.current += 1;
+    navChainRef.current = navChainRef.current
+      .then(run)
+      .catch((error) => {
+        console.error("[useGridKeyboard] navigation failed:", error);
+      })
+      .finally(() => {
+        navPendingRef.current -= 1;
+      });
+  }, []);
+
   /**
    * Handle navigation to a cell, expanding to merged region if needed.
    * This is an async helper that checks for merges and dispatches the appropriate selection.
@@ -100,75 +165,78 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
    */
   const navigateToCell = useCallback(
     async (row: number, col: number, extend: boolean) => {
+      // The anchor comes from the LIVE selection, not the render-time one: a
+      // navigation queued behind another must extend from where that one landed.
+      const anchor = liveSelectionRef.current;
       try {
         const mergeInfo = await getMergeInfo(row, col);
-        
+
         if (mergeInfo) {
           // Cell is part of a merge - expand selection to cover it
-          if (extend && selection) {
+          if (extend && anchor) {
             // When extending, keep the start anchor and extend to the merge bounds
             // Use the corner of the merge that's furthest from the start
-            const endRow = row >= selection.startRow ? mergeInfo.endRow : mergeInfo.startRow;
-            const endCol = col >= selection.startCol ? mergeInfo.endCol : mergeInfo.startCol;
-            dispatch(setSelection({
-              startRow: selection.startRow,
-              startCol: selection.startCol,
+            const endRow = row >= anchor.startRow ? mergeInfo.endRow : mergeInfo.startRow;
+            const endCol = col >= anchor.startCol ? mergeInfo.endCol : mergeInfo.startCol;
+            commitSelection({
+              startRow: anchor.startRow,
+              startCol: anchor.startCol,
               endRow,
               endCol,
-              type: selection.type,
-            }));
+              type: anchor.type,
+            });
           } else {
             // Not extending - select the entire merged region
             // Keep startRow/startCol at the entry point (row, col)
             // Set endRow/endCol to the opposite corner to cover the full merge
-            dispatch(setSelection({
+            commitSelection({
               startRow: row,
               startCol: col,
               // Set end to opposite corner of merge to ensure full coverage
               endRow: row <= mergeInfo.startRow ? mergeInfo.endRow : mergeInfo.startRow,
               endCol: col <= mergeInfo.startCol ? mergeInfo.endCol : mergeInfo.startCol,
               type: "cells",
-            }));
+            });
           }
         } else {
           // Regular cell - normal selection
-          if (extend && selection) {
-            dispatch(setSelection({
-              startRow: selection.startRow,
-              startCol: selection.startCol,
+          if (extend && anchor) {
+            commitSelection({
+              startRow: anchor.startRow,
+              startCol: anchor.startCol,
               endRow: row,
               endCol: col,
-              type: selection.type,
-            }));
+              type: anchor.type,
+            });
           } else {
-            dispatch(setSelection({
+            commitSelection({
               startRow: row,
               startCol: col,
               endRow: row,
               endCol: col,
               type: "cells",
-            }));
+            });
           }
         }
       } catch (error) {
         console.error('[useGridKeyboard] Failed to get merge info:', error);
         // Fallback to regular selection on error
-        if (extend && selection) {
-          dispatch(setSelection({
-            startRow: selection.startRow,
-            startCol: selection.startCol,
+        if (extend && anchor) {
+          commitSelection({
+            startRow: anchor.startRow,
+            startCol: anchor.startCol,
             endRow: row,
             endCol: col,
-            type: selection.type,
-          }));
+            type: anchor.type,
+          });
         } else {
-          dispatch(setSelection({
+          commitSelection({
             startRow: row,
             startCol: col,
             endRow: row,
             endCol: col,
             type: "cells",
-          }));
+          });
         }
       }
 
@@ -176,7 +244,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         setTimeout(onSelectionChange, 0);
       }
     },
-    [selection, dispatch, onSelectionChange]
+    [commitSelection, onSelectionChange]
   );
 
   /**
@@ -184,6 +252,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
    */
   const handleCtrlArrow = useCallback(
     async (direction: ArrowDirection, extend: boolean) => {
+      const selection = liveSelectionRef.current;
       if (!selection) {
         return;
       }
@@ -266,7 +335,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         console.error("[useGridKeyboard] Ctrl+Arrow navigation failed:", error);
       }
     },
-    [selection, config.totalRows, config.totalCols, dimensions, navigateToCell]
+    [config.totalRows, config.totalCols, dimensions, navigateToCell]
   );
 
   /**
@@ -277,6 +346,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
    */
   const handleArrowNavigation = useCallback(
     async (deltaRow: number, deltaCol: number, extend: boolean) => {
+      const selection = liveSelectionRef.current;
       if (!selection) {
         // No selection - start at origin
         await navigateToCell(0, 0, false);
@@ -346,7 +416,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       // Use merge-aware navigation
       await navigateToCell(targetRow, targetCol, extend);
     },
-    [selection, config.totalRows, config.totalCols, dimensions, navigateToCell]
+    [config.totalRows, config.totalCols, dimensions, navigateToCell]
   );
 
   /**
@@ -507,13 +577,13 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
             event.preventDefault();
             event.stopPropagation();
             eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+A', ['Ctrl']);
-            dispatch(setSelection({
+            commitSelection({
               startRow: 0,
               startCol: 0,
               endRow: config.totalRows - 1,
               endCol: config.totalCols - 1,
               type: "cells",
-            }));
+            });
             if (onSelectionChange) {
               setTimeout(onSelectionChange, 0);
             }
@@ -708,23 +778,27 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         event.stopPropagation();
         eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+End', ['Ctrl', 'Shift']);
 
-        (async () => {
+        enqueueNavigation(async () => {
+          // Anchor on the LIVE selection: this key can be pressed while an
+          // earlier navigation is still resolving.
+          const anchor = liveSelectionRef.current;
+          if (!anchor) return;
           try {
             const usedRange = await getUsedRange();
-            dispatch(setSelection({
-              startRow: selection.startRow,
-              startCol: selection.startCol,
+            commitSelection({
+              startRow: anchor.startRow,
+              startCol: anchor.startCol,
               endRow: usedRange.endRow,
               endCol: usedRange.endCol,
-              type: selection.type,
-            }));
+              type: anchor.type,
+            });
             if (onSelectionChange) {
               setTimeout(onSelectionChange, 0);
             }
           } catch (error) {
             console.error("[useGridKeyboard] Ctrl+Shift+End failed:", error);
           }
-        })();
+        });
 
         fnLog.exit('handleKeyDown', 'extend to last used cell');
         return;
@@ -757,8 +831,11 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           if (shiftKey) mods.push('Shift');
           eventLog.keyboard('Grid', 'handleKeyDown', `Ctrl+${key}`, mods);
           
-          // Call async handler (non-blocking)
-          handleCtrlArrow(direction, shiftKey || extendModeActive);
+          // Queued, not fired-and-forgotten: a Ctrl+Arrow still in flight must
+          // finish and publish its landing cell before the next key computes
+          // from it.
+          const ctrlArrowExtend = shiftKey || extendModeActive;
+          enqueueNavigation(() => handleCtrlArrow(direction, ctrlArrowExtend));
           fnLog.exit('handleKeyDown', 'ctrl+arrow (async)');
           return;
         }
@@ -771,13 +848,13 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           event.preventDefault();
           event.stopPropagation();
           eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+Space', ['Ctrl', 'Shift']);
-          dispatch(setSelection({
+          commitSelection({
             startRow: 0,
             startCol: 0,
             endRow: config.totalRows - 1,
             endCol: config.totalCols - 1,
             type: "cells",
-          }));
+          });
           if (onSelectionChange) {
             setTimeout(onSelectionChange, 0);
           }
@@ -918,14 +995,17 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         const extend = (shiftKey || extendModeActive) && key !== "Tab";
         
         stateLog.action('GridContext', 'dispatch(handleArrowNavigation)', `dRow=${deltaRow}, dCol=${deltaCol}, extend=${extend}`);
-        
-        // Use merge-aware navigation (async)
-        handleArrowNavigation(deltaRow, deltaCol, extend);
-        
+
+        // Use merge-aware navigation, QUEUED behind anything still in flight.
+        // Firing it bare let a fast follow-up key start from the pre-navigation
+        // selection and then overwrite this one's result — the "Ctrl+Home did
+        // not land" report.
+        enqueueNavigation(() => handleArrowNavigation(deltaRow, deltaCol, extend));
+
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation, enqueueNavigation, commitSelection]
   );
 
   /**

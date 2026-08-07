@@ -307,6 +307,11 @@ describe("ui method class", () => {
       "api.workbookSave",
       "api.workbookSaveAs",
       "cap.fileExportText",
+      // The MEDIA arm: the same native picker, so the same class and the same
+      // person-length deadline. It is the NARROWEST of the family — the host
+      // reads, validates and stores the file, and the caller gets a handle
+      // rather than any of its content.
+      "cap.fileImportMedia",
       "cap.fileImportText",
       // G4: the PDF export opens the same picker cap.fileExportText opens, so
       // it is the same class and carries the same person-length deadline. The

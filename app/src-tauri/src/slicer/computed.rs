@@ -419,7 +419,7 @@ pub fn add_slicer_computed_property(
     };
 
     // Evaluate formula
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let row_heights = state.row_heights.lock().unwrap();
     let column_widths = state.column_widths.lock().unwrap();
@@ -590,7 +590,7 @@ pub fn update_slicer_computed_property(
     }
 
     // Re-evaluate
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let row_heights = state.row_heights.lock().unwrap();
     let column_widths = state.column_widths.lock().unwrap();

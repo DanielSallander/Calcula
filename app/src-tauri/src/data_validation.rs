@@ -741,7 +741,7 @@ pub fn validate_cell(
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     // Get the validation rule for this cell
@@ -826,7 +826,7 @@ pub fn get_invalid_cells(
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let mut invalid_cells = Vec::new();
@@ -882,7 +882,7 @@ pub fn get_validation_list_values(
 ) -> Option<Vec<String>> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
@@ -935,7 +935,7 @@ pub fn validate_pending_value(
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     // Get the validation rule for this cell

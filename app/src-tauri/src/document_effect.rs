@@ -101,6 +101,44 @@ fn announce_globally(is_dirty: bool) {
 // DirtyFlag -- the flag that announces its own transitions
 // ============================================================================
 
+/// Permission to write `FileState`'s dirty flag.
+///
+/// THE POINT. `FileState::is_modified` is PRIVATE, and the only method that can
+/// change it (`FileState::set_dirty`) demands one of these. The field here is a
+/// private unit, there is no public constructor, no `Default` and no `Clone` --
+/// so a value of this type can only come into existence inside THIS module.
+/// "`DocumentEffect` is the sole writer of the dirty flag" is therefore a fact
+/// about the type system rather than a convention, and the audit is
+///     rg "DirtyWrite" app/src-tauri/src
+/// which returns this file and nothing else.
+///
+/// Rust has no `friend`, so this is the standard stand-in: a capability token
+/// whose constructor is module-private. It is the same move `TransientScope`
+/// makes for the transient exemption, one level down.
+pub struct DirtyWrite(());
+
+impl DirtyWrite {
+    /// The only constructor, private to this module.
+    fn new() -> Self {
+        DirtyWrite(())
+    }
+}
+
+/// The in-memory document now equals what is on disk: it was just saved, just
+/// opened, or is a fresh blank. CLEARS the dirty flag.
+///
+/// WHY THIS IS A FUNCTION AND NOT A `DocumentEffect` ARM. The three arms of
+/// `DocumentEffect` all answer "what does this WRITE do to the saved document?".
+/// Clearing the flag is not a write at all -- it is the save path telling the
+/// flag that the question has been settled. Giving it its own name keeps the arms
+/// meaning one thing, and keeps every mutation of the flag inside this module.
+///
+/// The clean transition is announced exactly like the dirty one, which is what
+/// makes the title-bar asterisk disappear after a backend-driven save.
+pub fn mark_saved(file_state: &FileState) {
+    file_state.set_dirty(DirtyWrite::new(), false);
+}
+
 /// Observer invoked with the NEW value whenever the flag actually changes.
 type DirtyObserver = Box<dyn Fn(bool) + Send + Sync>;
 
@@ -397,9 +435,7 @@ impl DocumentEffect {
     /// construct it inside the branch that changes something -- see
     /// `commands::data::update_cells_batch`, which already works this way.
     pub fn mutates(file_state: &FileState) -> Self {
-        if let Ok(mut modified) = file_state.is_modified.lock() {
-            *modified = true;
-        }
+        file_state.set_dirty(DirtyWrite::new(), true);
         DocumentEffect { kind: EffectKind::Mutates }
     }
 
@@ -489,6 +525,43 @@ impl<T> Persisted<T> {
         *guard = value;
         Ok(())
     }
+
+    /// Take the lock NOW and decide about dirtiness LATER, in the same critical
+    /// section. Reads through the returned guard immediately; call
+    /// [`PendingGuard::authorize`] with a [`DocumentEffect`] to obtain `&mut`.
+    ///
+    /// WHY THIS EXISTS -- AND WHY IT IS NOT A LOOPHOLE
+    /// ----------------------------------------------
+    /// [`DocumentEffect::mutates`] dirties AT CONSTRUCTION, so it must be built
+    /// *after* every gate that can still refuse -- otherwise a rejected command
+    /// leaves a spuriously dirty document. But the gates themselves READ the store
+    /// they are about to guard: sheet protection resolves a cell's lock state
+    /// through the grid and the style tiers, so it needs `&Grid` before anything is
+    /// decided. Every gated command therefore has the shape
+    ///
+    ///     lock the grid  ->  run the gates (may return Err)  ->  decide  ->  mutate
+    ///
+    /// and `write(&effect)` cannot express its first step, because the effect does
+    /// not exist yet.
+    ///
+    /// The obvious workaround -- `read()` for the gate, drop it, then
+    /// `write(&effect)` -- is WRONG, and that is the whole argument for this method.
+    /// Tauri dispatches commands on a thread pool, so releasing the lock between the
+    /// gate and the mutation opens a TOCTOU window in every gated command: the
+    /// protection check passes, the lock drops, a concurrent writer changes the
+    /// grid, and the mutation lands on state nobody checked. Today those commands
+    /// hold ONE lock across gate and commit; that atomicity is a property worth
+    /// keeping, so the guard bends instead of the callers.
+    ///
+    /// Nothing is weakened. `PendingGuard` has `Deref` and no `DerefMut`, exactly
+    /// like [`ReadGuard`] -- holding one without deciding lets you READ, and the
+    /// only route from it to `&mut T` still runs through a `DocumentEffect`. What
+    /// this buys is that the gate-then-decide ORDER, which until now was a comment
+    /// on `DocumentEffect::mutates` asking authors to remember, is the only order
+    /// the types will accept.
+    pub fn lock_pending(&self) -> Result<PendingGuard<'_, T>, LockPoisoned> {
+        self.inner.lock().map(PendingGuard).map_err(|_| LockPoisoned)
+    }
 }
 
 impl<T: Default> Default for Persisted<T> {
@@ -505,6 +578,29 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
+    }
+}
+
+/// A held lock whose dirty decision has not been made yet. Derefs to `&T` only;
+/// [`PendingGuard::authorize`] is the sole route to `&mut T`. See
+/// [`Persisted::lock_pending`].
+#[must_use = "a PendingGuard grants only read access; call .authorize(&effect) to mutate"]
+pub struct PendingGuard<'a, T>(MutexGuard<'a, T>);
+
+impl<'a, T> Deref for PendingGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<'a, T> PendingGuard<'a, T> {
+    /// Convert this held lock into a mutable one. Consumes `self`, so the
+    /// read-only view is gone rather than aliased, and the underlying mutex is
+    /// never released in between -- the gate and the mutation stay in one
+    /// critical section.
+    pub fn authorize(self, _effect: &DocumentEffect) -> WriteGuard<'a, T> {
+        WriteGuard(self.0)
     }
 }
 
@@ -529,7 +625,7 @@ mod tests {
     use super::*;
 
     fn is_dirty(fs: &FileState) -> bool {
-        *fs.is_modified.lock().unwrap()
+        fs.is_dirty()
     }
 
     #[test]
@@ -596,7 +692,7 @@ mod tests {
     #[test]
     fn dirty_flag_announces_the_clean_to_dirty_transition() {
         let fs = FileState::default();
-        let log = recorder(&fs.is_modified);
+        let log = recorder(fs.dirty_flag());
 
         let _effect = DocumentEffect::mutates(&fs);
 
@@ -608,7 +704,7 @@ mod tests {
     #[test]
     fn dirty_flag_announces_only_transitions_not_every_mutation() {
         let fs = FileState::default();
-        let log = recorder(&fs.is_modified);
+        let log = recorder(fs.dirty_flag());
 
         // A bulk operation: many mutating writes over one already-dirty document.
         for _ in 0..500 {
@@ -623,11 +719,11 @@ mod tests {
     #[test]
     fn dirty_flag_announces_the_dirty_to_clean_direction_too() {
         let fs = FileState::default();
-        let log = recorder(&fs.is_modified);
+        let log = recorder(fs.dirty_flag());
 
         let _effect = DocumentEffect::mutates(&fs);
         // What save / new_file / open_file do as their last act.
-        *fs.is_modified.lock().unwrap() = false;
+        mark_saved(&fs);
 
         // Without the second announcement the asterisk would never CLEAR after a
         // backend-driven save.
@@ -638,45 +734,46 @@ mod tests {
     #[test]
     fn dirty_flag_reads_announce_nothing() {
         let fs = FileState::default();
-        let log = recorder(&fs.is_modified);
+        let log = recorder(fs.dirty_flag());
 
         // `is_file_modified` is called by the frontend from INSIDE the listener
         // this event feeds. If a read announced, that would be an infinite loop.
         for _ in 0..10 {
-            let _ = *fs.is_modified.lock().unwrap();
+            let _ = fs.is_dirty();
         }
         assert_eq!(seen(&log), Vec::<bool>::new());
 
         let _effect = DocumentEffect::mutates(&fs);
         for _ in 0..10 {
-            let _ = *fs.is_modified.lock().unwrap();
+            let _ = fs.is_dirty();
         }
         assert_eq!(seen(&log), vec![true]);
     }
 
     #[test]
-    fn dirty_flag_announces_for_the_legacy_and_direct_write_paths_too() {
-        // `DocumentEffect::mutates` is the sanctioned path, but ~60 sites still
-        // write the flag directly and 15 more go through `mark_workbook_modified`.
-        // The announcement is on the FLAG precisely so those are covered without
-        // each one having to remember.
+    fn dirty_flag_announces_both_of_the_two_remaining_write_paths() {
+        // There are exactly two writers left in the crate, and both are in this
+        // module: `DocumentEffect::mutates` and `mark_saved`. The ~60 direct
+        // `*is_modified.lock() = true` sites and the 15
+        // `mark_workbook_modified` calls that this test used to cover are gone --
+        // `FileState::is_modified` is private and `FileState::set_dirty` demands
+        // a `DirtyWrite`, which only this module can mint.
         let fs = FileState::default();
-        let log = recorder(&fs.is_modified);
-        crate::persistence::mark_workbook_modified(&fs);
+        let log = recorder(fs.dirty_flag());
+        let _effect = DocumentEffect::mutates(&fs);
         assert_eq!(seen(&log), vec![true]);
 
         let fs2 = FileState::default();
-        let log2 = recorder(&fs2.is_modified);
-        if let Ok(mut modified) = fs2.is_modified.lock() {
-            *modified = true;
-        }
-        assert_eq!(seen(&log2), vec![true]);
+        let log2 = recorder(fs2.dirty_flag());
+        let _effect2 = DocumentEffect::mutates(&fs2);
+        mark_saved(&fs2);
+        assert_eq!(seen(&log2), vec![true, false]);
     }
 
     #[test]
     fn deliberately_clean_and_transient_announce_nothing() {
         let fs = FileState::default();
-        let log = recorder(&fs.is_modified);
+        let log = recorder(fs.dirty_flag());
 
         let _clean = DocumentEffect::deliberately_clean(CleanReason::Navigation);
         let mut registry: HashMap<String, Vec<u8>> = HashMap::new();
@@ -707,5 +804,146 @@ mod tests {
         }
         assert_eq!(*store.read().unwrap(), vec![1, 2]);
         assert!(is_dirty(&fs));
+    }
+
+    // ------------------------------------------------------------------
+    // The sole-writer guarantee
+    // ------------------------------------------------------------------
+
+    /// Every `.rs` under `src/`, so the scans below cannot be fooled by a new file.
+    fn crate_sources() -> Vec<(std::path::PathBuf, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        out.push((path, text));
+                    }
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        walk(&root, &mut out);
+        assert!(out.len() > 50, "source walk found only {} files", out.len());
+        out
+    }
+
+    /// Lines that are not comments (the flag is discussed in prose all over the
+    /// crate; only executable references matter here).
+    fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+        text.lines().enumerate().filter(|(_, l)| {
+            let t = l.trim_start();
+            !t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
+        })
+    }
+
+    /// THE GUARANTEE THIS WHOLE MODULE EXISTS FOR.
+    ///
+    /// `FileState::is_modified` is private, so the compiler already rejects an
+    /// outside writer -- that is the real enforcement and it cannot be evaded.
+    /// This test pins the SHAPE of the remedy rather than re-proving the
+    /// compiler: it fails if someone re-widens the field, or adds a third way to
+    /// reach `set_dirty` in a module that is not this one.
+    ///
+    /// Without it, `pub is_modified` could come back in a hurry-up diff and
+    /// every direct write in the crate would compile again in silence -- which
+    /// is precisely the state the dirty-flag census started from.
+    #[test]
+    fn is_modified_has_no_writer_outside_document_effect() {
+        let mut offenders: Vec<String> = Vec::new();
+        for (path, text) in crate_sources() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let is_flag_owner = name == "document_effect.rs" || name == "persistence.rs";
+            for (i, line) in code_lines(&text) {
+                // The field itself, reached from anywhere outside its own module.
+                if line.contains(".is_modified") && !is_flag_owner {
+                    offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                }
+                // The private setter, called from outside this module.
+                if line.contains("set_dirty(") && name != "document_effect.rs" && name != "persistence.rs" {
+                    offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                }
+                // The capability token, minted anywhere but here.
+                if line.contains("DirtyWrite") && name != "document_effect.rs" && name != "persistence.rs" {
+                    offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "`FileState::is_modified` must have exactly one writing module \
+             (`document_effect`). These reach it from elsewhere:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The field must stay PRIVATE. A `pub` here is what would silently re-open
+    /// every direct-write path, so it is asserted on the source text: nothing
+    /// else can notice the difference until a bug report arrives.
+    #[test]
+    fn the_dirty_flag_field_is_private() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence.rs"),
+        )
+        .expect("persistence.rs");
+        let decl = code_lines(&src)
+            .find(|(_, l)| l.trim_start().starts_with("is_modified:") || l.contains("pub is_modified"))
+            .map(|(_, l)| l.trim().to_string())
+            .expect("FileState must still declare an is_modified field");
+        assert_eq!(
+            decl, "is_modified: crate::document_effect::DirtyFlag,",
+            "the dirty flag must stay private -- `pub` re-opens every direct write \
+             the census closed"
+        );
+    }
+
+    /// `DirtyWrite` is minted in exactly the two places that are allowed to move
+    /// the flag: `DocumentEffect::mutates` (set) and `mark_saved` (clear). A
+    /// third `DirtyWrite::new()` is a new writer and must be argued for.
+    #[test]
+    fn the_capability_token_is_minted_exactly_twice() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/document_effect.rs"),
+        )
+        .expect("document_effect.rs");
+        // Split so this line does not contain the literal it is searching for --
+        // the first version of this test counted itself and reported three.
+        let needle = concat!("set_dirty(DirtyWrite", "::new()");
+        let mints: Vec<&str> = code_lines(&src)
+            .map(|(_, l)| l.trim())
+            .filter(|l| l.contains(needle))
+            .collect();
+        assert_eq!(
+            mints.len(),
+            2,
+            "expected exactly two DirtyWrite mints (mutates + mark_saved), found: {:#?}",
+            mints
+        );
+    }
+
+    /// The grid is the document. If either half of the pair goes back to a bare
+    /// `Mutex`, `.lock()` returns a `MutexGuard` and every one of the 391 call
+    /// sites this refactor gated can mutate undecided again -- with no error
+    /// anywhere, which is exactly how the gap survived the first census.
+    #[test]
+    fn the_grid_stores_are_persisted_not_bare_mutexes() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("lib.rs");
+        for decl in [
+            "pub grids: document_effect::Persisted<Vec<Grid>>,",
+            "pub grid: document_effect::Persisted<Grid>,",
+        ] {
+            assert!(
+                code_lines(&src).any(|(_, l)| l.trim() == decl),
+                "AppState must declare `{}` -- a bare Mutex here ungates every grid write",
+                decl
+            );
+        }
     }
 }

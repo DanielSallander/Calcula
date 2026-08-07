@@ -66,7 +66,7 @@ pub fn build_control_values(
     };
     // 4. Only now touch grids (brief lock, dropped at block end).
     let on_grid_entries = {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         on_grid_named_values(&storage, &grids)
     };
     Arc::new(collect_control_values(
@@ -434,14 +434,23 @@ pub(crate) fn recalc_control_dependents_core(
     let changed_upper: Option<HashSet<String>> = changed_names
         .map(|names| names.iter().map(|n| n.trim().to_uppercase()).collect());
 
+    // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
+    // themselves persisted (formulas, literals, locale, control values), so it
+    // must not dirty on its own account: the ENTRY command that made those
+    // values stale already owns the flag, and dirtying here would make a
+    // workbook holding NOW()/RAND() prompt to save merely for being looked at.
+    // See CleanReason::RecalcCompanion.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
     // Pre-pass: sync the active-sheet mirror into grids (BUG-0016 discipline —
     // the other-sheet pass below evaluates THROUGH grids, and other sheets may
     // reference active-sheet cells) and detect the non-active sheets that
     // contain GET.CONTROLVALUE formulas. Name-agnostic prefilter, like the
     // active-sheet scan's string prefilter (conservative).
     let (control_sheets, prepass_active_sheet) = {
-        let grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let grid = state.grid.read().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.lock().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();
@@ -532,8 +541,8 @@ pub(crate) fn recalc_control_dependents_core(
     let updated_cells = {
         let user_files = user_files_state.files.lock().unwrap();
         let sheet_names = state.sheet_names.lock().unwrap();
-        let mut grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grid = state.grid.write(&effect).unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.lock().unwrap();
 
         // The active-sheet mirror (state.grid) is the source of truth; grids[i]

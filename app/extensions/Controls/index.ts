@@ -17,8 +17,14 @@ import {
   IconShapes,
   IconImage,
   IconDesignMode,
-  registerControlStoreService,
 } from "@api";
+import { registerControlsProvider } from "@api/controlsService";
+import type { ControlPropertyValue } from "./lib/types";
+import type {
+  CreateShapeControlRequest,
+  ShapeCatalogEntry,
+  ShapeControlHandle,
+} from "@api/controlsService";
 import {
   registerButtonControlProvider,
   MACRO_REF_PROPERTY,
@@ -87,9 +93,28 @@ import {
   hitTestFloatingImage,
   invalidateImageCache,
   invalidateAllImageCaches,
+  forgetImageControl,
+  releaseAllImageMedia,
+  getMediaNaturalSize,
 } from "./Image/imageRenderer";
+import { registerPictureControlProvider } from "@api/pictureControlService";
+import type {
+  PictureControlAnchor,
+  PictureControlHandle,
+  CreatePictureControlRequest,
+} from "@api/pictureControlService";
+import {
+  pickValidatedImage,
+  initialImageSize,
+  pictureLayoutSize,
+} from "./Image/imageIngress";
+import { isMediaRef } from "./Image/mediaRefs";
+import {
+  collectUnmigratedInlineImages,
+  legacyInlineImageWarning,
+} from "./Image/legacyInlineImages";
 import React from "react";
-import { getShapeDefinition } from "./Shape/shapeCatalog";
+import { getShapeDefinition, getShapeCategories } from "./Shape/shapeCatalog";
 import { ShapeGalleryPanel } from "./Shape/ShapeGalleryOverlay";
 import {
   selectFloatingControl,
@@ -110,6 +135,7 @@ import {
   syncFloatingControlRegions,
   resetFloatingStore,
   makeFloatingControlId,
+  parseFloatingControlId,
   getGroupForControl,
   getGroupMembers,
   groupControls,
@@ -396,23 +422,34 @@ function activate(context: ExtensionContext): void {
 
   console.log("[Controls] Activating...");
 
-  // Expose the cell-anchored control inventory (IoC) so the script host's
-  // api.listObjects("shape") can enumerate buttons/checkboxes/shapes without
-  // importing Controls internals. Identity + anchor only — property VALUES may
-  // be formulas over the user's data and are read through their own paths.
-  registerControlStoreService({
-    async listControls(sheetIndex: number) {
-      const entries = await getAllControls(sheetIndex);
-      return entries.map((e) => ({
-        sheetIndex: e.sheetIndex,
-        row: e.row,
-        col: e.col,
-        controlType: e.metadata.controlType,
-        name: e.metadata.properties?.name?.value,
-      }));
-    },
-  });
-  cleanupFns.push(() => registerControlStoreService(null));
+  // Expose the whole cell-anchored control surface (IoC) through ONE seam:
+  // enumeration (so the script host's api.listObjects("shape") can list
+  // buttons/shapes/pictures without importing Controls internals), the shape
+  // CATALOG (so 123 shapes are discoverable instead of an unwritable enum in a
+  // consent string), CREATE and DELETE. Enumeration is identity + anchor only —
+  // property VALUES may be formulas over the user's data and are read through
+  // their own paths.
+  //
+  // Create and delete live here rather than in the caller for the reason the
+  // button seam already exists: the Macro Recorder hand-rolled control metadata
+  // once, got a successful backend response, and drew an INVISIBLE button.
+  cleanupFns.push(
+    registerControlsProvider({
+      listShapeCatalog: listShapeCatalogEntries,
+      createShape: createShapeControlAt,
+      deleteControl: deleteControlByInstanceId,
+      async listControls(sheetIndex: number) {
+        const entries = await getAllControls(sheetIndex);
+        return entries.map((e) => ({
+          sheetIndex: e.sheetIndex,
+          row: e.row,
+          col: e.col,
+          controlType: e.metadata.controlType,
+          name: e.metadata.properties?.name?.value,
+        }));
+      },
+    }),
+  );
 
   // Expose button CREATION (IoC). Placing a real, visible button is three
   // coordinated writes plus a geometry calculation, all of which live here; the
@@ -424,6 +461,17 @@ function activate(context: ExtensionContext): void {
     registerButtonControlProvider({
       createButton: createButtonControlAt,
       removeButton: removeButtonControlAt,
+    }),
+  );
+
+  // 0c. Register the PICTURE driver on the same seam, for the same reason: a
+  //     caller that writes control metadata itself gets a successful backend
+  //     response and no picture on the grid. `api.createPicture` rejects with
+  //     "the Controls extension is not loaded" until this runs.
+  cleanupFns.push(
+    registerPictureControlProvider({
+      createPicture: createPictureControlAt,
+      removePicture: removePictureControlAt,
     }),
   );
 
@@ -862,8 +910,107 @@ function activate(context: ExtensionContext): void {
 
   // -----------------------------------------------------------------------
   // 19. Load existing floating controls on startup
+  //
+  // This is the FIRST link of the reload queue declared below rather than a
+  // free-floating call. Activation and the two reloaders must share one chain:
+  // a workbook restored at startup can emit AFTER_OPEN / SHEET_CHANGED while
+  // this first read is still in flight, and an unserialised startup load would
+  // then race the reload that supersedes it. Chaining makes the last write win
+  // by ORDER instead of by whichever IPC round trip returned first.
   // -----------------------------------------------------------------------
-  loadFloatingControls();
+  let documentReloadQueue: Promise<void> = loadFloatingControls();
+
+  // -----------------------------------------------------------------------
+  // 19b. Re-load them when the DOCUMENT changes underneath us.
+  //
+  // Until now this extension read controls exactly once, at activation, so
+  // opening a second workbook in the same session left the grid holding the
+  // first one's controls (CellTypes and CellBehaviors already reload on
+  // AFTER_OPEN; this one did not). Embedded media makes that worse than stale
+  // geometry: the host's legacy-image migration runs during the load, and a
+  // `media:` handle belonging to the workbook that just closed resolves against
+  // the newly opened document's media store and correctly fails. So the whole
+  // frontend picture cache is released here, not merely invalidated.
+  //
+  // AFTER_NEW for the same reason with a simpler ending: the new document has no
+  // controls, so the reload finds none and the previous document's stop being
+  // painted.
+  // -----------------------------------------------------------------------
+  // ONE queue for both reloaders. `announceBackendStateReplaced()` (core's
+  // file-api) emits SHEET_CHANGED as well as AFTER_OPEN / AFTER_NEW — correctly,
+  // because the sheet list really is replaced — so opening a workbook fires both
+  // handlers. Serialising them makes the outcome deterministic instead of
+  // whichever await resolved first: the document reload runs to completion, and
+  // the sheet handler then finds `loadedSheetIndex` already correct and does
+  // nothing. (The queue itself is declared at step 19, seeded with the startup
+  // load, so activation is the first link rather than an unserialised racer.)
+
+  const reloadForNewDocument = () => {
+    documentReloadQueue = documentReloadQueue.then(async () => {
+      resetFloatingStore();
+      loadedSheetIndex = null;
+      deselectFloatingControl();
+      releaseAllImageMedia();
+      reportedLegacyInlineImages.clear();
+      invalidateAllFloatingButtonCaches();
+      invalidateAllShapeCaches();
+      await loadFloatingControls();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }).catch((err) => {
+      console.error("[Controls] Document-change reload failed:", err);
+    });
+  };
+  for (const evt of [AppEvents.AFTER_OPEN, AppEvents.AFTER_NEW] as const) {
+    cleanupFns.push(context.events.on(evt, reloadForNewDocument));
+  }
+
+  // -----------------------------------------------------------------------
+  // 19c. Re-load them when the ACTIVE SHEET changes.
+  //
+  // `loadFloatingControls` reads ONE sheet — the active one — and the floating
+  // store had no other loader, so until now the store held whatever sheet
+  // happened to be active at activation, forever. Two symptoms, both silent:
+  //
+  //   * the OTHER sheet's controls never appeared, because nothing ever read
+  //     them; and
+  //   * the FIRST sheet's controls kept painting on top of every other sheet,
+  //     because `syncFloatingControlRegions` is sheet-BLIND — it publishes an
+  //     overlay region for every entry in the store, with no sheet filter — and
+  //     a click on one of those phantoms edited a control on a sheet the user
+  //     was not looking at.
+  //
+  // So the store holds exactly one sheet at a time, and this is where it is
+  // swapped. `removeFloatingControlsForSheet` (not `resetFloatingStore`) because
+  // it also unpicks group membership for the departing sheet, and the sheet we
+  // loaded is tracked rather than guessed — SHEET_CHANGED carries the new index,
+  // not the old one.
+  //
+  // Bitmap caches are INVALIDATED, never released: the media blob URLs are
+  // keyed by content hash and the controls will very likely be back the moment
+  // the user switches sheets again, so revoking them would re-pull every
+  // picture's bytes on every tab click.
+  // -----------------------------------------------------------------------
+  const reloadForSheetChange = () => {
+    documentReloadQueue = documentReloadQueue.then(async () => {
+      const nextSheet = await getActiveSheet();
+      if (nextSheet === loadedSheetIndex) return;
+
+      if (loadedSheetIndex !== null) removeFloatingControlsForSheet(loadedSheetIndex);
+      deselectFloatingControl();
+      const { closeTaskPane: closeTP } = await import("../../src/api/ui");
+      closeTP(PROPERTIES_PANE_ID);
+      lastPropertiesCell = null;
+      invalidateAllFloatingButtonCaches();
+      invalidateAllShapeCaches();
+      invalidateAllImageCaches();
+
+      await loadFloatingControls();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }).catch((err) => {
+      console.error("[Controls] Sheet-change reload failed:", err);
+    });
+  };
+  cleanupFns.push(context.events.on(AppEvents.SHEET_CHANGED, reloadForSheetChange));
 
   // -----------------------------------------------------------------------
   // 20. Register context menu items for floating controls
@@ -1353,6 +1500,123 @@ async function removeButtonControlAt(anchor: ButtonControlAnchor): Promise<void>
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
+// ============================================================================
+// Picture Control Provider (@api/pictureControlService)
+// ============================================================================
+
+/**
+ * Place a picture the document ALREADY HOLDS, for any caller that asks through
+ * the feature-neutral seam (today: `api.createPicture` from the script broker).
+ *
+ * The one image argument is a `media:` handle, and this is a PLACEMENT path, not
+ * an ingress: there is no parameter here that could carry bytes, a path or a
+ * URL. Bytes enter a document through exactly one door — the user picking a file
+ * in a native dialog, read and validated by the host — and this is not it.
+ *
+ * Two refusals, both deliberate:
+ *
+ *   * A `src` that is not a well-formed handle is a programming error, not a
+ *     value to store. Storing it would leave the CSP as the only thing between a
+ *     control property and a tracking beacon.
+ *   * A handle this document cannot resolve produces NO control. A picture that
+ *     can never paint is worse than an error: it is a permanent broken-image box
+ *     the user has to hunt down and delete, created by an operation that
+ *     reported success.
+ */
+async function createPictureControlAt(
+  request: CreatePictureControlRequest,
+): Promise<PictureControlHandle> {
+  const { sheetIndex, row, col, mediaRef } = request;
+
+  if (!isMediaRef(mediaRef)) {
+    throw new Error(
+      `A picture's source must be a media handle ("media:" + 64 hex characters), not ${JSON.stringify(mediaRef)}. Import the image first — the handle comes back from the picker.`,
+    );
+  }
+
+  // Ask the renderer, which resolves through the same single-flight cache the
+  // paint uses: this costs the pull that was about to happen anyway.
+  const natural = await getMediaNaturalSize(mediaRef);
+  if (!natural) {
+    throw new Error(
+      `This workbook holds no image ${mediaRef}. A picture can only be placed for media already stored in the document.`,
+    );
+  }
+
+  const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
+  const gridState = getGridStateSnapshot();
+  const defaultCellWidth = gridState?.config?.defaultCellWidth ?? 100;
+  const defaultCellHeight = gridState?.config?.defaultCellHeight ?? 24;
+  const columnWidths = gridState?.dimensions?.columnWidths ?? new Map();
+  const rowHeights = gridState?.dimensions?.rowHeights ?? new Map();
+
+  let cellX = 0;
+  for (let c = 0; c < col; c++) {
+    cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
+  }
+  let cellY = 0;
+  for (let r = 0; r < row; r++) {
+    cellY += getRowHeight(r, defaultCellHeight, rowHeights);
+  }
+
+  // A decode failure (natural size 0) after the bytes RESOLVED is not a reason
+  // to refuse: the host already proved the header, so the picture exists and
+  // will paint. `pictureLayoutSize` lays it out at the standard box instead.
+  const { width, height } = pictureLayoutSize(request, natural);
+
+  await setControlMetadata(sheetIndex, row, col, {
+    controlType: "image",
+    properties: {
+      src: { valueType: "static", value: mediaRef },
+      opacity: { valueType: "static", value: "1" },
+      rotation: { valueType: "static", value: "0" },
+      // Explicit unpinned — see the floating-button creation above.
+      pinToGrid: { valueType: "static", value: "false" },
+      x: { valueType: "static", value: String(cellX) },
+      y: { valueType: "static", value: String(cellY) },
+      width: { valueType: "static", value: String(width) },
+      height: { valueType: "static", value: String(height) },
+      // Only written when asked for: `listControls` reads this property for the
+      // object list, and an empty one would name every picture "".
+      ...(request.name ? { name: { valueType: "static", value: request.name } } : {}),
+    },
+  });
+
+  const controlId = makeFloatingControlId(sheetIndex, row, col);
+  addFloatingControl({
+    id: controlId,
+    sheetIndex,
+    row,
+    col,
+    x: cellX,
+    y: cellY,
+    width,
+    height,
+    controlType: "image",
+  });
+
+  invalidateImageCache(controlId);
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+
+  return { instanceId: controlId, sheetIndex, row, col, x: cellX, y: cellY, width, height };
+}
+
+/** Delete the control at an anchor (no-op when there is none). */
+async function removePictureControlAt(anchor: PictureControlAnchor): Promise<void> {
+  const { removeControlMetadata } = await import("./lib/controlApi");
+  const { sheetIndex, row, col } = anchor;
+  const controlId = makeFloatingControlId(sheetIndex, row, col);
+
+  await removeControlMetadata(sheetIndex, row, col);
+  removeFloatingControl(controlId);
+  // Forget, not invalidate: the control is gone, so its picture's blob URL has
+  // nothing left referencing it.
+  forgetImageControl(controlId);
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
 /**
  * Insert a button control on the current selection.
  * Creates a floating button positioned at the selected cell's location.
@@ -1385,50 +1649,92 @@ function getCurrentSelectionFromInterceptor() {
 }
 
 // ============================================================================
-// Insert Shape Action (Always Floating)
+// Shape Controls Provider (@api/controlsService)
 // ============================================================================
 
+/** The shape catalog, flattened out of its categories — the feature-neutral
+ *  answer to "what can createShape draw?". Built once: the catalog is a module
+ *  constant, so nothing about it can change during a session. */
+let flattenedShapeCatalog: ShapeCatalogEntry[] | null = null;
+
+function listShapeCatalogEntries(): ShapeCatalogEntry[] {
+  if (!flattenedShapeCatalog) {
+    flattenedShapeCatalog = getShapeCategories().flatMap((cat) =>
+      cat.shapes.map((s) => ({
+        id: s.id,
+        label: s.label,
+        categoryId: cat.id,
+        categoryLabel: cat.label,
+        defaultWidth: s.defaultWidth,
+        defaultHeight: s.defaultHeight,
+        isLine: s.isLine === true,
+      })),
+    );
+  }
+  return flattenedShapeCatalog;
+}
+
 /**
- * Insert a shape control on the current selection.
- * Creates a floating shape positioned at the selected cell's location.
+ * Create a floating SHAPE at an anchor cell — THE one place a shape is made,
+ * for the ribbon's shape gallery and for every @api caller that comes through
+ * the ControlsProvider seam.
+ *
+ * One recipe, two callers, for `createButtonControlAt`'s hard-won reason: a
+ * shape is SEVENTEEN property keys, plus a pixel walk, plus three registrations,
+ * and a caller that reproduces only some of them gets a successful backend
+ * response and nothing on the grid. Three of those seventeen are load-bearing in
+ * ways nobody guesses:
+ *
+ *   * `pinToGrid` is written EXPLICITLY as "false". The backend's
+ *     `moves_with_cells` defaults an ABSENT pin property to TRUE (correct for
+ *     in-cell controls), so omitting it makes the backend shift this control's
+ *     anchor on the first row insert while the frontend holds its pixels —
+ *     divergence on the very first structural edit.
+ *   * The caption property is `text`, never `label`. Writing `label` succeeds
+ *     and draws an empty shape; that exact bug shipped once, for buttons.
+ *   * `x`/`y` are a per-column/per-row WALK, not `col * defaultWidth`. Column
+ *     widths and row heights are irregular the moment a user resizes anything.
+ *
+ * TWO REFUSALS, both loud on purpose:
+ *
+ *   * An unknown `shapeType` THROWS, naming every id the catalog accepts. It
+ *     used to `return` silently, which the caller cannot tell apart from a
+ *     shape that was created and failed to paint.
+ *   * An anchor that already holds a control THROWS rather than replacing it.
+ *     `set_control_metadata` is a plain map insert, so creating over an occupied
+ *     cell wipes the existing control — and because a control's instanceId is
+ *     derived from its ANCHOR, the wiped control's object script stays bound to
+ *     that id and the new control silently inherits someone else's code.
  */
-async function insertShape(shapeType: string): Promise<void> {
-  const { restoreFocusToGrid } = await import("../../src/api/events");
-  const { getGridStateSnapshot } = await import("../../src/api/grid");
-  const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
+async function createShapeControlAt(
+  request: CreateShapeControlRequest,
+): Promise<ShapeControlHandle> {
+  const { sheetIndex, row, col, shapeType } = request;
 
   const shapeDef = getShapeDefinition(shapeType);
-  if (!shapeDef) return;
-
-  // Get current selection
-  const sel = getCurrentSelectionFromInterceptor();
-  if (!sel) return;
-
-  const row = sel.endRow;
-  const col = sel.endCol;
-
-  // Get grid state for position calculation
-  const gridState = getGridStateSnapshot();
-  if (!gridState) return;
-
-  const sheetIndex = gridState.config?.activeSheet ?? 0;
-  const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
-  const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
-  const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
-  const rowHeights = gridState.dimensions?.rowHeights ?? new Map();
-
-  // Calculate pixel position from cell bounds (sheet coordinates, no scroll)
-  let cellX = 0;
-  for (let c = 0; c < col; c++) {
-    cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
-  }
-  let cellY = 0;
-  for (let r = 0; r < row; r++) {
-    cellY += getRowHeight(r, defaultCellHeight, rowHeights);
+  if (!shapeDef) {
+    const ids = listShapeCatalogEntries().map((s) => s.id);
+    throw new Error(
+      `Unknown shape "${shapeType}". Calcula draws ${ids.length} shapes; ` +
+        `the accepted ids are: ${ids.join(", ")}.`,
+    );
   }
 
-  const shapeWidth = shapeDef.defaultWidth;
-  const shapeHeight = shapeDef.defaultHeight;
+  const { getControlMetadata } = await import("./lib/controlApi");
+  const occupant = await getControlMetadata(sheetIndex, row, col);
+  if (occupant) {
+    throw new Error(
+      `The cell at row ${row}, column ${col} on sheet ${sheetIndex} already holds a ` +
+        `${occupant.controlType} control. One cell anchors at most one control, and a ` +
+        `control's script binding is derived from its anchor — creating here would ` +
+        `delete that control and hand its script to the new one. Delete it first, or ` +
+        `choose an empty cell.`,
+    );
+  }
+
+  const { x: cellX, y: cellY } = cellOriginPixels(row, col);
+  const shapeWidth = request.width ?? shapeDef.defaultWidth;
+  const shapeHeight = request.height ?? shapeDef.defaultHeight;
 
   // Create control metadata for the shape
   await setControlMetadata(sheetIndex, row, col, {
@@ -1438,7 +1744,8 @@ async function insertShape(shapeType: string): Promise<void> {
       fill: { valueType: "static", value: "#4472C4" },
       stroke: { valueType: "static", value: "#2F528F" },
       strokeWidth: { valueType: "static", value: "1" },
-      text: { valueType: "static", value: "" },
+      // `text`, never `label` — see the header.
+      text: { valueType: "static", value: request.text ?? "" },
       textColor: { valueType: "static", value: "#FFFFFF" },
       fontSize: { valueType: "static", value: "11" },
       fontBold: { valueType: "static", value: "false" },
@@ -1452,6 +1759,9 @@ async function insertShape(shapeType: string): Promise<void> {
       y: { valueType: "static", value: String(cellY) },
       width: { valueType: "static", value: String(shapeWidth) },
       height: { valueType: "static", value: String(shapeHeight) },
+      // Only written when asked for: `listControls` reads this property for the
+      // object list, and an empty one would name every shape "".
+      ...(request.name ? { name: { valueType: "static", value: request.name } } : {}),
     },
   });
 
@@ -1469,9 +1779,112 @@ async function insertShape(shapeType: string): Promise<void> {
     controlType: "shape",
   });
 
-  // Sync overlay regions and refresh
+  // Sync overlay regions and refresh. The cache invalidate was MISSING from the
+  // ribbon path: the shape renderer keys its bitmap cache by control id, and a
+  // fresh control at an id a deleted one used to hold repainted the OLD shape.
+  invalidateShapeCache(controlId);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
+
+  return {
+    instanceId: controlId,
+    shapeType,
+    sheetIndex,
+    row,
+    col,
+    x: cellX,
+    y: cellY,
+    width: shapeWidth,
+    height: shapeHeight,
+  };
+}
+
+/**
+ * Delete a control by its instance id, with the FULL teardown.
+ *
+ * Routes to `deleteFloatingControl`, never to `removeButtonControlAt`: that one
+ * is the button seam's ROLLBACK for a half-made control and deliberately skips
+ * object-script cleanup, declared properties, the HTML overlay, the selection
+ * and the Properties pane. Using it as a delete path would leave exactly the
+ * orphans this seam exists to avoid.
+ *
+ * Returns false when no control has that id; throws when a control exists at
+ * that anchor but is not a floating one (an in-cell button, whose deletion is a
+ * cell-style operation the user performs from the grid).
+ *
+ * A MISS IN THE STORE MEANS TWO DIFFERENT THINGS, and they must not share one
+ * message. The floating store holds ONE SHEET at a time (see step 19c), so a
+ * perfectly ordinary shape on a sheet the user is not looking at is also absent
+ * from it. Telling that caller "this is an in-cell control" would be a confident
+ * wrong answer to a question it never asked — so the two are separated by the
+ * SAME embedded predicate `loadFloatingControls` uses to decide what enters the
+ * store, and the cross-sheet case names the sheet and the fix.
+ */
+async function deleteControlByInstanceId(instanceId: string): Promise<boolean> {
+  if (getFloatingControl(instanceId)) {
+    await deleteFloatingControl(instanceId);
+    return true;
+  }
+
+  const anchor = parseFloatingControlId(instanceId);
+  if (!anchor) return false;
+
+  const { getControlMetadata } = await import("./lib/controlApi");
+  const meta = await getControlMetadata(anchor.sheetIndex, anchor.row, anchor.col);
+  if (!meta) return false;
+
+  if (!isEmbeddedControl(meta.controlType, meta.properties)) {
+    throw new Error(
+      `"${instanceId}" is on sheet ${anchor.sheetIndex}, which is not the sheet ` +
+        `currently shown. On-grid controls are deleted on their own sheet — switch to ` +
+        `it first.`,
+    );
+  }
+
+  throw new Error(
+    `"${instanceId}" is an in-cell ${meta.controlType} control, not a floating one. ` +
+      `In-cell controls are part of their cell's formatting — clear the cell to remove one.`,
+  );
+}
+
+// ============================================================================
+// Insert Shape Action (Always Floating)
+// ============================================================================
+
+/**
+ * Insert a shape control on the current selection.
+ * Creates a floating shape positioned at the selected cell's location.
+ *
+ * The whole recipe lives in `createShapeControlAt`; this is the selection and
+ * error-reporting wrapper around it. A refusal HAS to be shown: the gallery and
+ * the menu both call this without awaiting, so an unhandled rejection would
+ * leave the user watching nothing happen.
+ */
+async function insertShape(shapeType: string): Promise<void> {
+  const { restoreFocusToGrid } = await import("../../src/api/events");
+
+  // Get current selection
+  const sel = getCurrentSelectionFromInterceptor();
+  if (!sel) return;
+
+  // Get grid state for the active sheet
+  const gridState = getGridStateSnapshot();
+  if (!gridState) return;
+
+  try {
+    await createShapeControlAt({
+      sheetIndex: gridState.config?.activeSheet ?? 0,
+      row: sel.endRow,
+      col: sel.endCol,
+      shapeType,
+    });
+  } catch (err) {
+    showToast(
+      `The shape could not be inserted: ${err instanceof Error ? err.message : String(err)}`,
+      { type: "error", duration: 9000 },
+    );
+  }
+
   restoreFocusToGrid();
 }
 
@@ -1481,17 +1894,45 @@ async function insertShape(shapeType: string): Promise<void> {
 
 /**
  * Insert an image control on the current selection.
- * Opens a file picker, reads the selected image as a base64 data URL,
- * and creates a floating image positioned at the selected cell.
+ *
+ * THE INGRESS, AND WHY IT LOOKS LIKE THIS
+ *
+ * What shipped before this: a hidden `<input type="file">` in the WebView,
+ * `FileReader.readAsDataURL` over the whole file, and the resulting base64
+ * stored verbatim as the control's `src`. No size cap, no format check, no
+ * dimension check — `input.accept` is a dialog filter hint, and "All Files"
+ * exists. A file that failed to decode fell back to a 200x150 placeholder over
+ * bytes that were ALREADY in the document, and everything travelled on into the
+ * saved `.cala` and into published `.calp` artifacts under the signature.
+ *
+ * Now: the user picks a file in the NATIVE dialog, the host reads it, proves the
+ * format from its magic bytes, enforces the byte and dimension caps, files the
+ * bytes under their content hash, and hands back a handle. The WebView never
+ * sees the bytes and never produces any. Three consequences are deliberate:
+ *
+ *   * `src` holds a ~70-byte `media:{sha256}` handle, so `controls.json` stops
+ *     carrying whole files and the 64 KiB property bound is never in danger.
+ *   * The initial size comes from the HEADER the host parsed, not from decoding
+ *     the picture in the WebView. There is no fallback size, because there is no
+ *     case left where we hold a picture we could not read.
+ *   * A refusal is a REFUSAL: the user is told which rule the file broke, by
+ *     name and number, and NO control is created. Nothing is embedded.
  */
 async function insertImage(): Promise<void> {
   const { restoreFocusToGrid } = await import("../../src/api/events");
   const { getGridStateSnapshot } = await import("../../src/api/grid");
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
 
-  // Use a hidden file input to pick an image file
-  const dataUrl = await pickImageFile();
-  if (!dataUrl) return;
+  // The NATIVE picker, because the host needs a PATH: a WebView `<input
+  // type="file">` yields a File object whose bytes only the WebView can read,
+  // which is precisely the ingress being retired. `pickValidatedImage` returns
+  // null for BOTH a cancel and a refusal — and in the refusal case has already
+  // told the user which rule the file broke. Either way: create nothing.
+  const media = await pickValidatedImage();
+  if (!media) {
+    restoreFocusToGrid();
+    return;
+  }
 
   // Get current selection
   const sel = getCurrentSelectionFromInterceptor();
@@ -1520,38 +1961,41 @@ async function insertImage(): Promise<void> {
     cellY += getRowHeight(r, defaultCellHeight, rowHeights);
   }
 
-  // Determine image natural size to set initial dimensions
-  const naturalSize = await getImageNaturalSize(dataUrl);
-  let imgWidth = naturalSize.width;
-  let imgHeight = naturalSize.height;
+  // Initial size comes from the HEADER the host parsed — no decode in the
+  // WebView, and no `{200, 150}` fallback (that fallback is what turned "this
+  // file is not an image" into "here is a placeholder over the file anyway").
+  const { width: imgWidth, height: imgHeight } = initialImageSize(media.width, media.height);
 
-  // Cap to reasonable max while preserving aspect ratio
-  const maxDim = 400;
-  if (imgWidth > maxDim || imgHeight > maxDim) {
-    const scale = maxDim / Math.max(imgWidth, imgHeight);
-    imgWidth = Math.round(imgWidth * scale);
-    imgHeight = Math.round(imgHeight * scale);
+  // Create control metadata for the image. `src` is the HANDLE — the bytes are
+  // in the document's media store and never enter `controls.json`, a script
+  // realm, or an IPC payload. A backend refusal here (the 64 KiB property
+  // bound, a lock failure) still has to be shown: `MenuBar.tsx` calls
+  // `item.action()` without awaiting, so an unhandled rejection would leave the
+  // user watching nothing happen.
+  try {
+    await setControlMetadata(sheetIndex, row, col, {
+      controlType: "image",
+      properties: {
+        src: { valueType: "static", value: media.ref },
+        opacity: { valueType: "static", value: "1" },
+        rotation: { valueType: "static", value: "0" },
+        // Explicit unpinned — see the floating-button creation above.
+        pinToGrid: { valueType: "static", value: "false" },
+        x: { valueType: "static", value: String(cellX) },
+        y: { valueType: "static", value: String(cellY) },
+        width: { valueType: "static", value: String(imgWidth) },
+        height: { valueType: "static", value: String(imgHeight) },
+      },
+    });
+  } catch (err) {
+    const { showToast } = await import("../../src/api/notifications");
+    showToast(
+      `The image could not be inserted: ${err instanceof Error ? err.message : String(err)}`,
+      { type: "error", duration: 9000 },
+    );
+    restoreFocusToGrid();
+    return;
   }
-
-  // Minimum size
-  imgWidth = Math.max(imgWidth, 50);
-  imgHeight = Math.max(imgHeight, 50);
-
-  // Create control metadata for the image
-  await setControlMetadata(sheetIndex, row, col, {
-    controlType: "image",
-    properties: {
-      src: { valueType: "static", value: dataUrl },
-      opacity: { valueType: "static", value: "1" },
-      rotation: { valueType: "static", value: "0" },
-      // Explicit unpinned — see the floating-button creation above.
-      pinToGrid: { valueType: "static", value: "false" },
-      x: { valueType: "static", value: String(cellX) },
-      y: { valueType: "static", value: String(cellY) },
-      width: { valueType: "static", value: String(imgWidth) },
-      height: { valueType: "static", value: String(imgHeight) },
-    },
-  });
 
   // Add to floating store
   const controlId = makeFloatingControlId(sheetIndex, row, col);
@@ -1573,61 +2017,13 @@ async function insertImage(): Promise<void> {
   restoreFocusToGrid();
 }
 
-/**
- * Open a native file picker for image files and return the selected file as a data URL.
- * Returns null if the user cancels.
- */
-function pickImageFile(): Promise<string | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = "image/png,image/jpeg,image/gif,image/bmp,image/webp,image/svg+xml";
-    input.style.display = "none";
-    document.body.appendChild(input);
-
-    input.onchange = () => {
-      const file = input.files?.[0];
-      document.body.removeChild(input);
-      if (!file) {
-        resolve(null);
-        return;
-      }
-
-      const reader = new FileReader();
-      reader.onload = () => {
-        resolve(reader.result as string);
-      };
-      reader.onerror = () => {
-        console.error("[Controls] Failed to read image file");
-        resolve(null);
-      };
-      reader.readAsDataURL(file);
-    };
-
-    input.oncancel = () => {
-      document.body.removeChild(input);
-      resolve(null);
-    };
-
-    input.click();
-  });
-}
-
-/**
- * Get the natural dimensions of an image from its data URL.
- */
-function getImageNaturalSize(dataUrl: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    };
-    img.onerror = () => {
-      resolve({ width: 200, height: 150 }); // fallback
-    };
-    img.src = dataUrl;
-  });
-}
+// `pickImageFile` (hidden `<input type="file">` + `FileReader.readAsDataURL`)
+// and `getImageNaturalSize` (decode-in-WebView, `{200, 150}` on failure) used to
+// live here. Both are deleted rather than deprecated: they were the unvalidated
+// ingress and its silent-failure mode. The picker is now the native dialog via
+// `importImageViaPicker`, and the dimensions come from the header the host
+// parsed. There is deliberately no remaining function in this extension that
+// turns a file into bytes inside the WebView.
 
 // ============================================================================
 // Delete Floating Control
@@ -1643,19 +2039,28 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
 
   const { removeControlMetadata } = await import("./lib/controlApi");
 
-  // Shape-specific cleanup: scripts, declared properties, custom renderers, HTML overlays
-  if (ctrl.controlType === "shape") {
-    try {
-      const { deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
-      await deleteObjectScriptsForInstance(controlId);
-    } catch {
-      // Ignore errors — script may not exist
-    }
-    clearDeclaredProperties(controlId);
-    removeCustomCanvasRenderer(controlId);
-    removeShapeHtmlOverlay(controlId);
-    unmarkShapeHasScript(controlId);
+  // Instance-keyed cleanup: scripts, declared properties, custom renderers,
+  // HTML overlays.
+  //
+  // THIS USED TO BE GATED ON `controlType === "shape"`, and that gate leaked a
+  // control's OBJECT SCRIPT on every other type. An instanceId is derived from
+  // the ANCHOR, so a button deleted at B3 left `control-0-2-1`'s script behind,
+  // and the next control created at B3 — a button, a picture, anything —
+  // silently INHERITED it: code the new control's author never wrote, running on
+  // their click. The side tables below are keyed by the same id and have the
+  // same failure mode. Nothing here is shape-specific; deleting an entry that
+  // does not exist is a no-op for every one of them, so the honest gate is no
+  // gate at all.
+  try {
+    const { deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
+    await deleteObjectScriptsForInstance(controlId);
+  } catch {
+    // Ignore errors — script may not exist
   }
+  clearDeclaredProperties(controlId);
+  removeCustomCanvasRenderer(controlId);
+  removeShapeHtmlOverlay(controlId);
+  unmarkShapeHasScript(controlId);
 
   // Remove backend metadata
   await removeControlMetadata(ctrl.sheetIndex, ctrl.row, ctrl.col);
@@ -1669,10 +2074,12 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
   closeTP(PROPERTIES_PANE_ID);
   lastPropertiesCell = null;
 
-  // Invalidate caches and refresh
+  // Invalidate caches and refresh. The image cache is FORGOTTEN rather than
+  // marked stale: the control is gone, so the blob URL held for its picture has
+  // nothing left pointing at it and must be revoked, not re-fetched.
   invalidateFloatingButtonCache(controlId);
   invalidateShapeCache(controlId);
-  invalidateImageCache(controlId);
+  forgetImageControl(controlId);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
@@ -2461,21 +2868,69 @@ async function handleEmbeddedToggle(
 // ============================================================================
 
 /**
- * Load all floating controls from backend metadata into the floating store.
+ * Controls already reported as holding a legacy inline picture, so a structural
+ * undo (which reloads the sheet) does not re-toast the same news.
  */
+const reportedLegacyInlineImages = new Set<string>();
+
+/**
+ * Load all floating controls from backend metadata into the floating store.
+ *
+ * ON THE LEGACY CORPUS. The image migration itself is the HOST's and has already
+ * run by the time this reads anything; what is left for the frontend is telling
+ * the user about the pictures it could not convert. Both the reasoning and the
+ * wording live in `Image/legacyInlineImages.ts` — including why a migration
+ * deliberately does not dirty the document, and why a refused picture is kept
+ * rather than dropped.
+ */
+/**
+ * The sheet whose controls are currently IN the floating store.
+ *
+ * The store holds one sheet at a time (the overlay regions are sheet-blind, so
+ * two sheets' worth of controls would paint on top of each other), and
+ * SHEET_CHANGED reports the sheet being switched TO — so the departing sheet has
+ * to be remembered rather than derived. null = nothing loaded yet.
+ */
+let loadedSheetIndex: number | null = null;
+
+/**
+ * Is this control IN-CELL (part of its cell's formatting) rather than floating?
+ *
+ * The single definition of the rule, because two places ask it and a
+ * disagreement between them is silent: `loadFloatingControls` uses it to decide
+ * what enters the floating store, and `deleteControlByInstanceId` uses it to
+ * tell "in-cell, cannot delete through this path" apart from "floating, but on
+ * another sheet". If those two ever answered differently, a control would be
+ * refused with a reason that does not describe it.
+ *
+ * Only BUTTONS can be embedded, and only legacy ones are by default — shapes
+ * and pictures are always floating.
+ */
+function isEmbeddedControl(
+  controlType: string,
+  properties: Record<string, ControlPropertyValue>,
+): boolean {
+  return controlType === "button" ? properties.embedded?.value !== "false" : false;
+}
+
 async function loadFloatingControls(): Promise<void> {
   try {
     const { getGridStateSnapshot } = await import("../../src/api/grid");
     const gridState = getGridStateSnapshot();
     const sheetIndex = gridState?.config?.activeSheet ?? 0;
+    loadedSheetIndex = sheetIndex;
 
     const controls = await getAllControls(sheetIndex);
+    const unmigrated = collectUnmigratedInlineImages(
+      controls,
+      makeFloatingControlId,
+      reportedLegacyInlineImages,
+    );
     for (const entry of controls) {
       const props = entry.metadata.properties;
-      // Buttons default to embedded for legacy; shapes are always floating
-      const isEmbedded = entry.metadata.controlType === "button"
-        ? (props.embedded?.value !== "false")
-        : false;
+      // Buttons default to embedded for legacy; shapes are always floating.
+      // One predicate, shared with the delete path — see isEmbeddedControl.
+      const isEmbedded = isEmbeddedControl(entry.metadata.controlType, props);
 
       if (!isEmbedded) {
         const x = parseFloat(props.x?.value ?? "0");
@@ -2513,6 +2968,13 @@ async function loadFloatingControls(): Promise<void> {
           );
         }
       }
+    }
+
+    if (unmigrated.length > 0) {
+      showToast(legacyInlineImageWarning(unmigrated.length), {
+        type: "warning",
+        duration: 12000,
+      });
     }
 
     syncFloatingControlRegions();
@@ -2735,6 +3197,8 @@ function deactivate(): void {
   invalidateAllFloatingButtonCaches();
   invalidateAllShapeCaches();
   invalidateAllImageCaches();
+  // Teardown, not invalidation: revoke every object URL this session created.
+  releaseAllImageMedia();
   isActivated = false;
   console.log("[Controls] Deactivated.");
 }

@@ -103,17 +103,42 @@ export function drawDeferredCellDecorations(deferred: CellDecorationContext[]): 
 }
 
 /**
- * Draw text with ellipsis truncation if it exceeds the available width.
- * Returns the measured width of the full text.
+ * What a call to {@link drawTextWithTruncationMetrics} actually put on the canvas.
+ *
+ * `fullWidth` is the width the UNTRUNCATED string would occupy — the overflow
+ * signal callers use to decide whether a cell spills into its neighbour.
+ * `renderedWidth` / `renderedX` describe the glyphs that were really drawn.
+ *
+ * The two differ whenever the string was ellipsised, and a decoration measured
+ * on `fullWidth` (clamped to the cell) is therefore drawn WIDER than the text it
+ * decorates: "Quarterly reven..." got an underline the length of the whole cell.
  */
-export function drawTextWithTruncation(
+export interface DrawnTextMetrics {
+  /** Width of the full, untruncated string at the current font. */
+  fullWidth: number;
+  /** Width of the glyphs actually painted (ellipsis included). */
+  renderedWidth: number;
+  /** Left edge of the glyphs actually painted. */
+  renderedX: number;
+  /** True when the string did not fit and was ellipsised. */
+  truncated: boolean;
+}
+
+/**
+ * Draw text with ellipsis truncation if it exceeds the available width, and
+ * report what was drawn.
+ *
+ * Decorations (underline, strikethrough) MUST measure against the returned
+ * `renderedWidth`/`renderedX`, never against the source string.
+ */
+export function drawTextWithTruncationMetrics(
   ctx: CanvasRenderingContext2D,
   text: string,
   x: number,
   y: number,
   maxWidth: number,
   align: "left" | "right" | "center" = "left"
-): number {
+): DrawnTextMetrics {
   const metrics = ctx.measureText(text);
   const textWidth = metrics.width;
 
@@ -126,7 +151,12 @@ export function drawTextWithTruncation(
       drawX = x + (maxWidth - textWidth) / 2;
     }
     ctx.fillText(text, drawX, y);
-    return textWidth;
+    return {
+      fullWidth: textWidth,
+      renderedWidth: textWidth,
+      renderedX: drawX,
+      truncated: false,
+    };
   }
   // Text needs truncation - use ellipsis
   const ellipsis = "...";
@@ -135,7 +165,12 @@ export function drawTextWithTruncation(
   if (availableWidth <= 0) {
     // Not enough room even for ellipsis, just draw ellipsis
     ctx.fillText(ellipsis, x, y);
-    return ellipsisWidth;
+    return {
+      fullWidth: textWidth,
+      renderedWidth: ellipsisWidth,
+      renderedX: x,
+      truncated: true,
+    };
   }
   // Binary search for the right truncation point
   let low = 0;
@@ -152,7 +187,29 @@ export function drawTextWithTruncation(
   }
   const truncatedText = text.substring(0, low) + ellipsis;
   ctx.fillText(truncatedText, x, y);
-  return textWidth; // Return original width for potential overflow indication
+  // A truncated string is always drawn from the left edge regardless of
+  // alignment (it fills the cell), so the rendered origin is `x`.
+  return {
+    fullWidth: textWidth,
+    renderedWidth: ctx.measureText(truncatedText).width,
+    renderedX: x,
+    truncated: true,
+  };
+}
+
+/**
+ * Draw text with ellipsis truncation if it exceeds the available width.
+ * Returns the measured width of the FULL text (the overflow signal).
+ */
+export function drawTextWithTruncation(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  align: "left" | "right" | "center" = "left"
+): number {
+  return drawTextWithTruncationMetrics(ctx, text, x, y, maxWidth, align).fullWidth;
 }
 
 /**
@@ -1250,8 +1307,12 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
       // stems onto the pixel grid (crisper text, closer to Excel's ClearType).
       textY = Math.round(textY);
 
-      // Draw the text with truncation
-      drawTextWithTruncation(ctx, displayValue, textX, textY, availableWidth, textAlign);
+      // Draw the text with truncation. The metrics describe what was really
+      // painted — an ellipsised string is SHORTER than the source string, and
+      // decorations must follow the glyphs, not the data.
+      const drawn = drawTextWithTruncationMetrics(
+        ctx, displayValue, textX, textY, availableWidth, textAlign
+      );
 
       // Draw underline if needed
       if (underlineStyle !== "none") {
@@ -1259,19 +1320,11 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
         const isDouble = underlineStyle === "double" || underlineStyle === "doubleAccounting";
 
         // Accounting underlines span the full cell width at the cell bottom;
-        // standard underlines follow the text width under the text baseline.
-        const ulWidth = isAccounting ? (cellRight - cellLeft - paddingX * 2) : Math.min(ctx.measureText(displayValue).width, availableWidth);
-        let underlineX: number;
-        if (isAccounting) {
-          underlineX = cellLeft + paddingX;
-        } else {
-          underlineX = textX;
-          if (textAlign === "right") {
-            underlineX = textX + availableWidth - ulWidth;
-          } else if (textAlign === "center") {
-            underlineX = textX + (availableWidth - ulWidth) / 2;
-          }
-        }
+        // standard underlines follow the RENDERED text under the text baseline.
+        const ulWidth = isAccounting
+          ? (cellRight - cellLeft - paddingX * 2)
+          : Math.min(drawn.renderedWidth, availableWidth);
+        const underlineX = isAccounting ? cellLeft + paddingX : drawn.renderedX;
 
         // Position underline Y: accounting styles sit at the cell bottom, standard styles under the text
         let underlineY: number;
@@ -1306,14 +1359,9 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
 
       // Draw strikethrough if needed
       if (hasStrikethrough) {
-        const metrics = ctx.measureText(displayValue);
-        const textWidth = Math.min(metrics.width, availableWidth);
-        let strikeX = textX;
-        if (textAlign === "right") {
-          strikeX = textX + availableWidth - textWidth;
-        } else if (textAlign === "center") {
-          strikeX = textX + (availableWidth - textWidth) / 2;
-        }
+        // Same rule as the underline: measure the glyphs that were painted.
+        const textWidth = Math.min(drawn.renderedWidth, availableWidth);
+        const strikeX = drawn.renderedX;
         // Position strikethrough at vertical center of text
         let strikeY: number;
         if (vAlign === "top") {

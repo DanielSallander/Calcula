@@ -1029,7 +1029,7 @@ pub fn eval_formula_init(
 ) -> EvalStepState {
     let session_id = eval_state.new_session_id();
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
 
@@ -1114,7 +1114,7 @@ pub fn eval_formula_evaluate(
     eval_state: State<EvalFormulaState>,
     session_id: String,
 ) -> EvalStepState {
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
@@ -1154,7 +1154,7 @@ pub fn eval_formula_step_in(
     eval_state: State<EvalFormulaState>,
     session_id: String,
 ) -> EvalStepState {
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
@@ -1247,7 +1247,7 @@ pub fn eval_formula_step_out(
     eval_state: State<EvalFormulaState>,
     session_id: String,
 ) -> EvalStepState {
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
@@ -1287,7 +1287,7 @@ pub fn eval_formula_restart(
     eval_state: State<EvalFormulaState>,
     session_id: String,
 ) -> EvalStepState {
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();

@@ -941,6 +941,7 @@ pub(crate) fn update_pivot_region(
 /// Also syncs to state.grid if needed.
 pub(crate) fn update_pivot_in_grid(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     pivot_id: PivotId,
     dest_sheet_idx: usize,
     destination: (u32, u32),
@@ -950,7 +951,7 @@ pub(crate) fn update_pivot_in_grid(
     let old_region = get_pivot_region(state, pivot_id);
 
     let mut styles = state.style_registry.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
         // Clear old pivot area first if it exists
         if let Some(ref region) = old_region {
@@ -970,7 +971,7 @@ pub(crate) fn update_pivot_in_grid(
         let is_active = dest_sheet_idx == active_sheet;
 
         let pivot_merges = if is_active {
-            let mut active_grid = state.grid.lock().unwrap();
+            let mut active_grid = state.grid.write(&effect).unwrap();
 
             // Clear old region from active grid too
             if let Some(ref region) = old_region {
@@ -1359,7 +1360,7 @@ pub(crate) fn count_overwritten_cells(
 
     let old_region = get_pivot_region(state, pivot_id);
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid = match grids.get(dest_sheet_idx) {
         Some(g) => g,
         None => return 0,
@@ -1423,7 +1424,7 @@ pub(crate) fn save_overwritten_cells(
 
     let old_region = get_pivot_region(state, pivot_id);
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid = match grids.get(dest_sheet_idx) {
         Some(g) => g,
         None => return saved,
@@ -1465,6 +1466,7 @@ pub(crate) fn save_overwritten_cells(
 /// calling `update_pivot_in_grid` + `update_pivot_region` separately.
 pub(crate) fn finalize_pivot_update(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     pivot_state: &PivotState,
     pivot_id: PivotId,
     dest_sheet_idx: usize,
@@ -1472,7 +1474,7 @@ pub(crate) fn finalize_pivot_update(
     view: &PivotView,
     control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
 ) {
-    update_pivot_in_grid(state, pivot_id, dest_sheet_idx, destination, view);
+    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view);
     update_pivot_region(state, pivot_id, dest_sheet_idx, destination, view);
     recalculate_sheet_formulas(state, pivot_state, control_states);
 }
@@ -1507,8 +1509,17 @@ pub(crate) fn recalculate_sheet_formulas(
     let control_values =
         crate::control_values::build_control_values_from_states(state, control_states);
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
+    // themselves persisted (formulas, literals, locale, control values), so it
+    // must not dirty on its own account: the ENTRY command that made those
+    // values stale already owns the flag, and dirtying here would make a
+    // workbook holding NOW()/RAND() prompt to save merely for being looked at.
+    // See CleanReason::RecalcCompanion.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();

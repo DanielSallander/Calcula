@@ -238,7 +238,7 @@ pub(crate) fn frame_effect(state: &AppState, token: &str) -> Result<DocumentEffe
 #[tauri::command]
 pub fn anim_snapshot(state: State<AppState>, params: AnimSnapshotParams) -> AnimSnapshotResult {
     let sheet_idx = params.sheet_index;
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     if sheet_idx >= grids.len() {
         return AnimSnapshotResult {
             success: false,
@@ -296,8 +296,8 @@ pub fn anim_apply_frame(
     };
 
     // Lock order matches scenario_show to avoid cross-path deadlocks.
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -362,7 +362,16 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
     );
     // Proof BEFORE the take: the restore is the thing being performed, so the snapshot
     // is on file at this instant by definition.
-    let effect = frame_effect(&state, &params.token).ok();
+    // A restore with no registered snapshot cannot claim the transient exemption,
+    // and it also has nothing to restore -- the `None` arm below returns before any
+    // write. So the token is REQUIRED here rather than optional: an absent one is a
+    // refusal, not a licence to write undecided.
+    let Ok(effect) = frame_effect(&state, &params.token) else {
+        return AnimationFrameResult {
+            updated_cells: Vec::new(),
+            error: Some("No animation snapshot is registered for this token".to_string()),
+        };
+    };
     let saved = state
         .animation_snapshots
         .lock()
@@ -380,8 +389,8 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
 
     let sheet_idx = params.sheet_index;
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -398,17 +407,9 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
         };
     }
 
-    // Unreachable unless the snapshot vanished between the two locks above; the
-    // early return for an unknown token has already fired.
-    let effect = match effect {
-        Some(e) => e,
-        None => {
-            return AnimationFrameResult {
-                updated_cells: Vec::new(),
-                error: None,
-            }
-        }
-    };
+    // `effect` is already a plain DocumentEffect: the token is proven at the top
+    // of the command (an unregistered one refuses there), so there is no longer an
+    // Option to unwrap here.
 
     let ops: Vec<((u32, u32), SetOp)> = saved
         .into_iter()
@@ -467,7 +468,7 @@ pub fn anim_reroll_and_read(
         Some((&*pane_control_state, &*ribbon_filter_state)),
     );
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     if params.sheet_index >= grids.len() {
         return AnimRerollResult {
             value: None,

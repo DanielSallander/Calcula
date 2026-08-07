@@ -273,7 +273,7 @@ pub fn scenario_show(
     // Held for the whole write even though `grids` is not a `Persisted<T>` yet: when it
     // is onboarded this is the effect its `write()` will take, and constructing it here
     // already sets is_modified, which is the part that was missing.
-    let _effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(&file_state);
 
     // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below (canonical
     // lock order: control stores first, grids last).
@@ -300,8 +300,8 @@ pub fn scenario_show(
     };
 
     // Acquire grid locks
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -432,10 +432,10 @@ pub fn scenario_summary(
 
     // The summary report is written into fresh grid cells, which are persisted. Built
     // past the "no scenarios defined" return above, so that refusal stays clean.
-    let _effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(&file_state);
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();

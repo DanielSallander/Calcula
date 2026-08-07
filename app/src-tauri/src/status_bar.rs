@@ -22,7 +22,7 @@ pub fn get_selection_aggregations(
     end_col: u32,
     _selection_type: String,
 ) -> SelectionAggregationResult {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
 
     // Normalise bounds (ensure start <= end)
     let r0 = start_row.min(end_row);

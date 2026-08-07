@@ -341,8 +341,8 @@ fn a_long_batch_of_cheap_expressions_never_trips_the_aggregate() {
 fn state_with_formulas(count: u32) -> crate::AppState {
     let state = crate::create_app_state();
     {
-        let mut grids = state.grids.lock().unwrap();
-        let mut mirror = state.grid.lock().unwrap();
+        let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+        let mut mirror = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grids[0].set_cell(0, 0, Cell::new_number(7.0));
         mirror.set_cell(0, 0, Cell::new_number(7.0));
         for r in 1..=count {
@@ -391,7 +391,7 @@ fn a_cancelled_recalc_writes_nothing_and_records_every_stale_cell() {
     assert_eq!(pending.sheet_index, 0);
     assert_eq!(pending.cells.len(), 50, "every formula cell was left unprocessed");
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     for r in 1..=50u32 {
         let cell = grids[0].get_cell(r, 0).expect("cell survives the cancel");
         assert!(
@@ -424,7 +424,7 @@ fn a_completed_recalc_clears_the_stale_marker() {
         state.pending_recalc.lock().unwrap().is_none(),
         "a clean pass must clear the stale marker"
     );
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     assert_eq!(grids[0].get_cell(5, 0).unwrap().value, CellValue::Number(14.0));
 }
 
@@ -446,7 +446,7 @@ fn the_cancel_flag_never_survives_the_pass_that_consumed_it() {
 
     // ...and the very next pass therefore succeeds.
     crate::calculation::recalculate_sheet_values(&state, &files, &pivots, 0, None);
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     assert_eq!(grids[0].get_cell(3, 0).unwrap().value, CellValue::Number(14.0));
 }
 
@@ -525,7 +525,7 @@ fn a_cancel_from_another_thread_is_safe_wherever_it_lands() {
         .map(|p| p.cells.len())
         .unwrap_or(0);
 
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let mut computed = 0;
     for r in 1..=400u32 {
         let v = &grids[0].get_cell(r, 0).unwrap().value;

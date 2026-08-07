@@ -48,6 +48,8 @@ const DANGEROUS_EXACT = new Set([
   "write_text_file",
   "write_binary_file",
   "sort_log_file",
+  // Binary ingress: takes a host PATH, exactly like read_text_file.
+  "read_media_file",
 ]);
 function matchesDangerousHeuristic(name: string): boolean {
   return DANGEROUS_EXACT.has(name) || DANGEROUS_PREFIXES.some((p) => name.startsWith(p));

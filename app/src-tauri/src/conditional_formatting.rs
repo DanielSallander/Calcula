@@ -790,7 +790,7 @@ pub fn evaluate_conditional_formats(
 ) -> EvaluateCFResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let cf_storage = state.conditional_formats.read().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let rules = match cf_storage.get(&active_sheet) {

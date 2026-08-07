@@ -93,6 +93,7 @@ import {
 } from "../lib/crossWindowEvents";
 import type { ScriptDraft } from "../lib/crossWindowEvents";
 import { draftToScriptDefinition } from "../lib/scriptDrafts";
+import { readRequestedDocumentId } from "../lib/editorTarget";
 
 // ============================================================================
 // Monaco Worker Setup
@@ -426,9 +427,26 @@ export function mergeMacroDocs(
 export function ObjectScriptEditorApp(): React.ReactElement {
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
 
+  // WHICH DOCUMENT THIS WINDOW WAS OPENED FOR.
+  //
+  // Read from the window's own URL on the very first render — before any
+  // listener is registered, any timer fires or any backend listing lands. The
+  // selection is therefore decided by IDENTITY, not by which asynchronous thing
+  // happened to finish first. Without it, a slow-booting editor could have its
+  // open payload delivered into a void by the main window's fallback timer, and
+  // the "nothing selected yet, take the first one" fallback below would then
+  // choose whatever sorted first alphabetically — the reported `-sbfault-`
+  // instead of `-sb-`.
+  const requestedDocIdRef = useRef<string | null>(readRequestedDocumentId());
+
   // Script list and current script
   const [scripts, setScripts] = useState<ObjectScriptDefinition[]>([]);
-  const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
+  const [activeScriptId, setActiveScriptId] = useState<string | null>(
+    requestedDocIdRef.current,
+  );
+  /** True once BOTH initial listings have answered — the point at which
+   *  "the requested document does not exist" becomes a fact rather than a race. */
+  const [listingsLoaded, setListingsLoaded] = useState(false);
   const [source, setSource] = useState("");
   // The AI-authored draft under review, if any. It is NOT in `scripts`: it has
   // no backend record, is not registered and is not mounted. Saving it is what
@@ -728,10 +746,17 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
   }, [reportToConsole]);
 
-  // Initial load
+  // Initial load. `listingsLoaded` marks the moment both answers are in, which
+  // is the only point at which "the document this window was opened for is not
+  // in the workbook" can be concluded rather than guessed.
   useEffect(() => {
-    loadScripts();
-    void loadMacros();
+    let cancelled = false;
+    void Promise.allSettled([loadScripts(), loadMacros()]).then(() => {
+      if (!cancelled) setListingsLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loadScripts, loadMacros]);
 
   // Keep the persister's idea of "what the store holds" in step with the listing,
@@ -818,6 +843,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     const openWithScriptReady = onOpenWithScript(async (payload) => {
       if (cancelled) return;
       if (payload.scriptId) {
+        requestedDocIdRef.current = payload.scriptId;
         setActiveScriptId(payload.scriptId);
         // Always reload from backend to pick up newly created scripts
         try {
@@ -839,6 +865,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       if (cancelled) return;
       const script = draftToScriptDefinition(payload.draft);
       setDraftDoc({ draft: payload.draft, script });
+      requestedDocIdRef.current = script.id;
       setActiveScriptId(script.id);
       setSource(script.source);
       setLanguage("javascript");
@@ -857,16 +884,22 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     // work away.
     const openWithMacroReady = onOpenWithModuleMacro((payload) => {
       if (cancelled) return;
-      void (async () => {
-        // Whatever is in the buffer belongs to the document being left. Read the
-        // live values here too: re-opening the document that is ALREADY in front
-        // of the author must see its unsaved edits, and the stash above is a
-        // state update that has not landed yet.
-        const leavingId = activeDocIdRef.current;
-        const liveBuffer = sourceRef.current;
-        const liveDirty = isDirtyRef.current;
-        stashActiveBufferRef.current();
 
+      // SELECTION HAPPENS NOW, NOT AFTER THE RECORD READ. Everything below this
+      // point awaits the backend, and while it awaits, a listing that lands can
+      // reach the "nothing selected yet" fallback and choose a different macro.
+      // Whatever is in the buffer belongs to the document being left, so snapshot
+      // that first — the stash is a state update that has not landed yet, and
+      // re-opening the document already in front of the author must see its
+      // unsaved edits.
+      const leavingId = activeDocIdRef.current;
+      const liveBuffer = sourceRef.current;
+      const liveDirty = isDirtyRef.current;
+      stashActiveBufferRef.current();
+      requestedDocIdRef.current = payload.macroId;
+      setActiveScriptId(payload.macroId);
+
+      void (async () => {
         let record: WorkbookScriptRecord | null = null;
         let readError: string | null = null;
         try {
@@ -1038,6 +1071,27 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // change, and without the guard a background refresh of the macro list would
   // reset the buffer the author is typing in.
   useEffect(() => {
+    // THE REQUESTED DOCUMENT OUTRANKS THE FALLBACK. While the id this window was
+    // opened for is still outstanding, "take the first one" must not run — it is
+    // what selected the wrong macro. The request is only released once both
+    // listings have answered and the id is genuinely in neither of them (a macro
+    // deleted between the open call and this window mounting), at which point the
+    // fallback below runs on the next pass rather than leaving a blank editor.
+    if (requestedDocIdRef.current && requestedDocIdRef.current === activeScriptId) {
+      const found =
+        scripts.some((s) => s.id === activeScriptId) ||
+        macroDocs.some((d) => d.macroId === activeScriptId) ||
+        draftDoc?.script.id === activeScriptId;
+      if (found) {
+        requestedDocIdRef.current = null;
+      } else if (listingsLoaded) {
+        requestedDocIdRef.current = null;
+        setActiveScriptId(null);
+        return;
+      } else {
+        return;
+      }
+    }
     if (!activeScriptId && scripts.length > 0) {
       setActiveScriptId(scripts[0].id);
       setSource(scripts[0].source);
@@ -1079,7 +1133,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setIsDirty(doc.dirty);
       loadedDocIdRef.current = activeScriptId;
     }
-  }, [activeScriptId, scripts, draftDoc, macroDocs]);
+  }, [activeScriptId, scripts, draftDoc, macroDocs, listingsLoaded]);
 
   // Auto-scroll console
   useEffect(() => {
@@ -1128,6 +1182,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
 
   // Switch active script
   const handleSelectScript = useCallback(async (scriptId: string) => {
+    // An explicit choice ends the open request: from here the author decides
+    // what is on screen, not the id this window was launched with.
+    requestedDocIdRef.current = null;
     // A DRAFT is never auto-saved. Switching away from AI-authored code must
     // not be the thing that writes it into the workbook — the whole point of a
     // draft is that only an explicit Save promotes it. Keep the author's edits

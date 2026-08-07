@@ -480,19 +480,6 @@ pub(crate) fn hidden_formula_cells_in(
     hidden
 }
 
-/// `AppState` form of [`formula_is_hidden`] for callers holding no locks.
-///
-/// Returns a closure-friendly snapshot: whether the sheet is protected at all,
-/// so a caller reading many cells pays the lock cost once.
-pub(crate) fn sheet_is_protected(state: &AppState, sheet_index: usize) -> bool {
-    state
-        .sheet_protection
-        .lock()
-        .ok()
-        .and_then(|p| p.get(&sheet_index).map(|s| s.protected))
-        .unwrap_or(false)
-}
-
 /// The single decision procedure for "may this cell be written?".
 ///
 /// Both the `can_edit_cell` command and the backend gates below route through
@@ -602,12 +589,12 @@ pub(crate) fn check_sheet_protection_cells<'a>(
     // `state.grid` is the authoritative mirror for the ACTIVE sheet;
     // `grids[active_sheet]` is documented as stale.
     if sheet_index == active_sheet {
-        let grid = state.grid.lock().unwrap();
+        let grid = state.grid.read().unwrap();
         let styles = state.style_registry.lock().unwrap();
         let protection_storage = state.sheet_protection.lock().unwrap();
         check_sheet_protection_cells_in(&protection_storage, &grid, &styles, sheet_index, cells)
     } else {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         let styles = state.style_registry.lock().unwrap();
         let protection_storage = state.sheet_protection.lock().unwrap();
         let Some(grid) = grids.get(sheet_index) else {
@@ -650,7 +637,7 @@ pub(crate) fn check_sheet_protection_range(
 
     let active_sheet = *state.active_sheet.lock().unwrap();
     if sheet_index == active_sheet {
-        let grid = state.grid.lock().unwrap();
+        let grid = state.grid.read().unwrap();
         let styles = state.style_registry.lock().unwrap();
         let protection_storage = state.sheet_protection.lock().unwrap();
         check_sheet_protection_range_in(
@@ -658,7 +645,7 @@ pub(crate) fn check_sheet_protection_range(
             start_row, start_col, end_row, end_col,
         )
     } else {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         let styles = state.style_registry.lock().unwrap();
         let protection_storage = state.sheet_protection.lock().unwrap();
         let Some(grid) = grids.get(sheet_index) else {
@@ -855,7 +842,7 @@ fn record_protection_undo(
         previous,
         description,
     );
-    crate::persistence::mark_workbook_modified(file_state);
+    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
     record_protection_audit(state, description, Some(sheet_index));
 }
 
@@ -1176,7 +1163,7 @@ pub fn can_edit_cell(
     let active_sheet = *state.active_sheet.lock().unwrap();
     // Canonical order: grid -> style_registry -> sheet_protection. See the
     // lock-order note on `check_sheet_protection_cells`.
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let protection_storage = state.sheet_protection.lock().unwrap();
 
@@ -1298,7 +1285,7 @@ pub fn set_cell_protection(
     }
 
     let plan = {
-        let grid = state.grid.lock().unwrap();
+        let grid = state.grid.read().unwrap();
         let styles = state.style_registry.lock().unwrap();
 
         if whole_columns || whole_rows {
@@ -1423,8 +1410,12 @@ pub fn set_cell_protection(
 
     // PASS 2 — apply.
     {
-        let mut grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        // Every gate above has passed; from here this command commits. Constructed
+        // HERE and not at the top so a refusal cannot leave a spuriously dirty
+        // document -- see DocumentEffect::mutates on ordering.
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut grid = state.grid.write(&effect).unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let mut styles = state.style_registry.lock().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         undo_stack.begin_transaction("Change cell protection".to_string());
@@ -1523,7 +1514,7 @@ pub fn set_cell_protection(
         undo_stack.commit_transaction();
     }
 
-    crate::persistence::mark_workbook_modified(&file_state);
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     // The one protection mutation that does not flow through
     // record_protection_undo — record its audit entry directly, or the
     // "trail cannot miss one" invariant on record_protection_audit is false.
@@ -1539,7 +1530,7 @@ pub fn get_cell_protection(
     row: u32,
     col: u32,
 ) -> CellProtection {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
 
     // Lock state is a cell FORMAT attribute, resolved through the row/column
@@ -1672,7 +1663,7 @@ fn record_workbook_protection_undo(
     description: &str,
 ) {
     crate::undo_commands::record_workbook_protection_undo(state, previous, description);
-    crate::persistence::mark_workbook_modified(file_state);
+    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
     record_protection_audit(state, description, None);
 }
 

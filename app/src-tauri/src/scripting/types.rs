@@ -134,9 +134,7 @@ pub fn build_host_state(
     }
 
     if let Some(fs) = file_state {
-        if let Ok(modified) = fs.is_modified.lock() {
-            host.is_dirty = *modified;
-        }
+        host.is_dirty = fs.is_dirty();
     }
     if let Ok(style) = state.reference_style.lock() {
         host.reference_style = style.clone();

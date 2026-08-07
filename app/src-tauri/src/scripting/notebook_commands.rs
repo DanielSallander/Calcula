@@ -193,7 +193,7 @@ async fn run_cell_internal(
     super::commands::check_script_security(script_state)?;
 
     // Phase 1 (sync): clone AppState data + checkpoint bookkeeping
-    let grids = app_state.grids.lock().map_err(|e| e.to_string())?.clone();
+    let grids = app_state.grids.read().map_err(|e| e.to_string())?.clone();
     let style_registry = app_state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = app_state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *app_state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -534,12 +534,19 @@ async fn notebook_rewind_internal(
     {
         let active_grid_clone = snapshot_grids.get(active_sheet).cloned();
 
-        let mut app_grids = app_state.grids.lock().map_err(|e| e.to_string())?;
+        // Rewinding installs a checkpoint's cells over the live ones -- a real
+        // change to what a save would write, even though it is a "revert" in
+        // intent. Same call as step 4 below; `mutates` is idempotent and the
+        // flag announces only the clean->dirty TRANSITION, so this costs one
+        // event, not two.
+        let file_state = app.state::<crate::persistence::FileState>();
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut app_grids = app_state.grids.write(&effect).map_err(|e| e.to_string())?;
         *app_grids = snapshot_grids;
         drop(app_grids);
 
         if let Some(grid) = active_grid_clone {
-            let mut app_grid = app_state.grid.lock().map_err(|e| e.to_string())?;
+            let mut app_grid = app_state.grid.write(&effect).map_err(|e| e.to_string())?;
             *app_grid = grid;
         }
     }

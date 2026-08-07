@@ -131,7 +131,7 @@ mod tests {
     /// Two-sheet workbook, sheet 0 active.
     fn two_sheet_state() -> AppState {
         let state = crate::create_app_state();
-        state.grids.lock().unwrap().push(engine::Grid::new());
+        state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
         state.sheet_names.lock().unwrap().push("Sheet2".to_string());
         state
             .sheet_ids
@@ -230,15 +230,15 @@ mod tests {
                                            crate::pivot::types::PivotState) {
         let state = crate::create_app_state();
         {
-            let mut grid = state.grid.lock().unwrap();
+            let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             grid.set_cell(0, 0, engine::Cell::new_number(10.0));
             grid.set_cell(1, 0, engine::Cell::new_number(20.0));
             grid.set_cell(2, 0, engine::Cell::new_number(30.0));
             grid.set_cell(4, 0, engine::Cell::new_formula(formula.to_string()));
         }
         {
-            let mut grids = state.grids.lock().unwrap();
-            grids[0] = state.grid.lock().unwrap().clone();
+            let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+            grids[0] = state.grid.read().unwrap().clone();
         }
         let files = crate::persistence::UserFilesState::default();
         let pivots = crate::pivot::types::PivotState::new();
@@ -249,7 +249,7 @@ mod tests {
     }
 
     fn total_at_a5(state: &AppState) -> f64 {
-        match state.grid.lock().unwrap().get_cell(4, 0).map(|c| c.value.clone()) {
+        match state.grid.read().unwrap().get_cell(4, 0).map(|c| c.value.clone()) {
             Some(engine::CellValue::Number(n)) => n,
             other => panic!("A5 is not a number: {:?}", other),
         }
@@ -334,7 +334,7 @@ mod tests {
         let state = crate::create_app_state();
         state
             .grid
-            .lock()
+            .write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk))
             .unwrap()
             .set_cell(0, 0, engine::Cell::new_formula("=SUM(A2:A4)".to_string()));
         let files = crate::persistence::UserFilesState::default();

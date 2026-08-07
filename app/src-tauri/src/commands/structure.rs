@@ -33,7 +33,7 @@ static CELL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 
 /// Capture a snapshot of the current grid state for undo.
 fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let row_heights = state.row_heights.lock().unwrap();
     let column_widths = state.column_widths.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -1313,8 +1313,8 @@ pub fn insert_rows(
     // Capture snapshot BEFORE acquiring other locks (helper acquires its own locks)
     let snapshot = capture_grid_snapshot(&state);
 
-    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -1337,6 +1337,8 @@ pub fn insert_rows(
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
     // is_modified here, so no later `?` can skip it.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
     // Cell-type assignments move with their rows; their pre-shift state is
     // recorded in the SAME transaction so one undo restores grid + assignments
     // atomically.
@@ -1588,7 +1590,7 @@ pub fn insert_rows(
     shift_table_boundaries_for_row_insert(&state, &effect, row, count, active_sheet);
 
     // Re-acquire locks for result building
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -1659,8 +1661,8 @@ pub fn insert_columns(
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
-    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -1683,6 +1685,8 @@ pub fn insert_columns(
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
     // is_modified here, so no later `?` can skip it.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
     // Cell-type assignments move with their columns (same transaction; see insert_rows).
     {
         let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
@@ -1928,7 +1932,7 @@ pub fn insert_columns(
     shift_table_boundaries_for_col_insert(&state, &effect, col, count, active_sheet);
 
     // Re-acquire locks for result building
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -2426,8 +2430,8 @@ pub fn delete_rows(
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
-    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -2450,6 +2454,8 @@ pub fn delete_rows(
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
     // is_modified here, so no later `?` can skip it.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
     // Assignments on deleted rows drop; those below shift up (same transaction;
     // see insert_rows).
     {
@@ -2722,7 +2728,7 @@ pub fn delete_rows(
     shift_table_boundaries_for_row_delete(&state, &effect, row, count, active_sheet);
 
     // Re-acquire locks for result building
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -2820,8 +2826,8 @@ pub fn delete_columns(
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
-    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -2844,6 +2850,8 @@ pub fn delete_columns(
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
     // is_modified here, so no later `?` can skip it.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
     // Assignments on deleted columns drop; those to the right shift left (same
     // transaction; see insert_rows).
     {
@@ -3114,7 +3122,7 @@ pub fn delete_columns(
     shift_table_boundaries_for_col_delete(&state, &effect, col, count, active_sheet);
 
     // Re-acquire locks for result building
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -3251,6 +3259,7 @@ fn relocate_references_in_formula(
 #[tauri::command]
 pub fn relocate_cell_references(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     user_files_state: State<crate::UserFilesState>,
     src_start_row: u32,
     src_start_col: u32,
@@ -3278,8 +3287,12 @@ pub fn relocate_cell_references(
     }
 
     let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -4851,8 +4864,8 @@ pub(crate) fn off_sheet_structural_edit(
         // Canonical lock order (matches insert_rows): mirror, grids,
         // active_sheet, undo_stack. The per-store shift helpers take their own
         // sublocks while these are held, exactly as the active-sheet path does.
-        let mut mirror = state.grid.lock().map_err(|e| e.to_string())?;
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut mirror = state.grid.write(&effect).map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 

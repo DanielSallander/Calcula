@@ -68,10 +68,10 @@ fn with_search_grid<R>(
     f: impl FnOnce(&engine::Grid) -> R,
 ) -> R {
     if target == active {
-        let grid = state.grid.lock().unwrap();
+        let grid = state.grid.read().unwrap();
         f(&grid)
     } else {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         static EMPTY: once_cell::sync::Lazy<engine::Grid> =
             once_cell::sync::Lazy::new(engine::Grid::new);
         f(grids.get(target).unwrap_or(&EMPTY))
@@ -198,7 +198,7 @@ pub(crate) fn replace_all_off_sheet(
     match_entire_cell: bool,
 ) -> Result<ReplaceResult, String> {
     let matches = {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         match grids.get(target) {
             Some(grid) => grid.find_all(&search, case_sensitive, match_entire_cell, false),
             None => Vec::new(),
@@ -210,7 +210,7 @@ pub(crate) fn replace_all_off_sheet(
         state, "replace all here", target, &matches,
     )?;
 
-    let mut grids = state.grids.lock().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -239,7 +239,8 @@ pub(crate) fn replace_all_off_sheet(
 
     // Both gates passed and there is at least one match: cells on the target sheet are
     // about to be rewritten. Off-sheet writes are exactly the ones nothing else marks.
-    let _effect = DocumentEffect::mutates(file_state);
+    let effect = DocumentEffect::mutates(file_state);
+    let mut grids = grids.authorize(&effect);
 
     let search_normalized = if case_sensitive {
         search.clone()
@@ -353,7 +354,7 @@ pub fn replace_all(
     // short-lived read lock and the writeback guard runs with no other lock
     // held (it takes writeback_index / active_sheet / sheet_ids of its own).
     let matches = {
-        let grid = state.grid.lock().unwrap();
+        let grid = state.grid.read().unwrap();
         grid.find_all(&search, case_sensitive, match_entire_cell, false)
     };
 
@@ -368,8 +369,8 @@ pub fn replace_all(
     // that never lands in the form still runs.
     crate::calp_commands::ensure_cells_unclaimed(&state, "replace all here", &matches)?;
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -406,7 +407,9 @@ pub fn replace_all(
     }
 
     // Both gates passed and there is at least one match: the loop below rewrites cells.
-    let _effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
 
     // Begin atomic transaction for undo
     undo_stack.begin_transaction(format!(
@@ -545,15 +548,18 @@ pub(crate) fn replace_single_off_sheet(
     )?;
 
     let replaced = {
-        let mut grids = state.grids.lock().unwrap();
+        let grids = state.grids.lock_pending().unwrap();
         let styles = state.style_registry.lock().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
 
-        let grid = grids
-            .get_mut(target)
-            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+        if target >= grids.len() {
+            return Err(format!("Sheet index {} out of range", target));
+        }
+        let grid = &grids[target];
 
-        // Sheet protection on the TARGET sheet (borrowed form).
+        // Sheet protection on the TARGET sheet (borrowed form). Reads only, and
+        // it can still refuse -- so it runs under the PENDING guard, before any
+        // dirty decision, without releasing the lock it was taken under.
         {
             let protection_storage = state.sheet_protection.lock().unwrap();
             crate::protection::check_sheet_protection_range_in(
@@ -607,7 +613,9 @@ pub(crate) fn replace_single_off_sheet(
 
         // A replacement really is being committed (the `return Ok(None)` paths above
         // cover "no cell", "formula cell" and "text unchanged").
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut grids = grids.authorize(&effect);
+        let grid = &mut grids[target];
 
         undo_stack.begin_transaction("Replace".to_string());
         undo_stack.record_custom_restore(
@@ -699,8 +707,8 @@ pub fn replace_single(
     // applies rather than the single-cell draft guard.
     crate::calp_commands::ensure_range_unclaimed(&state, "replace in this cell", row, col, row, col)?;
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -769,7 +777,9 @@ pub fn replace_single(
             new_cell.value = new_val;
 
             // Only here: a formula cell or an unchanged value returns without writing.
-            let _effect = DocumentEffect::mutates(&file_state);
+            let effect = DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
 
             // Record undo
             undo_stack.record_cell_change(row, col, previous_cell);

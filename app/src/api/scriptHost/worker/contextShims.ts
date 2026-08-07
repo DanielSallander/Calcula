@@ -491,6 +491,50 @@ interface ScriptChartOptions {
   height?: number;
 }
 
+/** Placement options for api.createPicture. No sheet slot: pictures land on the
+ *  ACTIVE sheet, exactly like api.createTable. */
+interface ScriptPictureOptions {
+  name?: string;
+  width?: number;
+  height?: number;
+}
+
+/** A picture as api.createPicture placed it. */
+interface ScriptPictureHandle {
+  instanceId: string;
+  sheetIndex: number;
+  row: number;
+  col: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Placement options for api.createShape. No sheet slot: shapes land on the
+ *  ACTIVE sheet, exactly like api.createTable and api.createPicture. */
+interface ScriptShapeOptions {
+  name?: string;
+  width?: number;
+  height?: number;
+  /** Text drawn inside the shape. The stored property is `text`, never
+   *  `label` — writing `label` succeeds and draws nothing. */
+  text?: string;
+}
+
+/** A shape as api.createShape placed it. */
+interface ScriptShapeHandle {
+  instanceId: string;
+  shapeType: string;
+  sheetIndex: number;
+  row: number;
+  col: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** A pivot layout area, in the Pivot Layout DSL's vocabulary. */
 type ScriptPivotArea = "rows" | "columns" | "values" | "filters";
 
@@ -953,6 +997,26 @@ interface ScriptImportedFile {
   content: string;
 }
 
+/**
+ * What caps.file.importImage hands back: a HANDLE to a picture now stored
+ * inside the document, plus what its header said about it.
+ *
+ * There is no `data` member and there must never be one. The bytes stay in the
+ * privileged process — the script can place the picture and lay it out
+ * correctly, but it cannot read the image, cannot synthesise one, and cannot
+ * turn the handle into anything that leaves the machine. Mirrors
+ * `MediaRef` in @api/filesystem and `media::MediaRef` in Rust.
+ */
+interface ScriptMediaRef {
+  /** The document handle: "media:" + 64 hex characters. Opaque. */
+  ref: string;
+  /** IANA type proved by the file's MAGIC BYTES, not by its extension. */
+  mimeType: string;
+  width: number;
+  height: number;
+  byteLength: number;
+}
+
 /** caps.shortcut.bind options (ui.shortcut). There is nothing here that widens
  *  the reach: a label is what the user reads in their shortcut list. */
 interface ScriptShortcutOptions {
@@ -1083,6 +1147,7 @@ function buildCapsShim(rt: WorkerRuntime): {
       options?: ScriptFileExportOptions,
     ): Promise<string | null>;
     importText(options?: ScriptFileImportOptions): Promise<ScriptImportedFile | null>;
+    importImage(): Promise<ScriptMediaRef | null>;
     exportPdf(suggestedName?: string): Promise<string | null>;
   };
   shortcut: {
@@ -1343,6 +1408,30 @@ function buildCapsShim(rt: WorkerRuntime): {
        *  never silently truncated. */
       async importText(options?: ScriptFileImportOptions) {
         return (await call(rt, "cap.fileImportText", [options])) as ScriptImportedFile | null;
+      },
+      /**
+       * Ask the user to pick a PICTURE, and have Calcula store it inside this
+       * workbook. Resolves to `{ ref, mimeType, width, height, byteLength }`,
+       * or null if they cancelled.
+       *
+       * WHAT YOU GET IS A HANDLE, NOT AN IMAGE — and that is the difference
+       * between this and importText. Calcula reads the file, proves it really
+       * is a picture from its magic bytes (never its extension), enforces the
+       * size and dimension caps, and files the bytes under their content hash
+       * inside the document. Your script receives `"media:<hash>"` and four
+       * integers. It never sees the bytes, so it cannot send them anywhere.
+       *
+       * Pass the `ref` to `api.createPicture(...)` to place it, or write it to
+       * a picture's `src` property. Those are the only two things it is for —
+       * and the only two things it CAN be used for.
+       *
+       * Rejects, with the reason, when the chosen file is not an admissible
+       * picture (wrong format, too many bytes, too many pixels, a malformed
+       * header). A refusal is the correct outcome: the code this replaced fell
+       * back to a 200x150 placeholder and embedded the file anyway.
+       */
+      async importImage() {
+        return (await call(rt, "cap.fileImportMedia", [])) as ScriptMediaRef | null;
       },
       /**
        * Save the sheet you would PRINT as a PDF, to a file the user picks.
@@ -2114,6 +2203,32 @@ function resolveCFRange(input: unknown): unknown {
   return parseA1Body(rest);
 }
 
+/**
+ * A single-cell anchor, written either way a script author would write one:
+ * `"B3"` or `{ row: 2, col: 1 }`.
+ *
+ * Normalised HERE so the broker — and its validator — see exactly one shape.
+ * Address parsing is worker-side for the same reason it is for conditional
+ * formats: it is pure string work with no state to consult, and doing it once
+ * on the way out keeps the validator a shape check rather than a parser.
+ *
+ * A "Sheet!" prefix is REFUSED rather than silently dropped: pictures land on
+ * the ACTIVE sheet, so accepting the prefix and ignoring it would put the
+ * picture somewhere the author did not ask for and say nothing.
+ */
+function resolveCellAnchor(anchor: string | { row: number; col: number }): unknown {
+  if (typeof anchor !== "string") return anchor;
+  const { sheetName, rest } = splitSheetPrefix(anchor);
+  if (sheetName !== null) {
+    throw new Error(
+      `Pictures are placed on the active sheet: drop the "${sheetName}!" prefix ` +
+        `and call api.setActiveSheet(${JSON.stringify(sheetName)}) first`,
+    );
+  }
+  const box = parseA1Body(rest);
+  return { row: box.startRow, col: box.startCol };
+}
+
 function resolveCFRanges(ranges: unknown): unknown {
   return Array.isArray(ranges) ? ranges.map(resolveCFRange) : ranges;
 }
@@ -2870,6 +2985,41 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       options?: { name?: string; hasHeaders?: boolean },
     ) => call(rt, "api.createTable", [startRow, startCol, endRow, endCol, options]),
     deleteTable: (tableId: string) => call(rt, "api.deleteTable", [tableId]),
+    /**
+     * Place a picture the workbook ALREADY holds, at an anchor cell on the
+     * active sheet. `dataRef` is a `media:` handle from
+     * `context.caps.file.importImage()` — there is no parameter that could
+     * carry image data, so a script can only place pictures a person chose.
+     */
+    createPicture: (
+      dataRef: string,
+      anchor: string | { row: number; col: number },
+      options?: ScriptPictureOptions,
+    ) => call(rt, "api.createPicture", [dataRef, resolveCellAnchor(anchor), options]) as
+      Promise<ScriptPictureHandle>,
+    /**
+     * Draw a shape at an anchor cell on the ACTIVE sheet.
+     *
+     * `shapeType` is a catalog id — "rectangle", "roundedRectangle",
+     * "rightArrow", "star5", ... An id Calcula does not know REJECTS with every
+     * accepted id in the message, which is how the catalog is discovered.
+     *
+     * NOT undoable: Ctrl+Z will not remove the shape.
+     */
+    createShape: (
+      shapeType: string,
+      anchor: string | { row: number; col: number },
+      options?: ScriptShapeOptions,
+    ) => call(rt, "api.createShape", [shapeType, resolveCellAnchor(anchor), options]) as
+      Promise<ScriptShapeHandle>,
+    /**
+     * Delete a shape, button or picture by the `instanceId` api.shapes()
+     * reports, together with any object script bound to it. ACTIVE SHEET only.
+     *
+     * NOT undoable: Ctrl+Z will not bring it back.
+     */
+    deleteShape: (instanceId: string) =>
+      call(rt, "api.deleteShape", [instanceId]) as Promise<void>,
     createNamedRange: (
       name: string, refersTo: string,
       options?: { sheetIndex?: SheetRef | null; comment?: string },

@@ -1013,7 +1013,7 @@ pub(crate) fn apply_auto_filter_inner(
     // Gate passed, so this call will commit an AutoFilter.
     let effect = DocumentEffect::mutates(file_state);
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1115,7 +1115,7 @@ fn clear_column_criteria_inner(
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1231,7 +1231,7 @@ pub(crate) fn reapply_auto_filter_inner(
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1458,7 +1458,7 @@ pub fn get_filter_unique_values(
 ) -> UniqueValuesResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let _theme = state.theme.read().unwrap();
@@ -1555,7 +1555,7 @@ fn set_column_filter_values_inner(
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1647,7 +1647,7 @@ fn set_column_custom_filter_inner(
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1732,7 +1732,7 @@ fn set_column_top_bottom_filter_inner(
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -2030,7 +2030,7 @@ fn run_advanced_filter_inner(
     // Read list + criteria into owned values under the grid/style/locale locks,
     // then drop them before touching advanced_filter_hidden_rows.
     let (data_rows, criteria_rows): (Vec<(u32, Vec<String>)>, Vec<HashMap<u32, AdvParsedCriterion>>) = {
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         let style_registry = state.style_registry.lock().unwrap();
         let locale = state.locale.lock().unwrap();
         if active_sheet >= grids.len() {
@@ -2399,7 +2399,7 @@ fn set_column_dynamic_filter_inner(
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
     let mut auto_filters = state.auto_filters.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();

@@ -571,7 +571,7 @@ pub(crate) fn apply_script_modified_grids_core(
     // Build the active-sheet diff WITHOUT mutating AppState. Hold the AppState
     // grid locks only long enough to compute the diff, then drop them.
     let updates: Vec<CellUpdateInput> = {
-        let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let app_grids = state.grids.read().map_err(|e| e.to_string())?;
         let empty_grid = Grid::new();
         let before_active = app_grids.get(active_sheet).unwrap_or(&empty_grid);
         match modified_grids.get(active_sheet) {
@@ -599,7 +599,7 @@ pub(crate) fn apply_script_modified_grids_core(
     // there is nothing to roll back.
     let non_active_touched: Vec<(usize, Vec<(u32, u32)>)> = {
         let mut touched: Vec<(usize, Vec<(u32, u32)>)> = Vec::new();
-        let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let app_grids = state.grids.read().map_err(|e| e.to_string())?;
         // Borrowed gate form: `grids` is held for the whole loop and
         // std::sync::Mutex is not reentrant, so the locking wrapper would
         // deadlock here. Acquire the rest in canonical order
@@ -677,7 +677,12 @@ pub(crate) fn apply_script_modified_grids_core(
     }
     let mut non_active_writes: Vec<NonActiveWrite> = Vec::new();
     {
-        let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        // PLAN runs under a PENDING guard: it only READS, and it can still fail
+        // (`script_grid_cells_snapshot_bytes` below is fallible). The dirty
+        // decision is made at the APPLY boundary, which is the first line that
+        // cannot fail -- so a plan that aborts leaves the document clean, which is
+        // exactly what the two-phase split above exists to guarantee.
+        let app_grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
         // Canonical order inside this block: grids -> locale (the order
         // update_cells_batch_core acquires them in).
         let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
@@ -721,6 +726,8 @@ pub(crate) fn apply_script_modified_grids_core(
             });
         }
         // --- APPLY ---
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut app_grids = app_grids.authorize(&effect);
         for w in non_active_writes.iter_mut() {
             app_grids[w.sheet_index] = w.prepared.take().expect("planned grid");
         }
@@ -808,9 +815,7 @@ pub(crate) fn apply_script_modified_grids_core(
             );
         }
         // Dirty flag (update_cells_batch sets it only when there was an active diff).
-        if let Ok(mut modified) = file_state.is_modified.lock() {
-            *modified = true;
-        }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
         // Per-sheet audit with correct attribution + range (replaces the prior single
         // active-sheet entry that mis-attributed off-sheet writes to the active sheet).
         for w in &non_active_writes {
@@ -1003,7 +1008,7 @@ pub fn run_script(
     require_distributed_module_consent(&script_state, &window, &request.source)?;
 
     // 1. Clone data from AppState for isolated execution
-    let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
+    let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -1714,7 +1719,7 @@ mod script_apply_tests {
         let state = crate::create_app_state();
         // Deterministic parsing/rendering regardless of the machine's locale.
         *state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
-        state.grids.lock().unwrap().push(sheet1);
+        state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(sheet1);
         // `sheet_ids` must mirror `grids`: the writeback claim guard resolves a
         // sheet INDEX to the stable SheetId the published region is keyed by,
         // and a missing id would make every claim unresolvable (fail-open).
@@ -1734,12 +1739,11 @@ mod script_apply_tests {
         state.show_gridlines.write(&seed).unwrap().push(true);
         Harness {
             state,
-            file_state: FileState {
-                current_path: Mutex::new(None),
-                is_modified: crate::document_effect::DirtyFlag::new(false),
-                session_password: Mutex::new(None),
-                is_encrypted: Mutex::new(false),
-            },
+            // `FileState::default()` rather than a struct literal: `is_modified`
+            // is private now, so the dirty flag can only be reached through
+            // `is_dirty()` / `set_dirty(DirtyWrite, _)`. Default is already
+            // clean-with-no-path, which is what this literal spelled out.
+            file_state: FileState::default(),
             user_files: UserFilesState {
                 files: Mutex::new(StdHashMap::new()),
             },
@@ -1751,7 +1755,7 @@ mod script_apply_tests {
 
     /// The post-script grids for a workbook whose sheet 0 is untouched.
     fn modified(h: &Harness, sheet1_after: Grid) -> Vec<Grid> {
-        let sheet0 = h.state.grids.lock().unwrap()[0].clone();
+        let sheet0 = h.state.grids.read().unwrap()[0].clone();
         vec![sheet0, sheet1_after]
     }
 
@@ -1801,7 +1805,7 @@ mod script_apply_tests {
     }
 
     fn value_at(h: &Harness, sheet: usize, row: u32, col: u32) -> CellValue {
-        h.state.grids.lock().unwrap()[sheet]
+        h.state.grids.read().unwrap()[sheet]
             .get_cell(row, col)
             .map(|c| c.value.clone())
             .unwrap_or(CellValue::Empty)
@@ -1851,7 +1855,7 @@ mod script_apply_tests {
         assert!(result.is_ok(), "{:?}", result);
         assert!(active_calls.is_empty(), "sheet 0 was untouched");
 
-        let cell = h.state.grids.lock().unwrap()[1]
+        let cell = h.state.grids.read().unwrap()[1]
             .get_cell(0, 2)
             .cloned()
             .expect("C1 present");
@@ -1945,7 +1949,7 @@ mod script_apply_tests {
 
         let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
         assert!(result.is_ok(), "{:?}", result);
-        assert!(*h.file_state.is_modified.lock().unwrap());
+        assert!(h.file_state.is_dirty());
     }
 
     /// The ACTIVE sheet's writes are handed to the edit pipeline (parse +
@@ -2017,7 +2021,7 @@ mod script_apply_tests {
         let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
         assert!(result.is_ok(), "{:?}", result);
         assert_eq!(
-            h.state.grids.lock().unwrap()[1]
+            h.state.grids.read().unwrap()[1]
                 .get_cell(0, 1)
                 .map(|c| c.value.clone()),
             Some(CellValue::Number(99.0)),

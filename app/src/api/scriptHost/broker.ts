@@ -266,6 +266,10 @@ const BROKER_AUDITED_CAPABILITY_METHODS: ReadonlyMap<string, string> = new Map([
   ["cap.dialogForm", "host-window dialog; no backend call"],
   ["cap.fileExportText", "native picker + write, driven from the host; not a gated command"],
   ["cap.fileImportText", "native picker + read, driven from the host; not a gated command"],
+  // read_media_file IS privileged and MAIN-window gated, but it is not
+  // capability-gated in Rust (it has no scriptId and records nothing), so the
+  // broker is the only place this call's outcome can be written down.
+  ["cap.fileImportMedia", "native picker + host-side read/validate/store; read_media_file is not a capability-gated command"],
   ["cap.filePrintPdf", "native picker + host-side render; not a gated command"],
   ["cap.shortcutBind", "host-side shortcut registry; no backend call"],
   ["cap.shortcutUnbind", "host-side shortcut registry; no backend call"],

@@ -86,6 +86,24 @@ export function makeFloatingControlId(sheetIndex: number, row: number, col: numb
   return `control-${sheetIndex}-${row}-${col}`;
 }
 
+/**
+ * The inverse of `makeFloatingControlId`: recover the anchor a control id
+ * encodes, or null when the string is not one of ours.
+ *
+ * It lives NEXT TO the builder deliberately. The id format is a private detail
+ * of this module — every other surface (object scripts, `api.listObjects`, the
+ * click path) receives it as an opaque handle — and a second place that
+ * hand-splits `"control-{s}-{r}-{c}"` is a second place to update the day the
+ * format gains a field.
+ */
+export function parseFloatingControlId(
+  id: string,
+): { sheetIndex: number; row: number; col: number } | null {
+  const m = /^control-(\d+)-(\d+)-(\d+)$/.exec(id);
+  if (!m) return null;
+  return { sheetIndex: Number(m[1]), row: Number(m[2]), col: Number(m[3]) };
+}
+
 /** Add a floating control to the store. */
 export function addFloatingControl(ctrl: FloatingControl): void {
   // Remove existing with same ID first

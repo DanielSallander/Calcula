@@ -178,8 +178,32 @@ async function createControlCopy(
   // Find a free anchor cell
   const anchor = await findFreeAnchorCell(sheetIndex);
 
-  // Save metadata to backend
-  await setControlMetadata(sheetIndex, anchor.row, anchor.col, metadata);
+  // Save metadata to backend.
+  //
+  // A refusal has to be SHOWN. Both callers (the Ctrl+V/Ctrl+D keydown handler
+  // and the context menu) invoke this from an async handler whose promise
+  // nobody awaits, so a rejection here would be an unhandled rejection and the
+  // user would press Ctrl+V and see nothing happen, with no reason given.
+  //
+  // It is reachable: `set_control_metadata` bounds every property at
+  // MAX_CONTROL_PROPERTY_CHARS (64 KiB), and a control from the LEGACY corpus
+  // that this build could not migrate — an SVG the old picker accepted — still
+  // holds its whole image inline in `src`. It renders, so copying it is a
+  // reasonable thing for a user to try; it just cannot be written back.
+  //
+  // Returning here (rather than after `addFloatingControl`) is the point: a
+  // floating control with no backend metadata is an orphan that paints until
+  // the next reload and then vanishes.
+  try {
+    await setControlMetadata(sheetIndex, anchor.row, anchor.col, metadata);
+  } catch (err) {
+    const { showToast } = await import("@api/notifications");
+    showToast(
+      `The control could not be copied: ${err instanceof Error ? err.message : String(err)}`,
+      { type: "error", duration: 9000 },
+    );
+    return;
+  }
 
   // Add to floating store
   const controlId = makeFloatingControlId(sheetIndex, anchor.row, anchor.col);

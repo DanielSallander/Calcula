@@ -399,7 +399,7 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     //
     // `calculate_sheet` delegates straight to this function and inherits the decision.
     // Recorded rather than omitted: `rg deliberately_clean` must list every such call.
-    let _effect = crate::document_effect::DocumentEffect::deliberately_clean(
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
         crate::document_effect::CleanReason::DerivedCache,
     );
     // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
@@ -411,8 +411,8 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     let control_values = crate::control_values::build_control_values(
         &state, &pane_control_state, &ribbon_filter_state,
     );
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
 
@@ -728,9 +728,9 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     if !cancelled {
         // Refreshes each property's CACHED VALUE from formulas that are themselves
         // persisted -- the same derived-state argument as the recalc pass this sits in
-        // (see the `_effect` at the top of this command). The property definitions are
+        // (see the `effect` at the top of this command). The property definitions are
         // untouched here; add/update/remove_computed_property own the dirty flag.
-        let mut cp_storage = state.computed_properties.write(&_effect).unwrap();
+        let mut cp_storage = state.computed_properties.write(&effect).unwrap();
         let (_dim_changes, _style_refresh) =
             crate::computed_properties::re_evaluate_all_properties(
                 &mut cp_storage,
@@ -820,8 +820,17 @@ pub(crate) fn recalculate_sheet_values(
     // evaluate to #N/A for this pass (v1).
     let control_values =
         crate::control_values::build_control_values_from_states(state, control_states);
-    let mut grid_mirror = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
+    // themselves persisted (formulas, literals, locale, control values), so it
+    // must not dirty on its own account: the ENTRY command that made those
+    // values stale already owns the flag, and dirtying here would make a
+    // workbook holding NOW()/RAND() prompt to save merely for being looked at.
+    // See CleanReason::RecalcCompanion.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
+    let mut grid_mirror = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     if sheet_index >= grids.len() {
@@ -1202,11 +1211,20 @@ pub(crate) fn recalc_visibility_dependents_core(
     let control_values =
         crate::control_values::build_control_values_from_states(state, control_states);
 
+    // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
+    // themselves persisted (formulas, literals, locale, control values), so it
+    // must not dirty on its own account: the ENTRY command that made those
+    // values stale already owns the flag, and dirtying here would make a
+    // workbook holding NOW()/RAND() prompt to save merely for being looked at.
+    // See CleanReason::RecalcCompanion.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
     // Pre-pass: sync the active-sheet mirror into `grids` (BUG-0016 discipline)
     // and find the non-active sheets holding visibility-dependent formulas.
     let (visibility_sheets, prepass_active_sheet) = {
-        let grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let grid = state.grid.read().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.lock().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();
@@ -1283,8 +1301,8 @@ pub(crate) fn recalc_visibility_dependents_core(
     let updated_cells = {
         let user_files = user_files_state.files.lock().unwrap();
         let sheet_names = state.sheet_names.lock().unwrap();
-        let mut grid = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grid = state.grid.write(&effect).unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.lock().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();

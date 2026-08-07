@@ -67,6 +67,15 @@ pub struct PullResult {
     /// the PACKAGE sheet id (un-remapped); `controls` is the opaque app payload.
     /// Empty for packages published before controls were carried.
     pub controls: Vec<SavedSheetControls>,
+    /// Content-addressed binary media the published controls reference:
+    /// sha256 hex -> raw bytes, read from the `media/{sha256}` artifacts.
+    ///
+    /// Integrity-verified against the SIGNED manifest before it reaches here, so
+    /// these are provably the bytes the publisher sent. That is not the same
+    /// question as "is this an image this build will accept" -- the host runs
+    /// them through `calcula_format::media` on the way into the document, so a
+    /// correctly-signed decompression bomb is still refused.
+    pub media: HashMap<String, Vec<u8>>,
     /// Threaded comments carried by the package, per sheet (Wave B). `sheet_id`
     /// is the PACKAGE sheet id (un-remapped); `comments` is the opaque app
     /// payload. Empty unless the publisher opted in via `include_comments`
@@ -466,6 +475,34 @@ pub fn pull(
             None => Vec::new(),
         };
 
+    // Read embedded binary media: media/{sha256} -> raw bytes.
+    //
+    // Discovered from the SIGNED manifest's checksum keys, NOT by walking the
+    // version directory. That is not a style choice: `commit_artifacts_as_blobs`
+    // moves every artifact into the content-addressed blob store and deletes the
+    // per-version copy, so a directory walk returns nothing on a real published
+    // package — the exact bug that silently dropped every pivot definition from
+    // real pulls until the checksum map became the authoritative artifact set.
+    //
+    // The bytes are integrity-verified against the signed manifest before this
+    // runs (`verify_version_artifacts` at the top of `pull`). That proves the
+    // publisher sent these bytes; it says nothing about whether they are a
+    // picture, so the HOST re-validates through `calcula_format::media` on the
+    // way into the document (`media::admit_foreign_media`).
+    let mut pulled_media: HashMap<String, Vec<u8>> = HashMap::new();
+    {
+        let rel_paths: Vec<String> = ver_manifest.artifact_checksums.keys().cloned().collect();
+        for rel in &rel_paths {
+            let Some(hash) = rel.strip_prefix("media/") else { continue };
+            if !calcula_format::media::is_media_hash(hash) {
+                continue;
+            }
+            if let Some(bytes) = registry.read_artifact(pkg, ver, rel)? {
+                pulled_media.insert(hash.to_string(), bytes);
+            }
+        }
+    }
+
     // Read Wave B artifacts (comments, scenarios, outlines) — per-sheet opaque
     // payloads with PACKAGE sheet ids, exactly like CF/DV. All optional:
     // comments.json exists only when the publisher opted in, and older
@@ -758,6 +795,7 @@ pub fn pull(
         conditional_formats: pulled_conditional_formats,
         data_validations: pulled_data_validations,
         controls: pulled_controls,
+        media: pulled_media,
         comments: pulled_comments,
         scenarios: pulled_scenarios,
         outlines: pulled_outlines,
@@ -1164,6 +1202,212 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["controlType"], "button");
         assert_eq!(entries[0]["properties"]["onSelect"]["value"], "script-1");
+    }
+
+    /// A byte-exact PNG header of the requested size. Real bytes, so the
+    /// package carries a real binary rather than a placeholder string.
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut v: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&width.to_be_bytes());
+        v.extend_from_slice(&height.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        v
+    }
+
+    fn sha_of(bytes: &[u8]) -> String {
+        crate::integrity::sha256_hex(bytes)
+    }
+
+    #[test]
+    fn media_travels_as_its_own_artifact_and_only_for_published_sheets() {
+        // A picture referenced by a published control must arrive; a picture
+        // referenced only from a sheet the publisher withheld must NOT — the
+        // package would otherwise disclose content from an unpublished sheet.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let logo = png_bytes(64, 64);
+        let secret = png_bytes(128, 128);
+        let logo_hash = sha_of(&logo);
+        let secret_hash = sha_of(&secret);
+
+        let mut wb = make_test_workbook();
+        let published_sheet_id = wb.sheets[0].id;
+        let unpublished_sheet_id = wb.sheets[1].id;
+        wb.media.insert(logo_hash.clone(), logo.clone());
+        wb.media.insert(secret_hash.clone(), secret.clone());
+        wb.controls = vec![
+            persistence::SavedSheetControls {
+                sheet_id: published_sheet_id,
+                controls: serde_json::json!([
+                    { "row": 1, "col": 1, "controlType": "image",
+                      "properties": { "src": { "valueType": "static",
+                                               "value": format!("media:{}", logo_hash) } } }
+                ]),
+            },
+            persistence::SavedSheetControls {
+                sheet_id: unpublished_sheet_id,
+                controls: serde_json::json!([
+                    { "row": 0, "col": 0, "controlType": "image",
+                      "properties": { "src": { "valueType": "static",
+                                               "value": format!("media:{}", secret_hash) } } }
+                ]),
+            },
+        ];
+
+        let publish_req = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "media-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0],
+            now: "2026-08-07T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &publish_req, prof.path()).unwrap();
+
+        // The blob is its OWN artifact, listed in the signed checksum map — it
+        // has to be, because the integrity walk rejects any unlisted on-disk
+        // artifact (UnlistedArtifact). And its checksum IS its media hash,
+        // which is what makes the content-addressed blob store dedupe it.
+        let ver = reg.get_version_manifest("media-pkg", "1.0.0").unwrap();
+        let rel = format!("media/{}", logo_hash);
+        assert_eq!(
+            ver.artifact_checksums.get(&rel),
+            Some(&logo_hash),
+            "a media artifact's checksum is the media hash itself"
+        );
+        assert!(
+            !ver.artifact_checksums.contains_key(&format!("media/{}", secret_hash)),
+            "media referenced only from an unpublished sheet must not ship"
+        );
+        // controls.json must not have grown an inline copy.
+        let controls_json = reg
+            .read_artifact("media-pkg", "1.0.0", "controls.json")
+            .unwrap()
+            .unwrap();
+        let as_text = String::from_utf8_lossy(&controls_json);
+        assert!(!as_text.contains("base64"), "no inline base64 in controls.json");
+        assert!(as_text.contains(&format!("media:{}", logo_hash)));
+
+        let pull_req = PullRequest {
+            package_name: "media-pkg".to_string(),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-08-07T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse)
+            .unwrap();
+        assert_eq!(result.media.len(), 1);
+        assert_eq!(result.media.get(&logo_hash), Some(&logo), "byte-for-byte");
+        assert!(!result.media.contains_key(&secret_hash));
+    }
+
+    #[test]
+    fn the_same_logo_is_one_blob_across_two_versions_even_when_a_caption_changes() {
+        // The reason media is its own artifact rather than inline base64.
+        // `commit_artifacts_as_blobs` keys the content-addressed store on each
+        // ARTIFACT's SHA, so an inline logo made the blob key the SHA of the
+        // WHOLE controls.json — and a one-word caption edit minted a fresh
+        // multi-megabyte blob every release.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let logo = png_bytes(64, 64);
+        let logo_hash = sha_of(&logo);
+
+        for (version, caption) in [
+            (SemVer::new(1, 0, 0), "Q1 results"),
+            (SemVer::new(1, 0, 1), "Q2 results"),
+        ] {
+            let mut wb = make_test_workbook();
+            let sid = wb.sheets[0].id;
+            wb.media.insert(logo_hash.clone(), logo.clone());
+            wb.controls = vec![persistence::SavedSheetControls {
+                sheet_id: sid,
+                controls: serde_json::json!([
+                    { "row": 1, "col": 1, "controlType": "image",
+                      "properties": {
+                          "src": { "valueType": "static", "value": format!("media:{}", logo_hash) },
+                          "text": { "valueType": "static", "value": caption }
+                      } }
+                ]),
+            }];
+            let req = PublishRequest {
+                model_writebacks: None,
+                workbook: &wb,
+                package_name: "media-dedup".to_string(),
+                version,
+                kind: "report".to_string(),
+                sheet_indices: vec![0],
+                now: "2026-08-07T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
+            };
+            publish::publish(&reg, &req, prof.path()).unwrap();
+        }
+
+        let rel = format!("media/{}", logo_hash);
+        let v1 = reg.get_version_manifest("media-dedup", "1.0.0").unwrap();
+        let v2 = reg.get_version_manifest("media-dedup", "1.0.1").unwrap();
+        assert_eq!(
+            v1.artifact_checksums.get(&rel),
+            v2.artifact_checksums.get(&rel),
+            "the same logo hashes identically in both versions -> ONE blob"
+        );
+        // ...while the caption genuinely changed, so this is dedup rather than
+        // two identical publishes.
+        assert_ne!(
+            v1.artifact_checksums.get("controls.json"),
+            v2.artifact_checksums.get("controls.json"),
+            "the caption edit really did change controls.json"
+        );
+
+        // Both versions still resolve the logo through the shared blob store.
+        for version in ["1.0.0", "1.0.1"] {
+            let bytes = reg
+                .read_artifact("media-dedup", version, &rel)
+                .unwrap()
+                .expect("logo readable");
+            assert_eq!(bytes, logo);
+        }
+    }
+
+    #[test]
+    fn a_package_with_no_media_pulls_an_empty_map() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+        let pull_req = PullRequest {
+            package_name: "test-pkg".to_string(),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-08-07T01:00:00Z".to_string(),
+        };
+        let result =
+            pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        assert!(result.media.is_empty());
     }
 
     /// Two pane controls for the pane-control tests: a slider carrying a

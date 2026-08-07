@@ -1,0 +1,127 @@
+//! FILENAME: app/src/core/components/InlineEditor/expansion.ts
+// PURPOSE: Excel-parity geometry for the inline cell editor: while editing, the
+//          box grows to the right over ADJACENT EMPTY cells so a long entry is
+//          readable instead of scrolling inside one column's width.
+// CONTEXT: The editor had no expansion logic at all. At the (correct) 64.29px
+//          default column width, typing anything longer than ~7 characters made
+//          the text scroll out of sight while the user was still typing it.
+//
+//          Two rules are non-negotiable and are what the tests pin:
+//            1. NEVER expand over a cell that holds data. Obscuring the user's
+//               own data to show them a half-typed entry is worse than scrolling.
+//            2. NEVER cross the viewport edge. A box that runs off-screen is the
+//               same failure with extra steps.
+//          A neighbour whose contents are NOT KNOWN counts as occupied — the
+//          safe direction when the lookup has not answered yet.
+
+/** Chrome the box needs around its text: padding (4px each side), border (2px
+ *  each side) and two pixels of caret slack. Logical pixels, pre-zoom. */
+export const EDITOR_CHROME_PX = 4 * 2 + 2 * 2 + 2;
+
+export interface EditorExpansionInput {
+  /** Editor left edge in logical px (already clamped to the row header). */
+  x: number;
+  /** Width of the edited cell itself, logical px (already header-clipped). */
+  baseWidth: number;
+  /** Width the entry needs to be fully visible, logical px (chrome included). */
+  desiredWidth: number;
+  /** Widths of successive columns to the right; index 0 is the cell's neighbour. */
+  neighbourWidths: readonly number[];
+  /**
+   * Whether each of those neighbours holds data. An entry past the end of this
+   * array is UNKNOWN and treated as occupied, so a pending lookup can never
+   * paint the editor over a value.
+   */
+  neighbourOccupied: readonly boolean[];
+  /** Right edge in logical px the editor may not cross (the viewport). */
+  maxRight: number;
+}
+
+/**
+ * The width the inline editor should render at.
+ *
+ * Never smaller than the cell it is editing, never wider than the text needs,
+ * never past an occupied neighbour, never past `maxRight`.
+ */
+export function computeExpandedEditorWidth(input: EditorExpansionInput): number {
+  const {
+    x,
+    baseWidth,
+    desiredWidth,
+    neighbourWidths,
+    neighbourOccupied,
+    maxRight,
+  } = input;
+
+  // The entry fits: the editor is exactly its cell. This is also the path that
+  // collapses the box again when the user deletes text.
+  if (!(desiredWidth > baseWidth)) {
+    return baseWidth;
+  }
+
+  let width = baseWidth;
+  for (let n = 0; n < neighbourWidths.length; n++) {
+    if (width >= desiredWidth) break;
+    // Unknown counts as occupied.
+    const occupied = neighbourOccupied[n] ?? true;
+    if (occupied) break;
+    width += neighbourWidths[n];
+  }
+
+  // Hug the text rather than snapping to whole columns (Excel's behaviour), and
+  // stop at the viewport regardless.
+  const viewportLimit = Math.max(baseWidth, maxRight - x);
+  return Math.max(baseWidth, Math.min(width, desiredWidth, viewportLimit));
+}
+
+// ---------------------------------------------------------------------------
+// Text measurement
+// ---------------------------------------------------------------------------
+
+/**
+ * `undefined` = not tried yet, `null` = this environment has no 2D context
+ * (jsdom under vitest), otherwise the shared measuring context.
+ */
+let measureCtx: CanvasRenderingContext2D | null | undefined;
+
+/**
+ * Width of the widest line of `text` at `font`.
+ *
+ * Falls back to a character-count estimate where no canvas exists, so callers
+ * behave deterministically under test instead of measuring zero and never
+ * expanding.
+ */
+export function measureEditorTextWidth(
+  text: string,
+  font: string,
+  fallbackCharWidth: number,
+): number {
+  if (text === "") return 0;
+  // Alt+Enter puts newlines in the buffer; the box must fit the longest line.
+  const lines = text.split("\n");
+
+  if (measureCtx === undefined) {
+    try {
+      measureCtx = document.createElement("canvas").getContext("2d");
+    } catch {
+      measureCtx = null;
+    }
+  }
+
+  if (measureCtx) {
+    measureCtx.font = font;
+    let widest = 0;
+    for (const line of lines) {
+      const w = measureCtx.measureText(line).width;
+      if (w > widest) widest = w;
+    }
+    return widest;
+  }
+
+  let widest = 0;
+  for (const line of lines) {
+    const w = line.length * fallbackCharWidth;
+    if (w > widest) widest = w;
+  }
+  return widest;
+}

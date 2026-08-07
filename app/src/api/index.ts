@@ -2231,13 +2231,11 @@ export {
   registerChartStoreService,
   registerPivotStoreService,
   registerBiConnectionService,
-  registerControlStoreService,
   getSlicerStoreService,
   getTimelineStoreService,
   getChartStoreService,
   getPivotStoreService,
   getBiConnectionService,
-  getControlStoreService,
 } from "./componentStoreRegistry";
 
 export type {
@@ -2246,7 +2244,6 @@ export type {
   IChartStoreService,
   IPivotStoreService,
   IBiConnectionService,
-  IControlStoreService,
   ChartPlacement,
 } from "./componentStoreRegistry";
 
@@ -2267,6 +2264,28 @@ export type {
   ButtonControlProvider,
   CreateButtonControlRequest,
 } from "./buttonControlService";
+
+// ============================================================================
+// Controls Service (IoC seam — the Controls extension owns on-grid CONTROLS:
+// the shape catalog, shape creation, control deletion and the inventory)
+// ============================================================================
+
+export {
+  registerControlsProvider,
+  hasControlsProvider,
+  getControlsProvider,
+  requireControlsProvider,
+  resetControlsProvider,
+} from "./controlsService";
+
+export type {
+  ControlAnchor,
+  ControlInventoryRow,
+  ControlsProvider,
+  CreateShapeControlRequest,
+  ShapeCatalogEntry,
+  ShapeControlHandle,
+} from "./controlsService";
 
 // ============================================================================
 // Macro Run Service (IoC: a button LINKS a macro; this runs it by id)

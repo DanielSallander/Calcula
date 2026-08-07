@@ -4,17 +4,34 @@
 // user-customizable layout config (Clipboard, Font, Alignment, ...). The shell renders
 // the sections horizontally in the ribbon band or vertically in the sidebar; the
 // customize dialog re-registers the panel when the layout changes.
+//
+// The entry point to that dialog is a View-menu item. It is deliberately NOT a
+// ribbon gear: the tab strip has no right-aligned surface, a gear would need a
+// sidebar-projection equivalent, and it would change ~9 committed screenshots.
+// `registerMenuItem` is a first-class extension API (30+ extensions use it), so
+// this needs no shell change, no API change and turns no golden red.
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import type { RibbonContext } from "@api/extensions";
-import { RibbonIcon } from "@api";
-import { registerPanel, unregisterPanel, DialogExtensions } from "@api/ui";
+import {
+  registerPanel,
+  unregisterPanel,
+  registerMenuItem,
+  unregisterMenuItem,
+  showDialog,
+  DialogExtensions,
+} from "@api/ui";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
 import { useGridState } from "@api/state";
 import { HomeTabGroupComponent } from "./components/HomeTabGroupComponent";
 import { HomeTabCustomizeDialog } from "./components/HomeTabCustomizeDialog";
-import { loadLayout } from "./homeTabConfig";
+import {
+  groupIconFor,
+  HomeTabCustomizeIcon,
+  LAUNCHER_ICON_SIZE,
+} from "./components/homeTabIcons";
+import { loadLayout, type HomeTabLayout } from "./homeTabConfig";
 
 // ============================================================================
 // Constants
@@ -23,6 +40,12 @@ import { loadLayout } from "./homeTabConfig";
 const HOME_TAB_ID = "home";
 const HOME_TAB_ORDER = 10;
 const HOME_CUSTOMIZE_DIALOG_ID = "home-tab-customize";
+const VIEW_MENU_ID = "view";
+const CUSTOMIZE_MENU_ITEM_ID = "view.customizeHomeTab";
+
+/** Fallback demotion order for a group that names none (user-created groups).
+ *  Higher = collapses LAST, so a custom group survives the squeeze. */
+const DEFAULT_COLLAPSE_PRIORITY = 99;
 
 // ============================================================================
 // Extension State
@@ -30,39 +53,6 @@ const HOME_CUSTOMIZE_DIALOG_ID = "home-tab-customize";
 
 let isActivated = false;
 let layoutChangedHandler: (() => void) | null = null;
-
-// ============================================================================
-// Group Definitions
-// ============================================================================
-
-/** Icons per group (shown on launcher buttons when a section is demoted).
- *  SVGs from the shared ribbon set so collapsed groups match the inline
- *  buttons; "font" stays a typographic "A" like its in-group buttons. */
-const LAUNCHER_ICON_SIZE = 20;
-const GROUP_ICONS: Record<string, React.ReactNode> = {
-  clipboard: React.createElement(RibbonIcon.Paste, { size: LAUNCHER_ICON_SIZE }),
-  font: "A",
-  alignment: React.createElement(RibbonIcon.AlignLeft, { size: LAUNCHER_ICON_SIZE }),
-  number: React.createElement(RibbonIcon.NumberFormat, { size: LAUNCHER_ICON_SIZE }),
-  styles: React.createElement(RibbonIcon.CellStyles, { size: LAUNCHER_ICON_SIZE }),
-  cells: React.createElement(RibbonIcon.InsertRow, { size: LAUNCHER_ICON_SIZE }),
-  editing: React.createElement(RibbonIcon.Find, { size: LAUNCHER_ICON_SIZE }),
-};
-
-/** Fallback launcher icon for user-created custom groups. */
-const GROUP_ICON_FALLBACK: React.ReactNode = React.createElement(RibbonIcon.FormatCells, {
-  size: LAUNCHER_ICON_SIZE,
-});
-
-/** Collapse priority per group (lower = collapses to a launcher first) */
-const GROUP_ORDER: Record<string, number> = {
-  clipboard: 10,
-  font: 20,
-  alignment: 30,
-  number: 40,
-  styles: 50,
-  editing: 60,
-};
 
 // ============================================================================
 // Section Building
@@ -87,16 +77,21 @@ function makeSectionComponent(itemIds: string[]): React.ComponentType<PanelSecti
   return SectionAdapter;
 }
 
-/** Builds the panel sections from the current (possibly customized) layout. */
-function buildSections(): PanelSection[] {
-  const layout = loadLayout();
+/**
+ * Builds the panel sections from a layout.
+ *
+ * Icon and collapse order come from the LAYOUT (`iconId`, `collapsePriority`),
+ * not from side tables here. Two parallel lookup tables keyed by group id used
+ * to live in this file and had already drifted from DEFAULT_LAYOUT once.
+ */
+export function buildSections(layout: HomeTabLayout): PanelSection[] {
   return layout.groups.map((group) => ({
     id: `${HOME_TAB_ID}.${group.id}`,
     label: group.label,
-    icon: GROUP_ICONS[group.id] ?? GROUP_ICON_FALLBACK,
+    icon: groupIconFor(group, LAUNCHER_ICON_SIZE),
     component: makeSectionComponent(group.items),
     ribbonPresentation: "inline" as const,
-    collapsePriority: GROUP_ORDER[group.id] ?? 99,
+    collapsePriority: group.collapsePriority ?? DEFAULT_COLLAPSE_PRIORITY,
   }));
 }
 
@@ -106,7 +101,7 @@ function registerHomePanel(): void {
     id: HOME_TAB_ID,
     title: "Home",
     icon: null,
-    sections: buildSections(),
+    sections: buildSections(loadLayout()),
     defaultPlacement: "ribbon",
     ribbonOrder: HOME_TAB_ORDER,
     priority: 1000 - HOME_TAB_ORDER,
@@ -128,9 +123,19 @@ function activate(_context: ExtensionContext): void {
   // Register the Home panel (one section per layout group)
   registerHomePanel();
 
-  // Re-register the panel when the customize dialog saves a new layout
+  // Re-register the panel when the customize dialog saves a new layout.
+  //
+  // REGISTER IN PLACE — do NOT unregister first. `registerPanel` upserts by id
+  // (the panel registry `set`s, and `registerRibbonTab` overwrites), so a bare
+  // re-register replaces the tab without it ever being absent. Unregistering
+  // first made the Home tab momentarily NOT EXIST, and the ribbon's active-tab
+  // reconciliation reacts to that: when the current tab disappears it falls
+  // back to the first non-contextual tab. So the user pressed Save in
+  // "Customize Home Tab..." and was dumped onto Page Layout, with their newly
+  // customised Home tab off screen — the re-register that followed put the tab
+  // back but could not take the selection back, because by then "pageLayout"
+  // was a perfectly valid current tab.
   layoutChangedHandler = () => {
-    unregisterPanel(HOME_TAB_ID);
     registerHomePanel();
   };
   window.addEventListener("homeTab:layoutChanged", layoutChangedHandler);
@@ -140,6 +145,17 @@ function activate(_context: ExtensionContext): void {
     id: HOME_CUSTOMIZE_DIALOG_ID,
     component: HomeTabCustomizeDialog,
     priority: 150,
+  });
+
+  // The entry point. Without it the dialog is registered, listening and
+  // unreachable: a saved layout still applies at startup but nobody can
+  // change it back.
+  registerMenuItem(VIEW_MENU_ID, {
+    id: CUSTOMIZE_MENU_ITEM_ID,
+    label: "Customize Home Tab...",
+    icon: React.createElement(HomeTabCustomizeIcon, { size: 14 }),
+    order: 90,
+    action: () => showDialog(HOME_CUSTOMIZE_DIALOG_ID),
   });
 
   isActivated = true;
@@ -158,6 +174,7 @@ function deactivate(): void {
     window.removeEventListener("homeTab:layoutChanged", layoutChangedHandler);
     layoutChangedHandler = null;
   }
+  unregisterMenuItem(VIEW_MENU_ID, CUSTOMIZE_MENU_ITEM_ID);
   unregisterPanel(HOME_TAB_ID);
   DialogExtensions.unregisterDialog(HOME_CUSTOMIZE_DIALOG_ID);
   isActivated = false;

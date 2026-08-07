@@ -46,7 +46,7 @@ pub fn read_cell_range(
     end_col: u32,
 ) -> Result<String, String> {
     let state = handle.state::<AppState>();
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
@@ -166,10 +166,10 @@ pub fn get_sheet_summary(
     max_chars: u32,
 ) -> Result<String, String> {
     let state = handle.state::<AppState>();
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
 
     let options = AiSerializeOptions {
@@ -292,8 +292,11 @@ pub fn apply_cell_formatting(
     )?;
 
     let state = handle.state::<AppState>();
-    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    // Past the AI access-ceiling gate: this writes cell styles into the grid.
+    let file_state = handle.state::<crate::persistence::FileState>();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
+    let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
@@ -378,9 +381,9 @@ pub fn apply_cell_formatting(
 
     // Mark dirty + live-refresh the open grid (mirrors execute_script:858) so the
     // AI/MCP format participates in save state and repaints out-of-band.
-    if let Ok(mut modified) = handle.state::<crate::persistence::FileState>().is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(
+        &handle.state::<crate::persistence::FileState>(),
+    );
     let _ = handle.emit("grid:refresh", ());
 
     let range_label = format!(
@@ -1112,7 +1115,7 @@ async fn run_script_with_model(
 
     let state = handle.state::<AppState>();
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
-    let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
+    let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -1274,7 +1277,7 @@ fn run_engine_script(
     let state = handle.state::<AppState>();
 
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
-    let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
+    let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;

@@ -590,6 +590,7 @@ fn solve_evolutionary(
 #[tauri::command]
 pub fn solver_solve(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     params: SolverParams,
 ) -> SolverResult {
     // BACKGROUND: GRG/simplex/evolutionary all drive many full recalcs whose
@@ -665,8 +666,12 @@ pub fn solver_solve(
     }
 
     // Acquire locks
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -889,6 +894,7 @@ pub fn solver_solve(
 #[tauri::command]
 pub fn solver_revert(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     sheet_index: usize,
     original_values: Vec<SolverVariableValue>,
 ) -> SolverResult {
@@ -902,8 +908,13 @@ pub fn solver_revert(
     // numbers and no way back — the same reasoning that exempts undo replay
     // (see the exempt-paths block in protection.rs). solver_solve itself IS
     // gated, so nothing reaches here that protection did not already allow.
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    //
+    // Reverting writes cell values just as solving does, so it dirties too: the
+    // document after a revert is not the document that was last saved unless the
+    // save happened to fall exactly between solve and revert.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();

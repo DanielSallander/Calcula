@@ -163,6 +163,14 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
   if (PIVOT_DATA_ASPECTS.has(aspect as string)) {
     return checkPivotDataAspect(aspect as string, aspectArgs);
   }
+  // Control PROPERTY writes (shapes, pictures, buttons). Until this row existed
+  // the aspect fell through to `return true` with no key allowlist and no
+  // length bound, which is how `object.setState` — restricted tier, no
+  // capability — became a route for a distributed script to persist a
+  // multi-megabyte data: URI. See the media section below for the whole rule.
+  if (aspect === "shape.setProperty") {
+    return checkShapeSetProperty(aspectArgs);
+  }
   return true;
 };
 export const vDecl: Validator = ([decls]) =>
@@ -3843,6 +3851,317 @@ export const vKV: Validator = ([key, value]) => {
     return "key must be a non-empty string (max 512 chars)";
   }
   if (!isBoundedString(value, 262_144)) return "value must be a string (max 256 KB)";
+  return true;
+};
+
+// ============================================================================
+// Embedded MEDIA — handles, and the property slot that may hold one
+// ============================================================================
+//
+// THE RULE THIS SECTION MAKES MECHANICAL: a script may REFERENCE media that is
+// already inside the document; it may never INTRODUCE bytes.
+//
+// The backend half of that rule shipped first (core/calcula-format/src/media.rs
+// + app/src-tauri/src/media.rs): bytes enter only through `read_media_file`,
+// which is MAIN-window gated, denylisted for scripts, magic-byte validated and
+// capped, and what comes back is an inert handle — `media:` plus 64 lowercase
+// hex characters. But "restricted may reference, never introduce" was, until
+// this section existed, true of the backend and merely ASSERTED of the script
+// surface: `object.setState` is restricted tier with no capability, and
+// vSetState returned `true` for `shape.setProperty` with no key allowlist and
+// no length bound at all. A distributed, restricted script could therefore
+// write a multi-megabyte data: URI straight into a persisted control property,
+// which then travelled into a published .calp and under its signature.
+//
+// Prose does not close that. A validator does.
+
+/** A `media:{sha256}` handle. EXACTLY mirrors `parse_media_ref` in
+ *  core/calcula-format/src/media.rs: 64 LOWERCASE hex characters, nothing else.
+ *  Strictness is the whole point — a loose prefix test would let
+ *  "media:../../etc" or "media:https://tracker" through, and the handle is used
+ *  as an archive entry NAME. A test pins this against the Rust source. */
+export const MEDIA_REF_RE = /^media:[0-9a-f]{64}$/;
+
+/** True when `v` is a well-formed media handle. */
+export function isMediaRef(v: unknown): v is string {
+  return typeof v === "string" && MEDIA_REF_RE.test(v);
+}
+
+/** Mirrors MAX_MEDIA_BYTES in core/calcula-format/src/media.rs, which ENFORCES
+ *  it. Repeated here only so the consent/transparency line can state the cap a
+ *  user is agreeing to; a test reads the Rust source and pins the two together. */
+export const MAX_MEDIA_BYTES = 8 * 1024 * 1024;
+/** Mirrors MAX_MEDIA_PIXELS in the same Rust module (decompression-bomb gate). */
+export const MAX_MEDIA_PIXELS = 40_000_000;
+
+/**
+ * The control properties a script may write through `shape.setProperty`.
+ *
+ * The union of the three real property sets the Controls extension defines —
+ * SHAPE_PROPERTIES (Shape/shapeProperties.ts), IMAGE_PROPERTIES
+ * (Image/imageProperties.ts) and the geometry/chrome keys the button seam
+ * documents (@api/buttonControlService) — because ONE aspect reaches all three:
+ * `shape.setProperty` is what a shape context's `setProperty` sends, and
+ * `api.objectSetState` aims the same aspect at another instance.
+ *
+ * Kept as a literal set rather than imported from the extension on purpose: an
+ * extension is a feature, this file is policy, and the Facade Rule runs in both
+ * directions — @api must not import from app/extensions. A test asserts the two
+ * lists agree, so drift fails loudly instead of silently widening the gate.
+ */
+export const SCRIPT_SHAPE_PROPERTY_KEYS: readonly string[] = [
+  // -- shape identity + paint (SHAPE_PROPERTIES) --
+  "shapeType", "fill", "stroke", "strokeWidth",
+  "text", "textColor", "fontSize", "fontBold", "fontItalic",
+  // -- picture (IMAGE_PROPERTIES) --
+  "src", "opacity", "rotation", "flipH", "flipV",
+  // -- geometry + layout, shared by every on-grid control --
+  "x", "y", "width", "height", "pinToGrid", "embedded",
+  // -- chrome the button set contributes and a shape may legitimately carry --
+  "color", "borderColor", "tooltip",
+  // -- identity. Not a Properties-pane row, but a real stored property: it is
+  //    what IControlStoreService.listControls reads back as `name`, and so what
+  //    api.listObjects("shape") reports. Listed explicitly rather than left to
+  //    the custom-key tail, because a name is not a custom property.
+  "name",
+];
+const SCRIPT_SHAPE_PROPERTY_KEY_SET: ReadonlySet<string> = new Set(SCRIPT_SHAPE_PROPERTY_KEYS);
+
+/**
+ * Property slots a SCRIPT may not write, however the aspect is addressed.
+ *
+ * Both hold EXECUTABLE actions rather than appearance: `onSelect` is inline
+ * source that the click path feeds to `runWorkbookScript` (the QuickJS module
+ * runtime, a different and wider trust class than the sandboxed worker the
+ * caller is running in), and `macroRef` re-points a control at any recorded
+ * macro by module id. A sandboxed script that could write either would be
+ * authoring — or silently re-aiming — code that later runs with more reach than
+ * it has itself, which is privilege escalation with extra steps.
+ *
+ * Nothing legitimate is lost: neither key is in SHAPE_PROPERTIES or
+ * IMAGE_PROPERTIES, and the door this aspect goes through hardcodes the control
+ * type "shape". Buttons get their action from the Properties pane or from the
+ * @api/buttonControlService seam, both of which are trusted UI.
+ */
+export const SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS: readonly string[] = ["onSelect", "macroRef"];
+const SCRIPT_REFUSED_SHAPE_PROPERTY_KEY_SET: ReadonlySet<string> =
+  new Set(SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS);
+
+/**
+ * A CUSTOM property key, as `declareProperties` mints them.
+ *
+ * The key list above cannot be closed, and this is not a compromise — it is the
+ * shape of a shipped feature. `context.declareProperties([{ key: "threshold",
+ * ... }])` puts author-named rows in the Properties pane, and both the user and
+ * the script then write those keys through this same aspect. A validator is
+ * STATELESS by contract (it never reads state, and it runs before the tier
+ * check so nothing it decides can leak policy into an error message), so it
+ * cannot know which keys a given instance declared.
+ *
+ * So the tail is open by SPELLING and closed by everything that matters: an
+ * identifier, bounded, and it can never collide with a known slot because
+ * `src`'s media-only rule and the refused-key rule are checked FIRST. What a
+ * custom key buys an attacker is a bounded string in a property bag — which is
+ * what the value cap below is for.
+ */
+const CUSTOM_SHAPE_PROPERTY_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+/** Longest a property KEY may be (known or custom). */
+export const MAX_SHAPE_PROPERTY_KEY = 64;
+
+/**
+ * Longest a script-written control property VALUE may be: 8,192 characters.
+ *
+ * WHY 8 KiB, and why it is not the backend's number. The largest legitimate
+ * value a script writes is `text` — a caption or a short paragraph drawn on a
+ * shape — or a formula behind one; 8 KiB is several pages of prose, so it is
+ * uninteresting to an honest caller and decisive against the megabyte case that
+ * prompted this. Rich content has its own door (`render.setHtml`, 5 MB, gated
+ * by the ui.html capability), and a picture has one too (a 70-character handle).
+ *
+ * The backend bound (MAX_CONTROL_PROPERTY_CHARS, 64 KiB in
+ * app/src-tauri/src/controls.rs) is deliberately LOOSER and must stay so: it
+ * guards the door EVERY route converges on, including trusted UI writing inline
+ * `onSelect` script source, which a script may not write at all. Two bounds,
+ * two jobs — the backend's is the universal ceiling, this one is the tighter
+ * ceiling on the sandbox.
+ */
+export const MAX_SHAPE_PROPERTY_CHARS = 8_192;
+
+/**
+ * `shape.setProperty` aspect args: [key, value].
+ *
+ * Reached from both setState doors — `object.setState` (restricted, instance
+ * PINNED to the caller's own mount) and `api.objectSetState` (unlocked, an
+ * explicit target id, which is the containment that keeps a restricted script
+ * off other people's objects). vObjectAspect delegates here, so neither door is
+ * the lax one.
+ */
+export function checkShapeSetProperty(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  if (args.length < 2) return "expected [key, value]";
+  const [key, value] = args;
+  if (!isBoundedString(key, MAX_SHAPE_PROPERTY_KEY) || (key as string).length === 0) {
+    return `property key must be a non-empty string (max ${MAX_SHAPE_PROPERTY_KEY} chars)`;
+  }
+  if (typeof value !== "string") {
+    return "property value must be a string (control properties are stored as text)";
+  }
+  const name = key as string;
+  if (SCRIPT_REFUSED_SHAPE_PROPERTY_KEY_SET.has(name)) {
+    return (
+      `"${name}" holds an ACTION, not an appearance, and a script may not write it. ` +
+      `Set a button's click action in the Properties pane, or link a recorded macro ` +
+      `from the Macro Library.`
+    );
+  }
+  // The picture slot: a handle to media ALREADY inside this document, or "" to
+  // clear it. Nothing else — not a data: URI, not a file path, not a URL. This
+  // one line is what makes "reference media, never introduce bytes" a property
+  // of the code rather than a paragraph in a design document.
+  if (name === "src") {
+    if (value === "") return true;
+    if (!isMediaRef(value)) {
+      return (
+        `src must be a media handle — "media:" followed by 64 hex characters — or "" to clear it. ` +
+        `A data: URI, a file path and a URL are all refused: a picture enters the document ` +
+        `through the picker (caps.file.importImage), which validates the file, caps it at ` +
+        `${MAX_MEDIA_BYTES} bytes and stores the bytes host-side, and hands back the handle.`
+      );
+    }
+    return true;
+  }
+  if (!SCRIPT_SHAPE_PROPERTY_KEY_SET.has(name) && !CUSTOM_SHAPE_PROPERTY_KEY_RE.test(name)) {
+    return (
+      `unknown shape property "${name}" (allowed: ${SCRIPT_SHAPE_PROPERTY_KEYS.join(", ")}` +
+      `; or a custom property your script declared with declareProperties, named like an ` +
+      `identifier — a letter or underscore, then letters, digits or underscores)`
+    );
+  }
+  if (value.length > MAX_SHAPE_PROPERTY_CHARS) {
+    return (
+      `"${name}" is ${value.length} characters (max ${MAX_SHAPE_PROPERTY_CHARS}). ` +
+      `Large content belongs somewhere that can hold it: HTML in render.setHtml, ` +
+      `a picture in the document's media store (a media: handle).`
+    );
+  }
+  return true;
+}
+
+/**
+ * `api.createPicture` args: [dataRef, anchor, options?].
+ *
+ * The ONLY image argument is a handle. There is no bytes parameter, no data:
+ * URI parameter and no path parameter — not "rejected", ABSENT — so the shape
+ * of the call already says that a script places pictures the user imported and
+ * cannot conjure one. ACTIVE SHEET only, exactly like api.createTable: control
+ * geometry is derived from the active sheet's row heights and column widths and
+ * the overlay regions are sheet-blind, so a control created "for" another sheet
+ * paints on the one in front of the user.
+ */
+export const vCreatePicture: Validator = ([dataRef, anchor, options]) => {
+  if (!isMediaRef(dataRef)) {
+    return (
+      `dataRef must be a media handle — "media:" followed by 64 hex characters — as returned ` +
+      `by caps.file.importImage(). A data: URI, a file path and a URL are all refused.`
+    );
+  }
+  if (!isPlainObject(anchor)) {
+    return "anchor must be a cell — { row, col }, or an address like \"B3\"";
+  }
+  const a = anchor as Record<string, unknown>;
+  const anchorKeys = checkKnownKeys(a, ["row", "col"], "anchor key");
+  if (anchorKeys !== true) return anchorKeys;
+  if (!isCellCoord(a.row)) return "anchor.row must be a non-negative 0-based row index";
+  if (!isCellCoord(a.col)) return "anchor.col must be a non-negative 0-based column index";
+  if (options === undefined || options === null) return true;
+  if (!isPlainObject(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["name", "width", "height"], "picture option");
+  if (known !== true) return known;
+  if (o.name !== undefined && !isBoundedString(o.name, MAX_OBJECT_NAME)) {
+    return `name must be a string (max ${MAX_OBJECT_NAME} chars)`;
+  }
+  // The SAME bounds vCreateChart places a chart with — placing a picture must
+  // not be a laxer door than placing a chart at the same spot.
+  for (const k of ["width", "height"] as const) {
+    if (o[k] !== undefined && (!isFiniteNumber(o[k]) || (o[k] as number) < 10 || (o[k] as number) > 20_000)) {
+      return `${k} must be a number between 10 and 20000 (pixels)`;
+    }
+  }
+  return true;
+};
+
+/** Max characters of a shape catalog id. The longest Calcula ships is
+ *  "elbowConnectorArrow" (19); 64 leaves room without admitting a payload. */
+const MAX_SHAPE_TYPE_CHARS = 64;
+
+/** A shape catalog id, as `Shape/shapeCatalog.ts` spells them: camelCase, ASCII
+ *  letters and digits, starting with a lower-case letter. Checked for SHAPE
+ *  here and for MEMBERSHIP by the provider — a validator is stateless by
+ *  contract and must not import the extension that owns the catalog (the Facade
+ *  Rule runs both ways), so the authoritative "is there such a shape?" answer
+ *  comes from the refusal `createShape` throws, which names every accepted id. */
+const SHAPE_TYPE_RE = /^[a-z][A-Za-z0-9]*$/;
+
+/**
+ * `api.createShape` args: [catalogId, anchor, options?].
+ *
+ * The shape of the call is the whole security story, exactly as it is for
+ * `api.createPicture` above: the only thing a caller names is a CATALOG ID —
+ * one of the shapes Calcula already draws — so there is no bytes parameter, no
+ * path parameter, no URL parameter and no source-code parameter to refuse.
+ * `onSelect` and `macroRef` are not options here and never will be: they hold
+ * an ACTION rather than an appearance, and a sandboxed script that could write
+ * either would be authoring code that later runs in a wider trust class than
+ * its own.
+ *
+ * ACTIVE SHEET only, exactly like api.createTable and api.createPicture, so
+ * there is no sheet argument to reject: control geometry is derived from the
+ * live sheet's row heights and column widths and the overlay regions are
+ * sheet-blind.
+ */
+export const vCreateShape: Validator = ([catalogId, anchor, options]) => {
+  if (!isBoundedString(catalogId, MAX_SHAPE_TYPE_CHARS) || (catalogId as string).length === 0) {
+    return `shape must be a catalog id string (max ${MAX_SHAPE_TYPE_CHARS} chars), e.g. "rectangle"`;
+  }
+  if (!SHAPE_TYPE_RE.test(catalogId as string)) {
+    return (
+      `"${catalogId}" is not shaped like a shape id. Ids are camelCase letters and digits ` +
+      `starting with a lower-case letter, e.g. "rectangle", "roundedRectangle", "rightArrow"`
+    );
+  }
+  if (!isPlainObject(anchor)) {
+    return "anchor must be a cell — { row, col }, or an address like \"B3\"";
+  }
+  const a = anchor as Record<string, unknown>;
+  const anchorKeys = checkKnownKeys(a, ["row", "col"], "anchor key");
+  if (anchorKeys !== true) return anchorKeys;
+  if (!isCellCoord(a.row)) return "anchor.row must be a non-negative 0-based row index";
+  if (!isCellCoord(a.col)) return "anchor.col must be a non-negative 0-based column index";
+  if (options === undefined || options === null) return true;
+  if (!isPlainObject(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["width", "height", "text", "name"], "shape option");
+  if (known !== true) return known;
+  if (o.name !== undefined && !isBoundedString(o.name, MAX_OBJECT_NAME)) {
+    return `name must be a string (max ${MAX_OBJECT_NAME} chars)`;
+  }
+  // The caption goes through the SAME bound every other script-written control
+  // property gets (checkShapeSetProperty), not a second number: a shape created
+  // with `text` and a shape whose `text` is set afterwards must not disagree
+  // about how much text a shape may hold.
+  if (o.text !== undefined && !isBoundedString(o.text, MAX_SHAPE_PROPERTY_CHARS)) {
+    return `text must be a string (max ${MAX_SHAPE_PROPERTY_CHARS} chars)`;
+  }
+  // The SAME bounds vCreateChart and vCreatePicture place their objects with —
+  // placing a shape must not be a laxer door than placing a chart at the same
+  // spot. One decision, three rows.
+  for (const k of ["width", "height"] as const) {
+    if (o[k] !== undefined && (!isFiniteNumber(o[k]) || (o[k] as number) < 10 || (o[k] as number) > 20_000)) {
+      return `${k} must be a number between 10 and 20000 (pixels)`;
+    }
+  }
   return true;
 };
 

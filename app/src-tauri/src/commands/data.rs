@@ -222,7 +222,7 @@ pub fn get_viewport_cells(
     use std::time::Instant;
     let perf_t0 = Instant::now();
 
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -361,7 +361,7 @@ pub fn get_viewport_cells(
 #[tauri::command]
 pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -445,8 +445,8 @@ pub fn get_range_cells_typed(
 
     let active_sheet = *state.active_sheet.lock().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
-    let grids = state.grids.lock().unwrap();
-    let active_grid = state.grid.lock().unwrap();
+    let grids = state.grids.read().unwrap();
+    let active_grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let protection = state.sheet_protection.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -507,8 +507,8 @@ pub fn get_watch_cells(
     state: State<AppState>,
     requests: Vec<(usize, u32, u32)>,
 ) -> Vec<Option<CellData>> {
-    let grids = state.grids.lock().unwrap();
-    let active_grid = state.grid.lock().unwrap();
+    let grids = state.grids.read().unwrap();
+    let active_grid = state.grid.read().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -564,7 +564,7 @@ pub fn get_cell_collection(
     use crate::api_types::{CollectionEntry, CollectionItem, CollectionPreviewResult};
     use engine::cell::{CellValue, DictKey};
 
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
 
     fn cell_value_to_item(val: &CellValue, depth: usize) -> CollectionItem {
         if depth > 32 {
@@ -684,7 +684,7 @@ pub fn get_collection_texts(
 ) -> Vec<String> {
     use engine::cell::{CellValue, DictKey};
 
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
 
     fn cell_value_to_json(val: &CellValue, depth: usize) -> serde_json::Value {
         if depth > 32 {
@@ -949,8 +949,12 @@ fn update_cell_impl(
     }
 
     let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -1081,7 +1085,7 @@ fn update_cell_impl(
         // Record subscriber override for the cleared cell (subscribed sheets only)
         crate::calp_commands::record_subscription_override_edits(
             &state,
-            &crate::document_effect::DocumentEffect::mutates(file_state),
+            &effect,
             active_sheet,
             &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
         );
@@ -1090,7 +1094,8 @@ fn update_cell_impl(
         undo_stack.record_cell_change(row, col, previous_cell);
 
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        // Already dirtied by the `effect` bound above -- one `mutates` per
+        // command, not one per branch. See DocumentEffect::mutates.
 
         return Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed: false });
     }
@@ -1391,7 +1396,7 @@ fn update_cell_impl(
     // Record subscriber override for the edited cell (subscribed sheets only)
     crate::calp_commands::record_subscription_override_edits(
         &state,
-            &crate::document_effect::DocumentEffect::mutates(file_state),
+            &effect,
         active_sheet,
         &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
     );
@@ -1611,8 +1616,12 @@ fn update_cell_impl(
         }
     };
 
-    // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    // NOT a second dirty mark. The `effect` bound above -- unconditional, after
+    // every gate, and the token that authorised both grid writes -- already set
+    // the flag for this command. A trailing `mark_workbook_modified` used to sit
+    // here from before `DocumentEffect` existed; it was redundant the moment the
+    // grid became `Persisted<T>`, and this is the per-KEYSTROKE path, so a
+    // pointless extra `Mutex<bool>` acquisition is worth not having.
 
     Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed })
 }
@@ -2489,8 +2498,12 @@ pub(crate) fn update_cells_batch_core(
 
     // Acquire all locks once
     let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -3137,7 +3150,7 @@ pub(crate) fn update_cells_batch_core(
     }
 
     // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(updated_cells)
 }
@@ -3166,8 +3179,12 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
     // than the single-cell draft guard.
     crate::calp_commands::ensure_range_unclaimed(&state, "clear this cell", row, col, row, col)?;
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -3228,7 +3245,7 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
     if previous_cell.is_some() {
         undo_stack.record_cell_change(row, col, previous_cell);
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(())
@@ -3267,8 +3284,12 @@ pub fn clear_range(
         &state, "clear this range", start_row, start_col, end_row, end_col,
     )?;
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -3355,7 +3376,7 @@ pub fn clear_range(
     if count > 0 {
         undo_stack.commit_transaction();
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(count)
@@ -3405,11 +3426,17 @@ pub(crate) fn clear_range_with_options_off_sheet(
     let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
 
     let count = {
-        let mut grids = state.grids.lock().unwrap();
+        // Bounds check under a read-only view; the effect is built only once it
+        // has passed, so a bad sheet index cannot leave the document dirty. One
+        // lock throughout -- see Persisted::lock_pending.
+        let grids = state.grids.lock_pending().unwrap();
+        if target >= grids.len() {
+            return Err(format!("Sheet index {} out of range", target));
+        }
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut grids = grids.authorize(&effect);
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        let grid = grids
-            .get_mut(target)
-            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+        let grid = &mut grids[target];
 
         let effective_end_row = max_row.min(grid.max_row);
         let effective_end_col = max_col.min(grid.max_col);
@@ -3525,7 +3552,7 @@ pub(crate) fn clear_range_with_options_off_sheet(
     }
 
     if count > 0 {
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(ClearRangeResult {
@@ -3612,8 +3639,12 @@ pub fn clear_range_with_options(
         )?;
     }
 
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
@@ -3937,7 +3968,7 @@ pub fn clear_range_with_options(
     if count > 0 {
         undo_stack.commit_transaction();
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(ClearRangeResult {
@@ -4042,12 +4073,18 @@ pub(crate) fn sort_range_off_sheet(
     }
 
     let sorted_count = {
-        let mut grids = state.grids.lock().unwrap();
+        // Bounds check under a read-only view; the effect is built only once it
+        // has passed, so a bad sheet index cannot leave the document dirty. One
+        // lock throughout -- see Persisted::lock_pending.
+        let grids = state.grids.lock_pending().unwrap();
+        if target >= grids.len() {
+            return Err(format!("Sheet index {} out of range", target));
+        }
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut grids = grids.authorize(&effect);
         let styles = state.style_registry.lock().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        let grid = grids
-            .get_mut(target)
-            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+        let grid = &mut grids[target];
 
         let color_sort = fields
             .iter()
@@ -4210,7 +4247,7 @@ pub(crate) fn sort_range_off_sheet(
             ribbon_filter_state,
             &[target],
         );
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
 
     Ok(SortRangeResult {
@@ -4298,8 +4335,12 @@ pub fn sort_range(
     // Cloned before the long-lived locks: the dependency rebuild below needs
     // the official sheet names to canonicalise cross-sheet keys.
     let sheet_names_for_rebuild = state.sheet_names.lock().unwrap().clone();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -4502,7 +4543,7 @@ pub fn sort_range(
             );
 
             // Mark workbook as dirty
-            if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+            let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
             (sorted_count, updated_cells)
         }
@@ -4639,7 +4680,7 @@ pub fn sort_range(
             );
 
             // Mark workbook as dirty
-            if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+            let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
             (sorted_count, updated_cells)
         }
@@ -4971,14 +5012,14 @@ fn compare_cell_values(
 /// Get the grid bounds (max row and col with data).
 #[tauri::command]
 pub fn get_grid_bounds(state: State<AppState>) -> (u32, u32) {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     (grid.max_row, grid.max_col)
 }
 
 /// Get the total number of non-empty cells.
 #[tauri::command]
 pub fn get_cell_count(state: State<AppState>) -> usize {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     grid.cells.len()
 }
 
@@ -4994,8 +5035,8 @@ pub fn get_used_range(
 ) -> Result<UsedRangeResult, String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
-    let grids = state.grids.lock().unwrap();
-    let active_grid = state.grid.lock().unwrap();
+    let grids = state.grids.read().unwrap();
+    let active_grid = state.grid.read().unwrap();
     let grid: &Grid = if target_sheet == active_sheet {
         &active_grid
     } else if target_sheet < grids.len() {
@@ -5030,7 +5071,7 @@ pub fn get_cells_in_rows(
     start_row: u32,
     end_row: u32,
 ) -> Vec<CellData> {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -5069,7 +5110,7 @@ pub fn get_cells_in_cols(
     start_col: u32,
     end_col: u32,
 ) -> Vec<CellData> {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -5110,7 +5151,7 @@ pub fn has_content_in_range(
     end_row: u32,
     end_col: u32,
 ) -> bool {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
 
     grid.cells.iter().any(|(&(row, col), cell)| {
         row >= start_row
@@ -5158,9 +5199,9 @@ pub fn remove_duplicates(
     }
 
     // Past the protection gate: this deletes grid rows.
-    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -5413,9 +5454,19 @@ pub fn remove_duplicates(
 /// `every_cascade_path_uses_the_shared_cross_sheet_walk` fails if a copy
 /// reappears.
 ///
-/// Seeds are MEMBERS of the ordering (`include_seeds: true`): a sorted block
-/// routinely contains formulas reading other cells of the same block, and after
-/// a permutation those must be re-evaluated in dependency order too.
+/// Seeds are MEMBERS of the ordering (`include_seeds: true`), and that is
+/// load-bearing for both callers:
+///
+/// - a sorted block routinely contains formulas reading other cells of the same
+///   block, and after a permutation those must be re-evaluated in dependency
+///   order too;
+/// - an undo/redo restore hands back cells whose CACHED values can be stale for
+///   a reason peculiar to transactions — see `apply_changes`.
+///
+/// Re-evaluating a seed is never destructive: the loop below skips any seed
+/// with no formula, so a restored or moved LITERAL keeps exactly the value the
+/// caller wrote. Only DERIVED cells are re-derived, from precedents the caller
+/// has already finished writing.
 ///
 /// No UDF resolver and no cube prefetch are supplied. That is safe rather than
 /// lossy because `reevaluate_formula_cell` evaluates with the cell's OWN
@@ -5451,8 +5502,17 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     let user_files = user_files_state.files.lock().unwrap();
 
     let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
+    // themselves persisted (formulas, literals, locale, control values), so it
+    // must not dirty on its own account: the ENTRY command that made those
+    // values stale already owns the flag, and dirtying here would make a
+    // workbook holding NOW()/RAND() prompt to save merely for being looked at.
+    // See CleanReason::RecalcCompanion.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
@@ -5638,6 +5698,7 @@ pub fn recalculate_sheets_after_script_write(
 #[tauri::command]
 pub fn update_cell_on_sheets(
     state: State<AppState>,
+    file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
@@ -5679,11 +5740,15 @@ pub fn update_cell_on_sheets(
 
     // Every AppState lock is scoped to this block: `recalc_after_off_sheet_write`
     // below takes its own locks and would deadlock against these.
+    // Every gate above has passed; the group write below commits. This command
+    // took NO `FileState` before `grids` became a `Persisted<T>`: writing the same
+    // value across several sheets left the document looking unmodified.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let wrote: Vec<usize> = {
         let locale = state.locale.lock().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let sheet_names = state.sheet_names.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.lock().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
@@ -5825,8 +5890,8 @@ pub fn clear_range_on_sheets(
 
     // Past every per-sheet protection + writeback-claim refusal above. This writes
     // USER CONTENT to non-active sheets, which the paired `clear_range` never covered.
-    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grids = state.grids.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -5943,10 +6008,13 @@ pub fn fill_range(
         target_end_col,
     )?;
 
+    // Every gate above has passed; the fill below commits.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
     // Acquire all locks once
     let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -6428,7 +6496,7 @@ pub fn fill_range(
     }
 
     // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     let perf_tend = Instant::now();
     log_perf!("FILL",

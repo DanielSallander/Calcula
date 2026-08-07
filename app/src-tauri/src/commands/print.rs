@@ -58,7 +58,7 @@ pub fn set_page_setup(
 #[tauri::command]
 pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();

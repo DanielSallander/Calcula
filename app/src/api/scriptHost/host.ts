@@ -143,13 +143,15 @@ import {
   splitSheetPrefix as splitSheetPrefixHost,
 } from "./worker/canonicalModel";
 import { getCellBehaviorById } from "../cellBehaviors";
-import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService, getControlStoreService } from "../componentStoreRegistry";
+import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService } from "../componentStoreRegistry";
+import { getControlsProvider } from "../controlsService";
 import type { ChartPlacement } from "../componentStoreRegistry";
 import {
   chartToRef,
   namedRangeToRef,
   pivotToRef,
   shapeToRef,
+  controlSheetFromInstanceId,
   slicerToRef,
   tableToRef,
   type ScriptObjectKind,
@@ -3890,6 +3892,117 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       emitAppEvent(AppEvents.TABLE_CREATED, { tableId: result.table.id });
       return tableToRef(result.table);
     }
+    // PICTURES. The whole ingress question is answered by the arguments: the
+    // only image argument is a `media:` handle, already validated as such by
+    // vCreatePicture, and there is no bytes/path parameter for a caller to
+    // reach for. So this executor's job is placement, not admission.
+    //
+    // ACTIVE SHEET only, exactly like api.createTable above and for the same
+    // reason: a control's geometry is derived from the live sheet's row heights
+    // and column widths, and the overlay hit-test regions are sheet-blind — a
+    // control created "for" another sheet paints on the one in front of the
+    // user. There is therefore no sheet argument to refuse.
+    //
+    // The placement itself goes through the feature-neutral seam
+    // (@api/pictureControlService), never through set_control_metadata here: a
+    // hand-rolled control writes successfully and renders nothing, which is the
+    // failure the button seam already exists to prevent.
+    case "api.createPicture": {
+      const [mediaRef, anchor, options] = args as [
+        string,
+        { row: number; col: number },
+        { width?: number; height?: number; name?: string } | undefined,
+      ];
+      const pictures = await import("../pictureControlService");
+      if (!pictures.hasPictureControlProvider()) {
+        throw new BrokerError(
+          "HostError",
+          "The Controls extension is not loaded, so pictures are unavailable",
+        );
+      }
+      const lib = await getLib();
+      const { activeIndex } = await lib.getSheets();
+      const handle = await pictures.requirePictureControlProvider().createPicture({
+        sheetIndex: activeIndex,
+        row: anchor.row,
+        col: anchor.col,
+        mediaRef,
+        width: options?.width,
+        height: options?.height,
+        name: options?.name,
+      });
+      await announceObjectsChanged();
+      return handle;
+    }
+    // SHAPES. The placement rules are the picture row's, one step simpler: the
+    // only thing named is a CATALOG ID, so there is not even a handle to
+    // validate here — an id the catalog does not hold is refused by the
+    // provider, with every accepted id in the message.
+    //
+    // ACTIVE SHEET only (api.createTable's rule), and the seam is the ONLY way
+    // in: a hand-rolled shape needs seventeen property keys, an explicit
+    // `pinToGrid: "false"` and three registrations, and getting any of that
+    // wrong writes successfully and draws nothing.
+    case "api.createShape": {
+      const [shapeType, anchor, options] = args as [
+        string,
+        { row: number; col: number },
+        { width?: number; height?: number; text?: string; name?: string } | undefined,
+      ];
+      const controls = await import("../controlsService");
+      if (!controls.hasControlsProvider()) {
+        throw new BrokerError(
+          "HostError",
+          "The Controls extension is not loaded, so shapes are unavailable",
+        );
+      }
+      const lib = await getLib();
+      const { activeIndex } = await lib.getSheets();
+      const handle = await controls.requireControlsProvider().createShape({
+        sheetIndex: activeIndex,
+        row: anchor.row,
+        col: anchor.col,
+        shapeType,
+        width: options?.width,
+        height: options?.height,
+        text: options?.text,
+        name: options?.name,
+      });
+      await announceObjectsChanged();
+      return handle;
+    }
+    // Deleting is INSTANCE-addressed (the id api.listObjects("shape") reports),
+    // and the id encodes the anchor's sheet — so the active-sheet rule is
+    // enforced by reading the sheet OUT of the id rather than by taking a sheet
+    // argument. The seam performs the same full teardown the user's Delete key
+    // does, object script included: a control's instanceId is derived from its
+    // anchor, so a script left behind at a deleted control's anchor is
+    // inherited by whatever is created there next.
+    case "api.deleteShape": {
+      const [instanceId] = args as [string];
+      const controls = await import("../controlsService");
+      if (!controls.hasControlsProvider()) {
+        throw new BrokerError(
+          "HostError",
+          "The Controls extension is not loaded, so shapes are unavailable",
+        );
+      }
+      const anchorSheet = controlSheetFromInstanceId(instanceId);
+      if (anchorSheet === null) {
+        throw new BrokerError(
+          "ValidationError",
+          `"${instanceId}" is not a control id. Use the id api.shapes() reports.`,
+        );
+      }
+      const lib = await getLib();
+      await assertActiveSheet(lib, anchorSheet, "deleteShape");
+      const removed = await controls.requireControlsProvider().deleteControl(instanceId);
+      if (!removed) {
+        throw new BrokerError("ValidationError", `No control with id "${instanceId}"`);
+      }
+      await announceObjectsChanged();
+      return undefined;
+    }
     case "api.deleteTable": {
       const [tableId] = args as [string];
       const lib = await getLib();
@@ -4417,6 +4530,25 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         filterExtensions: extensions,
         maxChars: MAX_FILE_TEXT_CHARS,
       });
+    }
+    // The MEDIA arm of the same capability, and the narrowest of the four.
+    //
+    // WHAT COMES BACK IS A HANDLE, NOT A PICTURE. `importImageViaPicker` opens
+    // the native dialog, and the file the user chooses is read, magic-byte
+    // validated, byte- and pixel-capped and stored INSIDE THE DOCUMENT by Rust
+    // (`read_media_file`); the bytes never enter the WebView, let alone the
+    // worker realm. Contrast cap.fileImportText, which hands the script the
+    // file's contents — and does it through read_text_file, whose Windows-1252
+    // lossy fallback turns a binary file into mojibake rather than an error.
+    // This arm cannot repeat that, because there is no content to hand over.
+    //
+    // The response is RE-PROJECTED field by field rather than passed through.
+    // `MediaRef` has no `data` member and a Rust test asserts it never grows
+    // one — but that test guards the Rust type, and this is the door with the
+    // sandbox on the other side. Naming the five fields here means a sixth
+    // could never arrive by accident, in this build or a later one.
+    case "cap.fileImportMedia": {
+      return executeMediaImport(definition.name);
     }
     // PRINTING (G4). The script names a FILE and nothing else — it supplies no
     // bytes, so this cannot become "write whatever I like wherever the user can
@@ -7704,6 +7836,51 @@ function fillReadback(fill: StyleFillLike | null | undefined): ScriptFillReadbac
   };
 }
 
+/** The five fields a script is told about an imported picture. Structurally the
+ *  same as `MediaRef` in @api/filesystem, restated here so the projection below
+ *  is written against a type that CANNOT grow a `data` member by inheritance. */
+interface ScriptMediaHandle {
+  ref: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  byteLength: number;
+}
+
+/**
+ * The `cap.fileImportMedia` executor, as its own function so the projection can
+ * be tested directly. Exported for tests.
+ *
+ * `importImageViaPicker` opens the native dialog; the file the user chooses is
+ * read, magic-byte validated, byte- and pixel-capped and stored INSIDE THE
+ * DOCUMENT by Rust (`read_media_file`). The bytes never enter the WebView, let
+ * alone the worker realm.
+ *
+ * THE RESPONSE IS RE-PROJECTED FIELD BY FIELD rather than passed through, and
+ * that is not belt-and-braces. `MediaRef` has no `data` member and a Rust test
+ * asserts it never grows one — but that test guards the RUST type, and this is
+ * the door with the sandbox on the other side. Naming the five fields here
+ * means a sixth cannot travel by default, in this build or a later one.
+ *
+ * A refusal (wrong format, over a cap, malformed header) propagates as a
+ * rejection with the host's own message. That is the point: the ingress this
+ * replaces fell back to a 200x150 placeholder and embedded the file anyway.
+ */
+export async function executeMediaImport(scriptName: string): Promise<ScriptMediaHandle | null> {
+  const fs = await import("../filesystem");
+  const picked = await fs.importImageViaPicker({
+    title: `${scriptName} — choose a picture`,
+  });
+  if (!picked) return null; // cancelled: a normal outcome, never an error
+  return {
+    ref: picked.ref,
+    mimeType: picked.mimeType,
+    width: picked.width,
+    height: picked.height,
+    byteLength: picked.byteLength,
+  };
+}
+
 /**
  * StyleData -> the script vocabulary. PURE, and the exact inverse of the
  * applyRangeFormat write path key for key — the round-trip test in
@@ -10371,7 +10548,13 @@ async function listWorkbookObjects(kind: ScriptObjectKind): Promise<ScriptObject
     case "shape": {
       // Controls are stored per sheet and anchored to a cell, so the whole-
       // workbook view is the union over every sheet.
-      const store = getControlStoreService();
+      //
+      // `getControlsProvider` rather than `requireControlsProvider`: for a READ,
+      // "the Controls extension is not loaded" and "this workbook has no
+      // controls" are the same answer to the caller, and an empty list is
+      // honest. Creating and deleting take the throwing accessor, because there
+      // "nothing happened" and "it worked" must never look alike.
+      const store = getControlsProvider();
       if (!store) return [];
       const lib = await getLib();
       const { sheets } = await lib.getSheets();

@@ -235,7 +235,7 @@ pub fn collect_udf_calls(
     // touched (this pass is discarded).
     let user_files = user_files_state.files.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
+    let grids = state.grids.read().unwrap();
     let styles = state.style_registry.lock().unwrap();
     // The edited cells are always on the ACTIVE sheet (update_cell(s_batch)
     // edit there), so mirror that rather than trusting a caller-supplied index.

@@ -57,6 +57,17 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "sort_log_file",
     // Encodes RGBA frames to a GIF and writes it to a caller-chosen path.
     "export_gif",
+    // Reads an image off disk into the document's media store. Denylisted for
+    // the same reason read_text_file is: it takes a PATH. The sanctioned route
+    // for sandboxed code is `importImageViaPicker` (filesystem.ts), where the
+    // USER supplies the path through the native dialog and only a handle comes
+    // back — never the bytes.
+    "read_media_file",
+    // Turns a media handle back into pixels. Not a filesystem read, but the one
+    // door from a handle to bytes, so it is governed with the rest rather than
+    // left feature-open: a distributed extension has no business decoding
+    // another document's embedded binary.
+    "resolve_media_ref",
   ],
   // OS credential store.
   credentials: [

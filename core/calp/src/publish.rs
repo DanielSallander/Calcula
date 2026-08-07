@@ -781,6 +781,38 @@ pub fn publish(
         )?;
     }
 
+    // Write embedded binary media as ITS OWN artifacts, one file per blob at
+    // media/{sha256} — never inlined into controls.json.
+    //
+    // THIS IS WHAT MAKES THE BLOB STORE WORK. `commit_artifacts_as_blobs` keys
+    // the content-addressed store on each ARTIFACT's SHA-256, and a media
+    // artifact's content IS the image, so its blob key is literally the media
+    // hash. Publish version 1.0.1 with one caption changed and the logo is not
+    // re-stored: the same blob is already there. Inline the base64 in
+    // controls.json instead and the blob key is the SHA of the WHOLE controls
+    // file, so a one-character caption edit mints a fresh multi-megabyte blob
+    // every release — which is exactly what shipped.
+    //
+    // Only media the PUBLISHED sheets actually reference travels. A subscriber
+    // must not receive the picture from a sheet the publisher chose to withhold.
+    // The artifact walk in `integrity::compute_artifact_checksums` recurses into
+    // every directory except `submissions/` and `reviews/`, so these are hashed
+    // and LISTED automatically — which they must be, since that same walk
+    // rejects any unlisted on-disk artifact (`UnlistedArtifact`).
+    {
+        let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for entry in &published_controls {
+            calcula_format::media::visit_media_refs(&entry.controls, &mut |hash| {
+                referenced.insert(hash.to_string());
+            });
+        }
+        for hash in &referenced {
+            if let Some(bytes) = request.workbook.media.get(hash) {
+                registry.write_artifact(pkg, ver, &format!("media/{}", hash), bytes)?;
+            }
+        }
+    }
+
     // Write threaded comments on the published sheets (Wave B) — same
     // per-sheet opaque-payload shape as CF/DV — but ONLY when the publish
     // request opted in. Comments are internal discussion, not report content:

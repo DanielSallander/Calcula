@@ -260,3 +260,19 @@ export function shapeToRef(row: ShapeRow): ScriptObjectRef {
 export function controlInstanceId(sheetIndex: number, row: number, col: number): string {
   return `control-${sheetIndex}-${row}-${col}`;
 }
+
+/**
+ * The SHEET a control instanceId is anchored to, or null when the string is not
+ * a control id.
+ *
+ * `api.deleteShape` needs it because the active-sheet rule has to be enforced
+ * from the id itself: taking a sheet argument would let a caller name one sheet
+ * and delete a control on another, and refusing to parse the id would mean
+ * trusting the provider to police a rule the broker owns. Written beside
+ * `controlInstanceId` so the format has exactly one home on this side of the
+ * seam, the same discipline the Controls extension keeps on its own side.
+ */
+export function controlSheetFromInstanceId(instanceId: string): number | null {
+  const m = /^control-(\d+)-(\d+)-(\d+)$/.exec(instanceId);
+  return m ? Number(m[1]) : null;
+}

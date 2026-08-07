@@ -123,15 +123,29 @@ impl NamedRange {
         }
 
         // Convert column letters to column number (A=1, B=2, ..., Z=26, AA=27, etc.)
+        //
+        // The ceiling is enforced INSIDE the loop, and that placement is the whole
+        // point. This ran the multiplication to the end of the letter run and only
+        // then compared against 16384 — so a name like "ABCDEFGHIJKLMNOP1"
+        // overflowed `u32` first. In a debug build that is a panic, and this
+        // function is reached from a `#[tauri::command]` on a thread that cannot
+        // unwind, so the panic ABORTED THE WHOLE APPLICATION
+        // (STATUS_STACK_BUFFER_OVERRUN) rather than rejecting the name. A user
+        // typing a long alphabetic name that ends in digits could kill the app and
+        // lose the workbook.
+        //
+        // Bailing at the ceiling also makes overflow unreachable by construction:
+        // `col_num` is at most 16384 on entry to each multiply, so the largest
+        // value the arithmetic can produce is 16384 * 26 + 26 = 426,010.
         let col_str = &upper[..letter_end];
         let mut col_num: u32 = 0;
         for c in col_str.chars() {
             col_num = col_num * 26 + (c as u32 - 'A' as u32 + 1);
-        }
-
-        // Excel max column is XFD = 16384
-        if col_num > 16384 {
-            return false;
+            // Excel max column is XFD = 16384. Past it, this is not a cell
+            // reference and no further digits can bring it back.
+            if col_num > 16384 {
+                return false;
+            }
         }
 
         // Parse the row number
@@ -758,7 +772,11 @@ pub fn apply_names_to_formulas(
     end_col: Option<u32>,
 ) -> Result<ApplyNamesResult, String> {
     let named_ranges = state.named_ranges.read().unwrap();
-    let mut grid = state.grid.lock().unwrap();
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -878,5 +896,40 @@ mod tests {
         assert!(!NamedRange::looks_like_cell_reference("SalesData"));
         assert!(!NamedRange::looks_like_cell_reference("A"));
         assert!(!NamedRange::looks_like_cell_reference("1"));
+    }
+
+    /// A long alphabetic run followed by digits used to overflow `u32` in the
+    /// column accumulator before the 16384 ceiling was ever compared. In a debug
+    /// build that panics, and this is reached from a `#[tauri::command]` on a
+    /// thread that cannot unwind — so it ABORTED THE WHOLE APPLICATION instead of
+    /// answering "no". It was found live, as a crash mid-E2E-run.
+    ///
+    /// 7 letters is already past `u32::MAX` (26^7 = 8.03e9), and the loop is
+    /// exercised well beyond that here.
+    #[test]
+    fn a_long_letter_run_is_rejected_rather_than_overflowing_the_column_accumulator() {
+        for name in [
+            "ABCDEFG1",
+            "ABCDEFGHIJKLMNOP1",
+            "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ999",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1",
+        ] {
+            assert!(
+                !NamedRange::looks_like_cell_reference(name),
+                "{} is past column XFD and must be refused, not panic",
+                name
+            );
+            // ...and it is therefore a legal NAME, which is the question the
+            // caller was actually asking.
+            assert!(NamedRange::is_valid_name(name), "{} should be a usable name", name);
+        }
+    }
+
+    /// The ceiling is a boundary, not a blanket refusal of long names: the last
+    /// real column and the first one past it must land on opposite sides.
+    #[test]
+    fn the_column_ceiling_is_exact() {
+        assert!(NamedRange::looks_like_cell_reference("XFD1"), "XFD = 16384 is the last column");
+        assert!(!NamedRange::looks_like_cell_reference("XFE1"), "XFE = 16385 is past it");
     }
 }

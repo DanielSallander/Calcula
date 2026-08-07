@@ -458,6 +458,24 @@ fn compute_publish_report(
     item(&mut included, "controls",
         wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
         "sheets with buttons/checkboxes (incl. onSelect wiring)");
+    // Embedded pictures. Counted the same way publish SELECTS them — by scanning
+    // the published sheets' control payloads for media: handles — so the report
+    // cannot claim a different number from the one the package carries. Media
+    // referenced only from an unpublished sheet is neither shipped nor counted.
+    {
+        let mut media_refs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for entry in wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)) {
+            calcula_format::media::visit_media_refs(&entry.controls, &mut |hash| {
+                if wb.media.contains_key(hash) {
+                    media_refs.insert(hash.to_string());
+                }
+            });
+        }
+        if !media_refs.is_empty() {
+            item(&mut included, "media", media_refs.len(),
+                "embedded pictures, content-addressed and deduplicated across versions");
+        }
+    }
     // Comment/scenario/outline counts come from the SAME carrier the publish
     // writes (Wave B), counted per object (threads/scenarios/groups) so the
     // report reads naturally.
@@ -2234,7 +2252,7 @@ pub fn calp_pull(
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
     // the shared registry and remap cell style_index values accordingly.
     let (chart_sheet_index, pkg_to_index) = {
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -2490,6 +2508,17 @@ pub fn calp_pull(
     // control lock is taken — canonical order preserved.)
     let on_grid_snapshot = snapshot_on_grid_controls(&state)?;
 
+    // Take the package's binary media BEFORE the controls that reference it, so
+    // a materialized picture never points at bytes that are not there yet. Every
+    // blob is re-validated (magic bytes, caps, and its key re-derived from its
+    // own content): the signed manifest proves the publisher sent these bytes,
+    // not that they are a picture this build will accept.
+    if !result.media.is_empty() {
+        let media = std::mem::take(&mut result.media);
+        let (accepted, rejected) = crate::media::merge_pulled_media(&state, &effect, media)?;
+        log::info!("[calp] pulled {} media blob(s), refused {}", accepted, rejected);
+    }
+
     // Materialize pulled controls (buttons/checkboxes) onto the freshly-
     // appended sheets — SANITIZED: distributed onSelect wiring is inline
     // script source and must not execute outside the consent model, so
@@ -2501,7 +2530,13 @@ pub fn calp_pull(
             .iter()
             .map(|p| (p.package_sheet_id, (p.sheet.id, p.name.clone())))
             .collect();
-        let sanitized = crate::controls::sanitize_distributed_controls(&result.controls);
+        // Sanitize AND migrate: a package published before media artifacts
+        // existed carries its images base64'd inside the signed controls.json,
+        // and materialization writes straight into ControlStorage — so without
+        // this the legacy pull is the one route left that puts unvalidated
+        // binary into a document. Takes the media lock, so it must precede the
+        // controls lock below.
+        let sanitized = crate::media::admit_distributed_controls(&state, &effect, &result.controls)?;
         let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
         crate::controls::materialize_saved_controls(
             &sanitized,
@@ -3591,6 +3626,7 @@ fn sheet_index_for_id(state: &AppState, sheet_id: SheetId) -> Option<usize> {
 /// position. Returns true if a cell was written.
 fn apply_override_value_to_grid(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     sheet_id: SheetId,
     cell_id: CellId,
     fallback_position: (u32, u32),
@@ -3615,7 +3651,7 @@ fn apply_override_value_to_grid(
     };
 
     {
-        let mut grids = match state.grids.lock() {
+        let mut grids = match state.grids.write(effect) {
             Ok(g) => g,
             Err(_) => return false,
         };
@@ -3628,7 +3664,7 @@ fn apply_override_value_to_grid(
     // Keep the active-sheet mirror in sync.
     let active = state.active_sheet.lock().map(|a| *a).unwrap_or(usize::MAX);
     if active == sheet_index {
-        if let Ok(mut grid) = state.grid.lock() {
+        if let Ok(mut grid) = state.grid.write(effect) {
             write_override_value(&mut grid, position.0, position.1, value);
         }
     }
@@ -3655,8 +3691,10 @@ pub fn calp_revert_override(
     let cid = CellId::parse(&cell_id)
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
 
+    // Hoisted out of the block below so the grid write that follows the block can
+    // present the SAME decision. One `mutates`, one dirty transition.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let restore = {
-        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
         let restore = layer
             .get(sid, cid)
@@ -3669,7 +3707,7 @@ pub fn calp_revert_override(
 
     match restore {
         Some((baseline, position)) => {
-            apply_override_value_to_grid(&state, sid, cid, position, &baseline);
+            apply_override_value_to_grid(&state, &effect, sid, cid, position, &baseline);
             // Re-evaluate the sheet so restored formulas (written Empty,
             // pending recalc) and dependents of the restored value display
             // correctly even when the sheet is not active — the frontend's
@@ -3703,8 +3741,10 @@ pub fn calp_accept_upstream(
     let cid = CellId::parse(&cell_id)
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
 
+    // Hoisted out of the block below so the grid write that follows it can present
+    // the SAME decision. One `mutates`, one dirty transition.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let restore = {
-        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
         let restore = layer.get(sid, cid).map(|ovr| {
             // For a conflicted override the value to accept is the new
@@ -3720,7 +3760,7 @@ pub fn calp_accept_upstream(
 
     match restore {
         Some((upstream, position)) => {
-            apply_override_value_to_grid(&state, sid, cid, position, &upstream);
+            apply_override_value_to_grid(&state, &effect, sid, cid, position, &upstream);
             if let Some(idx) = sheet_index_for_id(&state, sid) {
                 crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
             }
@@ -4169,7 +4209,7 @@ pub fn calp_refresh_apply(
 
     // Materialize new/updated sheets into grids.
     let active_grid_after_materialize = {
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -4256,7 +4296,7 @@ pub fn calp_refresh_apply(
     // active sheet, and calculate_now copies it back over grids[active] —
     // without this sync a refreshed active sheet reverts on the next recalc.
     if let Some(grid) = active_grid_after_materialize {
-        *state.grid.lock().map_err(|e| e.to_string())? = grid;
+        *state.grid.write(&effect).map_err(|e| e.to_string())? = grid;
     }
 
     // Map each refreshed package sheet id -> its LOCAL sheet index, so named
@@ -4619,19 +4659,47 @@ pub fn calp_refresh_apply(
             // first here would be an AB/BA inversion against them.
             let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
             let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+            // Same order as first pull: media in before the controls that name
+            // it. Additive — the save-time sweep, not this path, decides what a
+            // refresh made unreachable.
+            for payload in &payloads {
+                if !payload.pull_result.media.is_empty() {
+                    let (accepted, rejected) = crate::media::merge_pulled_media(
+                        &state,
+                        &effect,
+                        payload.pull_result.media.clone(),
+                    )?;
+                    log::info!(
+                        "[calp] refresh pulled {} media blob(s), refused {}",
+                        accepted,
+                        rejected
+                    );
+                }
+            }
+            // Sanitize + migrate legacy inline images for every payload BEFORE
+            // the controls lock: admission takes the MEDIA lock, and
+            // media-then-controls is the order this whole block already uses.
+            let mut admitted_controls: Vec<Vec<persistence::SavedSheetControls>> =
+                Vec::with_capacity(payloads.len());
+            for payload in &payloads {
+                admitted_controls.push(crate::media::admit_distributed_controls(
+                    &state,
+                    &effect,
+                    &payload.pull_result.controls,
+                )?);
+            }
             let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
             controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
             // Cloned under the ALREADY-HELD controls lock (calling
             // snapshot_on_grid_controls here would re-lock and deadlock);
             // released with this scope, before the pane/filter locks below.
             let snapshot = controls.clone();
-            for payload in &payloads {
-                // Same sanitization as first pull: distributed onSelect wiring
-                // (inline script source) never materializes.
-                let sanitized =
-                    crate::controls::sanitize_distributed_controls(&payload.pull_result.controls);
+            for (payload, sanitized) in payloads.iter().zip(admitted_controls.iter()) {
+                // Same admission as first pull: distributed onSelect wiring
+                // (inline script source) never materializes, and a legacy
+                // package's inline base64 arrives as a media handle.
                 crate::controls::materialize_saved_controls(
-                    &sanitized,
+                    sanitized,
                     &mut controls,
                     |sid| cfdv_pkg_to_index.get(&sid).copied(),
                 );
@@ -5084,7 +5152,7 @@ pub fn calp_refresh_apply(
     drop(layer);
 
     for ovr in &to_overlay {
-        apply_override_value_to_grid(&state, ovr.sheet_id, ovr.cell_id, ovr.position, &ovr.current);
+        apply_override_value_to_grid(&state, &effect, ovr.sheet_id, ovr.cell_id, ovr.position, &ovr.current);
     }
 
     // Swap in the refreshed packages' scripts: replace each package's
@@ -5463,7 +5531,7 @@ pub fn calp_dev_subscribe(
 
     // Materialize pulled sheets into the workbook.
     let dev_map: std::collections::HashMap<SheetId, usize> = {
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -5543,10 +5611,23 @@ fn materialize_dev_controls(
     dev_map: &std::collections::HashMap<SheetId, usize>,
     ledger: &mut Vec<calp::manifest::SubscribedObject>,
 ) -> Result<(), String> {
+    // Media BEFORE the controls that name it, exactly as a real pull does: a dev
+    // source is a .cala on disk, so it carries whatever its author's document
+    // holds — `media/{sha256}` entries for a current file, inline base64 for a
+    // legacy one. Both arrive as handles.
+    if !result.media.is_empty() {
+        let (accepted, rejected) =
+            crate::media::merge_pulled_media(state, effect, result.media.clone())?;
+        log::info!(
+            "[calp] dev pull carried {} media blob(s), refused {}",
+            accepted,
+            rejected
+        );
+    }
     if result.controls.is_empty() {
         return Ok(());
     }
-    let sanitized = crate::controls::sanitize_distributed_controls(&result.controls);
+    let sanitized = crate::media::admit_distributed_controls(state, effect, &result.controls)?;
     let mut controls = state.controls.write(effect).map_err(|e| e.to_string())?;
     crate::controls::materialize_saved_controls(&sanitized, &mut controls, |sid| {
         dev_map.get(&sid).copied()
@@ -5614,7 +5695,7 @@ pub fn calp_dev_refresh(
 
     // Replace sheets already tracked by this subscription; append any new ones.
     let dev_map: std::collections::HashMap<SheetId, usize> = {
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names_state = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -6232,8 +6313,7 @@ pub fn calp_get_writeback_draft_regions(
 // (`user_files/writeback_draft_regions.json`) and are written only by the save
 // path, so a region designated on an otherwise-clean document was silently
 // discarded at close. Now shared with the protection commands, which had the
-// same gap — see `persistence::mark_workbook_modified`.
-use crate::persistence::mark_workbook_modified;
+// same gap — see `document_effect::DocumentEffect::mutates`.
 
 /// Add a new draft writeback region.
 #[tauri::command]
@@ -6264,7 +6344,7 @@ pub fn calp_add_writeback_region(
         .map_err(|e| format!("Region overlaps with existing draft: {}", e))?;
 
     drafts.push(region);
-    mark_workbook_modified(&file_state);
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
@@ -6283,7 +6363,7 @@ pub fn calp_remove_writeback_region(
     drafts.retain(|r| r.id != region_id);
     let removed = drafts.len() < len_before;
     if removed {
-        mark_workbook_modified(&file_state);
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
     Ok(removed)
 }
@@ -6325,7 +6405,7 @@ pub fn calp_update_writeback_region(
         .map_err(|e| format!("Invalid update: {}", e))?;
 
     drafts[pos] = updated;
-    mark_workbook_modified(&file_state);
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
@@ -10339,7 +10419,7 @@ pub(crate) fn queue_gather_refresh() {
                     let pivot = app.state::<crate::pivot::types::PivotState>();
                     let pane = app.state::<crate::pane_control::PaneControlState>();
                     let ribbon = app.state::<crate::ribbon_filter::RibbonFilterState>();
-                    let sheet_count = state.grids.lock().map(|g| g.len()).unwrap_or(0);
+                    let sheet_count = state.grids.read().map(|g| g.len()).unwrap_or(0);
                     for sheet_index in 0..sheet_count {
                         crate::calculation::recalculate_sheet_values(
                             &state,
@@ -12317,7 +12397,7 @@ fn restore_pulled_pivots(
         Err(_) => return,
     };
 
-    let mut grids = match state.grids.lock() {
+    let mut grids = match state.grids.write(effect) {
         Ok(g) => g,
         Err(_) => return,
     };
@@ -13188,7 +13268,7 @@ pub fn calp_reset_subscription(
     let snapshot = {
         let mut sheets = Vec::with_capacity(targets.len());
         {
-            let grids = state.grids.lock().map_err(|e| e.to_string())?;
+            let grids = state.grids.read().map_err(|e| e.to_string())?;
             let mirror_cw = state.column_widths.lock().map_err(|e| e.to_string())?;
             let mirror_rh = state.row_heights.lock().map_err(|e| e.to_string())?;
             let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
@@ -13332,11 +13412,18 @@ pub fn calp_reset_subscription(
         undo_stack.commit_transaction();
     }
 
+    // Reset replaces the tracked sheets' cells, pivot definitions and override
+    // layer with the published ones: a real document change relative to the LAST
+    // SAVE, even though it is a "revert" in intent. Constructed HERE -- every
+    // refusal is behind us and the undo transaction above is already committed,
+    // so from this line the command cannot back out.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
     // Apply: replace each tracked sheet's grid (style-remapped into the shared
     // registry, exactly like pull/refresh), widths, heights, and merges.
     let mut active_affected = false;
     {
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
@@ -13360,11 +13447,20 @@ pub fn calp_reset_subscription(
     // Sync the active-sheet mirrors (grid, widths, heights) if the active
     // sheet was among the reset sheets — the mirrors are the live copies while
     // a sheet is active; its all_* slots are shadowed.
+    //
+    // DERIVED CACHE, not a second mutation: `state.grid` is a copy of
+    // `grids[active_idx]`, which the block above already rewrote under the
+    // command's own `mutates` token further down. Minting a second `mutates`
+    // here would be harmless but dishonest — this write adds nothing to what a
+    // save would contain that the authoritative one did not already add.
+    let mirror_effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::DerivedCache,
+    );
     if let Some((idx, _, pulled)) = targets.iter().find(|(idx, _, _)| *idx == active_idx) {
         {
-            let grids = state.grids.lock().map_err(|e| e.to_string())?;
+            let grids = state.grids.read().map_err(|e| e.to_string())?;
             if let Some(grid) = grids.get(*idx) {
-                *state.grid.lock().map_err(|e| e.to_string())? = grid.clone();
+                *state.grid.write(&mirror_effect).map_err(|e| e.to_string())? = grid.clone();
             }
         }
         *state.column_widths.lock().map_err(|e| e.to_string())? =
@@ -13389,11 +13485,6 @@ pub fn calp_reset_subscription(
             *m = merges.clone();
         });
     }
-
-    // Reset replaces the tracked sheets' cells, pivot definitions and override layer
-    // with the published ones: a real document change relative to the LAST SAVE, even
-    // though it is a "revert" in intent. Constructed after every refusal above.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Clear the override layer for the reset sheets — the pristine content IS
     // the state now; stale overrides would re-assert the discarded edits.

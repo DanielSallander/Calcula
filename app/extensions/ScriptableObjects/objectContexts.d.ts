@@ -86,6 +86,7 @@
 //     - cap.writebackSubmit: Send your filled-in answers for one input area to the publisher — they leave this machine and you cannot take them back
 //   file.picker
 //     - cap.fileExportText: Ask you where to save a text file it has produced (you choose the folder and the name; it is never told where anything on your computer is)
+//     - cap.fileImportMedia: Ask you to pick a picture and store it in this workbook (only the one file you pick; it is given a reference to the picture, never the picture's data)
 //     - cap.fileImportText: Ask you to pick a text file and read what is inside it (only the one file you pick, and only its contents and its name)
 //     - cap.filePrintPdf: Turn the sheet you would print into a PDF and ask you where to save it (you choose the folder and the name; it is never told where anything on your computer is)
 //   formula.udf
@@ -385,6 +386,34 @@ declare interface ScriptImportedFile {
 }
 
 /**
+ * A picture the user picked, now stored inside the workbook — handed to you as
+ * a HANDLE, not as an image.
+ *
+ * There is no `data` member and there never will be. The bytes stay in
+ * Calcula's privileged process; your script gets an opaque reference and the
+ * four facts it needs to lay the picture out. You can place it and size it. You
+ * cannot read it, cannot make one up, and cannot send it anywhere.
+ */
+declare interface ScriptMediaRef {
+  /**
+   * The document handle: `"media:"` followed by 64 hex characters.
+   *
+   * Pass it to `api.createPicture(...)`, or write it to a picture's `src`
+   * property. Those are the only two things it is for.
+   */
+  ref: string;
+  /** What the file really is, proved by its MAGIC BYTES — never by its name.
+   *  One of `image/png`, `image/jpeg`, `image/gif`, `image/webp`. */
+  mimeType: string;
+  /** Natural width in pixels, read from the file's header. */
+  width: number;
+  /** Natural height in pixels, read from the file's header. */
+  height: number;
+  /** Size of the stored image in bytes. */
+  byteLength: number;
+}
+
+/**
  * Read and write files the USER picks, one at a time.
  *
  * This is the sanctioned replacement for VBA's `FileSystemObject`, and it is
@@ -444,6 +473,38 @@ declare interface ScriptFileApi {
    * Reach: broker `cap.fileImportText`, restricted tier, class file, requires the `file.picker` capability. Limits: maxChars 8,000,000.
    */
   importText(options?: ScriptFileImportOptions): Promise<ScriptImportedFile | null>;
+  /**
+   * Ask the user to pick a PICTURE, and have Calcula store it inside this
+   * workbook. Resolves to a handle, or `null` if they cancelled.
+   *
+   * WHAT YOU GET IS A HANDLE, NOT AN IMAGE, and that is the whole difference
+   * between this and `importText`. Calcula reads the file, proves it really is
+   * a picture from its magic bytes (never from its extension), enforces the
+   * size and dimension caps, and files the bytes under their content hash
+   * inside the document. Your script receives `"media:<hash>"` and four
+   * integers — it never sees the bytes, so it cannot send them anywhere.
+   *
+   * There is no options object, on purpose: WHICH formats may be embedded is
+   * Calcula's decision, not your script's. PNG, JPEG, GIF and WebP are
+   * admitted; SVG and BMP are refused.
+   *
+   * ```js
+   * const pic = await context.caps.file.importImage();
+   * if (!pic) return;                       // the user cancelled
+   * context.log(`${pic.width}x${pic.height} ${pic.mimeType}`);
+   * await context.api.createPicture(pic.ref, "B3", { width: 240 });
+   * ```
+   *
+   * REJECTS, with the reason, when the chosen file is not an admissible
+   * picture — wrong format, too many bytes, too many pixels, or a malformed
+   * header. A refusal is the correct outcome, not an inconvenience: the code
+   * this replaced fell back to a 200x150 placeholder and embedded the file
+   * anyway, whatever it was.
+   *
+   * Calcula policy (generated): Ask you to pick a picture and store it in this workbook (only the one file you pick; it is given a reference to the picture, never the picture's data).
+   * Reach: broker `cap.fileImportMedia`, restricted tier, class file, requires the `file.picker` capability. Limits: maxBytes 8,388,608, maxPixels 40,000,000.
+   */
+  importImage(): Promise<ScriptMediaRef | null>;
   /**
    * Save the sheet you would PRINT as a PDF, to a file the user picks. Resolves
    * to the chosen file NAME, or `null` if they cancelled.
@@ -5165,6 +5226,73 @@ declare interface UnlockedAPI {
    * Reach: broker `api.deleteTable`, unlocked tier, class mutate.
    */
   deleteTable(tableId: string): Promise<void>;
+  /**
+   * Place a picture the workbook ALREADY holds, at an anchor cell on the ACTIVE
+   * SHEET. Resolves to the placed picture's handle (its `instanceId`, and the
+   * pixel box Calcula gave it).
+   *
+   * `dataRef` is a `media:` handle — from `caps.file.importImage()`, or the
+   * `src` of a picture already on a sheet. NOTE WHAT IS NOT A PARAMETER: there
+   * is no bytes argument, no data URI argument and no file path argument. A
+   * script places pictures a PERSON chose; it cannot introduce image data of
+   * its own, by any spelling.
+   *
+   * `anchor` is a cell — `"B3"` or `{ row: 2, col: 1 }`. A `"Sheet1!"` prefix
+   * is refused rather than ignored: call `setActiveSheet()` first.
+   *
+   * ```js
+   * const pic = await context.caps.file.importImage();
+   * if (pic) await api.createPicture(pic.ref, "B3", { width: 240, name: "Logo" });
+   * ```
+   *
+   * Calcula policy (generated): Place a picture that is already stored in this workbook onto the sheet currently shown (it can name a picture, never supply one).
+   * Reach: broker `api.createPicture`, unlocked tier, class mutate.
+   */
+  createPicture(dataRef: string, anchor: string | { row: number; col: number }, options?: { name?: string; width?: number; height?: number }): Promise<{ instanceId: string; sheetIndex: number; row: number; col: number; x: number; y: number; width: number; height: number }>;
+  /**
+   * Draw a shape at an anchor cell on the ACTIVE SHEET. Resolves to the placed
+   * shape's handle (its `instanceId`, and the pixel box Calcula gave it).
+   *
+   * `shapeType` is a CATALOG ID. Calcula draws 123 shapes in 8 groups (lines,
+   * rectangles, basic shapes, block arrows, equation shapes, flowchart, stars
+   * and banners, callouts), so they are not listed here — pass an id Calcula
+   * does not know and the rejection names every accepted one. Common ids:
+   * `"rectangle"`, `"roundedRectangle"`, `"ellipse"`, `"triangle"`,
+   * `"rightArrow"`, `"star5"`, `"cloud"`, `"line"`.
+   *
+   * `anchor` is a cell — `"B3"` or `{ row: 2, col: 1 }`. A `"Sheet1!"` prefix
+   * is refused rather than ignored: call `setActiveSheet()` first. One cell
+   * anchors at most one control, and creating over an occupied cell is REFUSED,
+   * never a replacement — a control's script binding is derived from its
+   * anchor, so replacing one would hand its script to the newcomer.
+   *
+   * The caption property is `text`. There is no `label`.
+   *
+   * NOT UNDOABLE: Ctrl+Z will not remove the shape.
+   *
+   * ```js
+   * const s = await api.createShape("roundedRectangle", "B3", { text: "Run", width: 160 });
+   * await api.objectSetState("shape", s.instanceId, "shape.setProperty", ["fill", "#2E7D32"]);
+   * ```
+   *
+   * Calcula policy (generated): Draw a shape (rectangle, arrow, star and so on) on the sheet currently shown — NOT undoable: Ctrl+Z will not remove it.
+   * Reach: broker `api.createShape`, unlocked tier, class mutate.
+   */
+  createShape(shapeType: string, anchor: string | { row: number; col: number }, options?: { name?: string; width?: number; height?: number; text?: string }): Promise<{ instanceId: string; shapeType: string; sheetIndex: number; row: number; col: number; x: number; y: number; width: number; height: number }>;
+  /**
+   * Delete a shape, button or picture by the `instanceId` `api.shapes()`
+   * reports, along with any object script bound to it. ACTIVE SHEET only.
+   *
+   * The script goes too, deliberately: an instanceId is derived from the
+   * control's anchor cell, so a script left behind would be inherited by
+   * whatever control is created at that cell next.
+   *
+   * NOT UNDOABLE: Ctrl+Z will not bring it back.
+   *
+   * Calcula policy (generated): Delete a shape, button or picture from the sheet currently shown, along with any script attached to it — NOT undoable: Ctrl+Z will not bring it back.
+   * Reach: broker `api.deleteShape`, unlocked tier, class mutate.
+   */
+  deleteShape(instanceId: string): Promise<void>;
   /**
    * Create a named range. Omit `sheetIndex` (or pass null) for a
    * workbook-scoped name. `refersTo` is a formula: "=Sheet1!$A$1:$B$10".

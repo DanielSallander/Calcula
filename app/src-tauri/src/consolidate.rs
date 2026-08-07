@@ -423,8 +423,8 @@ pub fn consolidate_data(
     }
 
     // Acquire locks (same order as goal_seek.rs to avoid deadlocks)
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -505,7 +505,9 @@ pub fn consolidate_data(
 
         // Past the destination-block protection gate: the writes below are committed
         // into the grid, which is persisted.
-        let _effect = DocumentEffect::mutates(&file_state);
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut grid = grid.authorize(&effect);
+        let mut grids = grids.authorize(&effect);
 
         // Write column headers
         if has_col_headers {
@@ -619,8 +621,13 @@ pub fn consolidate_data(
             }
         }
 
-        // Past the destination-block protection gate (position mode).
-        let _effect = DocumentEffect::mutates(&file_state);
+        // Past the destination-block protection gate (position mode). The two
+        // branches authorize SEPARATELY: each has its own protection gate, and a
+        // single shared decision above them would dirty the document for a
+        // consolidation the other branch's gate was about to refuse.
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut grid = grid.authorize(&effect);
+        let mut grids = grids.authorize(&effect);
 
         // Write results to destination
         for &(rel_r, rel_c, value) in &pos_results {

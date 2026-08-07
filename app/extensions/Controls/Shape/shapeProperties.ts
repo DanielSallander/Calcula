@@ -67,6 +67,19 @@ export function getShapePropertiesWithDeclared(instanceId?: string): PropertyDef
 export const SHAPE_PROPERTIES: PropertyDefinition[] = [
   // -- Shape Identity --
   {
+    // The `name` property had a READER and no WRITER: IControlStoreService
+    // reported it, so `api.listObjects("shape")` and the object list showed a
+    // name column — always "", because no surface anywhere could set one. Now
+    // `api.createShape(..., { name })` writes it, so the pane has to be able to
+    // change it; a value a user can see and never edit is worse than no value.
+    key: "name",
+    label: "Name",
+    inputType: "text",
+    defaultValue: "",
+    supportsFormula: false,
+    group: "Shape",
+  },
+  {
     key: "shapeType",
     label: "Shape Type",
     inputType: "text",

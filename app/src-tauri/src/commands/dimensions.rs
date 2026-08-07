@@ -31,7 +31,7 @@ pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, co
     undo_stack.record_column_width_change(col, previous_width);
 
     // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
@@ -76,7 +76,7 @@ pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row:
     undo_stack.record_row_height_change(row, previous_height);
 
     // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
@@ -123,7 +123,7 @@ pub fn set_default_row_height(state: State<AppState>, file_state: State<FileStat
     undo_stack.record_custom_restore("default_row_height".to_string(), data, "Change default row height");
     drop(undo_stack);
 
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     let col_w = *state.default_column_width.lock().unwrap();
     DefaultDimensions {
         default_row_height: clamped,
@@ -146,7 +146,7 @@ pub fn set_default_column_width(state: State<AppState>, file_state: State<FileSt
     undo_stack.record_custom_restore("default_column_width".to_string(), data, "Change default column width");
     drop(undo_stack);
 
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     let row_h = *state.default_row_height.lock().unwrap();
     DefaultDimensions {
         default_row_height: row_h,
@@ -457,9 +457,7 @@ pub(crate) fn set_rows_hidden_inner(
         );
     }
 
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(sorted_set(&state.user_hidden_rows))
 }
 
@@ -512,9 +510,7 @@ pub(crate) fn set_cols_hidden_inner(
         );
     }
 
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(sorted_set(&state.user_hidden_cols))
 }
 

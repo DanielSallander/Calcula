@@ -163,7 +163,7 @@ pub fn restore_computed_properties(state: &AppState, bytes: Option<&[u8]>) {
     {
         // Lock order mirrors add_computed_property: grids before the
         // property/dependency stores.
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         // LOAD PATH: rebuilding the store from the .cala artifact. `open_file` assigns
         // is_modified = false as its last act, and a freshly-opened workbook must not
         // prompt to save.
@@ -777,8 +777,8 @@ pub fn add_computed_property(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
-    let grid = state.grid.lock().unwrap();
+    let grids = state.grids.read().unwrap();
+    let grid = state.grid.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let row_heights_snapshot = state.row_heights.lock().unwrap().clone();
@@ -864,8 +864,8 @@ pub fn add_computed_property(
     // Apply the computed value to the target
     let mut rh = state.row_heights.lock().unwrap();
     let mut cw = state.column_widths.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut style_reg = state.style_registry.lock().unwrap();
 
     let (dimension_changes, needs_style_refresh) = apply_property_value(
@@ -916,8 +916,8 @@ pub fn update_computed_property(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let grids = state.grids.lock().unwrap();
-    let grid = state.grid.lock().unwrap();
+    let grids = state.grids.read().unwrap();
+    let grid = state.grid.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let row_heights_snapshot = state.row_heights.lock().unwrap().clone();
@@ -1007,8 +1007,8 @@ pub fn update_computed_property(
     // Apply effect
     let mut rh = state.row_heights.lock().unwrap();
     let mut cw = state.column_widths.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let mut style_reg = state.style_registry.lock().unwrap();
 
     let (dimension_changes, needs_style_refresh) = apply_property_value(

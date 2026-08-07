@@ -29,7 +29,7 @@ use crate::persistence::FileState;
 use crate::AppState;
 
 fn dirty(fs: &FileState) -> bool {
-    *fs.is_modified.lock().unwrap()
+    fs.is_dirty()
 }
 
 /// A fresh workbook plus a clean `FileState` -- the state every test starts from.
@@ -194,6 +194,11 @@ fn setting_a_scroll_area_does_not_dirty_because_it_is_never_saved() {
 // Workbook-level object stores
 // ============================================================================
 
+/// The payload the frontend store sends for a sheet that really has a group.
+fn one_group_json() -> String {
+    r#"[{"id":1,"type":"line","cells":[{"row":0,"col":0}]}]"#.to_string()
+}
+
 #[test]
 fn saving_sparklines_dirties_and_deleting_nothing_stays_clean() {
     let (state, fs) = fixture();
@@ -203,7 +208,7 @@ fn saving_sparklines_dirties_and_deleting_nothing_stays_clean() {
         &fs,
         crate::api_types::SparklineEntry {
             sheet_index: 0,
-            groups_json: "[]".to_string(),
+            groups_json: one_group_json(),
         },
     )
     .expect("save should succeed");
@@ -229,6 +234,98 @@ fn saving_sparklines_dirties_and_deleting_nothing_stays_clean() {
     crate::sparkline_commands::delete_sparklines_impl(&state, &real, 0)
         .expect("delete should succeed");
     assert!(dirty(&real));
+}
+
+/// THE SHEET-SWITCH REGRESSION.
+///
+/// The Sparklines extension saves unconditionally on every SHEET_CHANGED, so on
+/// a workbook with no sparklines a plain sheet switch arrived here as
+/// `save_sparklines_impl(sheet, "[]")`. That both dirtied a just-saved document
+/// and pushed an undo entry that restored nothing — measured on the running app:
+/// two switches took `undoDepth` from 4 to 6 and turned the title asterisk on,
+/// so the user's next Ctrl+Z popped a no-op instead of undoing their last edit.
+#[test]
+fn an_upsert_that_changes_nothing_neither_dirties_nor_records_undo() {
+    let (state, _fs) = fixture();
+
+    // 1. A sheet that has never had a sparkline. No entry exists; the frontend
+    //    sends the empty list.
+    let switch = FileState::default();
+    let undo_before = state.undo_stack.lock().unwrap().undo_depth();
+    crate::sparkline_commands::save_sparklines_impl(
+        &state,
+        &switch,
+        crate::api_types::SparklineEntry {
+            sheet_index: 3,
+            groups_json: "[]".to_string(),
+        },
+    )
+    .expect("an empty save is not an error");
+    assert!(
+        !dirty(&switch),
+        "switching to a sheet with no sparklines must not dirty the document -- \
+         `set_active_sheet` declares itself deliberately clean precisely so that \
+         merely LOOKING at a workbook cannot make the close prompt lie, and an \
+         extension writing back what it just read must not be able to overrule that"
+    );
+    assert_eq!(
+        state.undo_stack.lock().unwrap().undo_depth(),
+        undo_before,
+        "and it must not push an undo entry -- one that restores 'no entry' still \
+         consumes the user's next Ctrl+Z"
+    );
+
+    // 2. A sheet that DOES have a group, re-saved byte-identically.
+    let real = FileState::default();
+    crate::sparkline_commands::save_sparklines_impl(
+        &state,
+        &real,
+        crate::api_types::SparklineEntry {
+            sheet_index: 0,
+            groups_json: one_group_json(),
+        },
+    )
+    .expect("save should succeed");
+    assert!(dirty(&real), "the first, real save must dirty");
+    let undo_after_real = state.undo_stack.lock().unwrap().undo_depth();
+
+    let resave = FileState::default();
+    crate::sparkline_commands::save_sparklines_impl(
+        &state,
+        &resave,
+        crate::api_types::SparklineEntry {
+            sheet_index: 0,
+            groups_json: one_group_json(),
+        },
+    )
+    .expect("an identical re-save is not an error");
+    assert!(
+        !dirty(&resave),
+        "re-saving the identical blob changes nothing and must stay clean"
+    );
+    assert_eq!(
+        state.undo_stack.lock().unwrap().undo_depth(),
+        undo_after_real,
+        "and must not push a second undo entry"
+    );
+
+    // 3. TEETH: a genuinely different payload still dirties and still records.
+    let changed = FileState::default();
+    crate::sparkline_commands::save_sparklines_impl(
+        &state,
+        &changed,
+        crate::api_types::SparklineEntry {
+            sheet_index: 0,
+            groups_json: r#"[{"id":1,"type":"column","cells":[{"row":0,"col":0}]}]"#.to_string(),
+        },
+    )
+    .expect("save should succeed");
+    assert!(dirty(&changed), "a real change must still dirty");
+    assert!(
+        state.undo_stack.lock().unwrap().undo_depth() > undo_after_real,
+        "a real change must still be undoable -- a guard that suppressed this would \
+         have traded a junk undo entry for a lost one"
+    );
 }
 
 #[test]

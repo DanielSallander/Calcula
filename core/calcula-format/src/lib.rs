@@ -31,6 +31,10 @@ mod zip_io;
 mod atomic;
 pub mod features;
 pub mod ai;
+// Public: the ONE validator for embedded binary media. The app crate calls it
+// at the file-picker ingress and at legacy-data-URL migration; `calp` calls it
+// on the bytes a published package carries. One gate, three doors.
+pub mod media;
 
 pub use error::FormatError;
 pub use manifest::{

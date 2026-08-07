@@ -52,10 +52,14 @@ describe("vSetState chart spec pre-filter", () => {
     expect(vSetState(["chart.updateSpec", [huge]])).not.toBe(true);
   });
 
-  it("does NOT constrain other setState aspects (slicer/shape/etc.)", () => {
+  it("does NOT constrain setState aspects that have no gate of their own", () => {
     expect(vSetState(["slicer.setSelectedItems", [["a", "b"]]])).toBe(true);
-    expect(vSetState(["shape.setProperty", ["fill", "#fff"]])).toBe(true);
     expect(vSetState(["chart.setStyleProperty", ["bg", "#fff"]])).toBe(true);
+    // shape.setProperty USED to be in this list. It now has its own gate — see
+    // mediaHandles.test.ts — because "no key allowlist, no length bound" on a
+    // restricted-tier aspect is how a distributed script could persist a
+    // multi-megabyte data: URI. A well-formed write still passes.
+    expect(vSetState(["shape.setProperty", ["fill", "#fff"]])).toBe(true);
   });
 });
 

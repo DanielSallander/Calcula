@@ -83,8 +83,9 @@
  *                   requires the owning script to be mounted, enforces a 30s
  *                   floor and a per-job no-self-overlap guard, and audits
  *                   every fire.
- *  - file.picker  : ask the USER to pick ONE file — to save text into, or to
- *                   read text from. Named for the MECHANISM, not the reach,
+ *  - file.picker  : ask the USER to pick ONE file — to save text into, to
+ *                   read text from, to save a rendered PDF into, or to embed
+ *                   as a PICTURE. Named for the MECHANISM, not the reach,
  *                   because the mechanism IS the safety story: the script
  *                   never supplies, sees or stores a path; the host opens a
  *                   native picker, the human chooses the file, and the host
@@ -100,6 +101,14 @@
  *                   matters is that the worker realm has no Tauri, no fs and
  *                   no path vocabulary at all — it can only ask the host to
  *                   ask the user.
+ *                   THE PICTURE ARM IS THE NARROWEST OF THE FOUR, and the
+ *                   reason it needs no id of its own: the host reads the file,
+ *                   proves it is an image from its MAGIC BYTES, enforces the
+ *                   byte and pixel caps and stores the bytes INSIDE THE
+ *                   DOCUMENT, then hands the script an inert `media:` handle.
+ *                   The text arm hands over CONTENTS; this one hands over a
+ *                   reference. Same mechanism, same sentence a user already
+ *                   consented to, strictly less reach.
  *  - ui.shortcut  : take over ONE keyboard shortcut so pressing it runs one of
  *                   the script's own exposed methods — the Application.OnKey
  *                   replacement. Named for what the user gets (a shortcut),

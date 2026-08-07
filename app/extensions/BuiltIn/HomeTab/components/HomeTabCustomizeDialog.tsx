@@ -1,6 +1,14 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/components/HomeTabCustomizeDialog.tsx
 // PURPOSE: Dialog for customizing which items appear in the Home ribbon tab.
-// CONTEXT: Opened via the cog wheel icon in the Home tab.
+// CONTEXT: Opened from View > "Customize Home Tab...".
+//
+// TWO RULES THIS FILE KEEPS. (1) A SEPARATOR IS MULTI-INSTANCE. The default
+// layout places five row breaks, so anything keyed on "is this id already
+// used" must exempt separators or Row Break is greyed out on first open and
+// layout control is advertised but unreachable. Because ids repeat, item
+// remove/move are INDEX-based, never equality-based. (2) NOTHING IS WRITTEN
+// UNTIL SAVE. Reset hands back the default layout and touches no storage, so
+// Reset-then-Cancel is a true no-op.
 
 import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
@@ -10,13 +18,13 @@ import {
   loadLayout,
   saveLayout,
   resetLayout,
+  isMultiInstanceItem,
   ALL_ITEMS,
   ITEMS_BY_ID,
   getCategories,
   type HomeTabLayout,
-  type HomeTabGroup,
 } from "../homeTabConfig";
-import { homeTabIcon } from "./homeTabIcons";
+import { homeTabIcon, groupIconFor, GROUP_ICON_IDS } from "./homeTabIcons";
 
 // ============================================================================
 // Styles
@@ -315,10 +323,14 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
     }
   }, [layout.groups, addToGroupId]);
 
-  // Collect all currently used item IDs
+  // Collect the item IDs that may appear only ONCE and already do. Separators
+  // are deliberately absent: "Row Break" is placeable as often as the user
+  // likes, and putting it in this set greyed it out permanently.
   const usedItemIds = new Set<string>();
   for (const group of layout.groups) {
-    for (const id of group.items) usedItemIds.add(id);
+    for (const id of group.items) {
+      if (!isMultiInstanceItem(ITEMS_BY_ID.get(id))) usedItemIds.add(id);
+    }
   }
 
   // Handle backdrop click
@@ -329,29 +341,43 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
     [onClose]
   );
 
-  // Remove item from a group
-  const removeItem = (groupId: string, itemId: string) => {
+  // Remove item from a group. BY INDEX: a group may hold several row breaks,
+  // and filtering by equality removed every one of them at once.
+  const removeItem = (groupId: string, index: number) => {
     setLayout((prev) => ({
-      groups: prev.groups.map((g) =>
-        g.id === groupId
-          ? { ...g, items: g.items.filter((id) => id !== itemId) }
-          : g
-      ),
+      ...prev,
+      groups: prev.groups.map((g) => {
+        if (g.id !== groupId) return g;
+        if (index < 0 || index >= g.items.length) return g;
+        const items = [...g.items];
+        items.splice(index, 1);
+        return { ...g, items };
+      }),
     }));
   };
 
   // Add item to a group
   const addItem = (groupId: string, itemId: string) => {
     setLayout((prev) => ({
+      ...prev,
       groups: prev.groups.map((g) =>
         g.id === groupId ? { ...g, items: [...g.items, itemId] } : g
       ),
     }));
   };
 
+  // Change a group's launcher glyph (shown when the section is demoted).
+  const setGroupIcon = (groupId: string, iconId: string) => {
+    setLayout((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) => (g.id === groupId ? { ...g, iconId } : g)),
+    }));
+  };
+
   // Remove entire group
   const removeGroup = (groupId: string) => {
     setLayout((prev) => ({
+      ...prev,
       groups: prev.groups.filter((g) => g.id !== groupId),
     }));
     // Reset addToGroupId if we removed the selected one
@@ -370,21 +396,23 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
       if (newIdx < 0 || newIdx >= prev.groups.length) return prev;
       const groups = [...prev.groups];
       [groups[idx], groups[newIdx]] = [groups[newIdx], groups[idx]];
-      return { groups };
+      return { ...prev, groups };
     });
   };
 
-  // Move item within group
-  const moveItem = (groupId: string, itemId: string, direction: -1 | 1) => {
+  // Move item within group. BY INDEX, for the same reason as removeItem:
+  // indexOf always found the FIRST row break, so the arrows on the second one
+  // moved the first one.
+  const moveItem = (groupId: string, index: number, direction: -1 | 1) => {
     setLayout((prev) => ({
+      ...prev,
       groups: prev.groups.map((g) => {
         if (g.id !== groupId) return g;
-        const idx = g.items.indexOf(itemId);
-        if (idx < 0) return g;
-        const newIdx = idx + direction;
+        if (index < 0 || index >= g.items.length) return g;
+        const newIdx = index + direction;
         if (newIdx < 0 || newIdx >= g.items.length) return g;
         const items = [...g.items];
-        [items[idx], items[newIdx]] = [items[newIdx], items[idx]];
+        [items[index], items[newIdx]] = [items[newIdx], items[index]];
         return { ...g, items };
       }),
     }));
@@ -395,9 +423,12 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
     const name = newGroupName.trim();
     if (!name) return;
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    if (layout.groups.some((g) => g.id === id)) return;
+    if (!id || layout.groups.some((g) => g.id === id)) return;
     setLayout((prev) => ({
-      groups: [...prev.groups, { id, label: name, items: [] }],
+      ...prev,
+      // A new group collapses last (it is the one the user asked for), and
+      // starts on the generic glyph until they pick one.
+      groups: [...prev.groups, { id, label: name, items: [], collapsePriority: 99 }],
     }));
     setNewGroupName("");
     setAddToGroupId(id);
@@ -405,19 +436,27 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
 
   // Save and close
   const handleSave = () => {
-    // Remove empty groups
+    // Drop groups with nothing to render. "Nothing" includes a group holding
+    // only row breaks: a separator paints no button, so such a group would
+    // survive as a labelled, empty section in the ribbon.
     const cleaned: HomeTabLayout = {
-      groups: layout.groups.filter((g) => g.items.length > 0),
+      ...layout,
+      groups: layout.groups.filter((g) =>
+        g.items.some((id) => !isMultiInstanceItem(ITEMS_BY_ID.get(id)))
+      ),
     };
     saveLayout(cleaned);
     window.dispatchEvent(new Event("homeTab:layoutChanged"));
     onClose();
   };
 
-  // Reset to defaults
+  // Reset to defaults. resetLayout() is PURE - it returns the default layout
+  // and writes nothing, so this stages a reset the same way every other edit
+  // in this dialog is staged. Cancelling therefore really cancels; it used to
+  // clear localStorage on the spot, leaving the ribbon unchanged and the reset
+  // waiting to appear at the next launch.
   const handleReset = () => {
-    const defaultLayout = resetLayout();
-    setLayout(defaultLayout);
+    setLayout(resetLayout());
   };
 
   // Escape to close
@@ -433,7 +472,12 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
 
   return (
     <div className={backdrop} onMouseDown={handleBackdropClick}>
-      <div className={dialog} ref={win.ref} style={{ position: "relative", ...win.style }}>
+      <div
+        className={dialog}
+        ref={win.ref}
+        data-hometab-customize-dialog=""
+        style={{ position: "relative", ...win.style }}
+      >
         {/* Header — drag handle */}
         <div className={header} onMouseDown={win.onHeaderMouseDown}>
           <span className={title}>Customize Home Tab</span>
@@ -446,10 +490,34 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
           <div>
             <div className={sectionLabel}>Current Groups</div>
             {layout.groups.map((group, gIdx) => (
-              <div key={group.id} className={groupCard} style={{ marginBottom: 8 }}>
+              <div
+                key={group.id}
+                className={groupCard}
+                data-hometab-group={group.id}
+                style={{ marginBottom: 8 }}
+              >
                 <div className={groupHeader}>
-                  <span className={groupTitle}>{group.label}</span>
+                  <span className={groupTitle} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", width: 16, justifyContent: "center" }}>
+                      {groupIconFor(group, 16)}
+                    </span>
+                    {group.label}
+                  </span>
                   <div className={groupActions}>
+                    <select
+                      className={selectGroup}
+                      style={{ marginBottom: 0 }}
+                      value={group.iconId ?? ""}
+                      onChange={(e) => setGroupIcon(group.id, e.target.value)}
+                      title="Launcher icon (shown when this group collapses)"
+                    >
+                      <option value="">Icon: default</option>
+                      {GROUP_ICON_IDS.map((iconId) => (
+                        <option key={iconId} value={iconId}>
+                          {iconId}
+                        </option>
+                      ))}
+                    </select>
                     <button
                       className={smallBtn}
                       onClick={() => moveGroup(group.id, -1)}
@@ -480,10 +548,18 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                     const item = ITEMS_BY_ID.get(itemId);
                     if (!item) return null;
                     return (
-                      <span key={itemId} className={itemChip}>
+                      // Keyed by POSITION, not id: row breaks repeat, and a
+                      // duplicated React key silently collapses siblings.
+                      <span
+                        key={`${itemId}#${iIdx}`}
+                        className={itemChip}
+                        data-hometab-chip={itemId}
+                        data-hometab-chip-index={iIdx}
+                      >
                         <button
                           className={smallBtn}
-                          onClick={() => moveItem(group.id, itemId, -1)}
+                          data-hometab-chip-left=""
+                          onClick={() => moveItem(group.id, iIdx, -1)}
                           disabled={iIdx === 0}
                           style={{ padding: "0 3px", fontSize: "9px", border: "none" }}
                           title="Move left"
@@ -496,7 +572,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                         {item.label}
                         <button
                           className={smallBtn}
-                          onClick={() => moveItem(group.id, itemId, 1)}
+                          onClick={() => moveItem(group.id, iIdx, 1)}
                           disabled={iIdx === group.items.length - 1}
                           style={{ padding: "0 3px", fontSize: "9px", border: "none" }}
                           title="Move right"
@@ -505,7 +581,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                         </button>
                         <span
                           className={chipRemove}
-                          onClick={() => removeItem(group.id, itemId)}
+                          onClick={() => removeItem(group.id, iIdx)}
                           title="Remove item"
                         >
                           X
@@ -548,6 +624,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                 <span style={{ fontSize: "12px", marginRight: 8 }}>Add to:</span>
                 <select
                   className={selectGroup}
+                  data-hometab-add-to=""
                   value={addToGroupId}
                   onChange={(e) => setAddToGroupId(e.target.value)}
                 >
@@ -571,6 +648,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                         <button
                           key={item.id}
                           className={isUsed ? addableItemDisabled : addableItem}
+                          data-hometab-add={item.id}
                           disabled={isUsed || !addToGroupId}
                           onClick={() => {
                             if (!isUsed && addToGroupId) {
@@ -595,14 +673,14 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
 
         {/* Footer */}
         <div className={footer}>
-          <button className={secondaryBtn} onClick={handleReset}>
+          <button className={secondaryBtn} data-hometab-reset="" onClick={handleReset}>
             Reset to Default
           </button>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className={secondaryBtn} onClick={onClose}>
+            <button className={secondaryBtn} data-hometab-cancel="" onClick={onClose}>
               Cancel
             </button>
-            <button className={primaryBtn} onClick={handleSave}>
+            <button className={primaryBtn} data-hometab-save="" onClick={handleSave}>
               Save
             </button>
           </div>

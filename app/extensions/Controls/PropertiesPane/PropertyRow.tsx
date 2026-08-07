@@ -77,6 +77,12 @@ const colorSwatchStyle: React.CSSProperties = {
   padding: 0,
 };
 
+const hintStyle: React.CSSProperties = {
+  fontSize: 10,
+  lineHeight: 1.35,
+  color: v("--text-secondary"),
+};
+
 const scriptSelectStyle: React.CSSProperties = {
   ...inputStyle,
   cursor: "pointer",
@@ -187,6 +193,23 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   // Render the appropriate input widget
   // ---------------------------------------------------------------
   const renderInput = () => {
+    // Handle-valued properties are DISPLAYED, never edited here. The value is
+    // still selectable so it can be copied — read-only is about who may WRITE
+    // it, not about hiding it.
+    if (definition.readOnly) {
+      return (
+        <input
+          type="text"
+          readOnly
+          spellCheck={false}
+          title={definition.readOnlyHint ?? "This value is set by the application."}
+          style={{ ...inputStyle, color: v("--text-secondary"), cursor: "default" }}
+          value={localValue}
+          onFocus={(e) => e.currentTarget.select()}
+        />
+      );
+    }
+
     // For properties that support formulas: use the smart FormulaPropertyInput
     // that auto-activates autocomplete and Point mode when value starts with "=".
     if (definition.supportsFormula) {
@@ -389,6 +412,9 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
         <span style={labelStyle}>{definition.label}</span>
       </div>
       {renderInput()}
+      {definition.readOnly && definition.readOnlyHint ? (
+        <span style={hintStyle}>{definition.readOnlyHint}</span>
+      ) : null}
     </div>
   );
 };

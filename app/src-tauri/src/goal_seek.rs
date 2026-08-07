@@ -172,8 +172,8 @@ pub fn goal_seek(
     }
 
     // Acquire locks (same order as update_cell to avoid deadlocks)
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
@@ -229,7 +229,9 @@ pub fn goal_seek(
     // recalculated along the way keep the perturbed values, so even an unsuccessful
     // run leaves the document different from the last save. Per the census rule for
     // reverts: a revert to a mid-run snapshot is not a revert to disk.
-    let _effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
 
     let goal = params.target_value;
     let max_iter = params.max_iterations;

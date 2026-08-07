@@ -453,7 +453,7 @@ fn run_go_to_special(
     criteria: &str,
     search_range: Option<(u32, u32, u32, u32)>,
 ) -> Vec<(u32, u32)> {
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let (sr, sc, er, ec) = search_range.unwrap_or((0, 0, grid.max_row, grid.max_col));
 
@@ -559,7 +559,7 @@ fn test_go_to_special_blanks() {
 
     // Set up a small grid: A1=10, A2=empty, A3="hello", B1=empty, B2=20
     {
-        let mut grid = state.grid.lock().unwrap();
+        let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0));
         // (1, 0) is empty
         grid.set_cell(2, 0, Cell::new_text("hello".to_string()));
@@ -582,7 +582,7 @@ fn test_go_to_special_formulas() {
     let state = create_app_state();
 
     {
-        let mut grid = state.grid.lock().unwrap();
+        let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0)); // constant
         let mut formula_cell = Cell::new_number(30.0);
         formula_cell.ast = parser::parse("=A1+20").ok().map(Box::new);
@@ -599,7 +599,7 @@ fn test_go_to_special_constants() {
     let state = create_app_state();
 
     {
-        let mut grid = state.grid.lock().unwrap();
+        let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0)); // constant
         let mut formula_cell = Cell::new_number(30.0);
         formula_cell.ast = parser::parse("=10+20").ok().map(Box::new);
@@ -617,7 +617,7 @@ fn test_go_to_special_errors() {
     let state = create_app_state();
 
     {
-        let mut grid = state.grid.lock().unwrap();
+        let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0));
         let mut div0_cell = Cell { value: CellValue::Error(CellError::Div0), ..Cell::default() };
         div0_cell.ast = parser::parse("=1/0").ok().map(Box::new);
@@ -743,7 +743,7 @@ fn test_go_to_special_with_search_range_filter() {
     let state = create_app_state();
 
     {
-        let mut grid = state.grid.lock().unwrap();
+        let mut grid = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grid.set_cell(0, 0, Cell::new_number(1.0));
         grid.set_cell(5, 5, Cell::new_number(2.0));
         grid.set_cell(10, 10, Cell::new_number(3.0));

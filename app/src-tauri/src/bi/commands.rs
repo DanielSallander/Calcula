@@ -2833,10 +2833,16 @@ pub async fn bi_insert_result(
 
     // Write cells to grid
     {
-        let mut grids = state.grids.lock().unwrap();
-        let grid = grids
-            .get_mut(request.sheet_index)
-            .ok_or("Invalid sheet index")?;
+        // Refusal-first: the destination-sheet check is the last thing that can
+        // refuse, so it runs under the PENDING guard and the eager `mutates` token
+        // is minted only once it has passed.
+        let grids = state.grids.lock_pending().unwrap();
+        if request.sheet_index >= grids.len() {
+            return Err("Invalid sheet index".to_string());
+        }
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut grids = grids.authorize(&effect);
+        let grid = &mut grids[request.sheet_index];
 
         // Write header row
         for (col_idx, col_name) in query_result.columns.iter().enumerate() {
@@ -2869,9 +2875,10 @@ pub async fn bi_insert_result(
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
         if request.sheet_index == active_sheet {
-            let grids = state.grids.lock().unwrap();
+            let grids = state.grids.read().unwrap();
             if let Some(src_grid) = grids.get(request.sheet_index) {
-                let mut active_grid = state.grid.lock().unwrap();
+                let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+                let mut active_grid = state.grid.write(&effect).unwrap();
                 for ((r, c), cell) in src_grid.cells.iter() {
                     if *r >= start_row && *r <= end_row && *c >= start_col && *c <= end_col {
                         active_grid.set_cell(*r, *c, cell.clone());
@@ -3043,10 +3050,16 @@ pub async fn bi_refresh_connection(
 
         // Clear old region cells
         {
-            let mut grids = state.grids.lock().unwrap();
-            let grid = grids
-                .get_mut(active_query.sheet_index)
-                .ok_or("Invalid sheet index")?;
+            // Refusal-first: the sheet-index check is the last thing that can
+            // refuse in this block, so it runs under the PENDING guard and the
+            // eager `mutates` token is minted only once it has passed.
+            let grids = state.grids.lock_pending().unwrap();
+            if active_query.sheet_index >= grids.len() {
+                return Err("Invalid sheet index".to_string());
+            }
+            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+            let mut grids = grids.authorize(&effect);
+            let grid = &mut grids[active_query.sheet_index];
 
             for r in active_query.start_row..=active_query.end_row {
                 for c in active_query.start_col..=active_query.end_col {
@@ -3064,10 +3077,16 @@ pub async fn bi_refresh_connection(
 
         // Write new data
         {
-            let mut grids = state.grids.lock().unwrap();
-            let grid = grids
-                .get_mut(active_query.sheet_index)
-                .ok_or("Invalid sheet index")?;
+            // Refusal-first: the sheet-index check is the last thing that can
+            // refuse in this block, so it runs under the PENDING guard and the
+            // eager `mutates` token is minted only once it has passed.
+            let grids = state.grids.lock_pending().unwrap();
+            if active_query.sheet_index >= grids.len() {
+                return Err("Invalid sheet index".to_string());
+            }
+            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+            let mut grids = grids.authorize(&effect);
+            let grid = &mut grids[active_query.sheet_index];
 
             for (col_idx, col_name) in result.columns.iter().enumerate() {
                 let mut cell = Cell::new_text(col_name.clone());
@@ -3098,9 +3117,10 @@ pub async fn bi_refresh_connection(
         {
             let active_sheet = *state.active_sheet.lock().unwrap();
             if active_query.sheet_index == active_sheet {
-                let grids = state.grids.lock().unwrap();
+                let grids = state.grids.read().unwrap();
                 if let Some(src_grid) = grids.get(active_query.sheet_index) {
-                    let mut active_grid = state.grid.lock().unwrap();
+                    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+                    let mut active_grid = state.grid.write(&effect).unwrap();
                     for r in active_query.start_row..=active_query.end_row {
                         for c in active_query.start_col..=active_query.end_col {
                             active_grid.set_cell(r, c, Cell::new());

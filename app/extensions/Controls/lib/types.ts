@@ -59,6 +59,18 @@ export interface PropertyDefinition {
   step?: number;
   /** Render side-by-side with next inline property */
   inline?: boolean;
+  /**
+   * Show the value, refuse to let the pane edit it.
+   *
+   * For properties whose value is a HANDLE the host issued rather than text the
+   * user authors — today: an image's `src`, which is `media:{sha256}` and only
+   * ever comes back from `read_media_file`. A free-text box there let anyone
+   * type `https://tracker.example/pixel.gif` into a document property, with the
+   * CSP as the only thing between that and a beacon firing on every open.
+   */
+  readOnly?: boolean;
+  /** Explains a `readOnly` row. Shown under the value and as its tooltip. */
+  readOnlyHint?: string;
 }
 
 /** All property definitions for a Button control. */

@@ -86,6 +86,23 @@ fn to_api_region(r: &UndoMergeRegion) -> MergedRegion {
     }
 }
 
+/// Whether a restore actually MOVED a cell's calculated content, as opposed to
+/// only its appearance.
+///
+/// Two things key off this and both need the same answer. The subscriber
+/// override layer records only value/formula, so a style-only restore must not
+/// manufacture an override; and the dependent cascade seeds off restored cells,
+/// so a "Bold 10,000 cells" undo — which records a `SetCell` per cell, in
+/// styles.rs, named_styles_cmd.rs and protection.rs alike — must not walk the
+/// whole dependency graph to re-derive the numbers it started with.
+fn cell_value_differs(pre: Option<&engine::Cell>, post: Option<&engine::Cell>) -> bool {
+    match (pre, post) {
+        (None, None) => false,
+        (Some(a), Some(b)) => a.value != b.value || a.formula_string() != b.formula_string(),
+        _ => true,
+    }
+}
+
 /// Convert api_types::MergedRegion to engine::UndoMergeRegion
 fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
     UndoMergeRegion {
@@ -109,7 +126,7 @@ pub(crate) fn rebuild_all_dependencies(state: &AppState) {
     // taking that lock inside would add a fourth lock to a function some
     // callers already reach while holding the grid.
     let sheet_names = state.sheet_names.lock().unwrap().clone();
-    let grid = state.grid.lock().unwrap();
+    let grid = state.grid.read().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     rebuild_all_dependencies_from_grid(&grid, active_sheet, &sheet_names, state);
 }
@@ -265,8 +282,8 @@ pub(crate) fn apply_changes(
     is_undo: bool,
 ) -> UndoResult {
     let undo_stack = state.undo_stack.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
@@ -280,6 +297,8 @@ pub(crate) fn apply_changes(
     // is cheap, a false negative loses data. (bi_model_undo/redo already work this way.)
     // Built up-front so the restore adapters below can reach `Persisted::write`.
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
 
     let description = transaction.description.clone();
     let mut updated_cells = Vec::new();
@@ -447,14 +466,7 @@ pub(crate) fn apply_changes(
                     for (row, col) in keys {
                         let pre = grid.cells.get(&(row, col));
                         let post = snapshot.cells.get(&(row, col));
-                        let same = match (pre, post) {
-                            (None, None) => true,
-                            (Some(a), Some(b)) => {
-                                a.value == b.value && a.formula_string() == b.formula_string()
-                            }
-                            _ => false,
-                        };
-                        if !same {
+                        if cell_value_differs(pre, post) {
                             override_edits.push((row, col, pre.cloned(), post.cloned()));
                         }
                     }
@@ -579,6 +591,103 @@ pub(crate) fn apply_changes(
         crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, active_sheet, Some((pane_control_state, ribbon_filter_state)));
     }
 
+    // Rebuild the dependency maps whenever a restore changed WHICH FORMULA sits
+    // in a cell, not only after a structural one.
+    //
+    // The maps are derived state — `rebuild_all_dependencies` reads them back
+    // out of the grid's formula ASTs — and restoring a cell used to put the
+    // formula back while leaving the edges as the undone operation had left
+    // them. Overwrite `A2 = A1*2` with a literal and the edge `A1 -> A2` is
+    // dropped (`update_dependencies` with no refs); undo then restored a
+    // formula that was INERT for the rest of the session, so the next edit to
+    // A1 silently failed to reach it. That is the same shape as BUG-0019's
+    // fourth cause: a map that describes the grid quietly stops describing it,
+    // and every symptom is a stale number rather than an error.
+    //
+    // Cheaper alternatives (incremental edge maintenance per restored cell) are
+    // exactly the hand-maintained-edge pattern that produced BUG-0019, and undo
+    // is a human-scale action — the same full rescan already runs on every
+    // sheet switch.
+    //
+    // This MUST also precede the dependent cascade below, which looks its seeds
+    // up in precisely these maps. (The structural rebuild used to run last,
+    // which was harmless only because nothing after it read them.)
+    let formula_edges_changed = override_edits.iter().any(|(_, _, pre, post)| {
+        pre.as_ref().and_then(|c| c.formula_string())
+            != post.as_ref().and_then(|c| c.formula_string())
+    });
+    if structural_restore || formula_edges_changed {
+        rebuild_all_dependencies(state);
+    }
+
+    // THE DEPENDENT CASCADE — undo/redo is a value RESTORE, and a restore on its
+    // own is a wrong answer.
+    //
+    // Only the cells a caller passed to `record_cell_change` are in a
+    // transaction; the dependents its forward cascade re-evaluated never were.
+    // So restoring `Sheet1!C5` used to leave `Sheet1!C9 = SUM(C4:C8)` and
+    // `Sheet2!B3 = Sheet1!C9` sitting at their post-edit values, disagreeing
+    // with what loading the same document produces. Excel's undo restores the
+    // prior state INCLUDING dependent values; so does this. `redo` reaches this
+    // through the same function with the inverse transaction, so both
+    // directions cascade or neither does.
+    //
+    // WHY THE RESTORED CELLS ARE RE-DERIVED RATHER THAN BELIEVED. The obvious
+    // reading is that a restored `Cell` carries the exact value it held before
+    // the undone operation, so it is authoritative and only its dependents need
+    // recomputing. That reading is wrong, and the counter-example is ordinary: a
+    // transaction is not required to capture its `previous` cells before it
+    // starts writing. Any grouped run that writes cell by cell —
+    // `begin_undo_transaction` + N `update_cell` (the scripting and CLI batch
+    // shape), find-and-replace, fill — cascades after EACH write, so a formula
+    // cell recorded LATE in the transaction was captured with a value the same
+    // transaction had already changed. Undo `[C5 = 6950, C9 = 99999]` and C9's
+    // recorded `previous` is `=SUM(C4:C8)` cached at 27800: the mid-transaction
+    // total, not the one the user is undoing back to. Believing it restores a
+    // number that never existed before the operation.
+    //
+    // Re-deriving is immune to that, because DERIVED state is not what a
+    // transaction is for. `recalc_after_active_sheet_bulk_rewrite` orders the
+    // seeds among themselves topologically and skips any seed with no formula,
+    // so restored LITERALS keep exactly the recorded value (that is the state
+    // undo owns) while restored FORMULAS are re-evaluated from precedents the
+    // restore has already finished putting back. The two kinds of transaction
+    // therefore converge instead of competing: one that carries no dependents
+    // gets them recomputed, and one that carries them — `RestoreSnapshot` hands
+    // back cached values for the whole active sheet — recomputes to the same
+    // numbers it carried, having also fixed the cells it could not carry (the
+    // OTHER sheets' formulas reading into it, which no active-sheet snapshot
+    // covers). The cost is that a restored volatile (`=RAND()`, `=NOW()`) lands
+    // on a fresh value, which is what any other recalculation of it does too.
+    //
+    // Seeds are only the cells whose value or formula actually MOVED. A
+    // style-only undo also records `SetCell` — styles.rs, named_styles_cmd.rs
+    // and protection.rs all do — and seeding a bold-10,000-cells undo with
+    // 10,000 unchanged cells would walk the whole dependency graph to re-derive
+    // the numbers it started with.
+    //
+    // LOCKING: `recalc_after_active_sheet_bulk_rewrite` acquires everything
+    // itself and its caller must hold nothing — hence a SECOND phase here, after
+    // every grid/style guard above was dropped and after
+    // `rebuild_all_dependencies` released the dependency maps it needs. Same
+    // shape, and the same reason, as `sort_range`: std mutexes are not
+    // reentrant.
+    {
+        let seeds: Vec<(u32, u32)> = override_edits
+            .iter()
+            .filter(|(_, _, pre, post)| cell_value_differs(pre.as_ref(), post.as_ref()))
+            .map(|&(row, col, _, _)| (row, col))
+            .collect();
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            state,
+            user_files_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &seeds,
+            &mut updated_cells,
+        );
+    }
+
     // Push inverse transaction to the appropriate stack (re-acquire undo_stack)
     {
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -593,11 +702,6 @@ pub(crate) fn apply_changes(
         let undo_stack = state.undo_stack.lock().unwrap();
         (undo_stack.can_undo(), undo_stack.can_redo())
     };
-
-    // Rebuild dependency maps after structural restore
-    if structural_restore {
-        rebuild_all_dependencies(state);
-    }
 
     UndoResult {
         success: true,
@@ -701,9 +805,9 @@ fn r_pane_control(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &Ribbo
 fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_create_restore(pc, d, inv); }
 fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_delete_restore(pc, d, inv); }
 fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, e, k, d, inv); }
-fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
+fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, e, d, inv); }
 fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_merge_regions_restore(s, d, inv); }
-fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_structural_restore(s, d, inv); }
+fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_structural_restore(s, e, d, inv); }
 fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, e, d, inv); }
 fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_calp_reset_restore(s, e, d, inv); }
 fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_user_hidden_restore(s, d, inv); }
@@ -819,6 +923,7 @@ pub(crate) struct ScriptGridCellsSnapshot {
 /// active_sheet) to stay deadlock-consistent.
 fn apply_script_grid_cells_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -830,8 +935,8 @@ fn apply_script_grid_cells_restore(
         }
     };
 
-    let mut mirror = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
+    let mut mirror = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
 
     if snapshot.sheet_index >= grids.len() {
@@ -976,7 +1081,7 @@ pub(crate) fn capture_sheet_structural_snapshot(
     state: &AppState,
     sheet_index: usize,
 ) -> Result<SheetStructuralSnapshot, String> {
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let grid = grids
         .get(sheet_index)
@@ -1038,6 +1143,7 @@ pub(crate) fn capture_sheet_structural_snapshot(
 /// maps via the `sheet_structural_snapshot` kind checks.
 fn apply_sheet_structural_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1051,9 +1157,9 @@ fn apply_sheet_structural_restore(
     let idx = snapshot.sheet_index;
 
     let mut inverse = {
-        let mut grids = state.grids.lock().unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active = *state.active_sheet.lock().unwrap();
-        let mut mirror = state.grid.lock().unwrap();
+        let mut mirror = state.grid.write(&effect).unwrap();
         let mut mirror_cw = state.column_widths.lock().unwrap();
         let mut mirror_rh = state.row_heights.lock().unwrap();
         let mut all_cw = state.all_column_widths.lock().unwrap();
@@ -1143,8 +1249,8 @@ fn apply_report_restore(
     let mut inverse_cells: Vec<(u32, u32, Option<engine::Cell>)> =
         Vec::with_capacity(snapshot.cells.len());
     {
-        let mut mirror = state.grid.lock().unwrap();
-        let mut grids = state.grids.lock().unwrap();
+        let mut mirror = state.grid.write(&effect).unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.lock().unwrap();
         if snapshot.sheet_index < grids.len() {
             let is_active = snapshot.sheet_index == active_sheet;
@@ -1253,9 +1359,9 @@ fn apply_calp_reset_restore(
         // widths/heights live in the MIRRORS (take-semantics) — capture and
         // restore through them for that sheet.
         let mut inverse = {
-            let mut grids = state.grids.lock().unwrap();
+            let mut grids = state.grids.write(&effect).unwrap();
             let active = *state.active_sheet.lock().unwrap();
-            let mut mirror = state.grid.lock().unwrap();
+            let mut mirror = state.grid.write(&effect).unwrap();
             let mut mirror_cw = state.column_widths.lock().unwrap();
             let mut mirror_rh = state.row_heights.lock().unwrap();
             let mut all_cw = state.all_column_widths.lock().unwrap();
@@ -1734,11 +1840,11 @@ fn apply_pivot_definition_restore(
         drop(pivot_tables);
 
         // Rewrite the grid
-        finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
+        finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
 
         // Restore cells that were overwritten by the previous pivot expansion
         if !snapshot.overwritten_cells.is_empty() {
-            let mut grids = state.grids.lock().unwrap();
+            let mut grids = state.grids.write(&effect).unwrap();
             if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
                 for sc in &snapshot.overwritten_cells {
                     dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
@@ -1746,7 +1852,7 @@ fn apply_pivot_definition_restore(
             }
             let active_sheet = *state.active_sheet.lock().unwrap();
             if snapshot.dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
+                let mut grid = state.grid.write(&effect).unwrap();
                 for sc in &snapshot.overwritten_cells {
                     grid.set_cell(sc.row, sc.col, sc.cell.clone());
                 }
@@ -1794,7 +1900,7 @@ fn apply_pivot_create_restore(
         // Clear the pivot grid region
         let old_region = get_pivot_region(state, pivot_id);
         if let Some(ref region) = old_region {
-            let mut grids = state.grids.lock().unwrap();
+            let mut grids = state.grids.write(&effect).unwrap();
             if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
                 clear_pivot_region_from_grid(
                     dest_grid,
@@ -1804,7 +1910,7 @@ fn apply_pivot_create_restore(
 
                 let active_sheet = *state.active_sheet.lock().unwrap();
                 if dest_sheet_idx == active_sheet {
-                    let mut grid = state.grid.lock().unwrap();
+                    let mut grid = state.grid.write(&effect).unwrap();
                     for row in region.start_row..=region.end_row {
                         for col in region.start_col..=region.end_col {
                             grid.clear_cell(row, col);
@@ -1879,7 +1985,7 @@ fn apply_pivot_delete_restore(
     drop(pivot_tables);
 
     // Write to grid
-    finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
+    finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
 }
 
 // ============================================================================
@@ -2833,8 +2939,8 @@ fn apply_object_swap_restore(
             // same as r_script_grid_cells. The mirror write matters: the user
             // may have switched to the restored sheet since the edit, and
             // writing only grids[i] leaves the visible grid stale.
-            let mut mirror = state.grid.lock().unwrap();
-            let mut grids = state.grids.lock().unwrap();
+            let mut mirror = state.grid.write(&effect).unwrap();
+            let mut grids = state.grids.write(&effect).unwrap();
             let active_sheet = *state.active_sheet.lock().unwrap();
             let is_active = snap.sheet_index == active_sheet;
             let mut current: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
@@ -2869,8 +2975,8 @@ fn apply_object_swap_restore(
             };
             // Canonical lock order: grid (mirror) -> grids -> active_sheet.
             // Both mirrors, same as the forward path in set_cell_protection.
-            let mut mirror = state.grid.lock().unwrap();
-            let mut grids = state.grids.lock().unwrap();
+            let mut mirror = state.grid.write(&effect).unwrap();
+            let mut grids = state.grids.write(&effect).unwrap();
             let active_sheet = *state.active_sheet.lock().unwrap();
             let is_active = snap.sheet_index == active_sheet;
             let mut current: Vec<(u32, usize)> = Vec::new();
@@ -3616,7 +3722,7 @@ mod sheet_tagged_restore_tests {
 
     fn two_sheet_state() -> AppState {
         let state = crate::create_app_state();
-        state.grids.lock().unwrap().push(engine::Grid::new());
+        state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
         state.sheet_names.lock().unwrap().push("Sheet2".to_string());
         state.all_column_widths.lock().unwrap().push(HashMap::new());
         state.all_row_heights.lock().unwrap().push(HashMap::new());
@@ -3640,17 +3746,17 @@ mod sheet_tagged_restore_tests {
     fn sheet_structural_restore_targets_the_named_sheet_and_captures_the_inverse() {
         let state = two_sheet_state();
         // Sheet 0 (active) sentinel that must survive untouched.
-        state.grid.lock().unwrap().set_cell(0, 0, Cell::new_number(999.0));
-        state.grids.lock().unwrap()[0].set_cell(0, 0, Cell::new_number(999.0));
+        state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().set_cell(0, 0, Cell::new_number(999.0));
+        state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap()[0].set_cell(0, 0, Cell::new_number(999.0));
 
         // Pre-edit state of sheet 2, captured as the undo snapshot.
-        state.grids.lock().unwrap()[1].set_cell(4, 0, Cell::new_number(2.0));
+        state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap()[1].set_cell(4, 0, Cell::new_number(2.0));
         state.all_row_heights.lock().unwrap()[1].insert(4, 33.0);
         let snapshot = capture_sheet_structural_snapshot(&state, 1).expect("capture");
 
         // Simulate the post-edit state (as if 3 rows were inserted at 2).
         {
-            let mut grids = state.grids.lock().unwrap();
+            let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             grids[1].clear_cell(4, 0);
             grids[1].set_cell(7, 0, Cell::new_number(2.0));
             let mut all_rh = state.all_row_heights.lock().unwrap();
@@ -3662,11 +3768,15 @@ mod sheet_tagged_restore_tests {
         let mut inverse = Transaction::new("test");
         apply_sheet_structural_restore(
             &state,
+            // Undo replay IS a document change: the restore writes cells.
+            &crate::document_effect::DocumentEffect::mutates(
+                &crate::persistence::FileState::default(),
+            ),
             &sheet_structural_snapshot_bytes(&snapshot),
             &mut inverse,
         );
 
-        let grids = state.grids.lock().unwrap();
+        let grids = state.grids.read().unwrap();
         assert_eq!(
             grids[1].get_cell(4, 0).map(|c| c.value.clone()),
             Some(CellValue::Number(2.0)),

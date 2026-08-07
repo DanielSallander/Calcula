@@ -98,6 +98,7 @@ pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
+pub mod media;
 pub mod cell_types;
 pub mod cell_behaviors;
 pub mod slicer;
@@ -224,15 +225,30 @@ pub struct ProtectedRegion {
 }
 
 pub struct AppState {
-    /// Multiple grids, one per sheet
-    pub grids: Mutex<Vec<Grid>>,
+    /// Cell data, one `Grid` per sheet. THE document.
+    ///
+    /// PERSISTED (`Sheet::cells`, every save) -> `Persisted<T>`. This was the last
+    /// bare `Mutex` on the document's own contents, and it was what BLOCKED making
+    /// `FileState::is_modified` private: call sites could reach `&mut Vec<Grid>`
+    /// without producing a `DocumentEffect`, so "every grid write decides about
+    /// dirtiness" was a convention enforced at the commit helpers rather than by
+    /// the type. Both are now closed -- `read()` is free, `write(&effect)` is the
+    /// only route to `&mut`, and the flag is private with `document_effect` its
+    /// sole writer.
+    pub grids: document_effect::Persisted<Vec<Grid>>,
     /// Sheet names in order
     pub sheet_names: Mutex<Vec<String>>,
     /// Currently active sheet index
     pub active_sheet: Mutex<usize>,
-    /// The currently active grid (synced with grids[active_sheet])
-    /// Commands use this for all cell operations
-    pub grid: Mutex<Grid>,
+    /// The active sheet's grid, mirroring `grids[active_sheet]`.
+    ///
+    /// PERSISTED for the same reason `grids` is -- it is the same cells. It is a
+    /// `Persisted<Grid>` and not a bare `Mutex<Grid>` precisely because it is a
+    /// MIRROR: a writer that reached `&mut Grid` here without a `DocumentEffect`
+    /// would dirty the document just as thoroughly as one writing `grids`, and
+    /// leaving one half of the pair ungated would have made the guarantee a
+    /// half-guarantee that reads as a whole one.
+    pub grid: document_effect::Persisted<Grid>,
     pub style_registry: Mutex<StyleRegistry>,
     /// Column widths for the currently active sheet (swapped on sheet switch)
     pub column_widths: Mutex<HashMap<u32, f64>>,
@@ -362,6 +378,13 @@ pub struct AppState {
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
     /// Control metadata: (sheet_index, row, col) -> ControlMetadata
     pub controls: document_effect::Persisted<controls::ControlStorage>,
+    /// Content-addressed binary media for the open document: sha256 hex -> raw
+    /// validated bytes. Everything in here passed `calcula_format::media`, and
+    /// the document refers to it only by the opaque handle `media:{sha256}`.
+    ///
+    /// NOT pruned during a session, on purpose — see `media::sweep_unreferenced_media`
+    /// for why undo depends on that.
+    pub media: document_effect::Persisted<media::MediaStore>,
     /// Cell-type assignments: (sheet_index, row, col) -> { typeId, params }
     pub cell_types: document_effect::Persisted<cell_types::CellTypeStorage>,
     /// Cell-behavior bindings: binding id -> { range target, scriptId, dispatch metadata }
@@ -508,11 +531,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Get the active grid (convenience method)
-    pub fn get_active_grid(&self) -> std::sync::MutexGuard<'_, Grid> {
-        self.grid.lock().unwrap()
-    }
-    
+    // `get_active_grid()` used to live here, returning a raw
+    // `MutexGuard<'_, Grid>` -- i.e. unconditional mutable access to the active
+    // sheet with no `DocumentEffect` in sight. It had no callers, so it was
+    // deleted rather than ported: the whole point of `Persisted<Grid>` is that
+    // there is no way to reach `&mut Grid` without deciding about dirtiness, and
+    // a convenience method that hands one out is that decision's only loophole.
+
     /// Check if a cell is within any protected region.
     /// Returns the first matching region, or None.
     pub fn get_region_at_cell(&self, sheet_index: usize, row: u32, col: u32) -> Option<ProtectedRegion> {
@@ -535,10 +560,10 @@ pub fn create_app_state() -> AppState {
     log_info!("SYS", "Creating AppState");
     let initial_grid = Grid::new();
     let app_state = AppState {
-        grids: Mutex::new(vec![initial_grid.clone()]),
+        grids: document_effect::Persisted::new(vec![initial_grid.clone()]),
         sheet_names: Mutex::new(vec!["Sheet1".to_string()]),
         active_sheet: Mutex::new(0),
-        grid: Mutex::new(initial_grid),
+        grid: document_effect::Persisted::new(initial_grid),
         style_registry: Mutex::new(StyleRegistry::new()),
         column_widths: Mutex::new(HashMap::new()),
         row_heights: Mutex::new(HashMap::new()),
@@ -593,6 +618,7 @@ pub fn create_app_state() -> AppState {
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
         controls: document_effect::Persisted::new(HashMap::new()),
+        media: document_effect::Persisted::new(HashMap::new()),
         cell_types: document_effect::Persisted::new(HashMap::new()),
         cell_behaviors: document_effect::Persisted::new(HashMap::new()),
         page_setups: document_effect::Persisted::new(vec![crate::api_types::PageSetup::default()]),
@@ -5085,6 +5111,8 @@ pub fn run() {
             controls::get_all_controls,
             controls::list_controls_referencing_macro,
             controls::resolve_control_properties,
+            media::read_media_file,
+            media::resolve_media_ref,
             // Cell-type assignment commands (granular bricks)
             cell_types::set_cell_type,
             cell_types::set_cell_type_range,

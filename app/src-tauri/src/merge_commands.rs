@@ -86,10 +86,18 @@ pub(crate) fn merge_cells_off_sheet(
     // Clear slave cells on the target grid, capturing their prior state.
     let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
     {
-        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
-        let grid = grids
-            .get_mut(target)
-            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+        // The bounds check is the LAST thing that can refuse, so it runs against
+        // a read-only view and the effect is constructed only once it has passed.
+        // `lock_pending` keeps this one critical section: dropping the lock to
+        // check and re-taking it to write would let a concurrent command resize
+        // `grids` in between.
+        let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+        if target >= grids.len() {
+            return Err(format!("Sheet index {} out of range", target));
+        }
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut grids = grids.authorize(&effect);
+        let grid = &mut grids[target];
         for row in min_row..=max_row {
             for col in min_col..=max_col {
                 if row == min_row && col == min_col {
@@ -135,7 +143,7 @@ pub(crate) fn merge_cells_off_sheet(
             merged.iter().cloned().collect()
         });
 
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // No updated_cells: the active canvas shows nothing from the target sheet,
     // and the sheet re-materializes from grids[target] on switch.
@@ -205,8 +213,12 @@ pub fn merge_cells(
         &state, "merge these cells", start_row, start_col, end_row, end_col,
     )?;
 
-    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
+    let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
@@ -321,7 +333,7 @@ pub fn merge_cells(
     });
 
     // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(MergeResult {
         success: true,
@@ -391,7 +403,7 @@ pub(crate) fn unmerge_cells_off_sheet(
             merged.iter().cloned().collect()
         });
 
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(MergeResult {
         success: true,
@@ -466,7 +478,7 @@ pub fn unmerge_cells(
         )?;
     }
 
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
@@ -509,7 +521,7 @@ pub fn unmerge_cells(
         }];
 
         // Mark workbook as dirty
-        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
         Ok(MergeResult {
             success: true,

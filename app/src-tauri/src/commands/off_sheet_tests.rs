@@ -47,7 +47,7 @@ fn two_sheet_state(seed_sheet2: impl FnOnce(&mut engine::Grid)) -> AppState {
     {
         let mut grid2 = engine::Grid::new();
         seed_sheet2(&mut grid2);
-        state.grids.lock().unwrap().push(grid2);
+        state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(grid2);
         state.sheet_names.lock().unwrap().push("Sheet2".to_string());
         state.all_column_widths.lock().unwrap().push(HashMap::new());
         state.all_row_heights.lock().unwrap().push(HashMap::new());
@@ -68,10 +68,10 @@ fn two_sheet_state(seed_sheet2: impl FnOnce(&mut engine::Grid)) -> AppState {
     // The active mirror gets a sentinel so cross-contamination is detectable.
     state
         .grid
-        .lock()
+        .write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk))
         .unwrap()
         .set_cell(0, 0, Cell::new_number(999.0));
-    state.grids.lock().unwrap()[0].set_cell(0, 0, Cell::new_number(999.0));
+    state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap()[0].set_cell(0, 0, Cell::new_number(999.0));
     state
 }
 
@@ -87,7 +87,7 @@ fn protect_sheet(state: &AppState, sheet: usize) {
 }
 
 fn value_at(state: &AppState, sheet: usize, row: u32, col: u32) -> Option<CellValue> {
-    state.grids.lock().unwrap()[sheet]
+    state.grids.read().unwrap()[sheet]
         .get_cell(row, col)
         .map(|c| c.value.clone())
 }
@@ -110,7 +110,7 @@ fn undo_restores(state: &AppState) -> Vec<(String, Vec<u8>)> {
 }
 
 fn mirror_untouched(state: &AppState) {
-    let mirror = state.grid.lock().unwrap();
+    let mirror = state.grid.read().unwrap();
     assert_eq!(
         mirror.get_cell(0, 0).map(|c| c.value.clone()),
         Some(CellValue::Number(999.0)),
@@ -141,7 +141,7 @@ fn off_sheet_insert_rows_lands_and_records_sheet_tagged_undo() {
     assert_eq!(value_at(&state, 1, 7, 0), Some(CellValue::Number(2.0)), "below the insert: shifted down");
     assert_eq!(value_at(&state, 1, 4, 0), None, "old position vacated");
     mirror_untouched(&state);
-    assert!(*a.file.is_modified.lock().unwrap(), "workbook dirtied");
+    assert!(a.file.is_dirty(), "workbook dirtied");
 
     let restores = undo_restores(&state);
     let (kind, data) = restores
@@ -415,7 +415,7 @@ fn off_sheet_clear_lands_and_records_sheet_tagged_undo() {
     assert_eq!(value_at(&state, 1, 0, 0), None);
     assert_eq!(value_at(&state, 1, 1, 1), None);
     mirror_untouched(&state);
-    assert!(*a.file.is_modified.lock().unwrap());
+    assert!(a.file.is_dirty());
 
     let restores = undo_restores(&state);
     let (_, data) = restores
@@ -444,7 +444,7 @@ fn off_sheet_clear_contents_keeps_the_style() {
     )
     .expect("clear succeeds");
 
-    let cell = state.grids.lock().unwrap()[1].get_cell(0, 0).cloned().expect("cell kept");
+    let cell = state.grids.read().unwrap()[1].get_cell(0, 0).cloned().expect("cell kept");
     assert_eq!(cell.value, CellValue::Empty, "value cleared");
     assert_eq!(cell.style_index, 3, "format kept");
 }
@@ -565,7 +565,7 @@ fn off_sheet_replace_all_rewrites_the_target_and_records_sheet_tagged_undo() {
     });
     let a = aux();
 
-    assert!(!*a.file.is_modified.lock().unwrap(), "clean before the replace");
+    assert!(!a.file.is_dirty(), "clean before the replace");
     let result = crate::commands::search::replace_all_off_sheet(
         &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters,
         1,
@@ -580,7 +580,7 @@ fn off_sheet_replace_all_rewrites_the_target_and_records_sheet_tagged_undo() {
     // else in the system would ever mark it: if this regresses, Replace All across
     // sheets is lost at close with no prompt.
     assert!(
-        *a.file.is_modified.lock().unwrap(),
+        a.file.is_dirty(),
         "an off-sheet Replace All must dirty the workbook"
     );
     assert_eq!(
@@ -634,7 +634,7 @@ fn off_sheet_replace_all_is_blocked_by_target_protection() {
     // otherwise the close prompt starts firing for work that was never done, and a
     // prompt users learn to dismiss is worth no more than no prompt at all.
     assert!(
-        !*a.file.is_modified.lock().unwrap(),
+        !a.file.is_dirty(),
         "a REFUSED off-sheet replace must leave the document clean"
     );
 }
@@ -661,7 +661,7 @@ fn off_sheet_replace_single_rewrites_one_cell_on_the_target() {
     .expect("replace succeeds");
     assert!(result.is_some(), "a replacement happened");
     assert!(
-        *a.file.is_modified.lock().unwrap(),
+        a.file.is_dirty(),
         "an off-sheet Replace Next must dirty the workbook"
     );
     assert_eq!(value_at(&state, 1, 2, 3), Some(CellValue::Text("new".to_string())));
