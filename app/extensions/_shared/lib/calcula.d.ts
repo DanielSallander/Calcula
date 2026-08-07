@@ -55,6 +55,29 @@ interface NotebookRange {
   resize(rows: number, cols: number): NotebookRange;
   /** A single-cell range at the given offset within this range (throws if outside). */
   getCell(rowOffset: number, colOffset: number): NotebookRange;
+  /**
+   * One ROW of this range, as a full-width sub-range. `index` is 0-BASED WITHIN
+   * THE RANGE (not a sheet row): `sheet.range("B2:D5").rows(0)` is `B2:D2`.
+   * VBA's `Rows(n)` is 1-based — subtract one when porting. An index outside
+   * `0..rowCount-1` throws rather than clamping.
+   */
+  rows(index: number): NotebookRange;
+  /**
+   * One COLUMN of this range, as a full-height sub-range. `index` is 0-BASED
+   * WITHIN THE RANGE: `sheet.range("B2:D5").columns(0)` is `B2:B5`. VBA's
+   * `Columns(n)` is 1-based. An index outside `0..colCount-1` throws.
+   */
+  columns(index: number): NotebookRange;
+  /** This range's rows across the WHOLE sheet width — VBA's `Range.EntireRow`
+   *  (columns A..XFD). */
+  entireRow(): NotebookRange;
+  /** This range's columns across the WHOLE sheet height — VBA's
+   *  `Range.EntireColumn` (rows 1..1048576). */
+  entireColumn(): NotebookRange;
+  /** VBA's `Cells(r, c)` name for {@link NotebookRange.getCell}: a single-cell
+   *  range at a 0-BASED offset within this range (VBA's is 1-based). An offset
+   *  outside the range throws. */
+  cells(rowOffset: number, colOffset: number): NotebookRange;
   /** The top-left cell's display value. */
   getValue(): string;
   /** All values as a rows x cols grid of display strings. */
@@ -99,7 +122,11 @@ interface NotebookSheet {
   /** A range on THIS sheet by A1 address. A "Sheet!" prefix (quoted or bare)
    *  is RESOLVED, never dropped: naming this sheet stays here, naming another
    *  EXISTING sheet rebinds the returned range to that sheet, and an unknown
-   *  name throws listing the workbook's sheets. */
+   *  name throws listing the workbook's sheets.
+   *
+   *  ONE area only. A comma address ("A1:B2,D4:E5") throws saying so — the
+   *  notebook realm has no multi-area shape; object scripts get one from
+   *  `api.range(...)`. */
   range(address: string): NotebookRange;
   /** A single cell on this sheet (0-based). */
   cell(row: number, col: number): NotebookRange;

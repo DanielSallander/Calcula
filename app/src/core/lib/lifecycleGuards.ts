@@ -18,10 +18,21 @@
  *  script's PDF render (VBA's Workbook_BeforePrint(Cancel:=True)). */
 export type LifecycleAction = "save" | "close" | "print";
 
-/** Detail handed to guards. `path` is present for saves. */
+/** Which flavour of save is being attempted — VBA's `SaveAsUI` argument to
+ *  `Workbook_BeforeSave`, as a word rather than a boolean.
+ *    - "save"   : Ctrl+S over an already-saved workbook (no dialog).
+ *    - "saveAs" : File ▸ Save As, and the Ctrl+S of a workbook that has never
+ *                 been saved (which IS a Save As — the picker opens). */
+export type LifecycleSaveKind = "save" | "saveAs";
+
+/** Detail handed to guards. `path` and `kind` are present for saves. */
 export interface LifecycleDetail {
   /** Target path of the save (absent for close). */
   path?: string;
+  /** Which flavour of save this is (absent for close and print). Lets a guard
+   *  tell "the user is re-saving in place" from "the user is writing a new
+   *  file" — e.g. stamp a version only on Save As. */
+  kind?: LifecycleSaveKind;
 }
 
 /** A guard's objection. Returning `null` from a guard means "no objection". */

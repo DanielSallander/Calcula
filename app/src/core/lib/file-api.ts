@@ -131,7 +131,11 @@ export async function saveFileAs(password?: string): Promise<string | null> {
       // a cancelled save never makes subscribers do save-prep work for a save
       // that will not happen. checkLifecycleGuards reports the cancellation to
       // the user (attributed to the script by name) — never a silent no-op.
-      if (await checkLifecycleGuards('save', { path })) return null;
+      // kind: "saveAs" — the user picked a destination. saveFile() falls
+      // through to here when the workbook has never been saved, and that IS a
+      // Save As (the picker opened), so the flavour is decided by which
+      // function runs, not by which one the user clicked.
+      if (await checkLifecycleGuards('save', { path, kind: 'saveAs' })) return null;
       emitAppEvent(AppEvents.BEFORE_SAVE, { path });
       await tracedInvoke('save_file', { path, password });
       emitAppEvent(AppEvents.AFTER_SAVE, { path });
@@ -158,7 +162,7 @@ export async function saveFile(password?: string): Promise<string | null> {
     if (currentPath) {
       // Cancellable Before-Save (see saveFileAs). Returning null means "not
       // saved", which every caller already handles as the user-cancelled case.
-      if (await checkLifecycleGuards('save', { path: currentPath })) return null;
+      if (await checkLifecycleGuards('save', { path: currentPath, kind: 'save' })) return null;
       emitAppEvent(AppEvents.BEFORE_SAVE, { path: currentPath });
       await tracedInvoke('save_file', { path: currentPath, password });
       emitAppEvent(AppEvents.AFTER_SAVE, { path: currentPath });

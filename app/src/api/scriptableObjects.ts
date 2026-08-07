@@ -793,8 +793,18 @@ export interface WorkbookContext extends BaseObjectContext {
    * reason }`) to stop the save; anything else (including nothing) allows it.
    * The verdict must arrive inside the host's deadline; a late one is ignored
    * and the save proceeds, so a hung script can never block Ctrl+S.
+   *
+   * The detail carries the target's FILE NAME only, never its folder (the same
+   * reduction onOpen/onAfterSave get — thinWorkbookPathDetail), plus `kind`:
+   * "save" for Ctrl+S over an already-saved workbook, "saveAs" when a
+   * destination was picked. That is VBA's `SaveAsUI`.
+   *
+   * It used to be declared as `{ path?: string }`, which is what CORE hands its
+   * guards — never what crosses into a sandboxed script.
    */
-  onBeforeSave(handler: BeforeLifecycleHandler<{ path?: string }>): CleanupFn;
+  onBeforeSave(
+    handler: BeforeLifecycleHandler<{ fileName: string | null; kind?: "save" | "saveAs" }>,
+  ): CleanupFn;
 
   /** Called after the workbook is saved. */
   onAfterSave(handler: EventHandler): CleanupFn;
@@ -861,6 +871,22 @@ export interface ScriptRange {
   resize(rows: number, cols: number): ScriptRange;
   /** A single-cell range at the given offset within this range. */
   getCell(rowOffset: number, colOffset: number): ScriptRange;
+  // ---- Slicing sugar: pure coordinate math (twin table:
+  //      core/script-engine/src/ops/canonical_model.rs NotebookRange) ----
+  /** One ROW of this range, full width. `index` is 0-BASED WITHIN THE RANGE
+   *  (VBA's `Rows(n)` is 1-based); outside `0..rowCount-1` throws. */
+  rows(index: number): ScriptRange;
+  /** One COLUMN of this range, full height. `index` is 0-BASED WITHIN THE
+   *  RANGE (VBA's `Columns(n)` is 1-based); outside `0..colCount-1` throws. */
+  columns(index: number): ScriptRange;
+  /** This range's rows across the whole sheet width — VBA `Range.EntireRow`. */
+  entireRow(): ScriptRange;
+  /** This range's columns across the whole sheet height — VBA
+   *  `Range.EntireColumn`. */
+  entireColumn(): ScriptRange;
+  /** VBA's `Cells(r, c)` name for {@link ScriptRange.getCell} — 0-based here,
+   *  and an offset outside the range throws. */
+  cells(rowOffset: number, colOffset: number): ScriptRange;
   /** The top-left cell's display value. */
   getValue(): Promise<string>;
   /**

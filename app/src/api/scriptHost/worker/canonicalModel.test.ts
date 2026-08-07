@@ -9,10 +9,20 @@
 
 import { describe, it, expect, vi } from "vitest";
 import {
+  charsToPixels,
+  columnWidthToPixels,
+  isMultiAreaAddress,
   makeRange,
+  makeRangeAreas,
+  MAX_RANGE_AREAS,
+  pixelsToChars,
+  pixelsToPoints,
+  pointsToPixels,
   rangeFromAddress,
   parseA1,
   parseA1Body,
+  rowHeightToPixels,
+  splitAreaAddresses,
   splitSheetPrefix,
   resolveSheetName,
   makeWorkbook,
@@ -134,9 +144,13 @@ describe("ScriptRange geometry + navigation", () => {
     expect(r.getCell(1, 1).address).toBe("C3");
   });
 
-  it("getCell out of range throws", () => {
+  it("getCell out of range throws — in EVERY direction, negatives included", () => {
     const r = rangeFromAddress(perCellTransport(), "B2:C3");
     expect(() => r.getCell(5, 5)).toThrow(/outside range/);
+    // A negative offset used to escape the range upwards/leftwards and hand
+    // back a cell outside it. The Rust twin always checked all four sides.
+    expect(() => r.getCell(-1, 0)).toThrow(/outside range/);
+    expect(() => r.getCell(0, -1)).toThrow(/outside range/);
   });
 
   it("a navigated range keeps the bulk transport", async () => {
@@ -579,5 +593,265 @@ describe("ScriptRange range ops (Wave 4)", () => {
     const t: RangeTransport = { ...perCellTransport(), specialCells };
     await rangeFromAddress(t, "A1:C3").offset(1, 1).resize(2, 2).specialCells("formulas");
     expect(specialCells).toHaveBeenCalledWith(1, 1, 2, 2, "formulas");
+  });
+});
+
+// ============================================================================
+// Long-tail sugar: slicing, multi-area, dimension units
+// ============================================================================
+
+describe("ScriptRange slicing sugar (twin of the Rust table in canonical_model.rs)", () => {
+  it("rows(i)/columns(i) slice WITHIN the range, 0-based", () => {
+    const r = rangeFromAddress(perCellTransport(), "B2:D5");
+    expect(r.rows(0).address).toBe("B2:D2");
+    expect(r.rows(3).address).toBe("B5:D5");
+    expect(r.columns(0).address).toBe("B2:B5");
+    expect(r.columns(2).address).toBe("D2:D5");
+    // A slice keeps the other axis whole.
+    expect([r.rows(1).rowCount, r.rows(1).colCount]).toEqual([1, 3]);
+    expect([r.columns(1).rowCount, r.columns(1).colCount]).toEqual([4, 1]);
+  });
+
+  it("rows(i)/columns(i) THROW out of range rather than clamping", () => {
+    const r = rangeFromAddress(perCellTransport(), "B2:D5"); // 4 rows x 3 cols
+    for (const bad of [4, 99, -1]) {
+      expect(() => r.rows(bad), "rows " + bad).toThrow(/outside range B2:D5/);
+    }
+    for (const bad of [3, 99, -1]) {
+      expect(() => r.columns(bad), "columns " + bad).toThrow(/outside range B2:D5/);
+    }
+    // Non-integers are refused too: rows(1.5) has no honest answer.
+    expect(() => r.rows(1.5)).toThrow(/outside range/);
+    expect(() => r.columns(Number.NaN)).toThrow(/outside range/);
+  });
+
+  it("the slice error names the range and the legal span", () => {
+    const r = rangeFromAddress(perCellTransport(), "B2:D5");
+    expect(() => r.rows(9)).toThrow(/rows\(9\)/);
+    expect(() => r.rows(9)).toThrow(/0 to 3/);
+    expect(() => r.columns(9)).toThrow(/0 to 2/);
+  });
+
+  it("a single-cell range still slices at index 0", () => {
+    const r = rangeFromAddress(perCellTransport(), "C7");
+    expect(r.rows(0).address).toBe("C7");
+    expect(r.columns(0).address).toBe("C7");
+    expect(() => r.rows(1)).toThrow(/0 to 0/);
+  });
+
+  it("entireRow()/entireColumn() stretch to the Excel grid bounds", () => {
+    const r = rangeFromAddress(perCellTransport(), "B2:D5");
+    expect(r.entireRow().address).toBe("A2:XFD5");
+    expect(r.entireColumn().address).toBe("B1:D1048576");
+    // The OTHER axis is untouched: entireRow keeps rows 2..5.
+    expect(r.entireRow().rowCount).toBe(4);
+    expect(r.entireColumn().colCount).toBe(3);
+  });
+
+  it("cells(r, c) is getCell under VBA's name, with the same bounds", () => {
+    const r = rangeFromAddress(perCellTransport(), "A1:C3");
+    expect(r.cells(1, 1).address).toBe("B2");
+    expect(r.cells(1, 1).isSingleCell).toBe(true);
+    expect(() => r.cells(5, 5)).toThrow(/outside range/);
+    expect(() => r.cells(-1, 0)).toThrow(/outside range/);
+  });
+
+  it("a slice keeps the transport, so its data ops address the SLICE", async () => {
+    const readRange = vi.fn(async () => [[cell("x", "text")]]);
+    const t: RangeTransport = { ...perCellTransport(), readRange };
+    await rangeFromAddress(t, "B2:D5").rows(2).getData();
+    expect(readRange).toHaveBeenCalledWith(3, 1, 3, 3);
+    readRange.mockClear();
+    await rangeFromAddress(t, "B2:D5").columns(1).getData();
+    expect(readRange).toHaveBeenCalledWith(1, 2, 4, 2);
+  });
+
+  it("slices compose (rows(i).columns(j) is one cell of the block)", () => {
+    const r = rangeFromAddress(perCellTransport(), "B2:D5");
+    expect(r.rows(1).columns(2).address).toBe("D3");
+    expect(r.columns(2).rows(1).address).toBe("D3");
+  });
+});
+
+describe("multi-area addresses", () => {
+  it("isMultiAreaAddress spots the comma and nothing else", () => {
+    expect(isMultiAreaAddress("A1:B2,D4:E5")).toBe(true);
+    expect(isMultiAreaAddress("A1")).toBe(false);
+    expect(isMultiAreaAddress("Data!A1:B5")).toBe(false);
+  });
+
+  it("splitAreaAddresses trims, drops empties and keeps order", () => {
+    expect(splitAreaAddresses("A1:B2, D4:E5 ,G7")).toEqual(["A1:B2", "D4:E5", "G7"]);
+    expect(splitAreaAddresses("Data!A1:B2,D4")).toEqual(["Data!A1:B2", "D4"]);
+  });
+
+  it("splitAreaAddresses refuses a per-area sheet prefix after the first", () => {
+    expect(() => splitAreaAddresses("Data!A1,Other!B2")).toThrow(/only the FIRST area/);
+  });
+
+  it("a PINNED context refuses a comma address, naming the comma", () => {
+    // Every context except api.range is bound to one rectangle. The old
+    // failure was `Invalid cell reference: "B2,D4"`, which never mentions the
+    // comma — the Rust twin's message says the same thing this one does.
+    expect(() => parseA1Body("A1:B2,D4:E5")).toThrow(/more than one area/);
+    expect(() => parseA1Body("A1:B2,D4:E5")).toThrow(/api\.range/);
+    expect(() => rangeFromAddress(perCellTransport(), "A1,B2")).toThrow(/more than one area/);
+  });
+
+  it("splitAreaAddresses refuses an empty address and more than the area cap", () => {
+    expect(() => splitAreaAddresses(",,")).toThrow(/names no areas/);
+    const tooMany = Array.from({ length: MAX_RANGE_AREAS + 1 }, (_, i) => "A" + (i + 1)).join(",");
+    expect(() => splitAreaAddresses(tooMany)).toThrow(/the limit is 128/);
+  });
+
+  it("the areas facet reports count, address and cellCount", () => {
+    const t = perCellTransport();
+    const areas = makeRangeAreas(
+      [rangeFromAddress(t, "A1:B2"), rangeFromAddress(t, "D4:E5")],
+      "A1:B2,D4:E5",
+    );
+    expect(areas.count).toBe(2);
+    expect(areas.address).toBe("A1:B2,D4:E5");
+    expect(areas.cellCount).toBe(8);
+    expect(areas.areas.map((a) => a.address)).toEqual(["A1:B2", "D4:E5"]);
+  });
+
+  it("cellCount counts an overlap TWICE, like VBA", () => {
+    const t = perCellTransport();
+    const areas = makeRangeAreas(
+      [rangeFromAddress(t, "A1:B2"), rangeFromAddress(t, "B2:C3")],
+      "A1:B2,B2:C3",
+    );
+    expect(areas.cellCount).toBe(8);
+  });
+
+  it("contains() is true for a cell in ANY area", () => {
+    const t = perCellTransport();
+    const areas = makeRangeAreas(
+      [rangeFromAddress(t, "A1:B2"), rangeFromAddress(t, "D4:E5")],
+      "A1:B2,D4:E5",
+    );
+    expect(areas.contains(0, 0)).toBe(true);
+    expect(areas.contains(4, 4)).toBe(true);
+    expect(areas.contains(2, 2)).toBe(false); // the gap
+    expect(areas.contains(-1, -1)).toBe(false);
+  });
+
+  it("format/clearFormat/applyStyle/setValidation reach EVERY area, in order", async () => {
+    const formatRange = vi.fn(async () => {});
+    const clearFormatRange = vi.fn(async () => {});
+    const applyNamedStyle = vi.fn(async () => {});
+    const setValidation = vi.fn(async () => {});
+    const t: RangeTransport = {
+      ...perCellTransport(),
+      formatRange,
+      clearFormatRange,
+      applyNamedStyle,
+      setValidation,
+    };
+    const areas = makeRangeAreas(
+      [rangeFromAddress(t, "A1:B2"), rangeFromAddress(t, "D4:E5")],
+      "A1:B2,D4:E5",
+    );
+    const fmt: ScriptFormat = { bold: true };
+    await areas.format(fmt);
+    expect(formatRange.mock.calls).toEqual([
+      [0, 0, 1, 1, fmt],
+      [3, 3, 4, 4, fmt],
+    ]);
+    await areas.clearFormat();
+    expect(clearFormatRange.mock.calls).toEqual([
+      [0, 0, 1, 1],
+      [3, 3, 4, 4],
+    ]);
+    await areas.applyStyle("Good");
+    expect(applyNamedStyle.mock.calls).toEqual([
+      [0, 0, 1, 1, "Good"],
+      [3, 3, 4, 4, "Good"],
+    ]);
+    await areas.setValidation(null);
+    expect(setValidation.mock.calls).toEqual([
+      [0, 0, 1, 1, null],
+      [3, 3, 4, 4, null],
+    ]);
+  });
+
+  it("getValues/getData answer ONE grid per area, never flattened", async () => {
+    const readRange = vi.fn(async (sr: number, sc: number) => [
+      [cell(sr + "," + sc, "text")],
+    ]);
+    const t: RangeTransport = { ...perCellTransport(), readRange };
+    const areas = makeRangeAreas([rangeFromAddress(t, "A1"), rangeFromAddress(t, "D4")], "A1,D4");
+    expect(await areas.getValues()).toEqual([[["0,0"]], [["3,3"]]]);
+    const data = await areas.getData();
+    expect(data).toHaveLength(2);
+    expect(data[0][0][0].value).toBe("0,0");
+    expect(data[1][0][0].value).toBe("3,3");
+  });
+
+  it("the areas facet does NOT carry the rectangle ops (they would be a guess)", () => {
+    const t = perCellTransport();
+    const areas = makeRangeAreas([rangeFromAddress(t, "A1:B2")], "A1:B2") as unknown as Record<
+      string,
+      unknown
+    >;
+    for (const absent of [
+      "setValue", "setValues", "select", "offset", "resize", "getCell", "rows", "columns",
+      "end", "currentRegion", "find", "replace", "goalSeek", "autoFit", "fillDown",
+      "removeDuplicates", "textToColumns", "setRowsHidden", "group",
+    ]) {
+      expect(areas[absent], absent).toBeUndefined();
+    }
+  });
+});
+
+describe("dimension unit conversion", () => {
+  it("points and pixels round-trip in BOTH directions (96/72)", () => {
+    expect(pointsToPixels(15)).toBe(20); // the default Calibri 11 row
+    expect(pixelsToPoints(20)).toBe(15);
+    for (const pt of [0, 7.5, 15, 30, 409]) {
+      expect(pixelsToPoints(pointsToPixels(pt))).toBeCloseTo(pt, 10);
+    }
+    for (const px of [0, 10, 20, 64.29, 546]) {
+      expect(pointsToPixels(pixelsToPoints(px))).toBeCloseTo(px, 10);
+    }
+  });
+
+  it("characters and pixels round-trip in BOTH directions (the .xlsx factor)", () => {
+    // The app's own conversion: px = chars * 7 + 5 (xlsx_style_reader.rs), with
+    // the writer using the exact inverse. Excel's 8.47-char default column is
+    // Calcula's DEFAULT_COLUMN_WIDTH_PX = 64.29.
+    expect(charsToPixels(8.47)).toBeCloseTo(64.29, 10);
+    expect(pixelsToChars(64.29)).toBeCloseTo(8.47, 10);
+    for (const chars of [0, 1, 8.43, 8.47, 100]) {
+      expect(pixelsToChars(charsToPixels(chars))).toBeCloseTo(chars, 10);
+    }
+    for (const px of [5, 12, 64.29, 500]) {
+      expect(charsToPixels(pixelsToChars(px))).toBeCloseTo(px, 10);
+    }
+  });
+
+  it("pixelsToChars never goes negative below the padding", () => {
+    expect(pixelsToChars(0)).toBe(0);
+    expect(pixelsToChars(5)).toBe(0);
+  });
+
+  it("rowHeightToPixels defaults to px and converts pt", () => {
+    expect(rowHeightToPixels(40, undefined)).toBe(40);
+    expect(rowHeightToPixels(40, "px")).toBe(40);
+    expect(rowHeightToPixels(30, "pt")).toBe(40);
+  });
+
+  it("columnWidthToPixels defaults to px and converts chars", () => {
+    expect(columnWidthToPixels(120, undefined)).toBe(120);
+    expect(columnWidthToPixels(120, "px")).toBe(120);
+    expect(columnWidthToPixels(8.47, "chars")).toBeCloseTo(64.29, 10);
+  });
+
+  it("an unknown unit or a non-number is REFUSED, never silently treated as px", () => {
+    expect(() => rowHeightToPixels(20, "em" as never)).toThrow(/"px" or "pt"/);
+    expect(() => columnWidthToPixels(20, "pt" as never)).toThrow(/"px" or "chars"/);
+    expect(() => rowHeightToPixels(Number.NaN, "px")).toThrow(/finite number/);
+    expect(() => columnWidthToPixels("20" as never, "px")).toThrow(/finite number/);
   });
 });

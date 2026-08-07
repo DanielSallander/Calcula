@@ -414,6 +414,14 @@ export interface Box {
   endCol: number;
 }
 
+/** Last addressable 0-based row of the Excel-shaped grid (row 1048576). TWIN of
+ *  `EXCEL_MAX_ROW_INDEX` in core/engine/src/navigation.rs — redeclared because
+ *  this module stays dependency-free. */
+export const EXCEL_MAX_ROW_INDEX = 1_048_575;
+/** Last addressable 0-based column of the Excel-shaped grid (column XFD). TWIN
+ *  of `EXCEL_MAX_COL_INDEX` in core/engine/src/navigation.rs. */
+export const EXCEL_MAX_COL_INDEX = 16_383;
+
 /** An edge-navigation direction (VBA Range.End / Ctrl+Arrow). The same four
  *  strings Rust's EdgeDirection::parse accepts (core/engine/src/navigation.rs). */
 export type EdgeDirection = "up" | "down" | "left" | "right";
@@ -574,6 +582,82 @@ export interface GoalSeekOutcome {
   iterations: number;
 }
 
+// ---------------------------------------------------------------------------
+// Dimension units (row height / column width)
+// ---------------------------------------------------------------------------
+//
+// Calcula stores BOTH dimensions in PIXELS: DEFAULT_ROW_HEIGHT_PX = 20 and
+// DEFAULT_COLUMN_WIDTH_PX = 64.29 (core/persistence/src/lib.rs). Excel's users
+// think in two other units, so `setRowHeight`/`setColumnWidth` accept them and
+// convert HERE, worker-side — the broker keeps seeing pixels only, exactly like
+// A1 addresses that resolve worker-side (Wave 1). Nothing new crosses.
+
+/** Pixels per point at 96 DPI — the project's documented rule (Calibri 11pt in
+ *  a 20px row: 15pt * 96/72 = 20px). */
+const PX_PER_PT = 96 / 72;
+
+/** Excel's column-width character unit -> pixels. The app's ONE conversion,
+ *  taken from the .xlsx reader (core/persistence/src/xlsx_style_reader.rs:
+ *  `px = w * 7.0 + 5.0`), whose exact inverse the writer uses so a round trip
+ *  does not inflate. Reused rather than re-derived: a second factor here would
+ *  make a script-set width and an imported width disagree. */
+const CHAR_WIDTH_PX = 7;
+/** The per-column padding the same conversion adds (the cell's left+right gap). */
+const CHAR_WIDTH_PAD_PX = 5;
+
+/** The unit a row height may be given in. */
+export type RowHeightUnit = "px" | "pt";
+/** The unit a column width may be given in. */
+export type ColumnWidthUnit = "px" | "chars";
+
+/** Points -> pixels (96 DPI). */
+export function pointsToPixels(points: number): number {
+  return points * PX_PER_PT;
+}
+/** Pixels -> points (96 DPI); the exact inverse of {@link pointsToPixels}. */
+export function pixelsToPoints(pixels: number): number {
+  return pixels / PX_PER_PT;
+}
+/** Excel column-width characters -> pixels. */
+export function charsToPixels(chars: number): number {
+  return chars * CHAR_WIDTH_PX + CHAR_WIDTH_PAD_PX;
+}
+/** Pixels -> Excel column-width characters; the exact inverse of
+ *  {@link charsToPixels}. Never negative (a width below the padding is 0). */
+export function pixelsToChars(pixels: number): number {
+  return Math.max((pixels - CHAR_WIDTH_PAD_PX) / CHAR_WIDTH_PX, 0);
+}
+
+/** Reject a dimension that cannot be converted, naming the caller. */
+function requireFiniteNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number`);
+  }
+  return value;
+}
+
+/**
+ * Turn a caller's row height into the PIXELS the broker row takes. `"px"` (the
+ * default) passes through; `"pt"` converts at 96/72.
+ */
+export function rowHeightToPixels(value: number, unit: RowHeightUnit | undefined): number {
+  const height = requireFiniteNumber(value, "setRowHeight height");
+  if (unit === undefined || unit === "px") return height;
+  if (unit === "pt") return pointsToPixels(height);
+  throw new Error(`setRowHeight unit must be "px" or "pt" (got ${JSON.stringify(unit)})`);
+}
+
+/**
+ * Turn a caller's column width into the PIXELS the broker row takes. `"px"`
+ * (the default) passes through; `"chars"` is Excel's column-width unit.
+ */
+export function columnWidthToPixels(value: number, unit: ColumnWidthUnit | undefined): number {
+  const width = requireFiniteNumber(value, "setColumnWidth width");
+  if (unit === undefined || unit === "px") return width;
+  if (unit === "chars") return charsToPixels(width);
+  throw new Error(`setColumnWidth unit must be "px" or "chars" (got ${JSON.stringify(unit)})`);
+}
+
 /** 0-based column index -> A1 letters (0 -> "A", 26 -> "AA"). */
 function colToLetters(col: number): string {
   let s = "";
@@ -664,6 +748,17 @@ export function resolveSheetName(names: string[], name: string): number {
  *  fails as an invalid cell reference rather than being re-split. */
 export function parseA1Body(body: string): Box {
   const work = body.replace(/\$/g, "");
+  // A comma address is a MULTI-AREA range. Only api.range answers one; every
+  // other context is pinned to a single rectangle, so it says so rather than
+  // failing with `Invalid cell reference: "B2,D4"`, which never mentions the
+  // comma. TWIN of the same guard in core/script-engine/src/ops/canonical_model.rs
+  // `parse_a1` (the notebook realm has no multi-area shape at all).
+  if (work.includes(",")) {
+    throw new Error(
+      `Address "${body.trim()}" names more than one area. Only api.range("A1:B2,D4:E5") ` +
+        `answers a multi-area range; address each area separately here.`,
+    );
+  }
   const parts = work.split(":");
   const a = parseRef(parts[0]);
   if (parts.length === 1) {
@@ -722,6 +817,33 @@ export interface ScriptRange {
   resize(rows: number, cols: number): ScriptRange;
   /** A single-cell range at the given offset within this range. */
   getCell(rowOffset: number, colOffset: number): ScriptRange;
+  // ---- Slicing sugar (pure coordinate math, no broker call). The TWIN of
+  //      this table lives in core/script-engine/src/ops/canonical_model.rs —
+  //      both realms MUST agree, case for case. ----
+  /**
+   * One ROW of this range, as a full-width sub-range. `index` is 0-BASED WITHIN
+   * THE RANGE (not a sheet row): `api.range("B2:D5").rows(0)` is `B2:D2`. VBA's
+   * `Rows(n)` is 1-based — subtract one when porting. An index outside
+   * `0..rowCount-1` throws rather than clamping.
+   */
+  rows(index: number): ScriptRange;
+  /**
+   * One COLUMN of this range, as a full-height sub-range. `index` is 0-BASED
+   * WITHIN THE RANGE: `api.range("B2:D5").columns(0)` is `B2:B5`. VBA's
+   * `Columns(n)` is 1-based. An index outside `0..colCount-1` throws.
+   */
+  columns(index: number): ScriptRange;
+  /** This range's rows across the WHOLE sheet width — VBA's
+   *  `Range.EntireRow` (columns A..XFD). */
+  entireRow(): ScriptRange;
+  /** This range's columns across the WHOLE sheet height — VBA's
+   *  `Range.EntireColumn` (rows 1..1048576). */
+  entireColumn(): ScriptRange;
+  /** A single-cell range at the given 0-based offset within this range — the
+   *  same thing {@link ScriptRange.getCell} returns, under VBA's name.
+   *  `Cells(r, c)` is 1-based in VBA; this is 0-based like the rest of the
+   *  model. An offset outside the range throws. */
+  cells(rowOffset: number, colOffset: number): ScriptRange;
   /** The top-left cell's display value. */
   getValue(): Promise<string>;
   /** All values as a rows x cols grid of display strings — ONE round trip.
@@ -877,6 +999,23 @@ function boxFromRangeValue(value: unknown, method: string): Box {
   };
 }
 
+/**
+ * Validate a `rows(i)` / `columns(i)` index: an integer in `0..count-1`, 0-BASED
+ * WITHIN THE RANGE. Out of range THROWS rather than clamping — clamping would
+ * silently hand back the wrong band, which is the whole failure mode the honest
+ * refusals in this module exist to avoid. TWIN of `slice_index` in
+ * core/script-engine/src/ops/canonical_model.rs (same rule, same message).
+ */
+function requireSliceIndex(index: number, count: number, method: string, address: string): number {
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= count) {
+    throw new Error(
+      `${method}(${JSON.stringify(index)}) is outside range ${address}: expected an integer ` +
+        `from 0 to ${count - 1} (0-based WITHIN the range, unlike VBA's 1-based ${method.charAt(0).toUpperCase()}${method.slice(1)})`,
+    );
+  }
+  return index;
+}
+
 /** Build a ScriptRange over `box`, backed by the injected transport. */
 export function makeRange(t: RangeTransport, box: Box): ScriptRange {
   const read = t.readCell;
@@ -918,10 +1057,52 @@ export function makeRange(t: RangeTransport, box: Box): ScriptRange {
     getCell(rowOffset, colOffset) {
       const row = box.startRow + rowOffset;
       const col = box.startCol + colOffset;
-      if (row > box.endRow || col > box.endCol) {
+      // All FOUR sides are checked, like the Rust twin (canonical_model.rs
+      // `getCell`): a negative offset used to escape the range upwards/leftwards
+      // and hand back a cell outside it — silently, and possibly off-grid.
+      if (row < box.startRow || col < box.startCol || row > box.endRow || col > box.endCol) {
         throw new Error(`Offset (${rowOffset}, ${colOffset}) is outside range ${range.address}`);
       }
       return makeRange(t, { startRow: row, startCol: col, endRow: row, endCol: col });
+    },
+    // ---- Slicing sugar: pure coordinate math, no broker call. TWIN of the
+    //      NotebookRange table in core/script-engine/src/ops/canonical_model.rs. ----
+    rows(index) {
+      const i = requireSliceIndex(index, range.rowCount, "rows", range.address);
+      return makeRange(t, {
+        startRow: box.startRow + i,
+        startCol: box.startCol,
+        endRow: box.startRow + i,
+        endCol: box.endCol,
+      });
+    },
+    columns(index) {
+      const i = requireSliceIndex(index, range.colCount, "columns", range.address);
+      return makeRange(t, {
+        startRow: box.startRow,
+        startCol: box.startCol + i,
+        endRow: box.endRow,
+        endCol: box.startCol + i,
+      });
+    },
+    entireRow() {
+      return makeRange(t, {
+        startRow: box.startRow,
+        startCol: 0,
+        endRow: box.endRow,
+        endCol: EXCEL_MAX_COL_INDEX,
+      });
+    },
+    entireColumn() {
+      return makeRange(t, {
+        startRow: 0,
+        startCol: box.startCol,
+        endRow: EXCEL_MAX_ROW_INDEX,
+        endCol: box.endCol,
+      });
+    },
+    cells(rowOffset, colOffset) {
+      return range.getCell(rowOffset, colOffset);
     },
     async getValue() {
       return read(box.startRow, box.startCol);
@@ -1303,6 +1484,155 @@ export function makeRange(t: RangeTransport, box: Box): ScriptRange {
  *  rebind to, and silently dropping the prefix wrote to the wrong sheet. */
 export function rangeFromAddress(t: RangeTransport, address: string): ScriptRange {
   return makeRange(t, parseA1(address));
+}
+
+// ---------------------------------------------------------------------------
+// Multi-area ranges (VBA's Range("A1:B2,D4:E5") / Ctrl+Click selection)
+// ---------------------------------------------------------------------------
+
+/** The most areas one address may name. Matches the selection surface's own
+ *  ceiling (MAX_SELECT_AREAS in scriptHost/validators.ts), so the two
+ *  multi-area shapes in the API agree on how big "multi" gets. Redeclared
+ *  rather than imported because this module stays dependency-free. */
+export const MAX_RANGE_AREAS = 128;
+
+/** True when `address` names more than one area (contains a comma). */
+export function isMultiAreaAddress(address: string): boolean {
+  return address.includes(",");
+}
+
+/**
+ * Split a comma address into its area parts, trimmed and validated for count.
+ * PURE string surgery — nothing is parsed or resolved here.
+ *
+ * Only the FIRST part may carry a "Sheet!" prefix, and it applies to the whole
+ * address (`"Data!A1:B2,D4:E5"` is two areas on Data). A later part naming its
+ * own sheet is REFUSED rather than resolved: an areas object whose members live
+ * on different sheets has no answer for "which sheet is this?", and quietly
+ * resolving them would make `.areas[1]` write somewhere `.areas[0]` never
+ * looked.
+ */
+export function splitAreaAddresses(address: string): string[] {
+  const parts = address
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    throw new Error(`Address "${address.trim()}" names no areas`);
+  }
+  if (parts.length > MAX_RANGE_AREAS) {
+    throw new Error(
+      `Address "${address.trim()}" names ${parts.length} areas; the limit is ${MAX_RANGE_AREAS}`,
+    );
+  }
+  for (let i = 1; i < parts.length; i++) {
+    const { sheetName } = splitSheetPrefix(parts[i]);
+    if (sheetName !== null) {
+      throw new Error(
+        `Area "${parts[i]}" names its own sheet. In a multi-area address only the FIRST area ` +
+          `may carry a "Sheet!" prefix, and it applies to all of them — every area of one ` +
+          `multi-area range lives on the same sheet.`,
+      );
+    }
+  }
+  return parts;
+}
+
+/**
+ * A MULTI-AREA range: what `api.range("A1:B2,D4:E5")` answers — VBA's
+ * `Range("A1:B2,D4:E5")` and the Ctrl+Click selection shape.
+ *
+ * IT IS NOT A ScriptRange, on purpose. A rectangle's ops (offset/resize/end/
+ * getValues/setValues/select/fill/sort/goalSeek/...) have no single correct
+ * meaning across disjoint areas, and the failure this program keeps finding is
+ * exactly the one where such a call quietly applies to the first area only. So
+ * this object exposes ONLY the ops that mean the same thing applied to each
+ * area independently; everything else is reached through `areas[i]`, which are
+ * ordinary ScriptRanges.
+ */
+export interface ScriptRangeAreas {
+  /** Each area as an ordinary ScriptRange, in the order the address named
+   *  them. All on the same sheet. */
+  readonly areas: ScriptRange[];
+  /** How many areas there are (`areas.length`) — VBA's `Areas.Count`. */
+  readonly count: number;
+  /** The whole address, normalized ("A1:B2,D4:E5"). */
+  readonly address: string;
+  /** Total cells across the areas. Overlapping areas are counted TWICE, like
+   *  VBA's `Range("A1:B2,B2:C3").Count` — the areas are independent, not a
+   *  merged set. */
+  readonly cellCount: number;
+  /** True when the 0-based cell lies inside ANY area (inclusive; negative
+   *  coordinates are always outside). Pure math, no broker call. */
+  contains(row: number, col: number): boolean;
+  /**
+   * Apply a PARTIAL format to every area. Each area is its own broker call, so
+   * N areas make N undo steps — wrap the call in `api.beginBatch()` /
+   * `api.commitBatch()` when you want one.
+   */
+  format(format: ScriptFormat): Promise<void>;
+  /** Remove ALL formatting from every area, keeping the values. One broker call
+   *  per area (see {@link ScriptRangeAreas.format} on undo steps). */
+  clearFormat(): Promise<void>;
+  /** Apply a NAMED cell style to every area. One broker call per area. */
+  applyStyle(name: string): Promise<void>;
+  /** Set (or, with null, clear) the data-validation rule on every area. One
+   *  broker call per area. */
+  setValidation(rule: ScriptValidationRule | null): Promise<void>;
+  /** Every area's values, ONE grid per area (`[area][row][col]`) — never
+   *  flattened, because disjoint rectangles have no shared row/column
+   *  geometry. One broker call per area. */
+  getValues(): Promise<string[][][]>;
+  /** Every area's typed cells, ONE grid per area — the safe read for a
+   *  read/modify/write round-trip. One broker call per area. */
+  getData(): Promise<ScriptCell[][][]>;
+}
+
+/**
+ * Build the multi-area facet over ranges that are ALREADY bound to one sheet.
+ * The per-area ops run SEQUENTIALLY, like every other fan-out in this module:
+ * firing them in parallel would burn the worker's in-flight call cap.
+ */
+export function makeRangeAreas(areas: ScriptRange[], address: string): ScriptRangeAreas {
+  if (areas.length === 0) throw new Error(`Address "${address}" names no areas`);
+  const facet: ScriptRangeAreas = {
+    areas,
+    get count() {
+      return areas.length;
+    },
+    get address() {
+      return areas.map((a) => a.address).join(",");
+    },
+    get cellCount() {
+      return areas.reduce((sum, a) => sum + a.rowCount * a.colCount, 0);
+    },
+    contains(row, col) {
+      return areas.some((a) => a.contains(row, col));
+    },
+    async format(format) {
+      for (const area of areas) await area.format(format);
+    },
+    async clearFormat() {
+      for (const area of areas) await area.clearFormat();
+    },
+    async applyStyle(name) {
+      for (const area of areas) await area.applyStyle(name);
+    },
+    async setValidation(rule) {
+      for (const area of areas) await area.setValidation(rule);
+    },
+    async getValues() {
+      const out: string[][][] = [];
+      for (const area of areas) out.push(await area.getValues());
+      return out;
+    },
+    async getData() {
+      const out: ScriptCell[][][] = [];
+      for (const area of areas) out.push(await area.getData());
+      return out;
+    },
+  };
+  return facet;
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,9 @@ import {
   vAutoFitSpan, MAX_AUTOFIT_SPAN, vFillRange,
   vHiddenSpan, vHiddenQuery, MAX_HIDDEN_SPAN,
   vCalculationMode, vRecalculate, vProtectSheet, vUnprotectSheet, vProtectionStatus,
+  vBeginUnprotected, vEndUnprotected,
+  vScenarios, vScenarioAdd, vScenarioByName, vScenarioSummary, vScenarioMerge,
+  vConsolidate,
   vSheetRename, vSheetVisibility, vSortRange, vFind, vReplace,
   vRemoveDuplicates, vTextToColumns, vSpecialCells, vGoalSeek,
   vDataValidationSet, vDataValidationClear, vSheetScopedList, vAddHyperlink,
@@ -242,6 +245,53 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Remove the active sheet's protection, so its cells can be edited again (a wrong password simply answers no)" },
   "api.getProtectionStatus": { tier: "unlocked", class: "read", validate: vProtectionStatus,
                              desc: "See whether the active sheet is protected, whether a password is set, and what the protection still allows" },
+  // ---- unlocked: the WITH-UNPROTECTED pair. VBA answers "I need to write to a
+  //      protected sheet" with UserInterfaceOnly:=True — a hidden flag that
+  //      exempts code from the protection, is invisible in any audit, and does
+  //      not even survive save/reload in Excel. Calcula answers it with the
+  //      HONEST pattern instead: lift the protection, write, put it back — and
+  //      makes that pattern SAFE by owning the restore host-side. Two rows,
+  //      because the body between them runs in the worker realm.
+  //
+  //      Both are audited like any other call, which IS the point: an unprotect
+  //      a person can read in the transparency panel beats an exemption nobody
+  //      can see. Same unlocked-only tier as the protect/unprotect rows they
+  //      compose — a distributed (restricted) script can no more borrow a
+  //      protection than it can lift one. ----
+  "api.beginUnprotected":  { tier: "unlocked", class: "mutate", validate: vBeginUnprotected,
+                             desc: "Temporarily lift the active sheet's protection so the script can write to it, remembering the exact protection to put back (a wrong password refuses, and Calcula re-protects the sheet even if the script crashes)" },
+  "api.endUnprotected":    { tier: "unlocked", class: "mutate", validate: vEndUnprotected,
+                             desc: "Put back the sheet protection that was temporarily lifted, with exactly the password and permissions it had before" },
+  // ---- unlocked: SCENARIOS (What-If). VBA's Worksheet.Scenarios collection —
+  //      Add / Show / Delete / CreateSummary / Merge — over the six shipped
+  //      scenario_* commands, name-addressed and sheet-addressable (all six take
+  //      an explicit sheet index, unlike the protection family above).
+  //
+  //      `scenarioShow` CALLS scenario_show; it does not re-implement it. That
+  //      command is the transient-write precedent and it also permanently keeps
+  //      the values it writes — a second implementation would be a second set of
+  //      rules for the same act. Every mutating row here is a `mutate`: adding,
+  //      deleting and merging change saved workbook state, and Show/Summary
+  //      write cells the user reads and the file keeps. ----
+  "api.scenarios":         { tier: "unlocked", class: "read",   validate: vScenarios,
+                             desc: "List the saved what-if scenarios on a sheet — their names, comments and which cells each one changes" },
+  "api.scenarioAdd":       { tier: "unlocked", class: "mutate", validate: vScenarioAdd,
+                             desc: "Save a named what-if scenario: a set of cells and the values they take in that scenario" },
+  "api.scenarioShow":      { tier: "unlocked", class: "mutate", validate: vScenarioByName,
+                             desc: "Apply a saved scenario — write its values into its changing cells and recalculate everything that depends on them" },
+  "api.scenarioDelete":    { tier: "unlocked", class: "mutate", validate: vScenarioByName,
+                             desc: "Delete a saved what-if scenario by name" },
+  "api.scenarioSummary":   { tier: "unlocked", class: "mutate", validate: vScenarioSummary,
+                             desc: "Build a scenario summary report comparing every saved scenario side by side, written into a new sheet area" },
+  "api.scenarioMerge":     { tier: "unlocked", class: "mutate", validate: vScenarioMerge,
+                             desc: "Copy the scenarios saved on one sheet onto another sheet, keeping any that already exist there" },
+  // ---- unlocked: CONSOLIDATE (Data ▸ Consolidate / VBA Range.Consolidate).
+  //      One row over consolidate_data: aggregate several ranges — by position
+  //      or by matching headers — into one destination block. It WRITES, so it
+  //      is a mutate at the tier its reach already sits at (api.setCellValue
+  //      writes any cell of any sheet of this workbook). ----
+  "api.consolidate":       { tier: "unlocked", class: "mutate", validate: vConsolidate,
+                             desc: "Combine several ranges of numbers into one summary block — totalling, averaging or counting them, matching rows and columns up by their headers if asked" },
   // Structural ops are SHEET-ADDRESSABLE since Wave 3: the backend commands
   // grew an optional sheetIndex with the full off-sheet guard chain
   // (protection, spill, writeback claims, sheet-tagged undo, cross-sheet
@@ -647,6 +697,12 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Create a pivot table over a block of cells and lay out its fields" },
   "api.deletePivot":       { tier: "unlocked", class: "mutate", validate: vObjectId,
                              desc: "Delete a pivot table" },
+  // Refresh-all is ONE row rather than a loop over api.pivot(id).refresh(): the
+  // backend already has refresh_all_pivot_tables, so the script pays one RPC
+  // and the user consents to one sentence. `mutate`, not `read`: a refresh
+  // rewrites every pivot's destination cells.
+  "api.refreshAllPivots":  { tier: "unlocked", class: "mutate", validate: vNone,
+                             desc: "Refresh every pivot table in this workbook (re-reads their source data and rewrites their cells)" },
   // ---- unlocked: NOTES + COMMENTS (Wave 4). Cell annotations are document
   //      content the user already sees (Review menu); nothing leaves the file,
   //      so no capability. The notes backend addresses THE ACTIVE SHEET —
@@ -1172,9 +1228,22 @@ function thinWorkbookPathPayload(payload: unknown): { fileName: string | null } 
  * cancellable onBeforeSave / onBeforeClose detail, which is pulled through the
  * guard registry rather than delivered as an app event and therefore never
  * reaches `thinAppEventForScripts`.
+ *
+ * `kind` ("save" | "saveAs") is carried THROUGH — it is VBA's `SaveAsUI`, the
+ * one thing an onBeforeSave handler needs to tell "re-saving in place" from
+ * "writing a new file", and it names no path. It is added HERE rather than in
+ * `thinWorkbookPathPayload` because that reduction is also what AFTER_OPEN /
+ * AFTER_SAVE app events get, and those carry no save flavour: the payload stays
+ * absent-by-default everywhere it is not deliberately allowed through. An
+ * unrecognised value is dropped rather than forwarded.
  */
-export function thinWorkbookPathDetail(detail: unknown): { fileName: string | null } {
-  return thinWorkbookPathPayload(detail);
+export function thinWorkbookPathDetail(
+  detail: unknown,
+): { fileName: string | null; kind?: "save" | "saveAs" } {
+  const base = thinWorkbookPathPayload(detail);
+  const kind = (detail as { kind?: unknown } | null | undefined)?.kind;
+  if (kind === "save" || kind === "saveAs") return { ...base, kind };
+  return base;
 }
 
 /** Options for `thinAppEventForScripts`. */

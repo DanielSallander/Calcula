@@ -51,6 +51,18 @@ pub(crate) fn parse_a1(
     bound_sheet: usize,
 ) -> Result<(Box, usize), String> {
     let mut work = address.trim();
+    // A comma address ("A1:B2,D4:E5") is a MULTI-AREA range. The object-script
+    // realm answers one (api.range -> ScriptRangeAreas); this realm has no
+    // multi-area shape, so it says so instead of failing with a confusing
+    // "Invalid cell reference: \"B2,D4\"" that never mentions the comma.
+    if work.contains(',') {
+        return Err(format!(
+            "Address \"{}\" names more than one area. Multi-area addresses are not available in \
+             notebooks — address each area separately, or use api.range(\"...\") in an object \
+             script, which answers a multi-area range.",
+            work
+        ));
+    }
     let mut resolved_sheet = bound_sheet;
     if let Some(bang) = work.find('!') {
         let (raw_prefix, rest) = work.split_at(bang);
@@ -129,6 +141,32 @@ fn box_address(b: &Box) -> String {
 /// Throw a JS Error with `message` inside the given context.
 fn throw<'js>(ctx: &Ctx<'js>, message: String) -> rquickjs::Error {
     rquickjs::Exception::throw_message(ctx, &message)
+}
+
+/// Validate a `rows(i)` / `columns(i)` index: an integer in `0..count-1`,
+/// 0-BASED WITHIN THE RANGE. Out of range is an ERROR, never a clamp — clamping
+/// would silently hand back the wrong band. TWIN of `requireSliceIndex` in
+/// app/src/api/scriptHost/worker/canonicalModel.ts (same rule, same message).
+fn slice_index(index: i32, count: u32, method: &str, address: &str) -> Result<u32, String> {
+    if index < 0 || index as i64 >= count as i64 {
+        let vba = {
+            let mut chars = method.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        };
+        return Err(format!(
+            "{}({}) is outside range {}: expected an integer from 0 to {} (0-based WITHIN the \
+             range, unlike VBA's 1-based {})",
+            method,
+            index,
+            address,
+            count - 1,
+            vba
+        ));
+    }
+    Ok(index as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +273,124 @@ fn make_range<'js>(
             },
         )?;
         obj.set("getCell", f)?;
+    }
+
+    // ---- Slicing sugar: pure coordinate math, no grid access. TWIN of the
+    //      ScriptRange table in app/src/api/scriptHost/worker/canonicalModel.ts
+    //      (rows / columns / entireRow / entireColumn / cells) — both realms
+    //      MUST agree, case for case: the index is 0-BASED WITHIN THE RANGE and
+    //      out of range throws rather than clamping; entireRow/entireColumn
+    //      stretch to the full Excel grid bounds. ----
+
+    // rows(i) -> one ROW of this range, full width (0-based within the range).
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, index: i32| -> rquickjs::Result<Object<'js>> {
+                let i = slice_index(index, row_count, "rows", &box_address(&b))
+                    .map_err(|e| throw(&ctx, e))?;
+                let row = Box {
+                    start_row: b.start_row + i,
+                    start_col: b.start_col,
+                    end_row: b.start_row + i,
+                    end_col: b.end_col,
+                };
+                make_range(&ctx, sc.clone(), sheet_index, row)
+            },
+        )?;
+        obj.set("rows", f)?;
+    }
+
+    // columns(i) -> one COLUMN of this range, full height (0-based within it).
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, index: i32| -> rquickjs::Result<Object<'js>> {
+                let i = slice_index(index, col_count, "columns", &box_address(&b))
+                    .map_err(|e| throw(&ctx, e))?;
+                let col = Box {
+                    start_row: b.start_row,
+                    start_col: b.start_col + i,
+                    end_row: b.end_row,
+                    end_col: b.start_col + i,
+                };
+                make_range(&ctx, sc.clone(), sheet_index, col)
+            },
+        )?;
+        obj.set("columns", f)?;
+    }
+
+    // entireRow() -> this range's rows across the whole sheet width.
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+                let whole = Box {
+                    start_row: b.start_row,
+                    start_col: 0,
+                    end_row: b.end_row,
+                    end_col: engine::navigation::EXCEL_MAX_COL_INDEX,
+                };
+                make_range(&ctx, sc.clone(), sheet_index, whole)
+            },
+        )?;
+        obj.set("entireRow", f)?;
+    }
+
+    // entireColumn() -> this range's columns across the whole sheet height.
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+                let whole = Box {
+                    start_row: 0,
+                    start_col: b.start_col,
+                    end_row: engine::navigation::EXCEL_MAX_ROW_INDEX,
+                    end_col: b.end_col,
+                };
+                make_range(&ctx, sc.clone(), sheet_index, whole)
+            },
+        )?;
+        obj.set("entireColumn", f)?;
+    }
+
+    // cells(dr, dc) -> VBA's name for getCell (0-based here, like the rest).
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, dr: i32, dc: i32| -> rquickjs::Result<Object<'js>> {
+                let row = b.start_row as i64 + dr as i64;
+                let col = b.start_col as i64 + dc as i64;
+                if row < b.start_row as i64
+                    || col < b.start_col as i64
+                    || row > b.end_row as i64
+                    || col > b.end_col as i64
+                {
+                    return Err(throw(
+                        &ctx,
+                        format!(
+                            "Offset ({}, {}) is outside range {}",
+                            dr,
+                            dc,
+                            box_address(&b)
+                        ),
+                    ));
+                }
+                let cell = Box {
+                    start_row: row as u32,
+                    start_col: col as u32,
+                    end_row: row as u32,
+                    end_col: col as u32,
+                };
+                make_range(&ctx, sc.clone(), sheet_index, cell)
+            },
+        )?;
+        obj.set("cells", f)?;
     }
 
     // getValue() -> top-left cell display string.
@@ -1119,6 +1275,127 @@ mod tests {
         "#;
         let (out, _grids) = run_logged(src, grids, registry, names, 0);
         assert_eq!(out, "num-threw,obj-threw");
+    }
+
+    // ---- Slicing sugar (rows/columns/entireRow/entireColumn/cells). The TWIN
+    //      assertions live in app/src/api/scriptHost/worker/canonicalModel.test.ts
+    //      ("range slicing sugar"); both realms must answer the same addresses.
+
+    #[test]
+    fn range_rows_and_columns_slice_within_the_range() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var r = Calcula.workbook.sheet(0).range("B2:D5");
+            Calcula.log(JSON.stringify([
+                r.rows(0).address, r.rows(3).address,
+                r.columns(0).address, r.columns(2).address,
+                r.rows(1).rowCount, r.rows(1).colCount,
+                r.columns(1).rowCount, r.columns(1).colCount
+            ]));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, r#"["B2:D2","B5:D5","B2:B5","D2:D5",1,3,4,1]"#);
+    }
+
+    #[test]
+    fn range_rows_and_columns_reject_an_out_of_range_index() {
+        let (grids, registry, names) = two_sheets();
+        // rowCount 4, colCount 3 -> 4 and 3 are one past the end, and negatives
+        // are always out. None of these may CLAMP.
+        let src = r#"
+            var r = Calcula.workbook.sheet(0).range("B2:D5");
+            var msgs = [];
+            try { r.rows(4); msgs.push("row4-ok"); } catch (e) { msgs.push("row4-threw"); }
+            try { r.rows(-1); msgs.push("rowneg-ok"); } catch (e) { msgs.push("rowneg-threw"); }
+            try { r.columns(3); msgs.push("col3-ok"); } catch (e) { msgs.push("col3-threw"); }
+            try { r.columns(-1); msgs.push("colneg-ok"); } catch (e) { msgs.push("colneg-threw"); }
+            Calcula.log(msgs.join(","));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "row4-threw,rowneg-threw,col3-threw,colneg-threw");
+    }
+
+    #[test]
+    fn range_slice_error_names_the_range_and_the_legal_span() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            try {
+                Calcula.workbook.sheet(0).range("B2:D5").rows(9);
+                Calcula.log("no-throw");
+            } catch (e) {
+                Calcula.log(e.message);
+            }
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert!(out.contains("rows(9)"), "{out}");
+        assert!(out.contains("B2:D5"), "{out}");
+        assert!(out.contains("0 to 3"), "{out}");
+    }
+
+    #[test]
+    fn range_entire_row_and_column_stretch_to_the_grid_bounds() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var r = Calcula.workbook.sheet(0).range("B2:D5");
+            Calcula.log(JSON.stringify([
+                r.entireRow().address, r.entireColumn().address,
+                r.entireRow().rowCount, r.entireColumn().colCount
+            ]));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        // XFD = column 16383, row 1048576 = the last Excel row.
+        assert_eq!(out, r#"["A2:XFD5","B1:D1048576",4,3]"#);
+    }
+
+    #[test]
+    fn range_cells_is_get_cell_under_vbas_name() {
+        let (mut grids, registry, names) = two_sheets();
+        seed(&mut grids[0], 1, 1, "inner"); // B2
+        let src = r#"
+            var r = Calcula.workbook.sheet(0).range("A1:C3");
+            var msgs = [r.cells(1, 1).address, r.cells(1, 1).getValue()];
+            try { r.cells(5, 5); msgs.push("far-ok"); } catch (e) { msgs.push("far-threw"); }
+            try { r.cells(-1, 0); msgs.push("neg-ok"); } catch (e) { msgs.push("neg-threw"); }
+            Calcula.log(JSON.stringify(msgs));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, r#"["B2","inner","far-threw","neg-threw"]"#);
+    }
+
+    #[test]
+    fn slices_of_a_rebound_range_stay_on_the_rebound_sheet() {
+        // The slice must inherit the SHEET, not just the geometry: a range that
+        // rebound to Beta and then sliced must still write to Beta.
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            Calcula.workbook.sheet("Alpha").range("Beta!A1:B2").rows(1).setValues([["x","y"]]);
+            Calcula.log("done");
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "done");
+        assert!(grids[0].get_cell(1, 0).is_none(), "Alpha must be untouched");
+        assert_eq!(
+            cell_value_to_string(&grids[1].get_cell(1, 0).unwrap().value),
+            "x"
+        );
+    }
+
+    #[test]
+    fn multi_area_address_is_refused_with_a_message_that_names_the_problem() {
+        // This realm has no multi-area shape. The old failure was
+        // `Invalid cell reference: "B2,D4"`, which never mentions the comma.
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            try {
+                Calcula.workbook.sheet(0).range("A1:B2,D4:E5");
+                Calcula.log("no-throw");
+            } catch (e) {
+                Calcula.log(e.message);
+            }
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert!(out.contains("more than one area"), "{out}");
+        assert!(out.contains("api.range"), "{out}");
     }
 
     #[test]

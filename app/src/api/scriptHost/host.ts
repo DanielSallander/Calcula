@@ -50,6 +50,12 @@ import {
   sanitizeSandboxGeometry,
 } from "./renderCache";
 import { ALLOWLIST, thinAppEventForScripts, thinWorkbookPathDetail } from "./allowlist";
+// Host-side audit appends. Nearly every entry comes from the broker, which
+// audits the calls it relays; the exception is the WITH-UNPROTECTED restore
+// fired from hostUnmountScript / hostResetAll, which no worker asked for and
+// which must still be visible — a re-protection nobody can see would undo the
+// only reason this design was chosen over VBA's UserInterfaceOnly flag.
+import { appendAudit } from "./auditRing";
 import type { CapabilityId } from "./capabilityIds";
 import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
@@ -825,6 +831,12 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
 export function hostUnmountScript(scriptId: string): void {
   const mw = mounted.get(scriptId);
   if (!mw) return;
+  // FIRST, ahead of every sweep below: an api.beginUnprotected may be in flight
+  // right now, past its permission checks and waiting on the backend. The
+  // protection sweep further down can only release holds that are already
+  // recorded, so this counter is what tells that begin — when it finally lands
+  // — that its owner is gone and it must put the sheet back itself.
+  noteScriptDeparture(scriptId);
   transientDebugMounts.delete(scriptId);
   // There is no realm left to end a session against.
   cancelDebugAutoEnd(scriptId);
@@ -883,6 +895,19 @@ export function hostUnmountScript(scriptId: string): void {
   if (manualCalcHolders.has(scriptId)) {
     void getLib()
       .then((lib) => releaseManualCalculation(lib, scriptId))
+      .catch(() => {
+        // Best-effort: the backend may already be gone (window teardown).
+      });
+  }
+  // Put back any sheet protection THIS script lifted with api.withUnprotected
+  // and did not close — the crash guarantee that makes the helper safe. Same
+  // fire-and-forget debt discipline as the calculation mode above, and the same
+  // coverage: unmount, fault (both crash paths), debugger stop. Without this,
+  // killing a script mid-write would leave the user's sheet unprotected, which
+  // is the exact failure that made VBA's UserInterfaceOnly untrustworthy.
+  if (scriptOwesUnprotectRestore(scriptId)) {
+    void getLib()
+      .then((lib) => releaseUnprotectedSheets(lib, scriptId))
       .catch(() => {
         // Best-effort: the backend may already be gone (window teardown).
       });
@@ -950,6 +975,24 @@ export function hostResetAll(): void {
     resetManualCalculationTracking();
     void getLib()
       .then((lib) => lib.setCalculationMode("automatic"))
+      .catch(() => {
+        // Best-effort: the backend may already be gone (window teardown).
+      });
+  }
+  // ...and every sheet protection a script lifted with api.withUnprotected, by
+  // the SAME snapshot-then-clear shape and for the same reason: the per-script
+  // unmounts above only queued microtasks, and the clear below would win the
+  // race and swallow them.
+  //
+  // The protection IS restored here rather than dropped, because this sweep is
+  // not only "the workbook is being replaced": BEFORE_CLOSE routes through here
+  // too, on a workbook that is still live and can still be saved. Dropping the
+  // debt there would write the file with the user's sheet left open.
+  if (unprotectedHolds.size > 0) {
+    const holds = allUnprotectedHolds();
+    resetUnprotectedTracking();
+    void getLib()
+      .then((lib) => restoreAllUnprotected(lib, holds))
       .catch(() => {
         // Best-effort: the backend may already be gone (window teardown).
       });
@@ -2934,6 +2977,62 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       } satisfies ScriptProtectionStatus;
     }
 
+    // ---- unlocked: the api.withUnprotected pair ----
+    // The worker helper is the composite; these are its two halves. The RESTORE
+    // is a host debt (see the executors), which is what makes the helper safe
+    // against a realm that never runs its own finally.
+    case "api.beginUnprotected": {
+      const [password, sheetRef] = args as [(string | null)?, (number | string)?];
+      const lib = await getLib();
+      return executeBeginUnprotected(lib, definition.id, password ?? undefined, sheetRef);
+    }
+    case "api.endUnprotected": {
+      const [token] = args as [(string | null)?];
+      const lib = await getLib();
+      return executeEndUnprotected(lib, definition.id, token ?? null);
+    }
+
+    // ---- unlocked: scenarios (What-If) ----
+    // Six thin rows over the six scenario_* commands. scenarioShow CALLS
+    // scenario_show — the transient-write precedent — rather than repeating it.
+    case "api.scenarios": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      return executeScenarios(lib, sheetRef);
+    }
+    case "api.scenarioAdd": {
+      const [params] = args as [ScriptScenarioAddParams];
+      const lib = await getLib();
+      return executeScenarioAdd(lib, params);
+    }
+    case "api.scenarioShow": {
+      const [name, sheetRef] = args as [string, (number | string)?];
+      const lib = await getLib();
+      return executeScenarioShow(lib, definition.id, name, sheetRef);
+    }
+    case "api.scenarioDelete": {
+      const [name, sheetRef] = args as [string, (number | string)?];
+      const lib = await getLib();
+      return executeScenarioDelete(lib, name, sheetRef);
+    }
+    case "api.scenarioSummary": {
+      const [options] = args as [ScriptScenarioSummaryOptions?];
+      const lib = await getLib();
+      return executeScenarioSummary(lib, options);
+    }
+    case "api.scenarioMerge": {
+      const [fromSheet, toSheet] = args as [number | string, (number | string)?];
+      const lib = await getLib();
+      return executeScenarioMerge(lib, fromSheet, toSheet);
+    }
+
+    // ---- unlocked: consolidate (Data ▸ Consolidate) ----
+    case "api.consolidate": {
+      const [params] = args as [ScriptConsolidateParams];
+      const lib = await getLib();
+      return executeConsolidate(lib, definition.id, params);
+    }
+
     // ---- unlocked: structure (B2; sheet-addressable since Wave 3) ----
     // The backend commands take an optional sheetIndex with the full off-sheet
     // guard chain (protection, spill, writeback claims, sheet-tagged undo,
@@ -3872,6 +3971,20 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await api.delete(pivotId);
       announcePivotChanged();
       return undefined;
+    }
+    case "api.refreshAllPivots": {
+      // ONE backend call (refresh_all_pivot_tables), not a loop: the backend
+      // walks its own pivot registry and rewrites each destination.
+      //
+      // The count is what actually REFRESHED. The backend logs and SKIPS a
+      // pivot whose refresh fails (a broken source, a missing connection), so a
+      // workbook with 5 pivots can honestly answer 4 — which is why this
+      // reports a number instead of `void`, and why the typings say "refreshed",
+      // not "all".
+      const { refreshAllPivotTables } = await import("../backend");
+      const responses = await refreshAllPivotTables<unknown[]>();
+      announcePivotChanged();
+      return { refreshedCount: Array.isArray(responses) ? responses.length : 0 };
     }
     // ---- unlocked: notes + comments (Wave 4) ----
     // The notes/comments backend addresses THE ACTIVE SHEET; the optional
@@ -9197,6 +9310,852 @@ export async function executeUnprotectSheet(
   if (/incorrect password/i.test(error)) return false;
   if (/not protected/i.test(error)) return true;
   throw new BrokerError("HostError", error || "unprotectSheet failed");
+}
+
+// ============================================================================
+// api.withUnprotected — the sanctioned answer to UserInterfaceOnly
+// ============================================================================
+// WHY THIS AND NOT THE FLAG. VBA's `Protect UserInterfaceOnly:=True` exempts
+// code from the protection it just applied. That was rejected here for three
+// reasons, in increasing order of weight: it needs a script-origin flag threaded
+// through dozens of Rust write gates; Excel's own version does not survive
+// save/reload, so the exemption silently lapses; and — decisively — a bypass
+// that leaves no trace is invisible in the audit trail, which is the one thing
+// Calcula's scripting story is FOR. The sanctioned pattern is
+// unprotect -> write -> re-protect, and every step of it shows up in the ring.
+//
+// What makes the pattern safe is not the worker's try/finally — a killed realm
+// never runs its finally, and "the app crashed and left your sheet open" is
+// exactly the failure the flag people are afraid of. So the RESTORE IS A HOST
+// DEBT, tracked in the map below, released by hostUnmountScript (which every way
+// a script ends routes through: explicit unmount, both crash paths, debugger
+// stop) and by hostResetAll (workbook swap / BEFORE_CLOSE). This is the
+// manualCalcHolders discipline, applied to something stricter than a calc mode.
+
+/** One sheet whose protection is currently lifted on a script's behalf. */
+interface UnprotectedHold {
+  /** 0-based sheet index the protection belongs to. */
+  sheet: number;
+  /** The password that was in force, or null if the sheet had none. Kept so
+   *  the re-protect restores the SAME password, and so a second caller cannot
+   *  join a hold it could not have opened itself. */
+  password: string | null;
+  /** The permission flags that were in force, captured verbatim BEFORE the
+   *  unprotect. Restored verbatim — never DEFAULT_PROTECTION_OPTIONS, which
+   *  would quietly rewrite the sheet owner's choices. */
+  options: SheetProtectionOptions;
+  /** scriptId -> how many nested holds that script currently owns. */
+  holders: Map<string, number>;
+}
+
+/** sheetIndex -> the live hold. Absent = that sheet is not being held open. */
+const unprotectedHolds = new Map<number, UnprotectedHold>();
+/** token -> which hold it belongs to, so end() can only release its own. */
+const unprotectTokens = new Map<string, { sheet: number; scriptId: string }>();
+let nextUnprotectToken = 1;
+
+/**
+ * scriptId -> how many times it has DEPARTED (hostUnmountScript ran for it).
+ *
+ * WHY. `releaseUnprotectedSheets` can only release holds that are already
+ * RECORDED. A script that dies while its `beginUnprotected` is still in flight
+ * — permission checks passed, unprotect posted, backend not yet answered — is
+ * swept BEFORE the hold exists, and the hold recorded a moment later belongs to
+ * a script that will never unmount again: nothing releases it and the sheet
+ * stays open for the rest of the session. That is the precise leak this helper
+ * exists to prevent, so begin compares this counter across its awaits and puts
+ * the protection back itself when its owner left in the meantime.
+ *
+ * NEVER CLEARED, deliberately — not even by resetUnprotectedTracking. A begin
+ * captures the value at its start and compares later; zeroing the map between
+ * those two points would make a departure that DID happen compare equal, which
+ * is exactly the orphan the counter is here to catch. It costs one integer per
+ * script id ever mounted.
+ */
+const scriptDepartures = new Map<string, number>();
+
+function departureEpoch(scriptId: string): number {
+  return scriptDepartures.get(scriptId) ?? 0;
+}
+
+/** Record that a script has ended. Called by hostUnmountScript for EVERY script,
+ *  whether or not it owes a restore — an in-flight begin has not recorded its
+ *  hold yet, so "owes nothing" is not the same as "has nothing in flight". */
+export function noteScriptDeparture(scriptId: string): void {
+  scriptDepartures.set(scriptId, departureEpoch(scriptId) + 1);
+}
+
+/** Test seam: read the epoch without mutating it. */
+export function scriptDepartureEpoch(scriptId: string): number {
+  return departureEpoch(scriptId);
+}
+
+/**
+ * Per-sheet serialization for every begin/end/restore.
+ *
+ * Without it, two begins on one sheet can BOTH read "protected" before either
+ * records its hold, both unprotect (the second reading "already unprotected"
+ * as success), and the second hold overwrites the first — losing the real prior
+ * options and leaving the sheet open when only one of the two ends. Every path
+ * that reads-then-writes this bookkeeping runs inside the chain, so the whole
+ * check-and-record is atomic with respect to the sheet it concerns.
+ */
+const unprotectQueues = new Map<number, Promise<unknown>>();
+
+function serializeOnSheet<T>(sheet: number, work: () => Promise<T>): Promise<T> {
+  const previous = unprotectQueues.get(sheet) ?? Promise.resolve();
+  // `work` runs whether the previous link settled or failed: one script's
+  // refusal must not wedge the sheet for everyone after it.
+  const next = previous.then(work, work);
+  unprotectQueues.set(
+    sheet,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+/** Test seam: the sheets whose protection is currently lifted by a script. */
+export function scriptsHoldingUnprotected(): ReadonlyMap<number, UnprotectedHold> {
+  return unprotectedHolds;
+}
+
+/** Test seam / hostResetAll: forget all hold tracking WITHOUT re-protecting.
+ *  hostResetAll restores first and clears second (see its comment there). */
+export function resetUnprotectedTracking(): void {
+  unprotectedHolds.clear();
+  unprotectTokens.clear();
+  unprotectQueues.clear();
+}
+
+/** Audit a host-initiated protection move that no worker call carried. */
+function auditUnprotectRestore(scriptId: string, ok: boolean, error?: string): void {
+  appendAudit({
+    ts: Date.now(),
+    scriptId,
+    scriptName: mounted.get(scriptId)?.handle.scriptName ?? scriptId,
+    method: "api.endUnprotected",
+    class: "mutate",
+    ok,
+    error,
+  });
+}
+
+/**
+ * Put one hold's protection back exactly as it was.
+ *
+ * protect_sheet addresses the ACTIVE sheet only, and the script may well have
+ * activated a different sheet inside `fn` — so the held sheet is activated for
+ * the duration and the previous one restored afterwards. The hop is net-zero
+ * (same sheet active before and after, nothing repaints in between), which is
+ * why it does not announce; skipping it would re-protect the WRONG sheet, which
+ * is worse than any amount of churn.
+ */
+async function reprotectHeldSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  hold: UnprotectedHold,
+): Promise<void> {
+  const activeNow = await lib.getActiveSheet();
+  const mustHop = activeNow !== hold.sheet;
+  if (mustHop) await lib.setActiveSheet(hold.sheet);
+  try {
+    const result = await lib.protectSheet({
+      password: hold.password ?? undefined,
+      options: hold.options,
+    });
+    if (!result.success) {
+      throw new BrokerError(
+        "HostError",
+        result.error || `could not restore the protection on sheet ${hold.sheet}`,
+      );
+    }
+  } finally {
+    if (mustHop) await lib.setActiveSheet(activeNow);
+  }
+}
+
+/** What api.beginUnprotected answers. `token: null` means "there was nothing
+ *  to lift" — the sheet was already unprotected and STAYS that way. */
+export interface ScriptUnprotectHold {
+  token: string | null;
+  wasProtected: boolean;
+}
+
+/**
+ * The api.beginUnprotected executor body.
+ *
+ * Contract, in the order the checks run:
+ *  1. the sheet must be the ACTIVE one (protect_sheet addresses no other);
+ *  2. an unprotected sheet is left alone and answers `{ token: null }`, so the
+ *    helper never surprises anyone by protecting a sheet that wasn't;
+ *  3. a wrong password THROWS — this is the one place the unprotectSheet
+ *    "answer false" convention is wrong, because the caller's next act is to
+ *    run `fn` against a sheet it believes is open;
+ *  4. a sheet already held open is JOINED, not re-unprotected: the depth goes
+ *    up, the captured options stay the FIRST ones (the only ones that were
+ *    ever really in force), and a joiner must still prove the password.
+ */
+export async function executeBeginUnprotected(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  password?: string,
+  sheetRef?: number | string | null,
+): Promise<ScriptUnprotectHold> {
+  // Captured BEFORE the first await. Both of the waits below — resolving the
+  // sheet, then queueing behind this sheet's chain — can be outlived by the
+  // script that asked, and a hold recorded for a departed script is one nothing
+  // will ever release (see scriptDepartures).
+  const epoch = departureEpoch(scriptId);
+  const active = await assertActiveSheet(lib, sheetRef, "withUnprotected");
+  // Everything from here reads the bookkeeping and then writes it, so it runs
+  // as one link in the sheet's chain (see serializeOnSheet).
+  return serializeOnSheet(active, () =>
+    beginUnprotectedOnActiveSheet(lib, scriptId, password, active, epoch),
+  );
+}
+
+async function beginUnprotectedOnActiveSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  password: string | undefined,
+  active: number,
+  /** The caller's departure epoch, sampled before it awaited anything. */
+  epoch: number,
+): Promise<ScriptUnprotectHold> {
+  // Departed while resolving the sheet, or while queued behind another hold on
+  // it. Nothing has been lifted yet — including on the JOIN path below, which
+  // would otherwise add a holder that never lets go — so simply refuse.
+  if (departureEpoch(scriptId) !== epoch) {
+    throw new BrokerError(
+      "HostError",
+      `withUnprotected: the script ended before the protection on sheet ${active} ` +
+        `was lifted; nothing ran and the sheet was not touched`,
+    );
+  }
+  const mintToken = (sheet: number): string => {
+    const token = `unprot-${nextUnprotectToken++}`;
+    unprotectTokens.set(token, { sheet, scriptId });
+    return token;
+  };
+
+  const existing = unprotectedHolds.get(active);
+  if (existing) {
+    // Joining someone else's (or one's own outer) hold. The sheet reads
+    // "unprotected" right now, so its status can no longer prove anything —
+    // the captured password is the only remaining gate, and skipping it would
+    // turn a concurrent script into a password oracle.
+    if (existing.password !== null && (password ?? "") !== existing.password) {
+      throw new BrokerError(
+        "PermissionDenied",
+        `withUnprotected: sheet ${active} is already open under a different password`,
+      );
+    }
+    existing.holders.set(scriptId, (existing.holders.get(scriptId) ?? 0) + 1);
+    return { token: mintToken(active), wasProtected: true };
+  }
+
+  const status = await lib.getProtectionStatus();
+  if (!status.isProtected) {
+    // Nothing to lift and nothing to put back. `fn` runs, the sheet stays
+    // unprotected afterwards — a helper that protected it here would be
+    // inventing a protection the user never asked for.
+    return { token: null, wasProtected: false };
+  }
+  // Captured BEFORE the unprotect: once the sheet is open the backend reports
+  // defaults, and restoring defaults is not restoring.
+  const options: SheetProtectionOptions = { ...status.options };
+
+  const opened = await executeUnprotectSheet(lib, password);
+  if (!opened) {
+    throw new BrokerError(
+      "PermissionDenied",
+      `withUnprotected: the password is wrong for sheet ${active}; nothing was run and the sheet is still protected`,
+    );
+  }
+
+  // THE ORPHAN WINDOW. The sheet is open NOW, but its owner may have died while
+  // the unprotect was in flight — in which case hostUnmountScript already ran
+  // its sweep, found no hold to release (there was not one yet), and will never
+  // run again for this id. Recording the hold here would leave the sheet open
+  // for the rest of the session with nothing able to close it. So the restore
+  // happens HERE, done by the begin that opened it, and the call refuses.
+  if (departureEpoch(scriptId) !== epoch) {
+    const orphan: UnprotectedHold = {
+      sheet: active,
+      password: status.hasPassword ? (password ?? "") : null,
+      options,
+      holders: new Map(),
+    };
+    try {
+      await reprotectHeldSheet(lib, orphan);
+      auditUnprotectRestore(scriptId, true);
+    } catch (e) {
+      // Same rule as every other restore on this surface: a FAILED one is said
+      // out loud rather than swallowed.
+      auditUnprotectRestore(scriptId, false, e instanceof Error ? e.message : String(e));
+    }
+    throw new BrokerError(
+      "HostError",
+      `withUnprotected: the script ended while the protection on sheet ${active} was ` +
+        `being lifted; it was put back and nothing ran`,
+    );
+  }
+
+  unprotectedHolds.set(active, {
+    sheet: active,
+    password: status.hasPassword ? (password ?? "") : null,
+    options,
+    holders: new Map([[scriptId, 1]]),
+  });
+  return { token: mintToken(active), wasProtected: true };
+}
+
+/**
+ * The api.endUnprotected executor body: drop one hold and, when the LAST holder
+ * of a sheet lets go, put the protection back.
+ *
+ * Deliberately forgiving about unknown/null tokens. `null` is the
+ * never-was-protected answer, and an unknown token means the host already
+ * restored this hold (an unmount sweep won the race) — in both cases the sheet
+ * is in the state the caller wanted and an exception thrown from a `finally`
+ * would replace the script's REAL error with a bookkeeping one.
+ */
+export async function executeEndUnprotected(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  token?: string | null,
+): Promise<{ reprotected: boolean }> {
+  if (token === null || token === undefined) return { reprotected: false };
+  const entry = unprotectTokens.get(token);
+  if (!entry) return { reprotected: false };
+  return serializeOnSheet(entry.sheet, async () => {
+    // Re-read inside the chain: a release sweep may have won the race between
+    // the lookup above and our turn here, in which case the sheet is already
+    // back in the state the caller wanted.
+    if (!unprotectTokens.delete(token)) return { reprotected: false };
+    const hold = unprotectedHolds.get(entry.sheet);
+    if (!hold) return { reprotected: false };
+    const depth = hold.holders.get(entry.scriptId) ?? 0;
+    if (depth <= 1) hold.holders.delete(entry.scriptId);
+    else hold.holders.set(entry.scriptId, depth - 1);
+    if (hold.holders.size > 0) return { reprotected: false };
+
+    // Last one out. Drop the tracking BEFORE the await so a begin queued behind
+    // us opens a fresh hold rather than joining one that is being torn down.
+    unprotectedHolds.delete(entry.sheet);
+    await reprotectHeldSheet(lib, hold);
+    return { reprotected: true };
+  });
+}
+
+/**
+ * Release every hold owned by ONE departing script — the crash guarantee.
+ * Called (fire-and-forget) from hostUnmountScript, which is the funnel every
+ * ending passes through: explicit unmount, worker fault (both crash paths),
+ * debugger stop. A script that dies mid-`fn` gets its sheets re-protected here,
+ * which is precisely what a worker-side try/finally cannot promise.
+ *
+ * Exported for tests.
+ */
+export async function releaseUnprotectedSheets(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+): Promise<void> {
+  // Its tokens die with it whatever else happens — a remounted successor must
+  // never be able to end a hold it did not open. Done OUTSIDE the per-sheet
+  // chains so an in-flight end for this script finds nothing to release.
+  for (const [token, entry] of [...unprotectTokens]) {
+    if (entry.scriptId === scriptId) unprotectTokens.delete(token);
+  }
+  const sheets = [...unprotectedHolds.keys()];
+  await Promise.all(
+    sheets.map((sheet) =>
+      serializeOnSheet(sheet, async () => {
+        const hold = unprotectedHolds.get(sheet);
+        if (!hold) return;
+        if (!hold.holders.delete(scriptId)) return;
+        if (hold.holders.size > 0) return;
+        unprotectedHolds.delete(sheet);
+        try {
+          await reprotectHeldSheet(lib, hold);
+          auditUnprotectRestore(scriptId, true);
+        } catch (e) {
+          // The sheet stays open — say so LOUDLY in the ring rather than
+          // swallowing it. A failed restore is exactly the state a reader needs.
+          auditUnprotectRestore(scriptId, false, e instanceof Error ? e.message : String(e));
+        }
+      }),
+    ),
+  );
+}
+
+/** Whether a departing script owes any restore (cheap pre-check so
+ *  hostUnmountScript does not import the lib for the common case). */
+export function scriptOwesUnprotectRestore(scriptId: string): boolean {
+  for (const hold of unprotectedHolds.values()) {
+    if (hold.holders.has(scriptId)) return true;
+  }
+  return false;
+}
+
+/** Every hold, whoever owns it — the workbook-swap restore (hostResetAll). */
+export function allUnprotectedHolds(): UnprotectedHold[] {
+  return [...unprotectedHolds.values()];
+}
+
+/**
+ * Restore every outstanding hold at once. hostResetAll's sweep: BEFORE_CLOSE
+ * and AFTER_OPEN/AFTER_NEW all funnel here, and BEFORE_CLOSE is the dangerous
+ * one — the workbook is still live and may still be SAVED, so a sheet left
+ * open at that moment is a sheet that gets saved unprotected.
+ */
+export async function restoreAllUnprotected(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  holds: UnprotectedHold[],
+): Promise<void> {
+  for (const hold of holds) {
+    const owner = [...hold.holders.keys()][0] ?? "(unknown script)";
+    try {
+      await reprotectHeldSheet(lib, hold);
+      auditUnprotectRestore(owner, true);
+    } catch (e) {
+      auditUnprotectRestore(owner, false, e instanceof Error ? e.message : String(e));
+    }
+  }
+}
+
+// ============================================================================
+// Scenarios (What-If) — VBA's Worksheet.Scenarios, over the six shipped commands
+// ============================================================================
+// PURE WIRING, and that word is load-bearing for `scenarioShow`: it CALLS
+// scenario_show. That command is the transient-write precedent the animation
+// design cites, it carries the writeback-region skips, the GET.CONTROLVALUE
+// snapshot and the dependent recalculation — and it is the one place all of
+// that agrees. Re-implementing "write the changing cells and recalculate" here
+// would be a second set of rules for the same act.
+//
+// Everything is NAME-addressed, because that is how VBA reads
+// (`ws.Scenarios("Best Case").Show`) and because a scenario's identity IS its
+// name — the backend matches case-insensitively on it in all six commands.
+
+/** One changing cell of a scenario, as scripts write and read it. */
+export interface ScriptScenarioCell {
+  row: number;
+  col: number;
+  /** The value the cell takes in this scenario. Scalars are accepted on the
+   *  way in and stringified for the backend, which re-parses them (number /
+   *  TRUE / FALSE / text) exactly as it does for a hand-typed scenario. */
+  value: string | number | boolean | null;
+}
+
+/** One saved scenario, as api.scenarios() answers it. */
+export interface ScriptScenario {
+  name: string;
+  changingCells: ScriptScenarioCell[];
+  comment: string;
+  createdBy: string;
+  sheetIndex: number;
+}
+
+/** api.scenarioAdd parameters — VBA's `Scenarios.Add Name:=..., ChangingCells:=...,
+ *  Values:=Array(...)`, with both spellings of the cell/value pairing. */
+export interface ScriptScenarioAddParams {
+  name: string;
+  /** An A1 address ("B2:B4", paired with `values`) or the explicit cells. */
+  changingCells: string | ScriptScenarioCell[];
+  /** Required with the A1 spelling: one value per cell, row-major. */
+  values?: Array<string | number | boolean | null>;
+  comment?: string;
+  sheet?: number | string;
+}
+
+/** api.scenarioSummary options. */
+export interface ScriptScenarioSummaryOptions {
+  /** The formula cells the report compares across scenarios: an A1 range, a
+   *  list of addresses, or explicit coordinates. */
+  resultCells?: string | Array<string | { row: number; col: number }>;
+  sheet?: number | string;
+}
+
+/** One row of the summary report. */
+export interface ScriptScenarioSummaryRow {
+  cellRef: string;
+  currentValue: string;
+  scenarioValues: string[];
+  isChangingCell: boolean;
+}
+
+/** Stringify a scenario value for the backend's `value: String` field. `null`
+ *  becomes the empty string, which parse_scenario_value reads as empty text —
+ *  the same thing clearing the cell in the Scenario Manager dialog does. */
+function scenarioValueToBackend(value: string | number | boolean | null): string {
+  if (value === null) return "";
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  return String(value);
+}
+
+/** Every cell of a box, row-major — the order VBA's `Values:=Array(...)` pairs
+ *  against `ChangingCells`. */
+function boxCellsRowMajor(box: ScriptRangeBox): Array<{ row: number; col: number }> {
+  const cells: Array<{ row: number; col: number }> = [];
+  for (let r = box.startRow; r <= box.endRow; r++) {
+    for (let c = box.startCol; c <= box.endCol; c++) cells.push({ row: r, col: c });
+  }
+  return cells;
+}
+
+/**
+ * Parse an A1 body that must NOT carry a sheet prefix. Scenario and consolidate
+ * arguments carry their sheet in a named slot, and two competing sheet claims
+ * in one call is the ambiguity every other range option in this file refuses.
+ */
+function parseUnqualifiedA1(address: string, method: string, label: string): ScriptRangeBox {
+  const { sheetName, rest } = splitSheetPrefixHost(address);
+  if (sheetName !== null) {
+    throw new BrokerError(
+      "ValidationError",
+      `${method}: ${label} must not name a sheet ("${address}") — use the \`sheet\` option`,
+    );
+  }
+  try {
+    return parseA1BodyHost(rest);
+  } catch {
+    throw new BrokerError(
+      "ValidationError",
+      `${method}: ${label} "${address}" is not an A1 range like "B2:B4"`,
+    );
+  }
+}
+
+/**
+ * Resolve `changingCells` (+ `values`) to the backend's flat cell list. The A1
+ * spelling is expanded row-major and zipped with `values`; a length mismatch is
+ * refused NAMING BOTH COUNTS, because "3 cells, 2 values" is a typo the author
+ * can fix instantly and a silent truncation is a scenario that quietly stores
+ * the wrong numbers.
+ */
+export function resolveScenarioChangingCells(
+  params: ScriptScenarioAddParams,
+): Array<{ row: number; col: number; value: string }> {
+  if (typeof params.changingCells === "string") {
+    const box = parseUnqualifiedA1(params.changingCells, "scenarioAdd", "changingCells");
+    const cells = boxCellsRowMajor(box);
+    const values = params.values ?? [];
+    if (cells.length !== values.length) {
+      throw new BrokerError(
+        "ValidationError",
+        `scenarioAdd: changingCells "${params.changingCells}" covers ${cells.length} cell(s) ` +
+          `but ${values.length} value(s) were given — they must pair up one for one, row by row`,
+      );
+    }
+    return cells.map((c, i) => ({
+      row: c.row,
+      col: c.col,
+      value: scenarioValueToBackend(values[i]),
+    }));
+  }
+  return params.changingCells.map((c) => ({
+    row: c.row,
+    col: c.col,
+    value: scenarioValueToBackend(c.value),
+  }));
+}
+
+/** Resolve the summary's `resultCells` to plain coordinates. */
+export function resolveScenarioResultCells(
+  spec: ScriptScenarioSummaryOptions["resultCells"],
+): Array<{ row: number; col: number }> {
+  if (spec === undefined || spec === null) return [];
+  if (typeof spec === "string") {
+    return boxCellsRowMajor(parseUnqualifiedA1(spec, "scenarioSummary", "resultCells"));
+  }
+  const out: Array<{ row: number; col: number }> = [];
+  for (const entry of spec) {
+    if (typeof entry === "string") {
+      out.push(...boxCellsRowMajor(parseUnqualifiedA1(entry, "scenarioSummary", "resultCells")));
+    } else {
+      out.push({ row: entry.row, col: entry.col });
+    }
+  }
+  return out;
+}
+
+/** Backend Scenario -> the script shape (camelCase both sides; this only
+ *  re-types the value field, which crosses as a string). */
+function scenarioToScript(s: {
+  name: string;
+  changingCells: Array<{ row: number; col: number; value: string }>;
+  comment: string;
+  createdBy: string;
+  sheetIndex: number;
+}): ScriptScenario {
+  return {
+    name: s.name,
+    changingCells: s.changingCells.map((c) => ({ row: c.row, col: c.col, value: c.value })),
+    comment: s.comment,
+    createdBy: s.createdBy,
+    sheetIndex: s.sheetIndex,
+  };
+}
+
+/** The sheet a scenario call addresses: any sheet (all six commands take an
+ *  explicit index), defaulting to the active one. */
+async function resolveScenarioSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef: number | string | undefined | null,
+  method: string,
+): Promise<SheetWriteTarget> {
+  return resolveSheetWriteTarget(lib, sheetRef, method);
+}
+
+export async function executeScenarios(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef?: number | string | null,
+): Promise<ScriptScenario[]> {
+  const t = await resolveScenarioSheet(lib, sheetRef, "scenarios");
+  const result = await lib.scenarioList(t.sheet);
+  return result.scenarios.map(scenarioToScript);
+}
+
+export async function executeScenarioAdd(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  params: ScriptScenarioAddParams,
+): Promise<{ name: string; changingCells: number }> {
+  const t = await resolveScenarioSheet(lib, params.sheet, "scenarioAdd");
+  // Resolved BEFORE the backend call so a mismatched cells/values pair fails
+  // without touching the workbook.
+  const changingCells = resolveScenarioChangingCells(params);
+  const result = await lib.scenarioAdd({
+    name: params.name,
+    changingCells,
+    comment: params.comment ?? "",
+    sheetIndex: t.sheet,
+  });
+  if (!result.success) {
+    // The backend refuses here for exactly one reason a script can act on: the
+    // sheet's allowEditScenarios protection flag. Surfacing its own words keeps
+    // the two explanations from drifting.
+    throw new BrokerError("ValidationError", result.error || "scenarioAdd was refused");
+  }
+  return { name: params.name, changingCells: changingCells.length };
+}
+
+export async function executeScenarioShow(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  name: string,
+  sheetRef?: number | string | null,
+): Promise<{ cellsUpdated: number }> {
+  const t = await resolveScenarioSheet(lib, sheetRef, "scenarioShow");
+  const result = await lib.scenarioShow({ name, sheetIndex: t.sheet });
+  if (result.error) {
+    throw new BrokerError("ValidationError", result.error);
+  }
+  // scenario_show WRITES (there is no scenario_restore — the values stay and
+  // are saved), so it is a write-attribution op like any other: without this a
+  // script's own onDataChange re-fires on the cells it just drove.
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, t.sheet, cell.row, cell.col);
+  }
+  if (!t.offSheet) await afterCellDataChange(result.updatedCells);
+  return { cellsUpdated: result.updatedCells.length };
+}
+
+export async function executeScenarioDelete(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  name: string,
+  sheetRef?: number | string | null,
+): Promise<{ deleted: true }> {
+  const t = await resolveScenarioSheet(lib, sheetRef, "scenarioDelete");
+  const result = await lib.scenarioDelete({ name, sheetIndex: t.sheet });
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || `scenario "${name}" was not deleted`);
+  }
+  return { deleted: true };
+}
+
+export async function executeScenarioSummary(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  options?: ScriptScenarioSummaryOptions,
+): Promise<{ scenarioNames: string[]; rows: ScriptScenarioSummaryRow[] }> {
+  const t = await resolveScenarioSheet(lib, options?.sheet, "scenarioSummary");
+  const resultCells = resolveScenarioResultCells(options?.resultCells);
+  const result = await lib.scenarioSummary({
+    sheetIndex: t.sheet,
+    // The backend's ScenarioCell carries a value field it never reads for
+    // result cells; "" is the honest filler for "this is a coordinate".
+    resultCells: resultCells.map((c) => ({ row: c.row, col: c.col, value: "" })),
+  });
+  if (result.error) {
+    throw new BrokerError("ValidationError", result.error);
+  }
+  // The report is BUILT by applying each scenario in turn, and the backend
+  // never puts the originals back — so the sheet is left holding the last
+  // scenario's values but the command answers with rows, not cells. Nothing
+  // would repaint without this, and the canvas would keep showing numbers the
+  // workbook no longer holds. announceNonCellMutation is the existing "the
+  // visible sheet changed underneath you" refresh, which is exactly the shape
+  // here: real changes, no cell payload to apply.
+  announceNonCellMutation(t.offSheet);
+  return { scenarioNames: result.scenarioNames, rows: result.rows };
+}
+
+export async function executeScenarioMerge(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  fromSheet: number | string,
+  toSheet?: number | string | null,
+): Promise<{ merged: true }> {
+  const { sheets, activeIndex } = await lib.getSheets();
+  const source = resolveSheetRefIn(sheets, fromSheet, "scenarioMerge");
+  const target =
+    toSheet === undefined || toSheet === null
+      ? activeIndex
+      : resolveSheetRefIn(sheets, toSheet, "scenarioMerge");
+  if (source === target) {
+    throw new BrokerError(
+      "ValidationError",
+      "scenarioMerge: the source and target sheets must be different",
+    );
+  }
+  const result = await lib.scenarioMerge(source, target);
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "scenarioMerge was refused");
+  }
+  return { merged: true };
+}
+
+// ============================================================================
+// Consolidate (Data ▸ Consolidate) — one row over consolidate_data
+// ============================================================================
+
+/** api.consolidate parameters. */
+export interface ScriptConsolidateParams {
+  /** sum | count | average | max | min | product | countNums | stdDev |
+   *  stdDevP | var | varP. */
+  function: string;
+  /** The ranges to combine: A1 strings (optionally "Sheet2!"-qualified) or
+   *  explicit boxes with their own `sheet` slot. */
+  sources: Array<string | (ScriptRangeBox & { sheet?: number | string })>;
+  /** Where the result block's top-left corner goes. */
+  destination: string | { row: number; col: number; sheet?: number | string };
+  /** Match columns up by the header text in each source's top row. */
+  useTopRow?: boolean;
+  /** Match rows up by the label text in each source's left column. */
+  useLeftColumn?: boolean;
+  /** Default sheet for sources and destination that do not name their own. */
+  sheet?: number | string;
+}
+
+/**
+ * Resolve one `sources` entry to the backend's `{ sheetIndex, start*, end* }`.
+ * The A1 spelling MAY name a sheet here (unlike the scenario arguments): a
+ * consolidation whose whole point is combining Q1/Q2/Q3 sheets would be absurd
+ * to express with one shared sheet slot, so `"Q1!A1:D10"` is the natural
+ * spelling and the wave-1 prefix splitter already reads it.
+ */
+function resolveConsolidateSource(
+  sheets: SheetListEntry[],
+  src: string | (ScriptRangeBox & { sheet?: number | string }),
+  fallbackSheet: number,
+  label: string,
+): { sheetIndex: number; startRow: number; startCol: number; endRow: number; endCol: number } {
+  if (typeof src === "string") {
+    const { sheetName, rest } = splitSheetPrefixHost(src);
+    const sheetIndex =
+      sheetName === null ? fallbackSheet : resolveSheetRefIn(sheets, sheetName, "consolidate");
+    let box: ScriptRangeBox;
+    try {
+      box = parseA1BodyHost(rest);
+    } catch {
+      throw new BrokerError(
+        "ValidationError",
+        `consolidate: ${label} "${src}" is not an A1 range like "A1:D10" or "Q1!A1:D10"`,
+      );
+    }
+    return { sheetIndex, ...box };
+  }
+  const sheetIndex =
+    src.sheet === undefined || src.sheet === null
+      ? fallbackSheet
+      : resolveSheetRefIn(sheets, src.sheet, "consolidate");
+  return {
+    sheetIndex,
+    startRow: Math.min(src.startRow, src.endRow),
+    startCol: Math.min(src.startCol, src.endCol),
+    endRow: Math.max(src.startRow, src.endRow),
+    endCol: Math.max(src.startCol, src.endCol),
+  };
+}
+
+/** The consolidate destination: only its TOP-LEFT matters (the block's size is
+ *  whatever the aggregation produces), so an A1 range collapses to its start. */
+function resolveConsolidateDestination(
+  sheets: SheetListEntry[],
+  dest: ScriptConsolidateParams["destination"],
+  fallbackSheet: number,
+): { sheetIndex: number; row: number; col: number } {
+  if (typeof dest === "string") {
+    const { sheetName, rest } = splitSheetPrefixHost(dest);
+    const sheetIndex =
+      sheetName === null ? fallbackSheet : resolveSheetRefIn(sheets, sheetName, "consolidate");
+    let box: ScriptRangeBox;
+    try {
+      box = parseA1BodyHost(rest);
+    } catch {
+      throw new BrokerError(
+        "ValidationError",
+        `consolidate: destination "${dest}" is not an A1 address like "A1" or "Summary!A1"`,
+      );
+    }
+    return { sheetIndex, row: box.startRow, col: box.startCol };
+  }
+  const sheetIndex =
+    dest.sheet === undefined || dest.sheet === null
+      ? fallbackSheet
+      : resolveSheetRefIn(sheets, dest.sheet, "consolidate");
+  return { sheetIndex, row: dest.row, col: dest.col };
+}
+
+export async function executeConsolidate(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  params: ScriptConsolidateParams,
+): Promise<{ rowsWritten: number; colsWritten: number; cellsUpdated: number }> {
+  const { sheets, activeIndex } = await lib.getSheets();
+  const fallback =
+    params.sheet === undefined || params.sheet === null
+      ? activeIndex
+      : resolveSheetRefIn(sheets, params.sheet, "consolidate");
+  // Every reference is resolved BEFORE the backend call, so one bad address
+  // refuses the whole consolidation rather than half-writing a summary block.
+  const sourceRanges = params.sources.map((src, i) =>
+    resolveConsolidateSource(sheets, src, fallback, `sources[${i}]`),
+  );
+  const dest = resolveConsolidateDestination(sheets, params.destination, fallback);
+
+  const result = await lib.consolidateData({
+    function: params.function as Parameters<typeof lib.consolidateData>[0]["function"],
+    sourceRanges,
+    destSheetIndex: dest.sheetIndex,
+    destRow: dest.row,
+    destCol: dest.col,
+    useTopRow: params.useTopRow ?? false,
+    useLeftColumn: params.useLeftColumn ?? false,
+  });
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "consolidate was refused");
+  }
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, dest.sheetIndex, cell.row, cell.col);
+  }
+  if (dest.sheetIndex === activeIndex) await afterCellDataChange(result.updatedCells);
+  return {
+    rowsWritten: result.rowsWritten,
+    colsWritten: result.colsWritten,
+    cellsUpdated: result.updatedCells.length,
+  };
 }
 
 // ============================================================================

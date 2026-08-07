@@ -900,6 +900,276 @@ export const vUnprotectSheet: Validator = ([password, sheetIndex]) => {
 export const vProtectionStatus: Validator = ([sheetIndex]) =>
   checkOptionalSheetRef(sheetIndex);
 
+// ----------------------------------------------------------------------------
+// api.withUnprotected — the SANCTIONED alternative to UserInterfaceOnly
+// ----------------------------------------------------------------------------
+// The worker helper is a composite over two broker rows: begin lifts the
+// protection (remembering EXACTLY what was in force) and end puts it back. The
+// pair exists rather than one row because `fn` runs in the WORKER realm and a
+// single host call cannot execute it — and because splitting them is what lets
+// the HOST own the restore, so a killed realm still gets its sheet re-protected
+// (a worker-side try/finally would die with the worker).
+
+/** api.beginUnprotected args: [password?, sheet?] — the password the sheet was
+ *  protected with, and the sheet (ACTIVE only; the executor refuses others). */
+export const vBeginUnprotected: Validator = ([password, sheetIndex]) => {
+  if (password !== undefined && password !== null && !isBoundedString(password, MAX_PROTECTION_PASSWORD)) {
+    return `password must be a string (max ${MAX_PROTECTION_PASSWORD} chars)`;
+  }
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** api.endUnprotected args: [token] — the opaque hold token begin handed back.
+ *  `null` is the "the sheet was never protected, nothing to put back" answer
+ *  and is accepted so the worker's `finally` has one shape. */
+export const vEndUnprotected: Validator = ([token]) => {
+  if (token === null || token === undefined) return true;
+  if (!isBoundedString(token, MAX_KEY) || (token as string).length === 0) {
+    return "token must be the non-empty string api.beginUnprotected returned";
+  }
+  return true;
+};
+
+// ============================================================================
+// Scenarios (What-If): VBA's Worksheet.Scenarios collection
+// ============================================================================
+// Name-addressed throughout — VBA's `ws.Scenarios("Best Case").Show` names the
+// scenario, never an index, and so does this. The sheet slot takes the Wave-1
+// name-or-index ref and may be ANY sheet: the six backend commands are all
+// explicitly sheet_index-parameterized (unlike the protection family).
+
+/** Longest scenario name / comment a script may pass (the backend stores them
+ *  verbatim; these are sanity ceilings, not backend limits). */
+const MAX_SCENARIO_NAME = 255;
+const MAX_SCENARIO_COMMENT = 4_096;
+/** Excel caps a scenario at 32 changing cells; this is deliberately looser —
+ *  the ceiling is here to stop a runaway loop, not to re-impose Excel's limit. */
+export const MAX_SCENARIO_CHANGING_CELLS = 1_000;
+/** The most result cells one summary report may compare. */
+export const MAX_SCENARIO_RESULT_CELLS = 1_000;
+
+/** A scenario cell VALUE: the backend stores it as a string and re-parses it
+ *  (number / TRUE / FALSE / text), so scalars are accepted and stringified
+ *  host-side rather than making every author write `String(x)`. */
+function checkScenarioValue(v: unknown, label: string): true | string {
+  if (typeof v === "boolean" || v === null) return true;
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? true : `${label} must be a finite number`;
+  }
+  if (isBoundedString(v, MAX_STRING)) return true;
+  return `${label} must be a string, number, boolean or null`;
+}
+
+/**
+ * The `changingCells` argument, in either shape:
+ *   - an A1 string ("B2:B4"), which REQUIRES a parallel `values` array —
+ *     VBA's `ChangingCells:="B2:B4", Values:=Array(1, 2, 3)`;
+ *   - an array of `{ row, col, value }`, the explicit spelling.
+ * The two are not mixable, and `values` is refused alongside the array form so
+ * a call can never carry two disagreeing sources for the same numbers.
+ */
+function checkChangingCells(cells: unknown, values: unknown): true | string {
+  if (typeof cells === "string") {
+    if (!Array.isArray(values)) {
+      return 'changingCells given as an A1 address ("B2:B4") needs a parallel `values` array';
+    }
+    if (values.length === 0) return "values must not be empty";
+    if (values.length > MAX_SCENARIO_CHANGING_CELLS) {
+      return `values may hold at most ${MAX_SCENARIO_CHANGING_CELLS} entries`;
+    }
+    for (let i = 0; i < values.length; i++) {
+      const verdict = checkScenarioValue(values[i], `values[${i}]`);
+      if (verdict !== true) return verdict;
+    }
+    return true;
+  }
+  if (!Array.isArray(cells)) {
+    return 'changingCells must be an A1 address ("B2:B4", with `values`) or an array of { row, col, value }';
+  }
+  if (values !== undefined) {
+    return "values belongs with the A1 spelling of changingCells; the { row, col, value } array already carries them";
+  }
+  if (cells.length === 0) return "changingCells must not be empty";
+  if (cells.length > MAX_SCENARIO_CHANGING_CELLS) {
+    return `changingCells may hold at most ${MAX_SCENARIO_CHANGING_CELLS} cells`;
+  }
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    if (typeof c !== "object" || c === null || Array.isArray(c)) {
+      return `changingCells[${i}] must be an object { row, col, value }`;
+    }
+    const o = c as Record<string, unknown>;
+    if (!isCellCoord(o.row)) return `changingCells[${i}].row must be a non-negative integer`;
+    if (!isCellCoord(o.col)) return `changingCells[${i}].col must be a non-negative integer`;
+    const verdict = checkScenarioValue(o.value, `changingCells[${i}].value`);
+    if (verdict !== true) return verdict;
+  }
+  return true;
+}
+
+/** api.scenarios args: [sheet?] — list every scenario on one sheet. */
+export const vScenarios: Validator = ([sheetIndex]) => checkOptionalSheetRef(sheetIndex, "sheet");
+
+/** api.scenarioAdd args: [params] — `{ name, changingCells, values?, comment?, sheet? }`,
+ *  mapping VBA's `Scenarios.Add Name:=..., ChangingCells:=..., Values:=Array(...)`. */
+export const vScenarioAdd: Validator = ([params]) => {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    return "scenarioAdd takes one object { name, changingCells, values?, comment?, sheet? }";
+  }
+  const p = params as Record<string, unknown>;
+  const allowed = ["name", "changingCells", "values", "comment", "sheet"];
+  for (const k of Object.keys(p)) {
+    if (p[k] === undefined) continue;
+    if (!allowed.includes(k)) {
+      return `unknown scenarioAdd key "${k}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  if (!isBoundedString(p.name, MAX_SCENARIO_NAME) || (p.name as string).trim().length === 0) {
+    return `name must be a non-empty string (max ${MAX_SCENARIO_NAME} chars)`;
+  }
+  const verdict = checkChangingCells(p.changingCells, p.values);
+  if (verdict !== true) return verdict;
+  if (p.comment !== undefined && !isBoundedString(p.comment, MAX_SCENARIO_COMMENT)) {
+    return `comment must be a string (max ${MAX_SCENARIO_COMMENT} chars)`;
+  }
+  return checkOptionalSheetRef(p.sheet, "sheet");
+};
+
+/** api.scenarioShow / api.scenarioDelete args: [name, sheet?]. */
+export const vScenarioByName: Validator = ([name, sheetIndex]) => {
+  if (!isBoundedString(name, MAX_SCENARIO_NAME) || (name as string).trim().length === 0) {
+    return `name must be a non-empty string (max ${MAX_SCENARIO_NAME} chars)`;
+  }
+  return checkOptionalSheetRef(sheetIndex, "sheet");
+};
+
+/** api.scenarioSummary args: [options?] — `{ resultCells?, sheet? }`. The
+ *  result cells are the formula cells the report compares across scenarios
+ *  (VBA's `Scenarios.CreateSummary ResultCells:=...`); omitted means "none",
+ *  which the backend renders as a changing-cells-only report. */
+export const vScenarioSummary: Validator = ([options]) => {
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "scenarioSummary takes one optional object { resultCells?, sheet? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (o[k] === undefined) continue;
+    if (k !== "resultCells" && k !== "sheet") {
+      return `unknown scenarioSummary key "${k}" (allowed: resultCells, sheet)`;
+    }
+  }
+  const cells = o.resultCells;
+  if (cells !== undefined && cells !== null) {
+    if (typeof cells === "string") {
+      if (cells.trim().length === 0) return "resultCells must not be an empty string";
+    } else if (Array.isArray(cells)) {
+      if (cells.length > MAX_SCENARIO_RESULT_CELLS) {
+        return `resultCells may hold at most ${MAX_SCENARIO_RESULT_CELLS} cells`;
+      }
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        if (typeof c === "string") {
+          if (c.trim().length === 0) return `resultCells[${i}] must not be an empty string`;
+          continue;
+        }
+        if (typeof c !== "object" || c === null || Array.isArray(c)) {
+          return `resultCells[${i}] must be an A1 address or an object { row, col }`;
+        }
+        const rc = c as Record<string, unknown>;
+        if (!isCellCoord(rc.row)) return `resultCells[${i}].row must be a non-negative integer`;
+        if (!isCellCoord(rc.col)) return `resultCells[${i}].col must be a non-negative integer`;
+      }
+    } else {
+      return 'resultCells must be an A1 address ("B10:B12") or an array of addresses / { row, col }';
+    }
+  }
+  return checkOptionalSheetRef(o.sheet, "sheet");
+};
+
+/** api.scenarioMerge args: [fromSheet, toSheet?] — copy every scenario whose
+ *  name is not already taken. `toSheet` omitted = the active sheet. */
+export const vScenarioMerge: Validator = ([fromSheet, toSheet]) => {
+  const from = checkSheetRef(fromSheet, "fromSheet");
+  if (from !== true) return from;
+  return checkOptionalSheetRef(toSheet, "toSheet");
+};
+
+// ============================================================================
+// Consolidate (Data ▸ Consolidate): VBA's Range.Consolidate
+// ============================================================================
+
+/** The aggregation names api.consolidate accepts — the ConsolidationFunction
+ *  enum in api_types.rs, camelCase per the serde convention. */
+export const CONSOLIDATION_FUNCTIONS = [
+  "sum", "count", "average", "max", "min", "product", "countNums",
+  "stdDev", "stdDevP", "var", "varP",
+] as const;
+const CONSOLIDATION_FUNCTION_SET: ReadonlySet<string> = new Set(CONSOLIDATION_FUNCTIONS);
+
+/** The most source ranges one consolidate call may name. */
+export const MAX_CONSOLIDATE_SOURCES = 256;
+
+/** One `sources` entry: an A1 string (optionally "Sheet!"-qualified) or an
+ *  explicit box. */
+function checkConsolidateSource(src: unknown, label: string): true | string {
+  if (typeof src === "string") {
+    return src.trim().length > 0 ? true : `${label} must not be an empty string`;
+  }
+  if (typeof src !== "object" || src === null || Array.isArray(src)) {
+    return `${label} must be an A1 address ("Sheet2!A1:D10") or an object { startRow, startCol, endRow, endCol, sheet? }`;
+  }
+  const o = src as Record<string, unknown>;
+  for (const k of ["startRow", "startCol", "endRow", "endCol"]) {
+    if (!isCellCoord(o[k])) return `${label}.${k} must be a non-negative integer`;
+  }
+  return checkOptionalSheetRef(o.sheet, `${label}.sheet`);
+}
+
+/** api.consolidate args: [params]. */
+export const vConsolidate: Validator = ([params]) => {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    return "consolidate takes one object { function, sources, destination, useTopRow?, useLeftColumn?, sheet? }";
+  }
+  const p = params as Record<string, unknown>;
+  const allowed = ["function", "sources", "destination", "useTopRow", "useLeftColumn", "sheet"];
+  for (const k of Object.keys(p)) {
+    if (p[k] === undefined) continue;
+    if (!allowed.includes(k)) {
+      return `unknown consolidate key "${k}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  if (typeof p.function !== "string" || !CONSOLIDATION_FUNCTION_SET.has(p.function)) {
+    return `function must be one of: ${CONSOLIDATION_FUNCTIONS.join(", ")}`;
+  }
+  if (!Array.isArray(p.sources) || p.sources.length === 0) {
+    return "sources must be a non-empty array of ranges";
+  }
+  if (p.sources.length > MAX_CONSOLIDATE_SOURCES) {
+    return `sources may name at most ${MAX_CONSOLIDATE_SOURCES} ranges`;
+  }
+  for (let i = 0; i < p.sources.length; i++) {
+    const verdict = checkConsolidateSource(p.sources[i], `sources[${i}]`);
+    if (verdict !== true) return verdict;
+  }
+  const dest = p.destination;
+  if (typeof dest === "string") {
+    if (dest.trim().length === 0) return "destination must not be an empty string";
+  } else if (typeof dest === "object" && dest !== null && !Array.isArray(dest)) {
+    const d = dest as Record<string, unknown>;
+    if (!isCellCoord(d.row)) return "destination.row must be a non-negative integer";
+    if (!isCellCoord(d.col)) return "destination.col must be a non-negative integer";
+    const verdict = checkOptionalSheetRef(d.sheet, "destination.sheet");
+    if (verdict !== true) return verdict;
+  } else {
+    return 'destination must be an A1 address ("Summary!A1") or an object { row, col, sheet? }';
+  }
+  for (const k of ["useTopRow", "useLeftColumn"]) {
+    if (p[k] !== undefined && typeof p[k] !== "boolean") return `${k} must be a boolean`;
+  }
+  return checkOptionalSheetRef(p.sheet, "sheet");
+};
+
 // ============================================================================
 // Structural operations (B2)
 // ============================================================================

@@ -1945,6 +1945,108 @@ declare interface ScriptProtectionStatus {
   options: Required<Omit<ScriptProtectSheetOptions, "password">>;
 }
 
+/** api.withUnprotected options, for when a bare password string is not enough. */
+declare interface ScriptWithUnprotectedOptions {
+  /** The password the sheet was protected with. Omit for a sheet protected
+   *  without one. */
+  password?: string;
+  /** The sheet to open — ACTIVE only, like every other protection call. */
+  sheet?: SheetRef;
+}
+
+/** One changing cell of a what-if scenario. */
+declare interface ScriptScenarioCell {
+  row: number;
+  col: number;
+  /** The value this cell takes in the scenario. Numbers, booleans and strings
+   *  are all accepted; Calcula stores and re-parses them exactly as it does a
+   *  scenario typed into the Scenario Manager. */
+  value: string | number | boolean | null;
+}
+
+/** One saved scenario, as api.scenarios() answers it. */
+declare interface ScriptScenario {
+  name: string;
+  changingCells: ScriptScenarioCell[];
+  comment: string;
+  /** Who saved it. */
+  createdBy: string;
+  /** The 0-based sheet the scenario belongs to. */
+  sheetIndex: number;
+}
+
+/**
+ * api.scenarioAdd parameters — VBA's
+ * `Scenarios.Add Name:=..., ChangingCells:=..., Values:=Array(...)`.
+ *
+ * `changingCells` takes either spelling and they do not mix:
+ *   - an A1 address, which REQUIRES a parallel `values` array read row by row;
+ *   - an explicit `{ row, col, value }[]`, which carries its own values.
+ */
+declare interface ScriptScenarioAddParams {
+  /** Unique within the sheet, matched case-insensitively (re-using a name
+   *  updates that scenario). */
+  name: string;
+  changingCells: string | ScriptScenarioCell[];
+  /** One value per cell, row-major. Required with the A1 spelling; refused
+   *  with the array spelling, which already carries its values. */
+  values?: Array<string | number | boolean | null>;
+  comment?: string;
+  /** 0-based index or sheet NAME. Omit for the active sheet. */
+  sheet?: SheetRef;
+}
+
+/** api.scenarioSummary options. */
+declare interface ScriptScenarioSummaryOptions {
+  /** The formula cells the report compares across every scenario (VBA's
+   *  `ResultCells`): an A1 range, a list of addresses, or coordinates. Omit
+   *  for a changing-cells-only report. */
+  resultCells?: string | Array<string | { row: number; col: number }>;
+  sheet?: SheetRef;
+}
+
+/** One row of the report api.scenarioSummary builds. */
+declare interface ScriptScenarioSummaryRow {
+  /** The cell this row is about, as "$B$2". */
+  cellRef: string;
+  /** Its value right now, before any scenario is applied. */
+  currentValue: string;
+  /** Its value under each scenario, in the order of `scenarioNames`. */
+  scenarioValues: string[];
+  /** True for a changing cell, false for a result cell. */
+  isChangingCell: boolean;
+}
+
+/** api.consolidate parameters (Data ▸ Consolidate / VBA Range.Consolidate). */
+declare interface ScriptConsolidateParams {
+  /** How to combine the overlapping values. */
+  function:
+    | "sum" | "count" | "average" | "max" | "min" | "product"
+    | "countNums" | "stdDev" | "stdDevP" | "var" | "varP";
+  /**
+   * The ranges to combine. An A1 string MAY name its own sheet
+   * ("Q1!A1:D10") — consolidating across sheets is the normal case — or you
+   * can pass an explicit box with its own `sheet` slot.
+   */
+  sources: Array<
+    | string
+    | { startRow: number; startCol: number; endRow: number; endCol: number; sheet?: SheetRef }
+  >;
+  /** Where the result block's TOP-LEFT corner goes; an A1 range collapses to
+   *  its start (the block is as big as the aggregation makes it). */
+  destination: string | { row: number; col: number; sheet?: SheetRef };
+  /** Match columns up by the header text in each source's top row rather than
+   *  by position. Default false. */
+  useTopRow?: boolean;
+  /** Match rows up by the label text in each source's left column. Default
+   *  false. When neither this nor `useTopRow` is set, sources are combined BY
+   *  POSITION and must all be the same size. */
+  useLeftColumn?: boolean;
+  /** Default sheet for any source or destination that does not name its own.
+   *  Omit for the active sheet. */
+  sheet?: SheetRef;
+}
+
 /** A sort criterion for api.sortRange. */
 declare interface ScriptSortField {
   /** 0-based offset of the sort column FROM THE RANGE START (not an absolute
@@ -3345,16 +3447,39 @@ declare interface UnlockedAPI {
    * await api.range("Orders");          // a table -> its DATA BODY (headers excluded)
    * ```
    *
-   * Resolution order: a "Sheet!" prefix is ALWAYS an address (an unknown sheet
-   * name rejects, listing the workbook's sheets); then A1-parse WINS — "A1" is
-   * the cell A1, never a named range or table called "A1"; then named ranges
-   * (exact name first, then unique case-insensitively); then table names.
-   * Anything else rejects listing the named ranges and tables that DO exist.
+   * Resolution order: a COMMA address is multi-area (below); then a "Sheet!"
+   * prefix is ALWAYS an address (an unknown sheet name rejects, listing the
+   * workbook's sheets); then A1-parse WINS — "A1" is the cell A1, never a named
+   * range or table called "A1"; then named ranges (exact name first, then
+   * unique case-insensitively); then table names. Anything else rejects listing
+   * the named ranges and tables that DO exist.
+   *
+   * MULTI-AREA. A comma address is VBA's `Range("A1:B2,D4:E5")` and answers a
+   * {@link ScriptRangeAreas} — NOT a ScriptRange. The return type is resolved
+   * from the address (see {@link RangeShapeFor}), so a literal address needs no
+   * narrowing in either direction:
+   *
+   * ```js
+   * const r = await api.range("A1:B2,D4:E5");  // ScriptRangeAreas
+   * await r.format({ bold: true });            // every area
+   * await r.areas[0].setValues(...);           // one area, as an ordinary range
+   * ```
+   *
+   * Only an address built at RUNTIME is the union `ScriptRange | ScriptRangeAreas`,
+   * because only then is the shape unknown until the call returns — narrow it
+   * with `if ("areas" in r)` and the compiler tells you which shape you hold.
+   *
+   * A multi-area range deliberately does NOT offer the rectangle ops
+   * (setValue/setValues/select/offset/resize/end/find/sort/fill/goalSeek/...):
+   * none of them has one correct meaning across disjoint areas, and applying
+   * them to the first area only would be silently wrong. Reach through
+   * `areas[i]` for those. Only the FIRST area may carry a "Sheet!" prefix, and
+   * it applies to all of them.
    *
    * Calcula policy (generated): List sheets.
    * Reach: broker `api.getSheetNames`, unlocked tier, class read.
    */
-  range(address: string): Promise<ScriptRange>;
+  range<A extends string>(address: A): Promise<RangeShapeFor<A>>;
   /** Read a cell value by row/col (active sheet) as a DISPLAY STRING.
    *
    * Calcula policy (generated): Read any cell.
@@ -3757,10 +3882,13 @@ declare interface UnlockedAPI {
    * sheet is already protected, or if `sheet` names a non-active sheet.
    *
    * NOT SUPPORTED (refused, loudly): `scriptsCanEdit` — VBA's
-   * UserInterfaceOnly. Protection currently binds scripts exactly as it binds
-   * the user, so protecting a sheet also blocks YOUR OWN writes to its locked
-   * cells: unprotect, write, re-protect (or mark your working cells
-   * `locked: false` via setRangeFormat first).
+   * UserInterfaceOnly. Protection binds scripts exactly as it binds the user,
+   * so protecting a sheet also blocks YOUR OWN writes to its locked cells.
+   * That is deliberate, and there are two supported ways round it:
+   * `api.withUnprotected(password, fn)`, which lifts the protection for one
+   * block of work and always puts it back; or marking the cells you mean to
+   * write `locked: false` via setRangeFormat, so they are never protected in
+   * the first place.
    *
    * ```js
    * await api.setRangeFormat(0, 0, 99, 0, { locked: false }); // input column stays editable
@@ -3788,6 +3916,141 @@ declare interface UnlockedAPI {
    * Reach: broker `api.getProtectionStatus`, unlocked tier, class read.
    */
   getProtectionStatus(sheet?: SheetRef): Promise<ScriptProtectionStatus>;
+  /**
+   * Run `fn` with the ACTIVE sheet's protection lifted, then put back EXACTLY
+   * the protection it had — same password, same permission flags. This is
+   * Calcula's answer to VBA's `UserInterfaceOnly:=True`, and it is a better
+   * one: the lift and the restore are both recorded, so anyone reading the
+   * script audit trail can see precisely when the sheet was open.
+   *
+   * The guarantees, which is why you should use this instead of calling
+   * unprotectSheet/protectSheet yourself:
+   *
+   *  - **The sheet is always re-protected.** Not just when `fn` throws — also
+   *    if your script is stopped, faults, or is killed outright mid-write.
+   *    Calcula remembers the lift and restores it when the script ends by ANY
+   *    route, which is a promise your own try/finally cannot make.
+   *  - **The exact prior protection comes back**, not a default set.
+   *  - **A sheet that was not protected stays unprotected.** `fn` simply runs.
+   *  - **A wrong password rejects and `fn` never runs**, so you can never write
+   *    into a sheet you only thought you had opened.
+   *  - **Nesting and concurrency are safe**: a second call on the same sheet
+   *    joins the first (proving the same password), and the protection returns
+   *    only when the last one finishes.
+   *
+   * Resolves whatever `fn` resolves.
+   *
+   * ```js
+   * const total = await api.withUnprotected("s3cret", async () => {
+   *   await api.setCellValue(0, 0, "recomputed");
+   *   return api.getCellValue(0, 1);
+   * });
+   * ```
+   *
+   * Calcula policy (generated): Temporarily lift the active sheet's protection so the script can write to it, remembering the exact protection to put back (a wrong password refuses, and Calcula re-protects the sheet even if the script crashes).
+   * Reach: broker `api.beginUnprotected`, unlocked tier, class mutate.
+   */
+  withUnprotected<T>(
+    passwordOrOptions: string | ScriptWithUnprotectedOptions | undefined,
+    fn: () => T | Promise<T>,
+    sheet?: SheetRef,
+  ): Promise<T>;
+
+  // -- Scenarios (What-If) --
+  // VBA's `Worksheet.Scenarios`, name-addressed exactly as VBA reads it
+  // (`ws.Scenarios("Best Case").Show`). Every call takes an optional `sheet`
+  // (0-based index or NAME, Wave-1 rules) and may address ANY sheet of the
+  // workbook — scenarios are stored per sheet.
+
+  /** Every scenario saved on a sheet: names, comments and changing cells.
+   *
+   * Calcula policy (generated): List the saved what-if scenarios on a sheet — their names, comments and which cells each one changes.
+   * Reach: broker `api.scenarios`, unlocked tier, class read.
+   */
+  scenarios(sheet?: SheetRef): Promise<ScriptScenario[]>;
+  /**
+   * Save a named scenario — VBA's
+   * `Scenarios.Add Name:=..., ChangingCells:=..., Values:=Array(...)`.
+   * Re-using an existing name updates that scenario.
+   *
+   * ```js
+   * await api.scenarioAdd({
+   *   name: "Best Case",
+   *   changingCells: "B2:B4",
+   *   values: [1200, 0.15, 48],
+   * });
+   * ```
+   *
+   * Calcula policy (generated): Save a named what-if scenario: a set of cells and the values they take in that scenario.
+   * Reach: broker `api.scenarioAdd`, unlocked tier, class mutate.
+   */
+  scenarioAdd(params: ScriptScenarioAddParams): Promise<{ name: string; changingCells: number }>;
+  /**
+   * Apply a scenario: write its values into its changing cells and recalculate
+   * everything downstream — the same act as picking it in the Scenario Manager.
+   *
+   * NOTE, because it differs from Excel: the values STAY. There is no "restore
+   * previous" step, so showing a scenario changes the workbook and the change
+   * is saved. Save the old values yourself first if you need them back.
+   *
+   * Calcula policy (generated): Apply a saved scenario — write its values into its changing cells and recalculate everything that depends on them.
+   * Reach: broker `api.scenarioShow`, unlocked tier, class mutate.
+   */
+  scenarioShow(name: string, sheet?: SheetRef): Promise<{ cellsUpdated: number }>;
+  /** Delete a saved scenario by name. Rejects if there is no such scenario.
+   *
+   * Calcula policy (generated): Delete a saved what-if scenario by name.
+   * Reach: broker `api.scenarioDelete`, unlocked tier, class mutate.
+   */
+  scenarioDelete(name: string, sheet?: SheetRef): Promise<{ deleted: true }>;
+  /**
+   * Build the comparison report (VBA's `Scenarios.CreateSummary`): one row per
+   * changing cell and per result cell, one column per scenario. Applying each
+   * scenario in turn is how the report is computed, so — like scenarioShow —
+   * the sheet is left holding the LAST scenario's values.
+   *
+   * Calcula policy (generated): Build a scenario summary report comparing every saved scenario side by side, written into a new sheet area.
+   * Reach: broker `api.scenarioSummary`, unlocked tier, class mutate.
+   */
+  scenarioSummary(
+    options?: ScriptScenarioSummaryOptions,
+  ): Promise<{ scenarioNames: string[]; rows: ScriptScenarioSummaryRow[] }>;
+  /** Copy every scenario from one sheet to another, keeping any whose name is
+   *  already taken there. `toSheet` omitted = the active sheet.
+   *
+   * Calcula policy (generated): Copy the scenarios saved on one sheet onto another sheet, keeping any that already exist there.
+   * Reach: broker `api.scenarioMerge`, unlocked tier, class mutate.
+   */
+  scenarioMerge(fromSheet: SheetRef, toSheet?: SheetRef): Promise<{ merged: true }>;
+
+  // -- Consolidate --
+
+  /**
+   * Combine several ranges into one summary block — Data ▸ Consolidate, VBA's
+   * `Range.Consolidate`.
+   *
+   * With neither `useTopRow` nor `useLeftColumn`, sources are combined BY
+   * POSITION and must all be the same size. With either one set, they are
+   * matched up BY CATEGORY: the header text in the top row and/or the labels in
+   * the left column decide what lines up with what, so the sources may differ
+   * in size and order.
+   *
+   * ```js
+   * await api.consolidate({
+   *   function: "sum",
+   *   sources: ["Q1!A1:D10", "Q2!A1:D12", "Q3!A1:D9"],
+   *   destination: "Summary!A1",
+   *   useTopRow: true,
+   *   useLeftColumn: true,
+   * });
+   * ```
+   *
+   * Calcula policy (generated): Combine several ranges of numbers into one summary block — totalling, averaging or counting them, matching rows and columns up by their headers if asked.
+   * Reach: broker `api.consolidate`, unlocked tier, class mutate.
+   */
+  consolidate(
+    params: ScriptConsolidateParams,
+  ): Promise<{ rowsWritten: number; colsWritten: number; cellsUpdated: number }>;
 
   // -- Structure --
   // SHEET-ADDRESSABLE: `sheet` is a 0-based index or a name (Wave-1 rules) and
@@ -3833,20 +4096,48 @@ declare interface UnlockedAPI {
    * Reach: broker `api.unmergeCells`, unlocked tier, class mutate.
    */
   unmergeCells(row: number, col: number, sheet?: SheetRef): Promise<void>;
-  /** Set a row's height in pixels (0 restores the sheet default). ACTIVE
-   *  sheet only — a sheet ref naming another one rejects.
+  /**
+   * Set a row's height (0 restores the sheet default). ACTIVE sheet only — a
+   * sheet ref naming another one rejects.
+   *
+   * PIXELS by default, because that is what Calcula stores. Excel's row height
+   * is in POINTS, so pass `{ unit: "pt" }` and it converts at 96/72 — the
+   * default 11pt Calibri row is 15pt, which is exactly the stored 20px:
+   *
+   * ```js
+   * await api.setRowHeight(0, 40);                          // 40 pixels
+   * await api.setRowHeight(0, 30, { unit: "pt" });          // 30pt = 40px
+   * await api.setRowHeight(0, 30, { unit: "pt", sheet: 1 });
+   * await api.setRowHeight(0, 40, "Sheet2");                // sheet ref, as before
+   * ```
+   *
+   * The third argument is EITHER the sheet ref it has always been OR the
+   * options bag; the conversion happens inside your script's worker, so the
+   * permission you granted is unchanged either way.
    *
    * Calcula policy (generated): Change a row's height.
    * Reach: broker `api.setRowHeight`, unlocked tier, class mutate.
    */
-  setRowHeight(row: number, height: number, sheet?: SheetRef): Promise<void>;
-  /** Set a column's width in pixels (0 restores the sheet default). ACTIVE
-   *  sheet only — a sheet ref naming another one rejects.
+  setRowHeight(row: number, height: number, sheetOrOptions?: SheetRef | { unit?: "px" | "pt"; sheet?: SheetRef }): Promise<void>;
+  /**
+   * Set a column's width (0 restores the sheet default). ACTIVE sheet only — a
+   * sheet ref naming another one rejects.
+   *
+   * PIXELS by default. Excel's column width is measured in CHARACTERS of the
+   * standard font, so pass `{ unit: "chars" }` for that unit — the same
+   * conversion Calcula's .xlsx import uses (`px = chars * 7 + 5`), so a width
+   * you set here matches one that came in from a workbook:
+   *
+   * ```js
+   * await api.setColumnWidth(2, 120);                         // 120 pixels
+   * await api.setColumnWidth(2, 8.43, { unit: "chars" });     // Excel's default column
+   * await api.setColumnWidth(2, 120, "Sheet2");               // sheet ref, as before
+   * ```
    *
    * Calcula policy (generated): Change a column's width.
    * Reach: broker `api.setColumnWidth`, unlocked tier, class mutate.
    */
-  setColumnWidth(col: number, width: number, sheet?: SheetRef): Promise<void>;
+  setColumnWidth(col: number, width: number, sheetOrOptions?: SheetRef | { unit?: "px" | "chars"; sheet?: SheetRef }): Promise<void>;
   /**
    * Size an inclusive span of columns to fit their contents — EXACTLY the
    * double-click best-fit: the same canvas measurement, per-cell fonts and
@@ -4913,6 +5204,26 @@ declare interface UnlockedAPI {
    * Reach: broker `api.deletePivot`, unlocked tier, class mutate.
    */
   deletePivot(pivotId: string): Promise<void>;
+  /**
+   * Refresh EVERY pivot table in this workbook — VBA's `RefreshAll` for pivots.
+   * ONE call reaches the backend's own refresh-all; it is NOT a loop over
+   * `api.pivots()`, so nothing your script does can interleave between two
+   * pivots.
+   *
+   * `refreshedCount` is how many pivots actually refreshed. A pivot whose
+   * refresh FAILS (a source range that no longer exists, a disconnected model)
+   * is skipped, not retried and not reported individually — so a workbook with
+   * five pivots can honestly answer four. Compare it with `(await
+   * api.pivots()).length` if you need to know that something was left behind.
+   *
+   * ```js
+   * const { refreshedCount } = await api.refreshAllPivots();
+   * ```
+   *
+   * Calcula policy (generated): Refresh every pivot table in this workbook (re-reads their source data and rewrites their cells).
+   * Reach: broker `api.refreshAllPivots`, unlocked tier, class mutate.
+   */
+  refreshAllPivots(): Promise<{ refreshedCount: number }>;
 
   // -- Conditional formatting --
   // The rules the Home ▸ Conditional Formatting dialogs write, from code.
@@ -5140,18 +5451,23 @@ declare interface WorkbookContext extends BaseObjectContext {
    * never be able to make a workbook unsaveable.
    *
    * The detail carries the target's FILE NAME only, never its folder — the same
-   * reduction `onOpen` and `onAfterSave` get, and for the same reason.
+   * reduction `onOpen` and `onAfterSave` get, and for the same reason — plus
+   * `kind`, which is VBA's `SaveAsUI` as a word:
+   *   - `"save"`   — Ctrl+S over a workbook that already has a file. No dialog.
+   *   - `"saveAs"` — File ▸ Save As, AND the Ctrl+S of a workbook that has
+   *                  never been saved (the picker opens, so it IS a Save As).
    *
    * ```js
-   * workbook.onBeforeSave(async ({ fileName }) => {
+   * workbook.onBeforeSave(async ({ fileName, kind }) => {
    *   const total = await context.api.getCellValue(20, 3);
    *   if (!total) return { cancel: true, reason: "Fill in the total in D21 first" };
-   *   await context.api.setCellValue(0, 5, new Date().toISOString());
+   *   // Stamp the version only when a NEW file is being written.
+   *   if (kind === "saveAs") await context.api.setCellValue(0, 5, new Date().toISOString());
    * });
    * ```
    */
   onBeforeSave(
-    handler: (detail: { fileName: string | null }) =>
+    handler: (detail: { fileName: string | null; kind?: "save" | "saveAs" }) =>
       | void
       | false
       | "cancel"
@@ -5247,8 +5563,41 @@ declare interface ScriptRange {
   offset(rowOffset: number, colOffset: number): ScriptRange;
   /** A new range, same top-left, resized to rows x cols. */
   resize(rows: number, cols: number): ScriptRange;
-  /** A single-cell range at the given offset within this range. */
+  /** A single-cell range at the given offset within this range. An offset
+   *  outside the range (in ANY direction — negatives included) throws. */
   getCell(rowOffset: number, colOffset: number): ScriptRange;
+  /**
+   * One ROW of this range, as a full-width sub-range.
+   *
+   * `index` is 0-BASED WITHIN THE RANGE, not a sheet row:
+   * `api.range("B2:D5").rows(0)` is `B2:D2` and `.rows(3)` is `B5:D5`. VBA's
+   * `Rows(n)` is 1-based, so subtract one when porting. An index outside
+   * `0..rowCount-1` throws rather than clamping — a clamp would quietly format
+   * or overwrite the wrong band.
+   *
+   * ```js
+   * const table = await context.api.range("A1:D20");
+   * await table.rows(0).format({ bold: true });   // the header row
+   * ```
+   */
+  rows(index: number): ScriptRange;
+  /**
+   * One COLUMN of this range, as a full-height sub-range. `index` is 0-BASED
+   * WITHIN THE RANGE (`api.range("B2:D5").columns(0)` is `B2:B5`); VBA's
+   * `Columns(n)` is 1-based. An index outside `0..colCount-1` throws.
+   */
+  columns(index: number): ScriptRange;
+  /** This range's rows across the WHOLE sheet width (columns A..XFD) — VBA's
+   *  `Range.EntireRow`. Pair it with `setRowsHidden` / `format` to treat whole
+   *  rows the way the row header does. */
+  entireRow(): ScriptRange;
+  /** This range's columns across the WHOLE sheet height (rows 1..1048576) —
+   *  VBA's `Range.EntireColumn`. */
+  entireColumn(): ScriptRange;
+  /** VBA's `Cells(r, c)` name for {@link ScriptRange.getCell}: the single cell
+   *  at a 0-BASED offset within this range. VBA's is 1-based — `Cells(1,1)`
+   *  there is `cells(0,0)` here. An offset outside the range throws. */
+  cells(rowOffset: number, colOffset: number): ScriptRange;
   /** The top-left cell's display value.
    *
    * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
@@ -5474,7 +5823,119 @@ declare interface ScriptRange {
   setColumnsHidden(hidden: boolean): Promise<{ hidden: number[] }>;
 }
 
-/** Context for Sheet-level scripts (applies to all sheets). */
+/**
+ * A MULTI-AREA range: what `api.range("A1:B2,D4:E5")` answers — VBA's
+ * `Range("A1:B2,D4:E5")`, and the shape of a Ctrl+Click selection.
+ *
+ * IT IS NOT A ScriptRange, deliberately. Read the list of what is missing as
+ * the point of the type, not as a gap: `setValue`, `setValues`, `select`,
+ * `offset`, `resize`, `getCell`, `rows`, `columns`, `end`, `currentRegion`,
+ * `find`, `replace`, `sort`, `fill*`, `autoFit`, `goalSeek`, `group`,
+ * `setRowsHidden`, `removeDuplicates` and `textToColumns` have NO single
+ * correct meaning across disjoint rectangles. A surface that offered them and
+ * quietly used the first area would be wrong in a way no error ever surfaces —
+ * so they are simply not here. Every one of them is available on `areas[i]`,
+ * which are ordinary {@link ScriptRange}s.
+ *
+ * What IS here is the set of operations that means the same thing applied to
+ * each area independently. Each of those is ONE broker call PER AREA, so N
+ * areas make N undo steps; wrap them for a single step:
+ *
+ * ```js
+ * const r = await api.range("A1:B2,D4:E5");
+ * if ("areas" in r) {
+ *   await api.beginBatch("Highlight inputs");
+ *   await r.format({ backgroundColor: "#FFF2CC" });
+ *   await api.commitBatch();
+ * }
+ * ```
+ *
+ * Every area lives on ONE sheet: only the first may carry a "Sheet!" prefix,
+ * and it applies to all of them (a later per-area prefix is rejected).
+ */
+/**
+ * What `api.range(address)` answers, decided FROM THE ADDRESS.
+ *
+ * A comma address is multi-area and genuinely answers a different shape, so the
+ * type has to say so — declaring a plain ScriptRange would be the quiet wrongness
+ * this whole surface exists to avoid. Resolving it from the literal keeps both
+ * common cases EXACT, with nothing to narrow:
+ *
+ * ```js
+ * const a = await api.range("A1:B2");        // ScriptRange
+ * const b = await api.range("A1:B2,D4:E5");  // ScriptRangeAreas
+ * const c = await api.range(someString);     // the union - narrow it
+ * ```
+ *
+ * Only a RUNTIME-BUILT string is the union, because only then is the shape
+ * genuinely unknown until the call returns. Narrow it with `"areas" in c`.
+ */
+declare type RangeShapeFor<A extends string> = string extends A
+  ? ScriptRange | ScriptRangeAreas
+  : A extends `${string},${string}`
+    ? ScriptRangeAreas
+    : ScriptRange;
+
+declare interface ScriptRangeAreas {
+  /** Each area as an ordinary ScriptRange, in the order the address named them
+   *  — VBA's `Areas`. All on the same sheet. */
+  readonly areas: ScriptRange[];
+  /** How many areas there are — VBA's `Areas.Count`. */
+  readonly count: number;
+  /** The whole address, normalized ("A1:B2,D4:E5"). */
+  readonly address: string;
+  /** Total cells across the areas. Overlapping areas count TWICE, like VBA's
+   *  `Range("A1:B2,B2:C3").Count` — the areas are independent, not a set. */
+  readonly cellCount: number;
+  /** True when the 0-based cell lies inside ANY area (inclusive). Pure math,
+   *  no round trip. */
+  contains(row: number, col: number): boolean;
+  /** Apply a PARTIAL format to every area (absent properties are left alone).
+   *  One call per area. */
+  format(format: ScriptFormat): Promise<void>;
+  /** Remove ALL formatting from every area, keeping the values. One call per
+   *  area. */
+  clearFormat(): Promise<void>;
+  /** Apply a NAMED cell style to every area. One call per area. */
+  applyStyle(name: string): Promise<void>;
+  /** Set (or, with `null`, clear) the data-validation rule on every area. One
+   *  call per area. */
+  setValidation(rule: ScriptValidationRule | null): Promise<void>;
+  /** Every area's display values, ONE grid per area (`[area][row][col]`) —
+   *  never flattened, because disjoint rectangles share no row/column
+   *  geometry. One call per area. */
+  getValues(): Promise<string[][][]>;
+  /** Every area's typed cells, ONE grid per area — the safe read for a
+   *  read/modify/write round-trip. One call per area. */
+  getData(): Promise<ScriptCell[][][]>;
+}
+
+/**
+ * Context for Sheet-level scripts.
+ *
+ * COMING FROM VBA — THE SHEET-SINGLETON IDIOM. In VBA every worksheet owns a
+ * code module, so `Sheet1`'s `Worksheet_Change` fires for Sheet1 and nothing
+ * else: the sheet is the singleton, and the filter is implicit in where you
+ * pasted the code. Calcula has ONE sheet script that runs for EVERY sheet —
+ * scripts are attached to the workbook and are visible and auditable in one
+ * place, which is the whole point of not hiding code inside the document. So
+ * the filter that was implicit becomes explicit, and it is one line:
+ *
+ * ```js
+ * export function setup(context) {
+ *   const MINE = "Invoice";                      // the sheet this script is about
+ *   context.onSelectionChange(async ({ sheetIndex }) => {
+ *     const names = await context.api.getSheetNames();
+ *     if (names[sheetIndex] !== MINE) return;    // the VBA module boundary, written down
+ *     ...
+ *   });
+ * }
+ * ```
+ *
+ * Filter by NAME (as above) rather than by index when the tab order can change
+ * under you; `onDataChange` gives every change its own `sheetIndex`, so filter
+ * the CHANGES, not the batch.
+ */
 declare interface SheetContext extends BaseObjectContext {
   /** Called when any sheet is activated (switched to). */
   onActivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
@@ -5504,6 +5965,20 @@ declare interface SheetContext extends BaseObjectContext {
    * Deliveries within one frame are batched. `truncated: true` means the batch
    * overflowed the delivery cap and `changes` is INCOMPLETE — re-read the cells
    * you care about (e.g. `getRangeValues`) instead of trusting the list.
+   *
+   * COMING FROM VBA: this is `Worksheet_Change`, and it is ALSO where
+   * `Worksheet_Calculate` lands. Calcula has no per-sheet "recalculated" hook,
+   * because a recalculation is not an event about a sheet — it is an event
+   * about the workbook, and Excel's version fires per sheet only as an artifact
+   * of where the code lived. The two idioms map like this:
+   *   - "a value I care about changed"  -> this handler; filter `changes` by
+   *     the cell or range you watch (that is what the `address` field is for).
+   *   - "a recalculation pass finished" -> `api.onEvent("app:recalculation-completed",
+   *     ({ scope, cellsUpdated, durationMs }) => ...)`, which fires ONCE per
+   *     pass with what it did, instead of once per sheet.
+   * Formula results that changed because their inputs changed arrive here as
+   * ordinary changes, so the common `Worksheet_Calculate` use — "the total
+   * moved, react to it" — needs only this handler.
    */
   onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; sheetIndex: number; address: string; oldValue?: string; newValue: string }>; truncated?: boolean }) => void): () => void;
   /**

@@ -7,12 +7,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const tracedInvoke = vi.fn();
 const invoke = vi.fn();
+const dialogSave = vi.fn();
 
 vi.mock("../../../utils/bridge", () => ({ tracedInvoke: (...a: unknown[]) => tracedInvoke(...a) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+  save: (...a: unknown[]) => dialogSave(...a),
+}));
 
-import { saveFile } from "../file-api";
+import { saveFile, saveFileAs } from "../file-api";
 import { addSheet, calculateSheet, copySheet, deleteSheet, renameSheet } from "../tauri-api";
 import { AppEvents, onAppEvent } from "../events";
 import {
@@ -30,6 +34,7 @@ function capture(eventName: string): { events: unknown[]; off: () => void } {
 beforeEach(() => {
   tracedInvoke.mockReset();
   invoke.mockReset();
+  dialogSave.mockReset();
   resetLifecycleGuards();
   registerLifecycleCancelReporter(() => {});
 });
@@ -81,14 +86,14 @@ describe("saveFile + lifecycle guards", () => {
     after.off();
   });
 
-  it("hands the target path to the guard so it can branch on it", async () => {
+  it("hands the target path AND the save kind to the guard so it can branch", async () => {
     const seen: unknown[] = [];
     registerLifecycleGuard(async (_action, detail) => {
       seen.push(detail);
       return null;
     });
     await saveFile();
-    expect(seen).toEqual([{ path: "C:/books/q4.cala" }]);
+    expect(seen).toEqual([{ path: "C:/books/q4.cala", kind: "save" }]);
   });
 
   it("asks with action \"save\" (a close guard must not fire on Ctrl+S)", async () => {
@@ -97,7 +102,56 @@ describe("saveFile + lifecycle guards", () => {
     );
     registerLifecycleGuard(closeOnly);
     await expect(saveFile()).resolves.toBe("C:/books/q4.cala");
-    expect(closeOnly).toHaveBeenCalledWith("save", { path: "C:/books/q4.cala" });
+    expect(closeOnly).toHaveBeenCalledWith("save", {
+      path: "C:/books/q4.cala",
+      kind: "save",
+    });
+  });
+});
+
+// ============================================================================
+// The save FLAVOUR (VBA's SaveAsUI): "save" vs "saveAs"
+// ============================================================================
+
+describe("lifecycle detail kind", () => {
+  it("saveFileAs asks with kind \"saveAs\"", async () => {
+    dialogSave.mockResolvedValue("C:/books/new.cala");
+    tracedInvoke.mockImplementation(async () => undefined);
+    const seen: unknown[] = [];
+    registerLifecycleGuard(async (_action, detail) => {
+      seen.push(detail);
+      return null;
+    });
+    await expect(saveFileAs()).resolves.toBe("C:/books/new.cala");
+    expect(seen).toEqual([{ path: "C:/books/new.cala", kind: "saveAs" }]);
+  });
+
+  it("Ctrl+S on a NEVER-SAVED workbook is a saveAs (the picker opens)", async () => {
+    // saveFile() with no current path falls through to saveFileAs, so the
+    // flavour is decided by which function actually runs — not by which
+    // keystroke the user pressed.
+    tracedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_current_file_path") return null;
+      return undefined;
+    });
+    dialogSave.mockResolvedValue("C:/books/untitled.cala");
+    const seen: unknown[] = [];
+    registerLifecycleGuard(async (_action, detail) => {
+      seen.push(detail);
+      return null;
+    });
+    await expect(saveFile()).resolves.toBe("C:/books/untitled.cala");
+    expect(seen).toEqual([{ path: "C:/books/untitled.cala", kind: "saveAs" }]);
+  });
+
+  it("a cancelled saveAs still never reaches save_file", async () => {
+    dialogSave.mockResolvedValue("C:/books/new.cala");
+    tracedInvoke.mockImplementation(async () => undefined);
+    registerLifecycleGuard(async (_a, detail) =>
+      (detail as { kind?: string }).kind === "saveAs" ? { by: "Versioner" } : null,
+    );
+    await expect(saveFileAs()).resolves.toBeNull();
+    expect(tracedInvoke.mock.calls.map((c) => c[0])).not.toContain("save_file");
   });
 });
 

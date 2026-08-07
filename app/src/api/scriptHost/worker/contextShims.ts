@@ -16,14 +16,22 @@ import type {
   ScriptDialogTextOptions,
 } from "../scriptDialogSpec";
 import {
+  columnWidthToPixels,
+  isMultiAreaAddress,
   makeRange,
+  makeRangeAreas,
   rangeFromAddress,
   makeWorkbook,
   parseA1Body,
   resolveSheetName,
+  rowHeightToPixels,
   sheetRangeTransport,
+  splitAreaAddresses,
   splitSheetPrefix,
   type Box,
+  type ColumnWidthUnit,
+  type RowHeightUnit,
+  type ScriptRangeAreas,
   type CellPoint,
   type EdgeDirection,
   type FillCount,
@@ -82,6 +90,37 @@ type SheetRef = number | string;
 /** What a cell write accepts (Wave 1): a typed value. Numbers and booleans
  *  land TYPED (42 reads back as the number 42); null CLEARS the cell. */
 type ScriptCellValue = string | number | boolean | null;
+
+/** The options bag api.setRowHeight accepts in place of a bare sheet ref. */
+interface ScriptRowHeightOptions {
+  /** "px" (default — how Calcula stores heights) or "pt" (Excel's unit;
+   *  px = pt * 96/72, so the 11pt default row is 15pt = 20px). */
+  unit?: RowHeightUnit;
+  sheet?: SheetRef;
+}
+
+/** The options bag api.setColumnWidth accepts in place of a bare sheet ref. */
+interface ScriptColumnWidthOptions {
+  /** "px" (default — how Calcula stores widths) or "chars" (Excel's
+   *  column-width unit; px = chars * 7 + 5, the app's own .xlsx conversion). */
+  unit?: ColumnWidthUnit;
+  sheet?: SheetRef;
+}
+
+/**
+ * Read the third argument of setRowHeight/setColumnWidth, which is EITHER the
+ * sheet ref it has always been (a number or a name) OR an options bag. An
+ * object is the bag; anything else is the sheet ref — so every existing
+ * `setRowHeight(0, 20, "Sheet2")` call keeps meaning what it meant.
+ */
+function splitDimensionOptions<U extends string>(
+  sheetOrOptions: SheetRef | { unit?: U; sheet?: SheetRef } | undefined,
+): { unit: U | undefined; sheet: SheetRef | undefined } {
+  if (sheetOrOptions !== null && typeof sheetOrOptions === "object") {
+    return { unit: sheetOrOptions.unit, sheet: sheetOrOptions.sheet };
+  }
+  return { unit: undefined, sheet: sheetOrOptions };
+}
 
 /** api.sleep's per-call ceiling (Wave 4): the same 30s bound every broker call
  *  carries (protocol.ts CALL_TIMEOUT_MS), stated as a literal because this
@@ -183,6 +222,77 @@ interface ScriptGoalSeekParams {
   maxIterations?: number;
   tolerance?: number;
   sheetIndex?: SheetRef;
+}
+
+/** api.withUnprotected options, when the password alone is not enough (a
+ *  sheet protected WITHOUT a password needs no `password` at all). */
+interface ScriptWithUnprotectedOptions {
+  password?: string;
+  /** The sheet to open — ACTIVE only, like every other protection call. */
+  sheet?: SheetRef;
+}
+
+/** What api.beginUnprotected answers (worker-internal: `withUnprotected` is the
+ *  only thing that reads it). */
+interface ScriptUnprotectHoldShim {
+  token: string | null;
+  wasProtected: boolean;
+}
+
+/** One changing cell of a scenario. */
+interface ScriptScenarioCellShim {
+  row: number;
+  col: number;
+  value: string | number | boolean | null;
+}
+
+/** api.scenarioAdd parameters — VBA's `Scenarios.Add Name:=...,
+ *  ChangingCells:=..., Values:=Array(...)`. */
+interface ScriptScenarioAddParamsShim {
+  name: string;
+  /** An A1 address ("B2:B4") paired with `values`, or the explicit cells. */
+  changingCells: string | ScriptScenarioCellShim[];
+  /** Required with the A1 spelling: one value per cell, row-major. */
+  values?: Array<string | number | boolean | null>;
+  comment?: string;
+  sheet?: SheetRef;
+}
+
+/** api.scenarioSummary options. */
+interface ScriptScenarioSummaryOptionsShim {
+  resultCells?: string | Array<string | { row: number; col: number }>;
+  sheet?: SheetRef;
+}
+
+/** One saved scenario, as api.scenarios() answers it. */
+interface ScriptScenarioShim {
+  name: string;
+  changingCells: ScriptScenarioCellShim[];
+  comment: string;
+  createdBy: string;
+  sheetIndex: number;
+}
+
+/** One row of the summary report api.scenarioSummary builds. */
+interface ScriptScenarioSummaryRowShim {
+  cellRef: string;
+  currentValue: string;
+  scenarioValues: string[];
+  isChangingCell: boolean;
+}
+
+/** api.consolidate parameters (Data ▸ Consolidate / VBA Range.Consolidate). */
+interface ScriptConsolidateParamsShim {
+  function:
+    | "sum" | "count" | "average" | "max" | "min" | "product"
+    | "countNums" | "stdDev" | "stdDevP" | "var" | "varP";
+  /** A1 strings — which MAY name their own sheet ("Q1!A1:D10") — or boxes. */
+  sources: Array<string | (Box & { sheet?: SheetRef })>;
+  destination: string | { row: number; col: number; sheet?: SheetRef };
+  useTopRow?: boolean;
+  useLeftColumn?: boolean;
+  /** Default sheet for sources/destination that do not name their own. */
+  sheet?: SheetRef;
 }
 
 /** api.addHyperlink's link spec (a union on `type`; per-type keys enforced
@@ -1863,6 +1973,8 @@ async function tableToRange(rt: WorkerRuntime, id: string): Promise<ScriptRange>
 /**
  * api.range(address) — the top-level range entry (VBA's Range("...")).
  * Resolution order, decided worker-side but enforced host-side per call:
+ *  0. a COMMA address ("A1:B2,D4:E5") is a MULTI-AREA range and answers a
+ *     ScriptRangeAreas instead of a ScriptRange (see resolveMultiAreaRange);
  *  1. an address with a "Sheet!" prefix (bare or 'quoted') is ALWAYS an
  *     address — the prefix resolves exact-then-unique-case-insensitive, and an
  *     unknown name throws listing the workbook's sheets;
@@ -1871,7 +1983,56 @@ async function tableToRange(rt: WorkerRuntime, id: string): Promise<ScriptRange>
  *  3. a named range (exact name, then unique case-insensitive);
  *  4. a table name — its DATA BODY, headers excluded.
  */
-async function resolveTopLevelRange(rt: WorkerRuntime, address: string): Promise<ScriptRange> {
+async function resolveTopLevelRange(
+  rt: WorkerRuntime,
+  address: string,
+): Promise<ScriptRange | ScriptRangeAreas> {
+  if (isMultiAreaAddress(address)) return resolveMultiAreaRange(rt, address);
+  return resolveSingleAreaRange(rt, address);
+}
+
+/**
+ * The multi-area half of api.range: "A1:B2,D4:E5" (and "Data!A1:B2,D4:E5").
+ *
+ * Every area must be an A1 rectangle — a named range or a table name inside a
+ * comma list is REFUSED rather than resolved, because their geometry can move
+ * under the script while the other areas cannot, and Excel does not accept the
+ * mixture either. The sheet is resolved ONCE, from the first area's optional
+ * prefix, so every area of one multi-area range provably lives on one sheet
+ * (splitAreaAddresses refuses a later per-area prefix).
+ */
+async function resolveMultiAreaRange(
+  rt: WorkerRuntime,
+  address: string,
+): Promise<ScriptRangeAreas> {
+  const wbt = makeWorkbookTransport(rt);
+  const parts = splitAreaAddresses(address);
+  const { sheetName, rest: firstRest } = splitSheetPrefix(parts[0]);
+  const names = await wbt.getSheetNames();
+  let sheetIndex: number;
+  if (sheetName !== null) {
+    sheetIndex = resolveSheetName(names, sheetName);
+  } else {
+    const active = await wbt.getActiveSheet();
+    sheetIndex = active >= 0 && active < names.length ? active : 0;
+  }
+  const transport = sheetRangeTransport(wbt, sheetIndex);
+  const bodies = [firstRest, ...parts.slice(1)];
+  const ranges = bodies.map((body) => {
+    try {
+      return makeRange(transport, parseA1Body(body));
+    } catch {
+      throw new Error(
+        `"${body.trim()}" is not an A1 rectangle. Every area of a multi-area address ` +
+          `("A1:B2,D4:E5") must be an A1 rectangle — named ranges and tables cannot be mixed in.`,
+      );
+    }
+  });
+  return makeRangeAreas(ranges, address);
+}
+
+/** The single-area half of api.range — steps 1-4 of the order above. */
+async function resolveSingleAreaRange(rt: WorkerRuntime, address: string): Promise<ScriptRange> {
   const wbt = makeWorkbookTransport(rt);
   const { sheetName, rest } = splitSheetPrefix(address);
   if (sheetName !== null) {
@@ -2019,7 +2180,15 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     // Top-level range entry (VBA Range("...")): "Data!A1:B5", "'My Sheet'!A1",
     // plain A1 on the active sheet, a named range, or a table's data body.
     // A1-parse wins over names; see resolveTopLevelRange for the order.
-    range: (address: string): Promise<ScriptRange> => resolveTopLevelRange(rt, address),
+    //
+    // A COMMA address ("A1:B2,D4:E5") answers a ScriptRangeAreas, NOT a
+    // ScriptRange — that is why the return type is a union. The alternative was
+    // to keep the declared type a plain ScriptRange and hand back the areas
+    // object anyway, which is the quiet kind of wrong this program keeps
+    // finding: narrow with `"areas" in r` (or call api.range twice) and the
+    // compiler tells you which shape you are holding.
+    range: (address: string): Promise<ScriptRange | ScriptRangeAreas> =>
+      resolveTopLevelRange(rt, address),
     // Canonical Workbook -> Sheet -> Range navigation (C3 step 3), plus the
     // FILE LIFECYCLE (G1) of the document this script lives in.
     //
@@ -2179,6 +2348,81 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
         hasPassword: boolean;
         options: Record<string, boolean>;
       }>,
+    /**
+     * Run `fn` with the sheet's protection temporarily lifted, then put the
+     * EXACT same protection back — the sanctioned replacement for VBA's
+     * `UserInterfaceOnly:=True`.
+     *
+     * The `finally` below is the tidy path, not the guarantee. The guarantee is
+     * host-side: the host remembers what it lifted and re-protects the sheet
+     * when this script ends for ANY reason — a throw, an unmount, a realm that
+     * is killed mid-write and never reaches this finally at all.
+     *
+     * Both halves are audited, which is the whole reason this shape was chosen
+     * over a hidden exemption flag: someone reading the transparency panel can
+     * see precisely when the protection was open and who opened it.
+     */
+    async withUnprotected<T>(
+      passwordOrOptions: string | ScriptWithUnprotectedOptions | undefined,
+      fn: () => T | Promise<T>,
+      sheet?: SheetRef,
+    ): Promise<T> {
+      const password =
+        typeof passwordOrOptions === "string" ? passwordOrOptions : passwordOrOptions?.password;
+      const target =
+        sheet ??
+        (typeof passwordOrOptions === "object" && passwordOrOptions !== null
+          ? passwordOrOptions.sheet
+          : undefined);
+      // Begin FIRST, then check `fn`: a bad callback still gets the sheet put
+      // back by the finally, instead of leaving the argument check to decide
+      // whether the restore runs.
+      const hold = (await call(rt, "api.beginUnprotected", [
+        password,
+        target,
+      ])) as ScriptUnprotectHoldShim;
+      try {
+        if (typeof fn !== "function") {
+          throw new TypeError("withUnprotected(password, fn): fn must be a function");
+        }
+        return await fn();
+      } finally {
+        // `token === null` means the sheet was never protected — it stays
+        // unprotected, because protecting it here would invent a protection
+        // the user never asked for.
+        if (hold && hold.token !== null) {
+          await call(rt, "api.endUnprotected", [hold.token]);
+        }
+      }
+    },
+
+    // ---- Scenarios (What-If): VBA's Worksheet.Scenarios ----
+    // Name-addressed, sheet-addressable. `scenarioShow` drives the same
+    // scenario_show the Scenario Manager dialog runs, so a script and a click
+    // produce identical cells (and identical dependent recalculation).
+    scenarios: (sheet?: SheetRef) =>
+      call(rt, "api.scenarios", [sheet]) as Promise<ScriptScenarioShim[]>,
+    scenarioAdd: (params: ScriptScenarioAddParamsShim) =>
+      call(rt, "api.scenarioAdd", [params]) as Promise<{ name: string; changingCells: number }>,
+    scenarioShow: (name: string, sheet?: SheetRef) =>
+      call(rt, "api.scenarioShow", [name, sheet]) as Promise<{ cellsUpdated: number }>,
+    scenarioDelete: (name: string, sheet?: SheetRef) =>
+      call(rt, "api.scenarioDelete", [name, sheet]) as Promise<{ deleted: true }>,
+    scenarioSummary: (options?: ScriptScenarioSummaryOptionsShim) =>
+      call(rt, "api.scenarioSummary", [options]) as Promise<{
+        scenarioNames: string[];
+        rows: ScriptScenarioSummaryRowShim[];
+      }>,
+    scenarioMerge: (fromSheet: SheetRef, toSheet?: SheetRef) =>
+      call(rt, "api.scenarioMerge", [fromSheet, toSheet]) as Promise<{ merged: true }>,
+
+    // ---- Consolidate (Data ▸ Consolidate / VBA Range.Consolidate) ----
+    consolidate: (params: ScriptConsolidateParamsShim) =>
+      call(rt, "api.consolidate", [params]) as Promise<{
+        rowsWritten: number;
+        colsWritten: number;
+        cellsUpdated: number;
+      }>,
 
     // ---- Structure (B2) ----
     insertRows: (startRow: number, count: number, sheet?: SheetRef) =>
@@ -2194,10 +2438,21 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     ) => call(rt, "api.mergeCells", [startRow, startCol, endRow, endCol, sheet]),
     unmergeCells: (row: number, col: number, sheet?: SheetRef) =>
       call(rt, "api.unmergeCells", [row, col, sheet]),
-    setRowHeight: (row: number, height: number, sheet?: SheetRef) =>
-      call(rt, "api.setRowHeight", [row, height, sheet]),
-    setColumnWidth: (col: number, width: number, sheet?: SheetRef) =>
-      call(rt, "api.setColumnWidth", [col, width, sheet]),
+    // Dimensions. Calcula stores BOTH in PIXELS, but a VBA convert reaches for
+    // Excel's units — POINTS for a row height, CHARACTERS for a column width.
+    // The third slot therefore takes either the sheet ref it always took or an
+    // options bag `{ unit, sheet }`; the conversion happens HERE, worker-side,
+    // so the broker row still only ever sees pixels (the same discipline A1
+    // addresses follow). See rowHeightToPixels/columnWidthToPixels for the two
+    // factors, both taken from the app's existing conversions.
+    setRowHeight: (row: number, height: number, sheetOrOptions?: SheetRef | ScriptRowHeightOptions) => {
+      const { unit, sheet } = splitDimensionOptions<RowHeightUnit>(sheetOrOptions);
+      return call(rt, "api.setRowHeight", [row, rowHeightToPixels(height, unit), sheet]);
+    },
+    setColumnWidth: (col: number, width: number, sheetOrOptions?: SheetRef | ScriptColumnWidthOptions) => {
+      const { unit, sheet } = splitDimensionOptions<ColumnWidthUnit>(sheetOrOptions);
+      return call(rt, "api.setColumnWidth", [col, columnWidthToPixels(width, unit), sheet]);
+    },
     // ---- Auto-fit (Wave 3, item 11): the double-click best-fit, scripted.
     //      ACTIVE SHEET only (measurement is canvas metrics over the rendered
     //      sheet) — a sheet ref naming another sheet is refused host-side.
@@ -2626,6 +2881,15 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       options?: Record<string, unknown>,
     ) => call(rt, "api.createPivot", [sourceRange, destinationCell, fields, options]),
     deletePivot: (pivotId: string) => call(rt, "api.deletePivot", [pivotId]),
+    /**
+     * Refresh EVERY pivot table in the workbook — VBA's
+     * `ThisWorkbook.RefreshAll` for pivots. ONE broker call that reaches the
+     * backend's own refresh-all, not a loop over api.pivots(): a loop from here
+     * would be one RPC per pivot and would interleave with anything else the
+     * script does between them.
+     */
+    refreshAllPivots: () =>
+      call(rt, "api.refreshAllPivots", []) as Promise<{ refreshedCount: number }>,
 
     // ---- Conditional formatting CRUD (Wave 3 item 3) ----
     // Ranges are A1-or-numbers: "B2:D10" resolves worker-side to the numeric
