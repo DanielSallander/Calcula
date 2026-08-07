@@ -11,11 +11,29 @@ use crate::api_types::{
     ScenarioListResult, ScenarioResult, ScenarioShowParams, ScenarioShowResult,
     ScenarioSummaryParams, ScenarioSummaryResult, ScenarioSummaryRow,
 };
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{
     evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
     get_recalculation_order, AppState,
 };
 use engine::{Cell, CellValue, Grid, StyleRegistry};
+
+// SCENARIOS ARE PERSISTED (`workbook.scenarios`) AND SCENARIO_SHOW IS NOT TRANSIENT.
+//
+// `docs/design/animation-simulation.md` cites `scenario_show` as the transient-write
+// precedent, and it is -- in the UNDO sense: it applies values without entering the
+// undo stack. But transient in the DIRTY-FLAG sense means "there is a restore that runs
+// unconditionally on stop and on BEFORE_SAVE", and there is no `scenario_restore`
+// anywhere in this file. The values `scenario_show` writes stay in the cells and get
+// saved, so it must dirty the document like any other cell write. Animation qualifies
+// for the exemption (`anim_snapshot` files a restore buffer first and
+// `TransientScope::prove_restore_registered` checks it); scenario_show cannot even
+// construct a `TransientScope`, which is what makes the distinction structural rather
+// than remembered.
+//
+// The same reasoning covers `scenario_summary`: it writes a summary report into fresh
+// grid cells, and those cells are saved.
 
 // ============================================================================
 // Helper: build CellData from grid
@@ -74,7 +92,7 @@ pub fn scenario_list(
     state: State<AppState>,
     sheet_index: usize,
 ) -> ScenarioListResult {
-    let scenarios = state.scenarios.lock().unwrap();
+    let scenarios = state.scenarios.read().unwrap();
     let sheet_scenarios = scenarios.get(&sheet_index).cloned().unwrap_or_default();
     ScenarioListResult {
         scenarios: sheet_scenarios,
@@ -85,6 +103,17 @@ pub fn scenario_list(
 #[tauri::command]
 pub fn scenario_add(
     state: State<AppState>,
+    file_state: State<FileState>,
+    params: ScenarioAddParams,
+) -> ScenarioResult {
+    scenario_add_impl(&state, &file_state, params)
+}
+
+/// Command body over plain references, so both the "adds dirty" and the "a refused add
+/// stays clean" contracts are unit-testable (see `document_effect_wave2_tests`).
+pub(crate) fn scenario_add_impl(
+    state: &AppState,
+    file_state: &FileState,
     params: ScenarioAddParams,
 ) -> ScenarioResult {
     // allowEditScenarios option gate.
@@ -114,7 +143,9 @@ pub fn scenario_add(
         };
     }
 
-    let mut scenarios = state.scenarios.lock().unwrap();
+    // Past the allowEditScenarios gate and the name/changing-cell validation above.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut scenarios = state.scenarios.write(&effect).unwrap();
     let sheet_scenarios = scenarios.entry(params.sheet_index).or_default();
 
     // Check for duplicate name (case-insensitive)
@@ -151,6 +182,7 @@ pub fn scenario_add(
 #[tauri::command]
 pub fn scenario_delete(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: ScenarioDeleteParams,
 ) -> ScenarioResult {
     // allowEditScenarios option gate.
@@ -166,7 +198,9 @@ pub fn scenario_delete(
         params.sheet_index
     );
 
-    let mut scenarios = state.scenarios.lock().unwrap();
+    // Past the allowEditScenarios gate above.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut scenarios = state.scenarios.write(&effect).unwrap();
     let sheet_scenarios = scenarios.entry(params.sheet_index).or_default();
 
     let name_upper = params.name.to_uppercase();
@@ -191,6 +225,7 @@ pub fn scenario_delete(
 #[tauri::command]
 pub fn scenario_show(
     state: State<AppState>,
+    file_state: State<FileState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ScenarioShowParams,
@@ -212,7 +247,7 @@ pub fn scenario_show(
     );
 
     // Find the scenario
-    let scenarios = state.scenarios.lock().unwrap();
+    let scenarios = state.scenarios.read().unwrap();
     let sheet_scenarios = scenarios.get(&params.sheet_index);
     let scenario = sheet_scenarios.and_then(|ss| {
         let name_upper = params.name.to_uppercase();
@@ -229,6 +264,16 @@ pub fn scenario_show(
         }
     };
     drop(scenarios);
+
+    // The scenario resolved, so the cell writes below WILL happen. They are permanent
+    // (see the file header: there is no scenario_restore), so they change what a save
+    // writes. Built here, past the not-found return above, so a bad scenario name
+    // leaves the document clean.
+    //
+    // Held for the whole write even though `grids` is not a `Persisted<T>` yet: when it
+    // is onboarded this is the effect its `write()` will take, and constructing it here
+    // already sets is_modified, which is the part that was missing.
+    let _effect = DocumentEffect::mutates(&file_state);
 
     // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below (canonical
     // lock order: control stores first, grids last).
@@ -363,6 +408,7 @@ pub fn scenario_show(
 #[tauri::command]
 pub fn scenario_summary(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: ScenarioSummaryParams,
 ) -> ScenarioSummaryResult {
     let _pass = crate::eval_budget::begin_pass(
@@ -371,7 +417,7 @@ pub fn scenario_summary(
     );
     crate::log_info!("SCENARIO", "Generating summary for sheet {}", params.sheet_index);
 
-    let scenarios_store = state.scenarios.lock().unwrap();
+    let scenarios_store = state.scenarios.read().unwrap();
     let sheet_scenarios = match scenarios_store.get(&params.sheet_index) {
         Some(ss) if !ss.is_empty() => ss.clone(),
         _ => {
@@ -383,6 +429,10 @@ pub fn scenario_summary(
         }
     };
     drop(scenarios_store);
+
+    // The summary report is written into fresh grid cells, which are persisted. Built
+    // past the "no scenarios defined" return above, so that refusal stays clean.
+    let _effect = DocumentEffect::mutates(&file_state);
 
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -599,6 +649,7 @@ pub fn scenario_summary(
 #[tauri::command]
 pub fn scenario_merge(
     state: State<AppState>,
+    file_state: State<FileState>,
     source_sheet_index: usize,
     target_sheet_index: usize,
 ) -> ScenarioResult {
@@ -609,7 +660,8 @@ pub fn scenario_merge(
         target_sheet_index
     );
 
-    let mut scenarios = state.scenarios.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut scenarios = state.scenarios.write(&effect).unwrap();
     let source_scenarios = scenarios
         .get(&source_sheet_index)
         .cloned()

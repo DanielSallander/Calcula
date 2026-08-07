@@ -7,7 +7,7 @@
 
 use persistence::{
     SavedHyperlink, SavedMergedRegion, SavedNote, SavedPageSetup, Sheet,
-    DEFAULT_SHEET_ZOOM_PERCENT,
+    DEFAULT_SHEET_ZOOM_PERCENT, DEFAULT_SHEET_VIEW_MODE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -62,6 +62,36 @@ pub struct SheetMetadata {
     /// Split-bar column (see `split_row`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_col: Option<u32>,
+    /// Whether zeros render as "0" (default) or blank. Omitted at the default so
+    /// ordinary sheets keep writing the same bytes -- which is also what keeps the
+    /// v6 format link from being stamped on workbooks that never use these.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub display_zeros: bool,
+    /// Whether cells show formula TEXT instead of the computed value (Ctrl+`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_formulas: bool,
+    /// "normal" (default), "pageLayout" or "pageBreakPreview".
+    #[serde(default = "default_view_mode", skip_serializing_if = "is_default_view_mode")]
+    pub view_mode: String,
+    /// Whether row/column headings are shown.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub display_headings: bool,
+}
+
+fn default_view_mode() -> String {
+    DEFAULT_SHEET_VIEW_MODE.to_string()
+}
+
+fn is_default_view_mode(v: &str) -> bool {
+    v == DEFAULT_SHEET_VIEW_MODE
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Hand-written because `#[derive(Default)]` would give `zoom` f64's 0.0 --
@@ -86,6 +116,10 @@ impl Default for SheetMetadata {
             zoom: DEFAULT_SHEET_ZOOM_PERCENT,
             split_row: None,
             split_col: None,
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: default_view_mode(),
+            display_headings: true,
         }
     }
 }
@@ -133,6 +167,10 @@ impl SheetMetadata {
             zoom: sheet.zoom,
             split_row: sheet.split_row,
             split_col: sheet.split_col,
+            display_zeros: sheet.display_zeros,
+            show_formulas: sheet.show_formulas,
+            view_mode: sheet.view_mode.clone(),
+            display_headings: sheet.display_headings,
         }
     }
 
@@ -154,6 +192,10 @@ impl SheetMetadata {
             && is_default_zoom(&self.zoom)
             && self.split_row.is_none()
             && self.split_col.is_none()
+            && self.display_zeros
+            && !self.show_formulas
+            && is_default_view_mode(&self.view_mode)
+            && self.display_headings
     }
 
     pub fn apply_to_sheet(&self, sheet: &mut Sheet) {
@@ -173,6 +215,20 @@ impl SheetMetadata {
         sheet.zoom = self.zoom;
         sheet.split_row = self.split_row;
         sheet.split_col = self.split_col;
+        sheet.display_zeros = self.display_zeros;
+        sheet.show_formulas = self.show_formulas;
+        sheet.view_mode = self.view_mode.clone();
+        sheet.display_headings = self.display_headings;
+    }
+
+    /// True when this sheet carries a non-default DISPLAY FLAG, i.e. the archive must
+    /// be stamped `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION`. Kept next to the fields so
+    /// adding a fifth flag has one obvious place to be added to.
+    pub fn has_non_default_display_flags(&self) -> bool {
+        !self.display_zeros
+            || self.show_formulas
+            || !is_default_view_mode(&self.view_mode)
+            || !self.display_headings
     }
 }
 

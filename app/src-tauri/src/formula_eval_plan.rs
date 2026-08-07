@@ -1043,7 +1043,7 @@ pub fn get_formula_eval_plan(
         Ok(parser_ast) => {
             // Resolve named references
             let resolved = if crate::ast_has_named_refs(&parser_ast) {
-                let named_ranges_map = state.named_ranges.lock().unwrap();
+                let named_ranges_map = state.named_ranges.read().unwrap();
                 let mut visited = std::collections::HashSet::new();
                 let r = crate::resolve_names_in_ast(
                     &parser_ast,
@@ -1058,8 +1058,8 @@ pub fn get_formula_eval_plan(
             };
             // Resolve table references
             let resolved = if crate::ast_has_table_refs(&resolved) {
-                let tables_map = state.tables.lock().unwrap();
-                let table_names_map = state.table_names.lock().unwrap();
+                let tables_map = state.tables.read().unwrap();
+                let table_names_map = state.table_names.read().unwrap();
                 let ctx = crate::TableRefContext {
                     tables: &tables_map,
                     table_names: &table_names_map,

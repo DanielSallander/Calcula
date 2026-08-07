@@ -6,6 +6,14 @@ mod tests {
     use crate::ribbon_filter::types::*;
     use identity::EntityId;
 
+    /// Seed the filter store directly. Not a document edit: these tests drive the
+    /// store, not the commands, and nothing is saved afterwards.
+    fn seed() -> crate::document_effect::DocumentEffect {
+        crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        )
+    }
+
     /// Helper to mint a fresh EntityId for tests.
     fn mint_id() -> EntityId {
         EntityId::from_bytes(identity::generate_uuid_v7())
@@ -129,7 +137,7 @@ mod tests {
     #[test]
     fn test_ribbon_filter_state_new() {
         let state = RibbonFilterState::new();
-        let filters = state.filters.lock().unwrap();
+        let filters = state.filters.read().unwrap();
         assert!(filters.is_empty());
     }
 
@@ -143,12 +151,12 @@ mod tests {
             let mut filter = make_filter(id, mint_id(), "Region");
             filter.field_name = "Sales.Region".to_string();
             filter.connection_mode = ConnectionMode::Manual;
-            state.filters.lock().unwrap().insert(id, filter);
+            state.filters.write(&seed()).unwrap().insert(id, filter);
         }
 
         // Read
         {
-            let filters = state.filters.lock().unwrap();
+            let filters = state.filters.read().unwrap();
             assert_eq!(filters.len(), 1);
             let f = filters.get(&id).unwrap();
             assert_eq!(f.name, "Region");
@@ -157,19 +165,19 @@ mod tests {
 
         // Update selection
         {
-            let mut filters = state.filters.lock().unwrap();
+            let mut filters = state.filters.write(&seed()).unwrap();
             let f = filters.get_mut(&id).unwrap();
             f.selected_items = Some(vec!["North".to_string(), "South".to_string()]);
         }
         {
-            let filters = state.filters.lock().unwrap();
+            let filters = state.filters.read().unwrap();
             let f = filters.get(&id).unwrap();
             assert_eq!(f.selected_items.as_ref().unwrap().len(), 2);
         }
 
         // Clear
         {
-            let mut filters = state.filters.lock().unwrap();
+            let mut filters = state.filters.write(&seed()).unwrap();
             let f = filters.get_mut(&id).unwrap();
             f.selected_items = None;
             assert!(f.selected_items.is_none());
@@ -177,7 +185,7 @@ mod tests {
 
         // Delete
         {
-            let mut filters = state.filters.lock().unwrap();
+            let mut filters = state.filters.write(&seed()).unwrap();
             filters.remove(&id);
             assert!(filters.is_empty());
         }
@@ -192,10 +200,10 @@ mod tests {
             let mut filter = make_filter(id, mint_id(), &format!("Filter{}", i));
             filter.field_name = format!("t.field{}", i);
             filter.order = i as u32;
-            state.filters.lock().unwrap().insert(id, filter);
+            state.filters.write(&seed()).unwrap().insert(id, filter);
         }
 
-        let filters = state.filters.lock().unwrap();
+        let filters = state.filters.read().unwrap();
         assert_eq!(filters.len(), 5);
     }
 
@@ -208,10 +216,10 @@ mod tests {
         let conn_b = mint_id();
         let id_a = mint_id();
         let id_b = mint_id();
-        state.filters.lock().unwrap().insert(id_a, make_filter(id_a, conn_a, "A"));
-        state.filters.lock().unwrap().insert(id_b, make_filter(id_b, conn_b, "B"));
+        state.filters.write(&seed()).unwrap().insert(id_a, make_filter(id_a, conn_a, "A"));
+        state.filters.write(&seed()).unwrap().insert(id_b, make_filter(id_b, conn_b, "B"));
 
-        let filters = state.filters.lock().unwrap();
+        let filters = state.filters.read().unwrap();
         assert_eq!(filters.get(&id_a).unwrap().connection_id, conn_a);
         assert_eq!(filters.get(&id_b).unwrap().connection_id, conn_b);
         assert_ne!(
@@ -231,15 +239,15 @@ mod tests {
         let mut pkg_filter = make_filter(id_pkg, old_conn, "pkg");
         pkg_filter.data_source_id = Some("ds-1".to_string());
         let local_filter = make_filter(id_local, old_conn, "local");
-        state.filters.lock().unwrap().insert(id_pkg, pkg_filter);
-        state.filters.lock().unwrap().insert(id_local, local_filter);
+        state.filters.write(&seed()).unwrap().insert(id_pkg, pkg_filter);
+        state.filters.write(&seed()).unwrap().insert(id_local, local_filter);
 
         let new_conn = mint_id();
         let mut ds_to_conn = std::collections::HashMap::new();
         ds_to_conn.insert("ds-1".to_string(), new_conn);
-        crate::ribbon_filter::commands::remap_ribbon_filter_connections(&state, &ds_to_conn);
+        crate::ribbon_filter::commands::remap_ribbon_filter_connections(&state, &seed(), &ds_to_conn);
 
-        let filters = state.filters.lock().unwrap();
+        let filters = state.filters.read().unwrap();
         assert_eq!(filters.get(&id_pkg).unwrap().connection_id, new_conn);
         assert_eq!(filters.get(&id_local).unwrap().connection_id, old_conn);
     }
@@ -251,17 +259,17 @@ mod tests {
         let mut filter = make_filter(id, mint_id(), "test");
         filter.field_name = "dim.col".to_string();
         filter.connection_mode = ConnectionMode::Manual;
-        state.filters.lock().unwrap().insert(id, filter);
+        state.filters.write(&seed()).unwrap().insert(id, filter);
 
         // Switch to bySheet
         {
-            let mut filters = state.filters.lock().unwrap();
+            let mut filters = state.filters.write(&seed()).unwrap();
             let f = filters.get_mut(&id).unwrap();
             f.connection_mode = ConnectionMode::BySheet;
             f.connected_sheets = vec![0, 1];
         }
 
-        let filters = state.filters.lock().unwrap();
+        let filters = state.filters.read().unwrap();
         let f = filters.get(&id).unwrap();
         assert_eq!(f.connection_mode, ConnectionMode::BySheet);
         assert_eq!(f.connected_sheets, vec![0, 1]);

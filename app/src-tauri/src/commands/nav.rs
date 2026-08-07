@@ -241,7 +241,7 @@ pub fn go_to_special(
             }
         }
         "comments" => {
-            let comments = state.comments.lock().unwrap();
+            let comments = state.comments.read().unwrap();
             if let Some(sheet_comments) = comments.get(&active_sheet) {
                 for (&(row, col), _) in sheet_comments {
                     if row >= sr && row <= er && col >= sc && col <= ec {
@@ -251,7 +251,7 @@ pub fn go_to_special(
             }
         }
         "notes" => {
-            let notes = state.notes.lock().unwrap();
+            let notes = state.notes.read().unwrap();
             if let Some(sheet_notes) = notes.get(&active_sheet) {
                 for (&(row, col), _) in sheet_notes {
                     if row >= sr && row <= er && col >= sc && col <= ec {
@@ -261,7 +261,7 @@ pub fn go_to_special(
             }
         }
         "conditionalFormats" => {
-            let cfs = state.conditional_formats.lock().unwrap();
+            let cfs = state.conditional_formats.read().unwrap();
             if let Some(sheet_cfs) = cfs.get(&active_sheet) {
                 let mut cell_set = std::collections::HashSet::new();
                 for cf in sheet_cfs {
@@ -281,7 +281,7 @@ pub fn go_to_special(
             }
         }
         "dataValidation" => {
-            let validations = state.data_validations.lock().unwrap();
+            let validations = state.data_validations.read().unwrap();
             if let Some(sheet_validations) = validations.get(&active_sheet) {
                 let mut cell_set = std::collections::HashSet::new();
                 for vr in sheet_validations {
@@ -382,7 +382,7 @@ pub(crate) fn hidden_row_sources_for_sheet(
         }
     }
     {
-        let outlines = state.outlines.lock().unwrap();
+        let outlines = state.outlines.read().unwrap();
         if let Some(outline) = outlines.get(&sheet_index) {
             user_hidden.extend(outline.get_hidden_rows());
         }
@@ -401,7 +401,7 @@ pub(crate) fn collect_hidden_cols_for_sheet(
     sheet_index: usize,
 ) -> std::collections::HashSet<u32> {
     let mut hidden = crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
     if let Some(o) = outlines.get(&sheet_index) {
         hidden.extend(o.get_hidden_cols());
     }
@@ -685,7 +685,11 @@ mod special_cells_tests {
             let mut group = crate::grouping::RowGroup::new(5, 6, 1);
             group.collapsed = true;
             outline.row_groups.push(group);
-            state.outlines.lock().unwrap().insert(0, outline);
+            // Test fixture seeding persisted state directly; no save follows.
+            let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::LoadingFromDisk,
+            );
+            state.outlines.write(&seed).unwrap().insert(0, outline);
         }
 
         let hidden_rows = collect_hidden_rows_for_sheet(&state, 0);

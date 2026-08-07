@@ -26,9 +26,23 @@ export default defineConfig({
   expect: {
     timeout: 10_000,
     toHaveScreenshot: {
-      // Store golden baselines alongside the test files
-      maxDiffPixelRatio: 0.005,
-      threshold: 0.2,
+      // Comparison gates. Keep in sync with DEFAULT_SCREENSHOT_OPTIONS in
+      // e2e/helpers/screenshots.ts, which explains how they were measured.
+      //
+      // `threshold` is pixelmatch's YIQ colour-distance gate, NOT a per-channel
+      // tolerance: a pixel counts as different only when its squared YIQ
+      // distance exceeds 35215 * threshold^2. Calcula's gridlines are #f1f1f1
+      // on white (ΔY 14), which pixelmatch stops seeing above 0.053 — at the
+      // former 0.2 an entirely erased gridline scored 0 differing pixels and
+      // no grid-geometry change could ever fail. Anything above ~0.038 blinds
+      // the suite to the grid; measured run-to-run noise at 0.02 is 0 pixels
+      // on 74 of 76 captures.
+      //
+      // Effective pixel budget is min(maxDiffPixels, maxDiffPixelRatio * px):
+      // 200 px on a full grid capture, ~15 px on a status-bar strip.
+      maxDiffPixels: 200,
+      maxDiffPixelRatio: 0.0005,
+      threshold: 0.02,
       animations: "disabled",
     },
   },
@@ -63,6 +77,23 @@ export default defineConfig({
       name: "visual",
       testDir: "./e2e/visual",
       testMatch: "**/*.spec.ts",
+    },
+    {
+      // End-to-end JOURNEYS that deliberately disturb the whole document
+      // (new_file, open_file, a frontend reload, or a real window close).
+      //
+      // They live outside ./e2e/tests on purpose. The functional specs share one
+      // app instance AND one accumulating workbook -- `resetGrid` only clears
+      // A1:Z1000, so every screenshot baseline encodes the residue of the specs
+      // that ran before it. A spec that wipes or reopens the document therefore
+      // shifts unrelated goldens, and one that closes the window ends the run.
+      // Keeping them in their own project makes them explicit to invoke and
+      // harmless to `yarn e2e`.
+      name: "journey",
+      testDir: "./e2e/journeys",
+      testMatch: "**/*.spec.ts",
+      // A real AutoRecover cycle is a 60s wait; a cold reload is up to 90s.
+      timeout: 300_000,
     },
     {
       name: "invariant",

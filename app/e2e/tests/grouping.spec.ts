@@ -3,15 +3,39 @@
  *
  * Tests grouping operations (group, ungroup, collapse, expand) via Tauri API.
  * Uses cells in columns AA-AB, rows 1-20 to avoid conflicts with other tests.
+ *
+ * WHY THERE ARE NO SCREENSHOTS IN THIS FILE ANY MORE
+ *
+ * There used to be four: `grouping-rows-grouped`, `grouping-rows-collapsed`,
+ * `grouping-rows-expanded` and `grouping-columns-grouped`. None of them could
+ * fail for the reason its name implies, and two of them proved it outright —
+ * `grouping-rows-collapsed.png` and `grouping-rows-expanded.png` were
+ * BYTE-IDENTICAL (sha256 1c8a474d...), i.e. the pair asserted that collapsing
+ * and expanding a group produce the same picture.
+ *
+ * The cause is not the framing. These tests drive the Rust commands
+ * (`group_rows`, `collapse_row_group`, ...) directly, and a backend-only
+ * outline change has NO effect on what is drawn. `src/api/groupingService.ts`
+ * says so in its own header: only the Grouping extension's store pushes hidden
+ * rows/cols into grid state and sizes the outline bar, so calling the backend
+ * behind its back leaves "the grid SHOWING rows the backend now hides (and an
+ * outline bar that never appears)". Measured against the running app:
+ * `group_rows` on a freshly populated span changed 0 of 42k captured pixels.
+ *
+ * Unlike the annotations and tables cases, there is no event to fix this with:
+ * the Grouping extension listens only for mousedown/keydown, and its
+ * controller (registerGroupingController) is module-private to @api, so
+ * nothing a test can dispatch will re-sync the store. Restoring these goldens
+ * means driving the real UI (Data > Outline > Group, or the outline bar's own
+ * +/- buttons) so the extension performs the operation itself. Until then the
+ * screenshots are decoration, and decoration that reports coverage it does not
+ * have is worse than no test. The functional assertions below are untouched
+ * and do have teeth — they check the backend's own return values.
  */
 import { test, expect } from "../fixtures";
-import {
-  takeGridScreenshot,
-  softly,
-} from "../helpers/screenshots";
 
 test.describe("Row Grouping", () => {
-  test("group rows and verify outline", async ({ appPage, grid }) => {
+  test("group rows and verify outline", async ({ grid }) => {
     // Set up data in rows 1-5
     for (let i = 1; i <= 5; i++) {
       await grid.setCellValueDirect(`AA${i}`, `Row ${i}`);
@@ -29,11 +53,9 @@ test.describe("Row Grouping", () => {
 
     expect(result.success).toBe(true);
 
-    await grid.navigateTo("AA1");
-    await softly(takeGridScreenshot(appPage, "grouping-rows-grouped"));
   });
 
-  test("collapse and expand row group", async ({ appPage, grid }) => {
+  test("collapse and expand row group", async ({ grid }) => {
     // Group rows 5-8 (0-based: rows 4-7)
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -52,8 +74,6 @@ test.describe("Row Grouping", () => {
 
     expect(collapseResult.success).toBe(true);
 
-    await grid.navigateTo("AA1");
-    await softly(takeGridScreenshot(appPage, "grouping-rows-collapsed"));
 
     // Expand the group
     const expandResult: any = await grid.page.evaluate(async () => {
@@ -64,7 +84,6 @@ test.describe("Row Grouping", () => {
 
     expect(expandResult.success).toBe(true);
 
-    await softly(takeGridScreenshot(appPage, "grouping-rows-expanded"));
   });
 
   test("ungroup rows", async ({ grid }) => {
@@ -89,7 +108,7 @@ test.describe("Row Grouping", () => {
 });
 
 test.describe("Column Grouping", () => {
-  test("group and ungroup columns", async ({ appPage, grid }) => {
+  test("group and ungroup columns", async ({ grid }) => {
     // Group columns AB-AD (0-based: cols 27-29)
     const groupResult: any = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -101,8 +120,6 @@ test.describe("Column Grouping", () => {
 
     expect(groupResult.success).toBe(true);
 
-    await grid.navigateTo("AB1");
-    await softly(takeGridScreenshot(appPage, "grouping-columns-grouped"));
 
     // Ungroup
     const ungroupResult: any = await grid.page.evaluate(async () => {

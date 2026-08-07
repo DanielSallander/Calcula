@@ -318,6 +318,13 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                 .unwrap_or(crate::DEFAULT_SHEET_ZOOM_PERCENT),
             split_row: None,
             split_col: None,
+            // The .xlsx reader does not yet map Excel's sheetView display flags
+            // (showZeros / showFormulas / view / showRowColHeaders); imports land on
+            // the Calcula defaults, same as every other unmapped sheetView attribute.
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: crate::DEFAULT_SHEET_VIEW_MODE.to_string(),
+            display_headings: true,
             // <row s=".."> / <col s=".."> translated from RAW xlsx xf indices
             // through the same map the cells use, so a column that Excel styled
             // wholesale stays one entry here instead of becoming a style on

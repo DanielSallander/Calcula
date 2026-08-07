@@ -145,7 +145,7 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
     let mut result: Vec<WritebackDataset> = Vec::new();
     let mut seen_regions: HashSet<String> = HashSet::new();
 
-    let subs = match state.subscriptions.lock() {
+    let subs = match state.subscriptions.read() {
         Ok(s) => s,
         Err(_) => return result,
     };
@@ -829,6 +829,14 @@ pub async fn bi_import_writeback_tables(
 
 /// Rebuild all writeback dataset data on every open connection (manual
 /// refresh; the same routine runs automatically after submit/approve/pull).
+///
+/// DIRTY FLAG: deliberately none (census "mutates-document" reclassified to read-only).
+/// `refresh_writeback_sources` re-provisions the ENGINE's in-memory writeback connectors
+/// from submissions that are already persisted; it writes no `AppState` store that the
+/// save path reads (it touches only `bi_state.connections`). Nothing it does changes what
+/// a save would write, so marking here would dirty a workbook on a refresh that cannot
+/// be lost -- and this runs on connect, which would make merely opening a subscribed
+/// workbook prompt to save. The commands that CREATE submissions own the flag.
 #[tauri::command]
 pub async fn bi_refresh_writeback_data(
     state: State<'_, AppState>,

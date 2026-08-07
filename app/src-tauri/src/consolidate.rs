@@ -11,6 +11,8 @@ use crate::api_types::{
     CellData, ConsolidateParams, ConsolidateResult, ConsolidationFunction,
     MergedRegion,
 };
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{format_cell_value, AppState};
 use engine::{Cell, CellValue, Grid, StyleRegistry};
 
@@ -398,7 +400,11 @@ fn consolidate_by_category(
 // ============================================================================
 
 #[tauri::command]
-pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> ConsolidateResult {
+pub fn consolidate_data(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    params: ConsolidateParams,
+) -> ConsolidateResult {
     crate::log_info!(
         "CONSOLIDATE",
         "Starting: function={:?} sources={} dest=sheet{}!({},{}) top_row={} left_col={}",
@@ -496,6 +502,10 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
                 return error_result(&e);
             }
         }
+
+        // Past the destination-block protection gate: the writes below are committed
+        // into the grid, which is persisted.
+        let _effect = DocumentEffect::mutates(&file_state);
 
         // Write column headers
         if has_col_headers {
@@ -608,6 +618,9 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
                 return error_result(&e);
             }
         }
+
+        // Past the destination-block protection gate (position mode).
+        let _effect = DocumentEffect::mutates(&file_state);
 
         // Write results to destination
         for &(rel_r, rel_c, value) in &pos_results {

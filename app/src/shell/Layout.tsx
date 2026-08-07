@@ -9,6 +9,7 @@ import { MenuBar } from "./MenuBar";
 import { RibbonContainer } from "./Ribbon/RibbonContainer";
 import { FormulaBar } from "./FormulaBar";
 import { Spreadsheet } from "../core/components/Spreadsheet";
+import { persistSheetDisplayFlags } from "../core/lib/sheetViewState";
 import { SheetTabs } from "./SheetTabs";
 import { TaskPaneContainer } from "./TaskPane";
 import { ActivityBar, SidePanel } from "./ActivityBar";
@@ -174,6 +175,9 @@ function LayoutInner(): React.ReactElement {
       viewMode: ViewMode;
     }>(AppEvents.VIEW_MODE_CHANGED, (detail) => {
       dispatch(setViewMode(detail.viewMode));
+      // Persist: before this the flag was frontend-only and reset on every reload
+      // and every sheet switch.
+      void persistSheetDisplayFlags({ viewMode: detail.viewMode });
     });
     return cleanup;
   }, [dispatch]);
@@ -184,6 +188,7 @@ function LayoutInner(): React.ReactElement {
       showFormulas: boolean;
     }>(AppEvents.SHOW_FORMULAS_TOGGLED, (detail) => {
       dispatch(setShowFormulas(detail.showFormulas));
+      void persistSheetDisplayFlags({ showFormulas: detail.showFormulas });
     });
     return cleanup;
   }, [dispatch]);
@@ -194,6 +199,7 @@ function LayoutInner(): React.ReactElement {
       displayZeros: boolean;
     }>(AppEvents.DISPLAY_ZEROS_TOGGLED, (detail) => {
       dispatch(setDisplayZeros(detail.displayZeros));
+      void persistSheetDisplayFlags({ displayZeros: detail.displayZeros });
     });
     return cleanup;
   }, [dispatch]);
@@ -216,6 +222,7 @@ function LayoutInner(): React.ReactElement {
       displayHeadings: boolean;
     }>(AppEvents.DISPLAY_HEADINGS_TOGGLED, (detail) => {
       dispatch(setDisplayHeadings(detail.displayHeadings));
+      void persistSheetDisplayFlags({ displayHeadings: detail.displayHeadings });
     });
     return cleanup;
   }, [dispatch]);
@@ -260,6 +267,20 @@ function LayoutInner(): React.ReactElement {
   // prompt for unsaved changes.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    // `onCloseRequested` registers ASYNCHRONOUSLY, so a cleanup that runs before the
+    // promise resolves cannot cancel it through `unlisten` -- it is still undefined.
+    // React StrictMode mounts this effect twice in dev, so the FIRST registration
+    // survived its own cleanup and the window ended up with TWO close handlers.
+    // Both then ran on the same close request, and both tried to raise the native
+    // save prompt: the second `ask()` cannot open a modal while the first owns one,
+    // so it rejected, the catch below swallowed the rejection, and the handler fell
+    // through to `destroy()` -- tearing the window down while the prompt was still on
+    // screen and discarding the user's unsaved work. `cancelled` closes that race by
+    // unlistening a registration that resolved after its effect was torn down.
+    let cancelled = false;
+    // Re-entrancy guard: a second close request arriving while the prompt is up must
+    // not stack a second modal.
+    let prompting = false;
 
     getCurrentWindow()
       .onCloseRequested(async (event) => {
@@ -289,8 +310,12 @@ function LayoutInner(): React.ReactElement {
           // Prevent close while we show the dialog
           event.preventDefault();
 
+          if (prompting) return;
+          prompting = true;
+
+          let shouldSave: boolean;
           try {
-            const shouldSave = await ask(
+            shouldSave = await ask(
               "Do you want to save changes before closing?",
               {
                 title: "Calcula",
@@ -299,24 +324,51 @@ function LayoutInner(): React.ReactElement {
                 cancelLabel: "Don't Save",
               }
             );
-
-            if (shouldSave) {
-              await saveFile();
-            }
           } catch (error) {
-            console.error("[Layout] Error during close handler:", error);
+            // The prompt could not be shown. NEVER fall through to destroy(): that
+            // discards unsaved work at exactly the moment we failed to ask about it.
+            // Keeping the window open costs the user one repeated click; closing
+            // costs them the document.
+            console.error(
+              "[Layout] Could not show the unsaved-changes prompt; keeping the window open:",
+              error
+            );
+            prompting = false;
+            return;
           }
 
-          // User has responded — now close
+          if (shouldSave) {
+            try {
+              await saveFile();
+            } catch (error) {
+              // The save the user asked for failed. Same rule: do not close over
+              // unsaved work.
+              console.error(
+                "[Layout] Save failed during close; keeping the window open:",
+                error
+              );
+              prompting = false;
+              return;
+            }
+          }
+
+          // User has responded and any save succeeded — now close
           await getCurrentWindow().destroy();
         }
         // If not dirty, don't preventDefault — window closes normally
       })
       .then((fn) => {
+        // The effect was already torn down while this registration was in flight:
+        // undo it now, or the listener leaks and doubles up on the next mount.
+        if (cancelled) {
+          fn();
+          return;
+        }
         unlisten = fn;
       });
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, []);

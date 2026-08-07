@@ -13,6 +13,8 @@
 //          delete containing marks the binding orphaned + disabled).
 
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
@@ -311,9 +313,13 @@ pub fn materialize_saved_cell_behaviors(
 #[tauri::command]
 pub fn set_cell_behavior(
     state: State<AppState>,
+    file_state: State<FileState>,
     binding: CellBehaviorBinding,
 ) -> CellBehaviorBinding {
-    let mut store = state.cell_behaviors.lock().unwrap();
+    // Cell-behavior bindings are persisted (`workbook.cell_behaviors`) and
+    // written only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut store = state.cell_behaviors.write(&effect).unwrap();
     let previous = all_bindings(&store);
     store.insert(binding.id.clone(), binding.clone());
     drop(store);
@@ -325,8 +331,15 @@ pub fn set_cell_behavior(
 /// Remove a binding (undoable). Returns whether it existed. The associated
 /// script is NOT removed here — script lifecycle belongs to the script UI.
 #[tauri::command]
-pub fn remove_cell_behavior(state: State<AppState>, id: String) -> bool {
-    let mut store = state.cell_behaviors.lock().unwrap();
+pub fn remove_cell_behavior(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    id: String,
+) -> bool {
+    // Cell-behavior bindings are persisted (`workbook.cell_behaviors`) and
+    // written only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut store = state.cell_behaviors.write(&effect).unwrap();
     if !store.contains_key(&id) {
         return false;
     }
@@ -340,8 +353,16 @@ pub fn remove_cell_behavior(state: State<AppState>, id: String) -> bool {
 
 /// Enable/disable a binding (undoable). Returns whether it existed.
 #[tauri::command]
-pub fn set_cell_behavior_enabled(state: State<AppState>, id: String, enabled: bool) -> bool {
-    let mut store = state.cell_behaviors.lock().unwrap();
+pub fn set_cell_behavior_enabled(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    id: String,
+    enabled: bool,
+) -> bool {
+    // Cell-behavior bindings are persisted (`workbook.cell_behaviors`) and
+    // written only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut store = state.cell_behaviors.write(&effect).unwrap();
     if !store.contains_key(&id) {
         return false;
     }
@@ -362,14 +383,14 @@ pub fn set_cell_behavior_enabled(state: State<AppState>, id: String, enabled: bo
 /// Get one binding by id.
 #[tauri::command]
 pub fn get_cell_behavior(state: State<AppState>, id: String) -> Option<CellBehaviorBinding> {
-    let store = state.cell_behaviors.lock().unwrap();
+    let store = state.cell_behaviors.read().unwrap();
     store.get(&id).cloned()
 }
 
 /// Get every binding (all sheets; the frontend indexes them spatially).
 #[tauri::command]
 pub fn get_all_cell_behaviors(state: State<AppState>) -> Vec<CellBehaviorBinding> {
-    let store = state.cell_behaviors.lock().unwrap();
+    let store = state.cell_behaviors.read().unwrap();
     all_bindings(&store)
 }
 

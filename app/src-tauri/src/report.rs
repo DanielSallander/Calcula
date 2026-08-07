@@ -75,12 +75,12 @@ fn connection_data_source_id(bi_state: &BiState, connection_id: identity::Entity
 
 /// Mirror the in-memory report definitions into extension_data so they persist
 /// with the workbook (extension_data is saved + loaded automatically).
-pub fn sync_reports_to_extension_data(state: &AppState) {
+pub fn sync_reports_to_extension_data(state: &AppState, effect: &crate::document_effect::DocumentEffect) {
     let defs = state.report_definitions.lock().unwrap();
     if let Ok(v) = serde_json::to_value(&*defs) {
         state
             .extension_data
-            .lock()
+            .write(effect)
             .unwrap()
             .insert(REPORTS_EXT_KEY.to_string(), v);
     }
@@ -456,6 +456,11 @@ fn clear_report_region(state: &AppState, report_id: ReportId) {
 /// in the callers BEFORE this runs (it feeds the undo-policy decision).
 #[allow(clippy::too_many_arguments)]
 fn materialize(
+    // Required so a caller cannot materialize a report without first deciding what it
+    // does to the saved document. Currently unused in the body only because the cells it
+    // writes live in `AppState.grids`, which is not a `Persisted<T>` yet; when it is,
+    // this becomes the token those writes present.
+    _effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
     pivot_state: &PivotState,
     pane_control_state: &crate::pane_control::PaneControlState,
@@ -477,6 +482,7 @@ fn materialize(
 #[tauri::command]
 pub async fn create_report(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     bi_state: State<'_, BiState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
@@ -484,6 +490,9 @@ pub async fn create_report(
     request: CreateReportRequest,
 ) -> Result<ReportResult, String> {
     let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
+    // The query resolved; everything below writes grid cells and the report
+    // registry. Built after the await so a failed query leaves the doc clean.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let visible_rows = view.rows.iter().filter(|r| r.visible).count();
     if visible_rows > MAX_REPORT_ROWS {
         return Err(format!(
@@ -511,6 +520,7 @@ pub async fn create_report(
     record_report_undo(&state, request.sheet_index, bounds, "Create report");
 
     materialize(
+        &effect,
         &state,
         &pivot_state,
         &pane_control_state,
@@ -534,7 +544,7 @@ pub async fn create_report(
         end_col,
         data_source_id,
     });
-    sync_reports_to_extension_data(&state);
+    sync_reports_to_extension_data(&state, &effect);
 
     Ok(ReportResult {
         report_id,
@@ -548,6 +558,7 @@ pub async fn create_report(
 #[tauri::command]
 pub async fn refresh_report(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     bi_state: State<'_, BiState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
@@ -568,6 +579,10 @@ pub async fn refresh_report(
     };
 
     let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
+    // The query resolved and the report exists. Everything below rewrites the
+    // report's grid region and the definition registry (mirrored into
+    // `workbook.extension_data`), so it changes what a save writes.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let visible_rows = view.rows.iter().filter(|r| r.visible).count();
     if visible_rows > MAX_REPORT_ROWS {
         return Err(format!(
@@ -603,6 +618,7 @@ pub async fn refresh_report(
     }
 
     materialize(
+        &effect,
         &state,
         &pivot_state,
         &pane_control_state,
@@ -629,7 +645,7 @@ pub async fn refresh_report(
             }
         }
     }
-    sync_reports_to_extension_data(&state);
+    sync_reports_to_extension_data(&state, &effect);
 
     Ok(ReportResult {
         report_id: request.report_id,
@@ -643,11 +659,14 @@ pub async fn refresh_report(
 #[tauri::command]
 pub fn delete_report(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     report_id: ReportId,
 ) -> Result<(), String> {
+    // Deleting a report clears its grid region and drops the definition.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Undo snapshot: the report's cells + the current report list, before clearing.
     if let Some((sheet_idx, bounds)) = {
         let defs = state.report_definitions.lock().unwrap();
@@ -660,7 +679,7 @@ pub fn delete_report(
 
     clear_report_region(&state, report_id);
     state.report_definitions.lock().unwrap().retain(|d| d.id != report_id);
-    sync_reports_to_extension_data(&state);
+    sync_reports_to_extension_data(&state, &effect);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&pane_control_state, &ribbon_filter_state)));
     Ok(())
 }
@@ -683,9 +702,12 @@ pub fn list_reports(state: State<'_, AppState>) -> Result<Vec<SavedReport>, Stri
 #[tauri::command]
 pub fn restore_report(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     bi_state: State<'_, BiState>,
     report: SavedReport,
 ) -> Result<Option<String>, String> {
+    // Restoring re-materializes the report into the grid and re-registers it.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut report = report;
 
     {
@@ -733,6 +755,6 @@ pub fn restore_report(
         defs.push(report.clone());
     }
     reregister_report_region(&state, &report);
-    sync_reports_to_extension_data(&state);
+    sync_reports_to_extension_data(&state, &effect);
     Ok(rebind_warning)
 }

@@ -114,7 +114,7 @@ export function createScenarioDriver(spec: ScenarioSpec): Driver {
       const data = await ensureLoaded();
       const writes = scenarioWritesForFrame(spec, data.keyframes, data.union, t);
       if (writes.length === 0) return;
-      const res = await animApplyFrame(spec.sheetIndex, writes);
+      const res = await animApplyFrame(token, spec.sheetIndex, writes);
       repaintFromCells(res.updatedCells);
     },
 

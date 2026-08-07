@@ -4,9 +4,23 @@
  * Tests trace_precedents and trace_dependents Tauri commands to verify
  * the formula dependency graph is correctly reported.
  * Uses cells in columns AG-AH, rows 1-10 to avoid conflicts with other tests.
+ *
+ * WHY THERE ARE NO SCREENSHOTS IN THIS FILE ANY MORE
+ *
+ * `tracing-precedents` and `tracing-range-precedents` were removed. They were
+ * named for the trace ARROWS but contained none: these tests call the Rust
+ * `trace_precedents` command, which computes the dependency graph and returns
+ * it, while the arrows are drawn by the Tracing extension from state it
+ * maintains itself. Measured against the running app: invoking
+ * `trace_precedents` on a live formula and repainting changed 0 of the 4828
+ * captured pixels.
+ *
+ * The functional assertions below — that the returned graph names the right
+ * precedents/dependents — are the real test here and are untouched. Restoring
+ * an arrow golden means driving the Tracing extension (it registers
+ * `calcula.tracing`) rather than the backend command.
  */
 import { test, expect } from "../fixtures";
-import { takeGridScreenshot, softly } from "../helpers/screenshots";
 
 /**
  * Count the total number of same-sheet cells a TraceResult references.
@@ -26,7 +40,7 @@ function countTracedCells(result: any): number {
 }
 
 test.describe("Formula Tracing", () => {
-  test("trace precedents of a formula cell", async ({ appPage, grid }) => {
+  test("trace precedents of a formula cell", async ({ grid }) => {
     // Set up: AG1=10, AG2=20, AG3=SUM(AG1:AG2)
     await grid.setCellValueDirect("AG1", "10");
     await grid.setCellValueDirect("AG2", "20");
@@ -51,8 +65,6 @@ test.describe("Formula Tracing", () => {
     expect(result.cells).toBeDefined();
     expect(countTracedCells(result)).toBeGreaterThanOrEqual(2);
 
-    await grid.navigateTo("AG1");
-    await softly(takeGridScreenshot(appPage, "tracing-precedents"));
   });
 
   test("trace dependents of a source cell", async ({ grid }) => {
@@ -96,7 +108,7 @@ test.describe("Formula Tracing", () => {
     expect(refs.length).toBe(0);
   });
 
-  test("trace precedents with range references", async ({ appPage, grid }) => {
+  test("trace precedents with range references", async ({ grid }) => {
     // Set up: AH1=1, AH2=2, AH3=3, AH4=SUM(AH1:AH3)
     await grid.setCellValueDirect("AH1", "1");
     await grid.setCellValueDirect("AH2", "2");
@@ -119,7 +131,5 @@ test.describe("Formula Tracing", () => {
     // Should reference AH1:AH3 (either as individual cells or a grouped range)
     expect(countTracedCells(result)).toBeGreaterThanOrEqual(1);
 
-    await grid.navigateTo("AH1");
-    await softly(takeGridScreenshot(appPage, "tracing-range-precedents"));
   });
 });

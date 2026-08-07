@@ -416,7 +416,7 @@ mod tests {
         let _guard = store_guard();
         clear_drafts();
         let state = crate::create_app_state();
-        assert!(state.object_scripts.lock().unwrap().is_empty());
+        assert!(state.object_scripts.read().unwrap().is_empty());
 
         let draft = build_draft("Sneaky", "button", Some("btn-9"), None, SAMPLE).unwrap();
         remember(draft.clone()).unwrap();
@@ -426,7 +426,7 @@ mod tests {
         // ...and the workbook — the collection `loadAndMountScripts` reads and
         // mounts on open — is untouched.
         assert!(
-            state.object_scripts.lock().unwrap().is_empty(),
+            state.object_scripts.read().unwrap().is_empty(),
             "a draft must never land in AppState.object_scripts: local object \
              scripts there are MOUNTED on workbook load"
         );

@@ -27,7 +27,11 @@ import { test, expect } from "../../fixtures";
 import type { GridHelper } from "../../helpers/grid";
 import { OracleBattery } from "../../oracles";
 import type { OracleBaseline, OracleViolation } from "../../oracles/types";
-import { takeCheckpoint, softly } from "../../helpers/screenshots";
+import {
+  takeCheckpoint,
+  softly,
+  waitForVisualStability,
+} from "../../helpers/screenshots";
 import { deepResetForWalk } from "../../walker/reset";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -131,6 +135,11 @@ export function defineScenario(name: string, phases: ScenarioPhase[]): void {
         ).toBe(0);
 
         if (phase.screenshot) {
+          // Scenario phases build pivots and charts, whose refreshes finish on a
+          // backend round-trip and paint a transient progress indicator on the
+          // grid overlay canvas. Let the frame settle before capturing, or the
+          // golden records "Updating grid… (4/4)" plus a Cancel button.
+          await waitForVisualStability(appPage);
           await softly(takeCheckpoint(appPage, phase.screenshot));
         }
       });

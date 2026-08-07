@@ -13,12 +13,16 @@ const getSheetZoom = vi.fn();
 const setSheetZoom = vi.fn();
 const getSplitWindow = vi.fn();
 const getFreezePanes = vi.fn();
+const getSheetDisplayFlags = vi.fn();
+const setSheetDisplayFlags = vi.fn();
 
 vi.mock("../tauri-api", () => ({
   getSheetZoom: (...a: unknown[]) => getSheetZoom(...a),
   setSheetZoom: (...a: unknown[]) => setSheetZoom(...a),
   getSplitWindow: (...a: unknown[]) => getSplitWindow(...a),
   getFreezePanes: (...a: unknown[]) => getFreezePanes(...a),
+  getSheetDisplayFlags: (...a: unknown[]) => getSheetDisplayFlags(...a),
+  setSheetDisplayFlags: (...a: unknown[]) => setSheetDisplayFlags(...a),
 }));
 
 import {
@@ -28,6 +32,9 @@ import {
   zoomPercentToFactor,
   loadSheetViewState,
   persistSheetZoom,
+  loadSheetDisplayFlags,
+  persistSheetDisplayFlags,
+  DEFAULT_SHEET_DISPLAY_FLAGS,
 } from "../sheetViewState";
 import { ZOOM_MIN, ZOOM_MAX } from "../../types";
 
@@ -128,5 +135,65 @@ describe("persistSheetZoom", () => {
   it("does not break interactive zooming when the write fails", async () => {
     setSheetZoom.mockRejectedValue(new Error("locked"));
     await expect(persistSheetZoom(1.25)).resolves.toBeUndefined();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Per-sheet DISPLAY FLAGS
+// ---------------------------------------------------------------------------
+
+describe("loadSheetDisplayFlags", () => {
+  beforeEach(() => {
+    getSheetDisplayFlags.mockReset();
+    setSheetDisplayFlags.mockReset();
+    setSheetDisplayFlags.mockResolvedValue(undefined);
+  });
+
+  it("returns all four flags as the backend reports them", async () => {
+    getSheetDisplayFlags.mockResolvedValue({
+      displayZeros: false,
+      showFormulas: true,
+      viewMode: "pageBreakPreview",
+      displayHeadings: false,
+    });
+    const flags = await loadSheetDisplayFlags();
+    expect(flags).toEqual({
+      displayZeros: false,
+      showFormulas: true,
+      viewMode: "pageBreakPreview",
+      displayHeadings: false,
+    });
+  });
+
+  it("falls back to the defaults rather than refusing to draw the sheet", async () => {
+    getSheetDisplayFlags.mockRejectedValue(new Error("command not available"));
+    await expect(loadSheetDisplayFlags()).resolves.toEqual(DEFAULT_SHEET_DISPLAY_FLAGS);
+  });
+
+  it("fills in only the fields the backend omitted", async () => {
+    getSheetDisplayFlags.mockResolvedValue({ showFormulas: true });
+    const flags = await loadSheetDisplayFlags();
+    expect(flags.showFormulas).toBe(true);
+    expect(flags.displayZeros).toBe(true);
+    expect(flags.viewMode).toBe("normal");
+    expect(flags.displayHeadings).toBe(true);
+  });
+});
+
+describe("persistSheetDisplayFlags", () => {
+  beforeEach(() => {
+    setSheetDisplayFlags.mockReset();
+    setSheetDisplayFlags.mockResolvedValue(undefined);
+  });
+
+  it("sends a PARTIAL patch so a toggle cannot clobber the other three", async () => {
+    await persistSheetDisplayFlags({ showFormulas: true });
+    expect(setSheetDisplayFlags).toHaveBeenCalledWith({ showFormulas: true });
+  });
+
+  it("does not break the interactive toggle when the write fails", async () => {
+    setSheetDisplayFlags.mockRejectedValue(new Error("locked"));
+    await expect(persistSheetDisplayFlags({ displayZeros: false })).resolves.toBeUndefined();
   });
 });

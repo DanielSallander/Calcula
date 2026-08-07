@@ -49,6 +49,7 @@ export function StatusBar(_props: StatusBarProps): React.ReactElement {
 
   return (
     <div
+      data-testid="status-bar"
       onContextMenu={handleContextMenu}
       style={{
         height: "24px",

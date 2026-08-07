@@ -7,7 +7,17 @@ use std::collections::{HashMap, HashSet};
 use engine::{self, CellValue, Grid, StyleRegistry};
 use tauri::State;
 use crate::api_types::{ComputedPropertyData, ComputedPropertyResult, DimensionData};
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{evaluate_formula_with_context, AppState};
+
+// COMPUTED PROPERTIES ARE PERSISTED (`user_files/computed_properties.json`), and
+// applying one also writes row heights / column widths / styles into the grid, which
+// are persisted too. All three mutators previously took no `FileState`.
+//
+// `add_` commits unconditionally once it has an id; `update_` and `remove_` both bail
+// out with `success: false` when the property id does not resolve, so their effects are
+// constructed only after `find_prop_location` has succeeded.
 
 // ============================================================================
 // Storage types
@@ -99,7 +109,7 @@ fn to_saved(props: &[ComputedProperty]) -> Vec<SavedComputedProp> {
 /// Serialize all computed properties for user_files, or None when there are
 /// none. Sorted (sheets, then indices) for deterministic artifact bytes.
 pub fn collect_computed_properties_for_save(state: &AppState) -> Option<Vec<u8>> {
-    let storage = state.computed_properties.lock().ok()?;
+    let storage = state.computed_properties.read().ok()?;
     let mut sheets: Vec<SavedSheetComputedProps> = Vec::new();
     for (sheet_index, sp) in storage.iter() {
         if sp.column_props.is_empty() && sp.row_props.is_empty() && sp.cell_props.is_empty() {
@@ -154,7 +164,13 @@ pub fn restore_computed_properties(state: &AppState, bytes: Option<&[u8]>) {
         // Lock order mirrors add_computed_property: grids before the
         // property/dependency stores.
         let grids = state.grids.lock().unwrap();
-        let mut storage = state.computed_properties.lock().unwrap();
+        // LOAD PATH: rebuilding the store from the .cala artifact. `open_file` assigns
+        // is_modified = false as its last act, and a freshly-opened workbook must not
+        // prompt to save.
+        let load = DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut storage = state.computed_properties.write(&load).unwrap();
         let mut deps = state.computed_prop_dependencies.lock().unwrap();
         let mut rev_deps = state.computed_prop_dependents.lock().unwrap();
         storage.clear();
@@ -705,7 +721,7 @@ pub fn get_computed_properties(
     index2: Option<u32>,
 ) -> Vec<ComputedPropertyData> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let props_storage = state.computed_properties.lock().unwrap();
+    let props_storage = state.computed_properties.read().unwrap();
 
     let sheet_props = match props_storage.get(&active_sheet) {
         Some(sp) => sp,
@@ -747,6 +763,7 @@ pub fn get_available_attributes(target_type: String) -> Vec<String> {
 #[tauri::command]
 pub fn add_computed_property(
     state: State<AppState>,
+    file_state: State<FileState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     target_type: String,
@@ -807,7 +824,8 @@ pub fn add_computed_property(
     );
 
     // Store the property
-    let mut props_storage = state.computed_properties.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut props_storage = state.computed_properties.write(&effect).unwrap();
     let sheet_props = props_storage.entry(active_sheet).or_insert_with(SheetComputedProperties::default);
 
     let prop = ComputedProperty {
@@ -871,7 +889,7 @@ pub fn add_computed_property(
     drop(style_reg);
 
     // Build response with current properties list
-    let props_storage = state.computed_properties.lock().unwrap();
+    let props_storage = state.computed_properties.read().unwrap();
     let properties = get_props_list(&props_storage, active_sheet, &target_type, index, index2);
 
     ComputedPropertyResult {
@@ -886,6 +904,7 @@ pub fn add_computed_property(
 #[tauri::command]
 pub fn update_computed_property(
     state: State<AppState>,
+    file_state: State<FileState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     prop_id: u64,
@@ -904,17 +923,23 @@ pub fn update_computed_property(
     let row_heights_snapshot = state.row_heights.lock().unwrap().clone();
     let col_widths_snapshot = state.column_widths.lock().unwrap().clone();
 
-    // Find and update the property
-    let mut props_storage = state.computed_properties.lock().unwrap();
-    let (target_type, index, index2) = match find_prop_location(&props_storage, active_sheet, prop_id) {
-        Some(loc) => loc,
-        None => return ComputedPropertyResult {
-            success: false,
-            properties: Vec::new(),
-            dimension_changes: Vec::new(),
-            needs_style_refresh: false,
-        },
+    // Resolve under a READ guard, then decide, then take the write guard: an
+    // unresolvable prop_id returns `success: false` having changed nothing, and must
+    // leave the document clean.
+    let (target_type, index, index2) = {
+        let props_storage = state.computed_properties.read().unwrap();
+        match find_prop_location(&props_storage, active_sheet, prop_id) {
+            Some(loc) => loc,
+            None => return ComputedPropertyResult {
+                success: false,
+                properties: Vec::new(),
+                dimension_changes: Vec::new(),
+                needs_style_refresh: false,
+            },
+        }
     };
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut props_storage = state.computed_properties.write(&effect).unwrap();
 
     let (eval_row, eval_col) = match target_type.as_str() {
         "column" => (0, index),
@@ -1006,7 +1031,7 @@ pub fn update_computed_property(
     drop(grids);
     drop(style_reg);
 
-    let props_storage = state.computed_properties.lock().unwrap();
+    let props_storage = state.computed_properties.read().unwrap();
     let properties = get_props_list(&props_storage, active_sheet, &target_type, index, index2);
 
     ComputedPropertyResult {
@@ -1021,20 +1046,28 @@ pub fn update_computed_property(
 #[tauri::command]
 pub fn remove_computed_property(
     state: State<AppState>,
+    file_state: State<FileState>,
     prop_id: u64,
 ) -> ComputedPropertyResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut props_storage = state.computed_properties.lock().unwrap();
 
-    let (target_type, index, index2) = match find_prop_location(&props_storage, active_sheet, prop_id) {
-        Some(loc) => loc,
-        None => return ComputedPropertyResult {
-            success: false,
-            properties: Vec::new(),
-            dimension_changes: Vec::new(),
-            needs_style_refresh: false,
-        },
+    // Resolve under a READ guard first (see `update_computed_property`).
+    let (target_type, index, index2) = {
+        let props_storage = state.computed_properties.read().unwrap();
+        match find_prop_location(&props_storage, active_sheet, prop_id) {
+            Some(loc) => loc,
+            None => return ComputedPropertyResult {
+                success: false,
+                properties: Vec::new(),
+                dimension_changes: Vec::new(),
+                needs_style_refresh: false,
+            },
+        }
     };
+
+    // The property resolved, so this call will remove it.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut props_storage = state.computed_properties.write(&effect).unwrap();
 
     // Remove the property
     if let Some(sheet_props) = props_storage.get_mut(&active_sheet) {

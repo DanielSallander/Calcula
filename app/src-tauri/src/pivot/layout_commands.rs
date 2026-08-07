@@ -1,6 +1,8 @@
 //! FILENAME: app/src-tauri/src/pivot/layout_commands.rs
 //! PURPOSE: Tauri commands for saving/loading/deleting pivot layout configurations.
 
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::AppState;
 use persistence::SavedPivotLayout;
 use serde::{Deserialize, Serialize};
@@ -56,9 +58,13 @@ impl From<&SavedPivotLayout> for PivotLayoutResponse {
 #[tauri::command]
 pub fn save_pivot_layout(
     state: State<'_, AppState>,
+    file_state: State<'_, FileState>,
     request: SavePivotLayoutRequest,
 ) -> Result<identity::EntityId, String> {
-    let mut layouts = state.pivot_layouts.lock()
+    // Saved layouts are persisted (`workbook.pivot_layouts`). A save/upsert always
+    // commits, so the decision can be made up front.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut layouts = state.pivot_layouts.write(&effect)
         .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;
 
     let now = js_sys_now();
@@ -102,7 +108,7 @@ pub fn save_pivot_layout(
 pub fn get_pivot_layouts(
     state: State<'_, AppState>,
 ) -> Result<Vec<PivotLayoutResponse>, String> {
-    let layouts = state.pivot_layouts.lock()
+    let layouts = state.pivot_layouts.read()
         .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;
     Ok(layouts.iter().map(PivotLayoutResponse::from).collect())
 }
@@ -111,15 +117,21 @@ pub fn get_pivot_layouts(
 #[tauri::command]
 pub fn delete_pivot_layout(
     state: State<'_, AppState>,
+    file_state: State<'_, FileState>,
     id: identity::EntityId,
 ) -> Result<(), String> {
-    let mut layouts = state.pivot_layouts.lock()
-        .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;
-    let before = layouts.len();
-    layouts.retain(|l| l.id != id);
-    if layouts.len() == before {
-        return Err(format!("Layout with id {} not found", id));
+    // Resolve the not-found refusal under a READ guard first, so it stays clean.
+    {
+        let layouts = state.pivot_layouts.read()
+            .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;
+        if !layouts.iter().any(|l| l.id == id) {
+            return Err(format!("Layout with id {} not found", id));
+        }
     }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut layouts = state.pivot_layouts.write(&effect)
+        .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;
+    layouts.retain(|l| l.id != id);
     Ok(())
 }
 

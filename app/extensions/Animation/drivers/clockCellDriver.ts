@@ -47,7 +47,7 @@ export function createClockCellDriver(cfg: ClockCellConfig): Driver {
 
     async applyFrame(t: number): Promise<void> {
       const value = valueAtFrame(cfg, t);
-      const res = await animApplyFrame(cfg.sheetIndex, [
+      const res = await animApplyFrame(token, cfg.sheetIndex, [
         { row: cfg.row, col: cfg.col, value: String(value) },
       ]);
       repaintFromCells(res.updatedCells);

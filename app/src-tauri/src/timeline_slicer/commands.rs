@@ -70,6 +70,7 @@ pub fn create_timeline_slicer(
 #[tauri::command]
 pub fn delete_timeline_slicer(
     state: State<crate::AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     timeline_state: State<TimelineSlicerState>,
     timeline_id: identity::EntityId,
 ) -> Result<(), String> {
@@ -81,8 +82,13 @@ pub fn delete_timeline_slicer(
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
     drop(timelines);
 
+    // The timeline object itself is NOT persisted (TimelineSlicerState is never read
+    // by assemble_workbook_for_save -- a separate, pre-existing gap). The object
+    // SCRIPT pruned below is persisted, so this delete does change what a save
+    // writes, and that is what the effect is for.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // C10: a deleted timeline must not leave its object script mounted/persisted.
-    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &timeline_id.to_string());
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &timeline_id.to_string());
 
     Ok(())
 }
@@ -338,7 +344,7 @@ pub fn get_pivot_date_fields(
     pivot_id: PivotId,
 ) -> Result<Vec<String>, String> {
     let pid = pivot_id;
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)).unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pid)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -401,7 +407,7 @@ fn get_pivot_date_values(
     pivot_id: PivotId,
     field_name: &str,
 ) -> Result<Vec<DateTuple>, String> {
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)).unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -438,7 +444,7 @@ fn get_pivot_date_value_strings_in_range(
     start: &DateTuple,
     end: &DateTuple,
 ) -> Result<Vec<String>, String> {
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)).unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;

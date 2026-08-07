@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
 
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::AppState;
 use engine::{CellValue, Grid};
 
@@ -608,10 +610,24 @@ fn resolve_cf_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usiz
 #[tauri::command]
 pub fn add_conditional_format(
     state: State<AppState>,
+    file_state: State<FileState>,
+    params: AddCFParams,
+) -> CFResult {
+    add_conditional_format_impl(&state, &file_state, params)
+}
+
+/// Command body over plain references, so the dirty-flag contract is unit-testable
+/// without a Tauri `State` (see `document_effect_pilot_tests`).
+pub(crate) fn add_conditional_format_impl(
+    state: &AppState,
+    file_state: &FileState,
     params: AddCFParams,
 ) -> CFResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut cf_storage = state.conditional_formats.lock().unwrap();
+    // Rules live in `workbook.conditional_formats` and are written only by the save
+    // path, so adding one changes what a save would write.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
     let mut next_id = state.next_cf_rule_id.lock().unwrap();
 
     let rules = cf_storage.entry(active_sheet).or_insert_with(Vec::new);
@@ -642,10 +658,12 @@ pub fn add_conditional_format(
 #[tauri::command]
 pub fn update_conditional_format(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: UpdateCFParams,
 ) -> CFResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut cf_storage = state.conditional_formats.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let rules = match cf_storage.get_mut(&active_sheet) {
         Some(r) => r,
@@ -680,10 +698,12 @@ pub fn update_conditional_format(
 #[tauri::command]
 pub fn delete_conditional_format(
     state: State<AppState>,
+    file_state: State<FileState>,
     rule_id: u64,
 ) -> CFResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut cf_storage = state.conditional_formats.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let rules = match cf_storage.get_mut(&active_sheet) {
         Some(r) => r,
@@ -704,10 +724,12 @@ pub fn delete_conditional_format(
 #[tauri::command]
 pub fn reorder_conditional_formats(
     state: State<AppState>,
+    file_state: State<FileState>,
     rule_ids: Vec<u64>,
 ) -> CFResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut cf_storage = state.conditional_formats.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let rules = match cf_storage.get_mut(&active_sheet) {
         Some(r) => r,
@@ -734,7 +756,7 @@ pub fn get_conditional_format(
     rule_id: u64,
 ) -> Option<ConditionalFormatDefinition> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let cf_storage = state.conditional_formats.lock().unwrap();
+    let cf_storage = state.conditional_formats.read().unwrap();
 
     cf_storage
         .get(&active_sheet)
@@ -748,7 +770,7 @@ pub fn get_all_conditional_formats(
     sheet_index: Option<usize>,
 ) -> Result<Vec<ConditionalFormatDefinition>, String> {
     let target_sheet = resolve_cf_sheet(&state, sheet_index)?;
-    let cf_storage = state.conditional_formats.lock().unwrap();
+    let cf_storage = state.conditional_formats.read().unwrap();
 
     Ok(cf_storage
         .get(&target_sheet)
@@ -767,7 +789,7 @@ pub fn evaluate_conditional_formats(
     end_col: u32,
 ) -> EvaluateCFResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let cf_storage = state.conditional_formats.lock().unwrap();
+    let cf_storage = state.conditional_formats.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
@@ -842,6 +864,7 @@ pub fn evaluate_conditional_formats(
 #[tauri::command]
 pub fn clear_conditional_formats_in_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -849,7 +872,8 @@ pub fn clear_conditional_formats_in_range(
     sheet_index: Option<usize>,
 ) -> Result<u32, String> {
     let target_sheet = resolve_cf_sheet(&state, sheet_index)?;
-    let mut cf_storage = state.conditional_formats.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
@@ -1715,3 +1739,4 @@ mod tests {
         assert_eq!(IconSetType::default(), IconSetType::ThreeTrafficLights1);
     }
 }
+

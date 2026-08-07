@@ -7,6 +7,8 @@ use std::collections::HashSet;
 use tauri::State;
 
 use crate::api_types::{CellData, GoalSeekParams, GoalSeekResult};
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{
     evaluate_formula_multi_sheet,
     format_cell_value, get_column_row_dependents, get_recalculation_order, AppState,
@@ -121,6 +123,7 @@ fn error_result(msg: &str) -> GoalSeekResult {
 #[tauri::command]
 pub fn goal_seek(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: GoalSeekParams,
 ) -> GoalSeekResult {
     // BACKGROUND: up to 100 secant iterations, each a full dependent recalc
@@ -218,6 +221,15 @@ pub fn goal_seek(
     ) {
         return error_result("Target cell formula does not depend on the changing cell");
     }
+
+    // Every refusal is now behind us (sheet protection, writeback region, target has a
+    // formula, variable has none, and the dependency check above), so from here the
+    // solver WRITES into the grid. It is marked here rather than at the end because
+    // the failure paths below restore only the variable cell -- the dependents they
+    // recalculated along the way keep the perturbed values, so even an unsuccessful
+    // run leaves the document different from the last save. Per the census rule for
+    // reverts: a revert to a mid-run snapshot is not a revert to disk.
+    let _effect = DocumentEffect::mutates(&file_state);
 
     let goal = params.target_value;
     let max_iter = params.max_iterations;

@@ -68,7 +68,7 @@ fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
 /// end), so after a generic region shift this brings the definition store — the
 /// source of truth for the NEXT refresh's destination — back in sync. Without it
 /// a refresh would re-materialize the report at its pre-shift coordinates.
-fn sync_report_definitions_to_regions(state: &AppState) {
+fn sync_report_definitions_to_regions(state: &AppState, effect: &crate::document_effect::DocumentEffect) {
     let report_regions: Vec<_> = {
         let regions = state.protected_regions.lock().unwrap();
         regions
@@ -92,14 +92,14 @@ fn sync_report_definitions_to_regions(state: &AppState) {
             }
         }
     }
-    crate::report::sync_reports_to_extension_data(state);
+    crate::report::sync_reports_to_extension_data(state, effect);
 }
 
 /// Shift protected regions when rows are inserted.
 /// Coordinate shifts apply to ALL regions; pivot definition updates apply only to pivot regions.
-fn shift_pivot_regions_for_row_insert(state: &AppState, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_row_insert(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
 
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
@@ -142,13 +142,13 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, pivot_state: &PivotState
     // Report-specific: realign report definitions with their shifted regions.
     drop(pivot_tables);
     drop(regions);
-    sync_report_definitions_to_regions(state);
+    sync_report_definitions_to_regions(state, effect);
 }
 
 /// Shift protected regions when columns are inserted.
-fn shift_pivot_regions_for_col_insert(state: &AppState, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_col_insert(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
 
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
@@ -190,13 +190,13 @@ fn shift_pivot_regions_for_col_insert(state: &AppState, pivot_state: &PivotState
     // Report-specific: realign report definitions with their shifted regions.
     drop(pivot_tables);
     drop(regions);
-    sync_report_definitions_to_regions(state);
+    sync_report_definitions_to_regions(state, effect);
 }
 
 /// Shift protected regions when rows are deleted.
-fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_row_delete(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
 
     // Collect IDs of regions fully within the deleted range
     let mut regions_to_remove: Vec<String> = Vec::new();
@@ -278,7 +278,7 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState
     // (definitions whose region was fully deleted are dropped).
     drop(pivot_tables);
     drop(regions);
-    sync_report_definitions_to_regions(state);
+    sync_report_definitions_to_regions(state, effect);
 }
 
 /// ============================================================================
@@ -288,8 +288,8 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState
 /// Shift table boundaries when rows are inserted.
 /// Tables entirely below the insertion point are shifted down.
 /// Tables spanning the insertion point (including at start_row) expand.
-fn shift_table_boundaries_for_row_insert(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
-    let mut tables = state.tables.lock().unwrap();
+fn shift_table_boundaries_for_row_insert(state: &AppState, effect: &crate::document_effect::DocumentEffect, from_row: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.write(effect).unwrap();
 
     if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
         for table in sheet_tables.values_mut() {
@@ -308,8 +308,8 @@ fn shift_table_boundaries_for_row_insert(state: &AppState, from_row: u32, count:
 /// Shift table boundaries when columns are inserted.
 /// Tables entirely to the right of the insertion point are shifted right.
 /// Tables spanning the insertion point (including at start_col) expand.
-fn shift_table_boundaries_for_col_insert(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
-    let mut tables = state.tables.lock().unwrap();
+fn shift_table_boundaries_for_col_insert(state: &AppState, effect: &crate::document_effect::DocumentEffect, from_col: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.write(effect).unwrap();
 
     if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
         for table in sheet_tables.values_mut() {
@@ -327,9 +327,9 @@ fn shift_table_boundaries_for_col_insert(state: &AppState, from_col: u32, count:
 
 /// Shift table boundaries when rows are deleted.
 /// Tables fully within the deleted range are removed.
-fn shift_table_boundaries_for_row_delete(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
-    let mut tables = state.tables.lock().unwrap();
-    let mut table_names = state.table_names.lock().unwrap();
+fn shift_table_boundaries_for_row_delete(state: &AppState, effect: &crate::document_effect::DocumentEffect, from_row: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.write(effect).unwrap();
+    let mut table_names = state.table_names.write(effect).unwrap();
 
     let delete_end = from_row + count;
 
@@ -376,9 +376,9 @@ fn shift_table_boundaries_for_row_delete(state: &AppState, from_row: u32, count:
 
 /// Shift table boundaries when columns are deleted.
 /// Tables fully within the deleted range are removed.
-fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
-    let mut tables = state.tables.lock().unwrap();
-    let mut table_names = state.table_names.lock().unwrap();
+fn shift_table_boundaries_for_col_delete(state: &AppState, effect: &crate::document_effect::DocumentEffect, from_col: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.write(effect).unwrap();
+    let mut table_names = state.table_names.write(effect).unwrap();
 
     let delete_end = from_col + count;
 
@@ -498,6 +498,7 @@ fn shift_flat_cell_stores(
 /// The caller must already hold the undo-stack lock inside `begin_transaction`.
 fn shift_per_sheet_range_stores(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
@@ -505,7 +506,7 @@ fn shift_per_sheet_range_stores(
     use crate::commands::coord_shift::{shift_range, CellRange};
 
     // --- Conditional formats: each rule owns a LIST of ranges. ---
-    if let Ok(mut store) = state.conditional_formats.lock() {
+    if let Ok(mut store) = state.conditional_formats.write(effect) {
         if let Some(rules) = store.get_mut(&sheet_index) {
             if !rules.is_empty() {
                 let previous = rules.clone();
@@ -602,7 +603,7 @@ fn shift_per_sheet_range_stores(
     }
 
     // --- Data validations: one range each. ---
-    if let Ok(mut store) = state.data_validations.lock() {
+    if let Ok(mut store) = state.data_validations.write(effect) {
         if let Some(ranges) = store.get_mut(&sheet_index) {
             if !ranges.is_empty() {
                 let previous = ranges.clone();
@@ -740,6 +741,7 @@ fn shift_merged_regions_for_sheet(
 /// The caller must already hold the undo-stack lock inside `begin_transaction`.
 fn shift_per_sheet_cell_stores(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
@@ -767,9 +769,9 @@ fn shift_per_sheet_cell_stores(
         };
     }
 
-    shift_store!(state.comments.lock(), "obj_comments", "Shift comments");
-    shift_store!(state.notes.lock(), "obj_notes", "Shift notes");
-    shift_store!(state.hyperlinks.lock(), "obj_hyperlinks", "Shift hyperlinks");
+    shift_store!(state.comments.write(effect), "obj_comments", "Shift comments");
+    shift_store!(state.notes.write(effect), "obj_notes", "Shift notes");
+    shift_store!(state.hyperlinks.write(effect), "obj_hyperlinks", "Shift hyperlinks");
     // Cell protection is NOT shifted here any more, and needs no replacement:
     // lock state now rides on `Cell.style_index`, which moves with the cell
     // itself when rows or columns are inserted or deleted.
@@ -1032,6 +1034,7 @@ fn record_auto_filter_shift(
 /// matching the cell-types / cell-behaviors helpers directly above.
 fn shift_writeback_draft_regions(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
@@ -1045,7 +1048,7 @@ fn shift_writeback_draft_regions(
         return;
     };
 
-    let Ok(mut regions) = state.writeback_draft_regions.lock() else {
+    let Ok(mut regions) = state.writeback_draft_regions.write(effect) else {
         return;
     };
     if regions.is_empty() {
@@ -1080,9 +1083,9 @@ fn shift_writeback_draft_regions(
 }
 
 /// Shift protected regions when columns are deleted.
-fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_col_delete(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
 
     let mut regions_to_remove: Vec<String> = Vec::new();
 
@@ -1163,7 +1166,7 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState
     // (definitions whose region was fully deleted are dropped).
     drop(pivot_tables);
     drop(regions);
-    sync_report_definitions_to_regions(state);
+    sync_report_definitions_to_regions(state, effect);
 }
 
 // ============================================================================
@@ -1329,11 +1332,16 @@ pub fn insert_rows(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Insert {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Past every refusal gate above (sheet-protection options + the writeback
+    // shift guard) and inside the open transaction: the edit is committed, and
+    // the cell-keyed / range-keyed stores below move with it. `mutates` sets
+    // is_modified here, so no later `?` can skip it.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Cell-type assignments move with their rows; their pre-shift state is
     // recorded in the SAME transaction so one undo restores grid + assignments
     // atomically.
     {
-        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
         if crate::cell_types::shift_rows_for_insert(&mut cell_types, active_sheet, row, count) {
             undo_stack.record_custom_restore(
@@ -1345,7 +1353,7 @@ pub fn insert_rows(
     }
     // Cell-behavior bindings track their target ranges the same way.
     {
-        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let mut behaviors = state.cell_behaviors.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_behaviors::all_bindings(&behaviors);
         if crate::cell_behaviors::shift_rows_for_insert(&mut behaviors, active_sheet, row, count) {
             undo_stack.record_custom_restore(
@@ -1358,6 +1366,7 @@ pub fn insert_rows(
     // Writeback draft regions are coordinate-anchored and must track the shift.
     shift_writeback_draft_regions(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1372,6 +1381,7 @@ pub fn insert_rows(
     // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
     shift_per_sheet_cell_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1388,6 +1398,7 @@ pub fn insert_rows(
     // advanced-filter hidden rows are position-keyed too.
     shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1404,6 +1415,7 @@ pub fn insert_rows(
             .unwrap_or_default();
         shift_named_ranges(
             &state,
+            &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
@@ -1413,6 +1425,7 @@ pub fn insert_rows(
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1420,6 +1433,7 @@ pub fn insert_rows(
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1427,6 +1441,7 @@ pub fn insert_rows(
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1567,10 +1582,10 @@ pub fn insert_rows(
     shift_merged_regions(&state, calp::writeback::StructuralEdit::RowInsert { at: row, count });
 
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_row_insert(&state, &pivot_state, row, count, active_sheet);
+    shift_pivot_regions_for_row_insert(&state, &effect, &pivot_state, row, count, active_sheet);
 
     // === UPDATE TABLE BOUNDARIES ===
-    shift_table_boundaries_for_row_insert(&state, row, count, active_sheet);
+    shift_table_boundaries_for_row_insert(&state, &effect, row, count, active_sheet);
 
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -1598,8 +1613,7 @@ pub fn insert_rows(
         }
     }
 
-    // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 
     Ok(result)
 }
@@ -1664,9 +1678,14 @@ pub fn insert_columns(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Insert {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Past every refusal gate above (sheet-protection options + the writeback
+    // shift guard) and inside the open transaction: the edit is committed, and
+    // the cell-keyed / range-keyed stores below move with it. `mutates` sets
+    // is_modified here, so no later `?` can skip it.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Cell-type assignments move with their columns (same transaction; see insert_rows).
     {
-        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
         if crate::cell_types::shift_cols_for_insert(&mut cell_types, active_sheet, col, count) {
             undo_stack.record_custom_restore(
@@ -1677,7 +1696,7 @@ pub fn insert_columns(
         }
     }
     {
-        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let mut behaviors = state.cell_behaviors.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_behaviors::all_bindings(&behaviors);
         if crate::cell_behaviors::shift_cols_for_insert(&mut behaviors, active_sheet, col, count) {
             undo_stack.record_custom_restore(
@@ -1690,6 +1709,7 @@ pub fn insert_columns(
     // Writeback draft regions are coordinate-anchored and must track the shift.
     shift_writeback_draft_regions(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1704,6 +1724,7 @@ pub fn insert_columns(
     // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
     shift_per_sheet_cell_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1720,6 +1741,7 @@ pub fn insert_columns(
     // advanced-filter hidden rows are position-keyed too.
     shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1736,6 +1758,7 @@ pub fn insert_columns(
             .unwrap_or_default();
         shift_named_ranges(
             &state,
+            &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
@@ -1745,6 +1768,7 @@ pub fn insert_columns(
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1752,6 +1776,7 @@ pub fn insert_columns(
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1759,6 +1784,7 @@ pub fn insert_columns(
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1896,10 +1922,10 @@ pub fn insert_columns(
     shift_merged_regions(&state, calp::writeback::StructuralEdit::ColInsert { at: col, count });
 
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_col_insert(&state, &pivot_state, col, count, active_sheet);
+    shift_pivot_regions_for_col_insert(&state, &effect, &pivot_state, col, count, active_sheet);
 
     // === UPDATE TABLE BOUNDARIES ===
-    shift_table_boundaries_for_col_insert(&state, col, count, active_sheet);
+    shift_table_boundaries_for_col_insert(&state, &effect, col, count, active_sheet);
 
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -1927,8 +1953,7 @@ pub fn insert_columns(
         }
     }
 
-    // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 
     Ok(result)
 }
@@ -2420,10 +2445,15 @@ pub fn delete_rows(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Delete {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Past every refusal gate above (sheet-protection options + the writeback
+    // shift guard) and inside the open transaction: the edit is committed, and
+    // the cell-keyed / range-keyed stores below move with it. `mutates` sets
+    // is_modified here, so no later `?` can skip it.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Assignments on deleted rows drop; those below shift up (same transaction;
     // see insert_rows).
     {
-        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
         if crate::cell_types::shift_rows_for_delete(&mut cell_types, active_sheet, row, count) {
             undo_stack.record_custom_restore(
@@ -2435,7 +2465,7 @@ pub fn delete_rows(
     }
     // Bindings shrink with overlapping deletes; fully-deleted targets orphan.
     {
-        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let mut behaviors = state.cell_behaviors.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_behaviors::all_bindings(&behaviors);
         if crate::cell_behaviors::shift_rows_for_delete(&mut behaviors, active_sheet, row, count) {
             undo_stack.record_custom_restore(
@@ -2449,6 +2479,7 @@ pub fn delete_rows(
     // cells are all deleted is dropped and reported.
     shift_writeback_draft_regions(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2463,6 +2494,7 @@ pub fn delete_rows(
     // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
     shift_per_sheet_cell_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2479,6 +2511,7 @@ pub fn delete_rows(
     // advanced-filter hidden rows are position-keyed too.
     shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2495,6 +2528,7 @@ pub fn delete_rows(
             .unwrap_or_default();
         shift_named_ranges(
             &state,
+            &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
@@ -2504,6 +2538,7 @@ pub fn delete_rows(
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2511,6 +2546,7 @@ pub fn delete_rows(
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2518,6 +2554,7 @@ pub fn delete_rows(
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2679,10 +2716,10 @@ pub fn delete_rows(
     shift_merged_regions(&state, calp::writeback::StructuralEdit::RowDelete { at: row, count });
 
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_row_delete(&state, &pivot_state, row, count, active_sheet);
+    shift_pivot_regions_for_row_delete(&state, &effect, &pivot_state, row, count, active_sheet);
 
     // === UPDATE TABLE BOUNDARIES ===
-    shift_table_boundaries_for_row_delete(&state, row, count, active_sheet);
+    shift_table_boundaries_for_row_delete(&state, &effect, row, count, active_sheet);
 
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -2710,8 +2747,7 @@ pub fn delete_rows(
         }
     }
 
-    // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 
     Ok(result)
 }
@@ -2803,10 +2839,15 @@ pub fn delete_columns(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Delete {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Past every refusal gate above (sheet-protection options + the writeback
+    // shift guard) and inside the open transaction: the edit is committed, and
+    // the cell-keyed / range-keyed stores below move with it. `mutates` sets
+    // is_modified here, so no later `?` can skip it.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Assignments on deleted columns drop; those to the right shift left (same
     // transaction; see insert_rows).
     {
-        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
         if crate::cell_types::shift_cols_for_delete(&mut cell_types, active_sheet, col, count) {
             undo_stack.record_custom_restore(
@@ -2817,7 +2858,7 @@ pub fn delete_columns(
         }
     }
     {
-        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let mut behaviors = state.cell_behaviors.write(&effect).map_err(|e| e.to_string())?;
         let previous = crate::cell_behaviors::all_bindings(&behaviors);
         if crate::cell_behaviors::shift_cols_for_delete(&mut behaviors, active_sheet, col, count) {
             undo_stack.record_custom_restore(
@@ -2831,6 +2872,7 @@ pub fn delete_columns(
     // cells are all deleted is dropped and reported.
     shift_writeback_draft_regions(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -2845,6 +2887,7 @@ pub fn delete_columns(
     // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
     shift_per_sheet_cell_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -2861,6 +2904,7 @@ pub fn delete_columns(
     // advanced-filter hidden rows are position-keyed too.
     shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -2877,6 +2921,7 @@ pub fn delete_columns(
             .unwrap_or_default();
         shift_named_ranges(
             &state,
+            &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
@@ -2886,6 +2931,7 @@ pub fn delete_columns(
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -2893,6 +2939,7 @@ pub fn delete_columns(
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -2900,6 +2947,7 @@ pub fn delete_columns(
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -3060,10 +3108,10 @@ pub fn delete_columns(
     shift_merged_regions(&state, calp::writeback::StructuralEdit::ColDelete { at: col, count });
 
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_col_delete(&state, &pivot_state, col, count, active_sheet);
+    shift_pivot_regions_for_col_delete(&state, &effect, &pivot_state, col, count, active_sheet);
 
     // === UPDATE TABLE BOUNDARIES ===
-    shift_table_boundaries_for_col_delete(&state, col, count, active_sheet);
+    shift_table_boundaries_for_col_delete(&state, &effect, col, count, active_sheet);
 
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -3091,8 +3139,7 @@ pub fn delete_columns(
         }
     }
 
-    // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 
     Ok(result)
 }
@@ -3369,6 +3416,7 @@ pub fn relocate_cell_references(
 /// edit shifts them together and they should undo together.
 pub(crate) fn shift_misc_coordinate_stores(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
@@ -3395,7 +3443,7 @@ pub(crate) fn shift_misc_coordinate_stores(
     // --- Outline groups: row groups move on row edits, column groups on column
     //     edits. A group whose whole span is deleted goes with it. ---
     let prev_outline = {
-        let mut store = match state.outlines.lock() { Ok(s) => s, Err(_) => return };
+        let mut store = match state.outlines.write(effect) { Ok(s) => s, Err(_) => return };
         let before = store.get(&sheet_index).cloned();
         if let Some(outline) = store.get_mut(&sheet_index) {
             if row_edit {
@@ -3440,7 +3488,7 @@ pub(crate) fn shift_misc_coordinate_stores(
     // --- Scenario changing-cells: a cell whose row/column was deleted drops out
     //     of the scenario rather than silently pointing at a different cell. ---
     let prev_scenarios = {
-        let mut store = match state.scenarios.lock() { Ok(s) => s, Err(_) => return };
+        let mut store = match state.scenarios.write(effect) { Ok(s) => s, Err(_) => return };
         let before = store.get(&sheet_index).cloned();
         if let Some(list) = store.get_mut(&sheet_index) {
             for scenario in list.iter_mut() {
@@ -3460,7 +3508,7 @@ pub(crate) fn shift_misc_coordinate_stores(
 
     // --- Computed properties: three maps, keyed by column, row, and cell. ---
     let prev_computed = {
-        let mut store = match state.computed_properties.lock() { Ok(s) => s, Err(_) => return };
+        let mut store = match state.computed_properties.write(effect) { Ok(s) => s, Err(_) => return };
         let before = store.get(&sheet_index).cloned();
         if let Some(props) = store.get_mut(&sheet_index) {
             if !row_edit {
@@ -3599,6 +3647,7 @@ pub(crate) fn shift_misc_coordinate_stores(
 /// Records one `obj_named_ranges` undo entry when anything moved.
 fn shift_named_ranges(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     sheet_name: &str,
@@ -3606,7 +3655,7 @@ fn shift_named_ranges(
 ) {
     use calp::writeback::StructuralEdit as SE;
 
-    let mut store = match state.named_ranges.lock() {
+    let mut store = match state.named_ranges.write(effect) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -3741,6 +3790,7 @@ mod structural_formula_shift_tests {
 /// Records one `obj_range_strings` undo entry when either moved.
 fn shift_sheet_range_strings(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
@@ -3759,7 +3809,7 @@ fn shift_sheet_range_strings(
     let mut changed = false;
 
     let prev_print = {
-        let mut setups = match state.page_setups.lock() { Ok(s) => s, Err(_) => return };
+        let mut setups = match state.page_setups.write(effect) { Ok(s) => s, Err(_) => return };
         let before = setups.get(sheet_index).map(|s| s.print_area.clone());
         if let Some(ps) = setups.get_mut(sheet_index) {
             if !ps.print_area.is_empty() {
@@ -4539,6 +4589,7 @@ fn shift_cross_sheet_formulas_for_off_sheet_edit(
 /// from the anchor this shifts; the backend stores no pixel geometry.
 fn shift_controls(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
@@ -4546,7 +4597,7 @@ fn shift_controls(
     use crate::commands::coord_shift::shift_cell;
 
     let previous_controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)> = {
-        let store = match state.controls.lock() { Ok(s) => s, Err(_) => return };
+        let store = match state.controls.write(effect) { Ok(s) => s, Err(_) => return };
         if store.is_empty() {
             return;
         }
@@ -4601,7 +4652,7 @@ fn shift_controls(
     // script's own stable id (see ControlsObjSnapshot) so a later script
     // deletion cannot make the undo payload target the wrong script.
     let previous_ids = {
-        let mut scripts = match state.object_scripts.lock() { Ok(s) => s, Err(_) => return };
+        let mut scripts = match state.object_scripts.write(effect) { Ok(s) => s, Err(_) => return };
         let mut prev = Vec::new();
         for script in scripts.iter_mut() {
             let Some(current) = script.instance_id.clone() else { continue };
@@ -4613,7 +4664,7 @@ fn shift_controls(
         prev
     };
 
-    if let Ok(mut store) = state.controls.lock() {
+    if let Ok(mut store) = state.controls.write(effect) {
         *store = rebuilt;
     }
 
@@ -4796,6 +4847,12 @@ pub(crate) fn off_sheet_structural_edit(
     // Capture the per-sheet snapshot BEFORE any mutation (takes its own locks).
     let snapshot = crate::undo_commands::capture_sheet_structural_snapshot(state, target)?;
 
+    // Past every refusal gate above (protection, writeback claims, spill guards): the
+    // off-sheet edit is committed from here. Same reasoning as the on-sheet path, and
+    // declared at function scope because the per-store shift helpers below run in
+    // several sibling blocks.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+
     let description = match edit {
         SE::RowInsert { count, .. } => format!("Insert {} row(s) on sheet {}", count, target + 1),
         SE::RowDelete { count, .. } => format!("Delete {} row(s) on sheet {}", count, target + 1),
@@ -4825,7 +4882,7 @@ pub(crate) fn off_sheet_structural_edit(
 
         // Cell-type assignments move with the edit (same transaction).
         {
-            let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+            let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
             let previous = crate::cell_types::entries_for_sheet(&cell_types, target);
             let changed = match edit {
                 SE::RowInsert { at, count } => crate::cell_types::shift_rows_for_insert(&mut cell_types, target, at, count),
@@ -4843,7 +4900,7 @@ pub(crate) fn off_sheet_structural_edit(
         }
         // Cell-behavior bindings track their target ranges the same way.
         {
-            let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+            let mut behaviors = state.cell_behaviors.write(&effect).map_err(|e| e.to_string())?;
             let previous = crate::cell_behaviors::all_bindings(&behaviors);
             let changed = match edit {
                 SE::RowInsert { at, count } => crate::cell_behaviors::shift_rows_for_insert(&mut behaviors, target, at, count),
@@ -4861,11 +4918,11 @@ pub(crate) fn off_sheet_structural_edit(
         }
 
         // The generic-edit store shifts, all sheet-parameterized already.
-        shift_writeback_draft_regions(state, &mut undo_stack, target, edit);
+        shift_writeback_draft_regions(state, &effect, &mut undo_stack, target, edit);
         shift_sheet_auto_filter(state, &mut undo_stack, target, edit);
-        shift_per_sheet_cell_stores(state, &mut undo_stack, target, edit);
+        shift_per_sheet_cell_stores(state, &effect, &mut undo_stack, target, edit);
         shift_style_tiers_single(&mut grids[target], edit);
-        shift_misc_coordinate_stores(state, &mut undo_stack, target, edit);
+        shift_misc_coordinate_stores(state, &effect, &mut undo_stack, target, edit);
 
         let sheet_names_snapshot: Vec<String> =
             state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
@@ -4874,10 +4931,10 @@ pub(crate) fn off_sheet_structural_edit(
             .cloned()
             .unwrap_or_default();
 
-        shift_named_ranges(state, &mut undo_stack, target, &edited_sheet_name, edit);
-        shift_sheet_range_strings(state, &mut undo_stack, target, edit);
-        shift_controls(state, &mut undo_stack, target, edit);
-        shift_per_sheet_range_stores(state, &mut undo_stack, target, edit);
+        shift_named_ranges(state, &effect, &mut undo_stack, target, &edited_sheet_name, edit);
+        shift_sheet_range_strings(state, &effect, &mut undo_stack, target, edit);
+        shift_controls(state, &effect, &mut undo_stack, target, edit);
+        shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, edit);
         shift_flat_cell_stores(state, target, edit);
 
         // Every OTHER sheet (including the ACTIVE mirror) may reference the
@@ -5063,20 +5120,20 @@ pub(crate) fn off_sheet_structural_edit(
     // Pivot regions + table boundaries on the target sheet.
     match edit {
         SE::RowInsert { at, count } => {
-            shift_pivot_regions_for_row_insert(state, pivot_state, at, count, target);
-            shift_table_boundaries_for_row_insert(state, at, count, target);
+            shift_pivot_regions_for_row_insert(state, &effect, pivot_state, at, count, target);
+            shift_table_boundaries_for_row_insert(state, &effect, at, count, target);
         }
         SE::RowDelete { at, count } => {
-            shift_pivot_regions_for_row_delete(state, pivot_state, at, count, target);
-            shift_table_boundaries_for_row_delete(state, at, count, target);
+            shift_pivot_regions_for_row_delete(state, &effect, pivot_state, at, count, target);
+            shift_table_boundaries_for_row_delete(state, &effect, at, count, target);
         }
         SE::ColInsert { at, count } => {
-            shift_pivot_regions_for_col_insert(state, pivot_state, at, count, target);
-            shift_table_boundaries_for_col_insert(state, at, count, target);
+            shift_pivot_regions_for_col_insert(state, &effect, pivot_state, at, count, target);
+            shift_table_boundaries_for_col_insert(state, &effect, at, count, target);
         }
         SE::ColDelete { at, count } => {
-            shift_pivot_regions_for_col_delete(state, pivot_state, at, count, target);
-            shift_table_boundaries_for_col_delete(state, at, count, target);
+            shift_pivot_regions_for_col_delete(state, &effect, pivot_state, at, count, target);
+            shift_table_boundaries_for_col_delete(state, &effect, at, count, target);
         }
     }
 
@@ -5109,10 +5166,7 @@ pub(crate) fn off_sheet_structural_edit(
         &[target],
     );
 
-    // Mark workbook as dirty.
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
+    // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 
     Ok(())
 }

@@ -75,7 +75,7 @@ fn collect_cell_type_custom_objects(
         .iter()
         .filter_map(|&i| sheet_ids.get(i).copied())
         .collect();
-    let cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+    let cell_types = state.cell_types.read().map_err(|e| e.to_string())?;
     let objects = crate::cell_types::collect_cell_types_for_save(&cell_types, &sheet_ids)
         .into_iter()
         .filter(|s| selected.contains(&s.sheet_id))
@@ -340,13 +340,13 @@ fn assemble_publish_workbook(
 
     // Include any author-designated writeback regions in the publish
     let writeback_regions = {
-        let drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+        let drafts = state.writeback_draft_regions.read().map_err(|e| e.to_string())?;
         if drafts.is_empty() { None } else { Some(drafts.clone()) }
     };
 
     // Include object scripts in the publish
     let object_scripts = {
-        let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+        let scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
         if scripts.is_empty() { None } else { Some(scripts.clone()) }
     };
 
@@ -696,7 +696,7 @@ pub fn calp_publish(
     {
         let now = chrono::Utc::now().to_rfc3339();
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Published,
                 &format!(
@@ -828,7 +828,7 @@ pub fn calp_publish_model(
     // Audit (B4)
     {
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Published,
                 &format!(
@@ -970,6 +970,7 @@ pub fn calp_publish_preview(
 ///   it to a NEW id. `modules`/`notebooks` are already stamped source_package =
 ///   package_name at pull. Notebooks arrive run-clean (exec metadata stripped at pull).
 fn materialize_distributed_scripts(
+    effect: &crate::document_effect::DocumentEffect,
     script_state: &crate::scripting::types::ScriptState,
     package_name: &str,
     modules: &[persistence::SavedScript],
@@ -986,7 +987,7 @@ fn materialize_distributed_scripts(
 
     {
         use crate::scripting::types::{ScriptScope, WorkbookScript};
-        let mut scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+        let mut scripts = script_state.workbook_scripts.write(effect).map_err(|e| e.to_string())?;
         let new_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
         // Removal-on-refresh: drop this package's prior modules it no longer
         // ships. The reserved Custom Functions record is exempt: it is
@@ -1053,7 +1054,7 @@ fn materialize_distributed_scripts(
 
     {
         use crate::scripting::types::{NotebookCell, NotebookDocument};
-        let mut nbs = script_state.workbook_notebooks.lock().map_err(|e| e.to_string())?;
+        let mut nbs = script_state.workbook_notebooks.write(effect).map_err(|e| e.to_string())?;
         let new_ids: HashSet<&str> = notebooks.iter().map(|n| n.id.as_str()).collect();
         nbs.retain(|id, n| {
             !(n.source_package.as_deref() == Some(package_name) && !new_ids.contains(id.as_str()))
@@ -1332,6 +1333,7 @@ fn ensure_slot<T: Clone>(v: &mut Vec<T>, idx: usize, default: T) {
 /// carrier Sheet; ids resolve to local indices via `pkg_to_index`.
 fn materialize_pulled_sheet_state(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     sheets: &[(SheetId, &persistence::Sheet)],
     pkg_to_index: &std::collections::HashMap<SheetId, usize>,
     active_sheet: usize,
@@ -1344,7 +1346,7 @@ fn materialize_pulled_sheet_state(
         .collect();
 
     {
-        let mut v = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        let mut v = state.freeze_configs.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, crate::sheets::FreezeConfig::default());
             v[*idx] = crate::sheets::FreezeConfig {
@@ -1377,21 +1379,21 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut v = state.tab_colors.lock().map_err(|e| e.to_string())?;
+        let mut v = state.tab_colors.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, String::new());
             v[*idx] = p.tab_color.clone();
         }
     }
     {
-        let mut v = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
+        let mut v = state.sheet_visibility.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, "visible".to_string());
             v[*idx] = p.visibility.clone();
         }
     }
     {
-        let mut v = state.show_gridlines.lock().map_err(|e| e.to_string())?;
+        let mut v = state.show_gridlines.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, true);
             v[*idx] = p.show_gridlines;
@@ -1435,7 +1437,7 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        let mut page_setups = state.page_setups.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut page_setups, *idx, crate::api_types::PageSetup::default());
             page_setups[*idx] = match &p.page_setup {
@@ -1468,7 +1470,7 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut notes_storage = state.notes.lock().map_err(|e| e.to_string())?;
+        let mut notes_storage = state.notes.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             if p.notes.is_empty() {
                 notes_storage.remove(idx);
@@ -1506,7 +1508,7 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut hyperlinks_storage = state.hyperlinks.lock().map_err(|e| e.to_string())?;
+        let mut hyperlinks_storage = state.hyperlinks.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             if p.hyperlinks.is_empty() {
                 hyperlinks_storage.remove(idx);
@@ -1541,6 +1543,7 @@ fn materialize_pulled_sheet_state(
 /// is supplied. Returns the number materialized. Shared by pull, refresh, and
 /// the dev-mode preview loop.
 fn materialize_pulled_tables(
+    effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
     saved_tables: &[persistence::SavedTable],
     map: &std::collections::HashMap<SheetId, usize>,
@@ -1550,8 +1553,8 @@ fn materialize_pulled_tables(
         return Ok(0);
     }
     let mut materialized = 0usize;
-    let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
-    let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+    let mut tables = state.tables.write(&effect).map_err(|e| e.to_string())?;
+    let mut table_names = state.table_names.write(&effect).map_err(|e| e.to_string())?;
     for saved in saved_tables {
         let Some(&idx) = map.get(&saved.sheet_id) else {
             continue; // the table's sheet wasn't pulled
@@ -1622,7 +1625,7 @@ fn pane_control_taken_names<'a>(
 /// lock, released before the pane/filter locks are taken — the lock-order
 /// convention (pane_control/types.rs, control_values.rs) never nests these.
 fn snapshot_on_grid_controls(state: &AppState) -> Result<crate::controls::ControlStorage, String> {
-    Ok(state.controls.lock().map_err(|e| e.to_string())?.clone())
+    Ok(state.controls.read().map_err(|e| e.to_string())?.clone())
 }
 
 /// Materialize pulled pane controls (Controls pane) into PaneControlState —
@@ -1659,7 +1662,7 @@ fn materialize_pulled_pane_controls(
     // don't touch grids here).
     let mut controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
     let (mut taken_names, base_order) = {
-        let filters = ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?;
+        let filters = ribbon_filter_state.filters.read().map_err(|e| e.to_string())?;
         let names = pane_control_taken_names(controls.values(), filters.values(), on_grid_controls);
         let max_order = controls
             .values()
@@ -1768,6 +1771,7 @@ fn sanitize_distributed_slicers(
 /// Returns (id, name) for each slicer ACTUALLY inserted, so callers record
 /// provenance-ledger entries only for what landed.
 fn materialize_pulled_slicers(
+    effect: &crate::document_effect::DocumentEffect,
     slicer_state: &crate::slicer::SlicerState,
     pulled: &[persistence::SavedSlicer],
     resolve: impl Fn(SheetId) -> Option<usize>,
@@ -1775,10 +1779,10 @@ fn materialize_pulled_slicers(
     if pulled.is_empty() {
         return Ok(Vec::new());
     }
-    let mut slicers = slicer_state.slicers.lock().map_err(|e| e.to_string())?;
+    let mut slicers = slicer_state.slicers.write(&effect).map_err(|e| e.to_string())?;
     let mut computed_props = slicer_state
         .computed_properties
-        .lock()
+        .write(effect)
         .map_err(|e| e.to_string())?;
     let mut applied: Vec<(String, String)> = Vec::new();
     for saved in pulled {
@@ -1822,6 +1826,7 @@ fn materialize_pulled_slicers(
 fn materialize_pulled_ribbon_filters(
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    effect: &crate::document_effect::DocumentEffect,
     on_grid_controls: &crate::controls::ControlStorage,
     pulled: &[persistence::SavedRibbonFilter],
     pulled_data_source_ids: &std::collections::HashSet<String>,
@@ -1830,7 +1835,7 @@ fn materialize_pulled_ribbon_filters(
         return Ok(Vec::new());
     }
     let controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
-    let mut filters = ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?;
+    let mut filters = ribbon_filter_state.filters.write(effect).map_err(|e| e.to_string())?;
     let mut taken_names =
         pane_control_taken_names(controls.values(), filters.values(), on_grid_controls);
     let base_order = controls
@@ -1897,13 +1902,14 @@ fn materialize_pulled_ribbon_filters(
 /// PUBLISHER's connection uuid — which at publish time IS the stable package
 /// data-source id, so a string match against the ds map re-binds it.
 fn remap_slicer_bi_connections(
+    effect: &crate::document_effect::DocumentEffect,
     slicer_state: &crate::slicer::SlicerState,
     ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
 ) {
     if ds_to_conn.is_empty() {
         return;
     }
-    let Ok(mut slicers) = slicer_state.slicers.lock() else {
+    let Ok(mut slicers) = slicer_state.slicers.write(effect) else {
         return;
     };
     for slicer in slicers.values_mut() {
@@ -1928,13 +1934,14 @@ fn remap_slicer_bi_connections(
 /// default — a subscriber who customized their theme keeps it (logged, never
 /// clobbered). Shared by calp_pull and calp_refresh_apply.
 fn apply_pulled_theme(
+    effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
     pulled: Option<&engine::ThemeDefinition>,
 ) -> Result<(), String> {
     let Some(theme) = pulled else {
         return Ok(()); // pre-Wave-A package: no theme carried
     };
-    let mut current = state.theme.lock().map_err(|e| e.to_string())?;
+    let mut current = state.theme.write(effect).map_err(|e| e.to_string())?;
     if *current == engine::ThemeDefinition::default() {
         *current = theme.clone();
     } else if *current != *theme {
@@ -1957,12 +1964,13 @@ fn apply_pulled_theme(
 /// keys are never attributed to it.
 fn merge_pulled_extension_data(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     pulled: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<Vec<String>, String> {
     if pulled.is_empty() {
         return Ok(Vec::new());
     }
-    let mut data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    let mut data = state.extension_data.write(effect).map_err(|e| e.to_string())?;
     let mut inserted: Vec<String> = Vec::new();
     for (key, value) in pulled {
         if !data.contains_key(key) {
@@ -2133,6 +2141,7 @@ pub(crate) fn pull_pin_policy(params: &PullParams) -> calp::integrity::PinPolicy
 #[tauri::command]
 pub fn calp_pull(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, BiState>,
     script_state: State<'_, crate::scripting::types::ScriptState>,
@@ -2143,6 +2152,9 @@ pub fn calp_pull(
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // A pull materializes package content into THIS workbook: it changes what a
+    // save writes, and (unlike open_file) nothing resets the flag afterwards.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
@@ -2281,7 +2293,7 @@ pub fn calp_pull(
             .iter()
             .map(|p| (p.package_sheet_id, &p.sheet))
             .collect();
-        materialize_pulled_sheet_state(&state, &pairs, &pkg_to_index, active)?;
+        materialize_pulled_sheet_state(&state, &effect, &pairs, &pkg_to_index, active)?;
     }
 
     // Materialize pulled tables. The package carries full table objects
@@ -2289,12 +2301,12 @@ pub fn calp_pull(
     // dropped — the subscriber got the cells but lost the table entity (name,
     // structured references, header/filter behavior).
     let tables_materialized =
-        materialize_pulled_tables(&state, &result.tables, &pkg_to_index, Some(&mut sub_objects))?;
+        materialize_pulled_tables(&effect, &state, &result.tables, &pkg_to_index, Some(&mut sub_objects))?;
 
     // Materialize pulled object scripts (forced to restricted mode by the calp layer)
     let scripts_pulled = result.object_scripts.len();
     if !result.object_scripts.is_empty() {
-        let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+        let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
         for script in result.object_scripts {
             // Don't overwrite existing scripts with the same ID (subscriber may have modified)
             if !scripts.iter().any(|s| s.id == script.id) {
@@ -2312,7 +2324,7 @@ pub fn calp_pull(
     // subscriber sees the report's charts in-app. Don't overwrite a chart the
     // subscriber already has by id.
     if !result.charts.is_empty() {
-        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         for chart in result.charts {
             if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
                 if !charts.iter().any(|c| c.id == chart.id) {
@@ -2331,7 +2343,7 @@ pub fn calp_pull(
     // Sparklines carry no id, so dedupe by (sheet_index, groups_json) to avoid
     // duplicating one the subscriber already has.
     if !result.sparklines.is_empty() {
-        let mut sparklines = state.sparklines.lock().map_err(|e| e.to_string())?;
+        let mut sparklines = state.sparklines.write(&effect).map_err(|e| e.to_string())?;
         for sp in result.sparklines {
             if let Some(&sheet_index) = chart_sheet_index.get(&sp.sheet_id) {
                 let already = sparklines
@@ -2352,7 +2364,7 @@ pub fn calp_pull(
     // Keyed by the UPPERCASED name (the case-insensitive lookup invariant);
     // PublishedNamedRange.sheet_id is the PACKAGE id, mapped to the local index.
     if !result.named_ranges.is_empty() {
-        let mut names = state.named_ranges.lock().map_err(|e| e.to_string())?;
+        let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
         for nr in &result.named_ranges {
             let key = nr.name.to_uppercase();
             if names.contains_key(&key) {
@@ -2378,7 +2390,7 @@ pub fn calp_pull(
     if !result.conditional_formats.is_empty() {
         let mut max_id: u64 = 0;
         {
-            let mut store = state.conditional_formats.lock().map_err(|e| e.to_string())?;
+            let mut store = state.conditional_formats.write(&effect).map_err(|e| e.to_string())?;
             for entry in &result.conditional_formats {
                 if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                     if let Ok(defs) = serde_json::from_value::<
@@ -2402,7 +2414,7 @@ pub fn calp_pull(
 
     // Materialize pulled data validations onto the (remapped) local sheet index.
     if !result.data_validations.is_empty() {
-        let mut store = state.data_validations.lock().map_err(|e| e.to_string())?;
+        let mut store = state.data_validations.write(&effect).map_err(|e| e.to_string())?;
         for entry in &result.data_validations {
             if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                 if let Ok(ranges) = serde_json::from_value::<
@@ -2421,7 +2433,7 @@ pub fn calp_pull(
     // insert, CF/DV semantics. No ledger entries (sheet-scoped payloads, like
     // CF/DV). Re-stamp each thread's sheet_index with the LOCAL index.
     if !result.comments.is_empty() {
-        let mut store = state.comments.lock().map_err(|e| e.to_string())?;
+        let mut store = state.comments.write(&effect).map_err(|e| e.to_string())?;
         for entry in &result.comments {
             if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                 if let Ok(threads) = serde_json::from_value::<Vec<crate::comments::Comment>>(
@@ -2439,7 +2451,7 @@ pub fn calp_pull(
 
     // Materialize pulled what-if scenarios (Wave B) — same shape as comments.
     if !result.scenarios.is_empty() {
-        let mut store = state.scenarios.lock().map_err(|e| e.to_string())?;
+        let mut store = state.scenarios.write(&effect).map_err(|e| e.to_string())?;
         for entry in &result.scenarios {
             if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                 if let Ok(mut scenarios) = serde_json::from_value::<Vec<crate::api_types::Scenario>>(
@@ -2457,7 +2469,7 @@ pub fn calp_pull(
     // Materialize pulled outline groups (Wave B). One SheetOutline per sheet;
     // the freshly appended sheet has no existing outline, so plain insert.
     if !result.outlines.is_empty() {
-        let mut store = state.outlines.lock().map_err(|e| e.to_string())?;
+        let mut store = state.outlines.write(&effect).map_err(|e| e.to_string())?;
         for entry in &result.outlines {
             if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                 if let Ok(outline) = serde_json::from_value::<crate::grouping::SheetOutline>(
@@ -2490,7 +2502,7 @@ pub fn calp_pull(
             .map(|p| (p.package_sheet_id, (p.sheet.id, p.name.clone())))
             .collect();
         let sanitized = crate::controls::sanitize_distributed_controls(&result.controls);
-        let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+        let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
         crate::controls::materialize_saved_controls(
             &sanitized,
             &mut controls,
@@ -2527,7 +2539,7 @@ pub fn calp_pull(
             })
             .collect();
         if !cell_type_saved.is_empty() {
-            let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+            let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
             crate::cell_types::materialize_saved_cell_types(
                 &cell_type_saved,
                 &mut cell_types,
@@ -2581,7 +2593,7 @@ pub fn calp_pull(
         if !orphaned.is_empty() {
             let mut removed_ids: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+            let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
             scripts.retain(|s| {
                 let orphan = matches!(s.provenance, persistence::ScriptProvenance::Distributed)
                     && s.package_name.as_deref() == Some(result.package_name.as_str())
@@ -2607,6 +2619,7 @@ pub fn calp_pull(
     // conflict-skipped local document is never attributed to this package.
     let (applied_modules, applied_notebooks, custom_functions_changed) =
         materialize_distributed_scripts(
+            &effect,
             &script_state,
             &result.package_name,
             &result.module_scripts,
@@ -2636,6 +2649,7 @@ pub fn calp_pull(
     // Same sanitization discipline as on-grid controls: distributed
     // computed-property formulas never materialize.
     let applied_slicers = materialize_pulled_slicers(
+        &effect,
         &slicer_state,
         &sanitize_distributed_slicers(&result.slicers),
         |sid| pkg_to_index.get(&sid).copied(),
@@ -2658,6 +2672,7 @@ pub fn calp_pull(
     let applied_ribbon_filters = materialize_pulled_ribbon_filters(
         &pane_control_state,
         &ribbon_filter_state,
+        &effect,
         &on_grid_snapshot,
         &result.ribbon_filters,
         &pulled_ds_ids,
@@ -2669,7 +2684,7 @@ pub fn calp_pull(
     // Materialize pulled saved pivot layouts (Wave A) — workbook-scoped,
     // ADDITIVE with skip-if-id-present (a subscriber's same-id layout wins).
     {
-        let mut layouts = state.pivot_layouts.lock().map_err(|e| e.to_string())?;
+        let mut layouts = state.pivot_layouts.write(&effect).map_err(|e| e.to_string())?;
         for layout in &result.pivot_layouts {
             if layouts.iter().any(|l| l.id == layout.id) {
                 continue;
@@ -2685,13 +2700,13 @@ pub fn calp_pull(
 
     // Apply the publisher's document theme (Wave A) — singleton, guarded:
     // only while the subscriber's theme is still the default. No ledger entry.
-    apply_pulled_theme(&state, result.theme.as_ref())?;
+    apply_pulled_theme(&effect, &state, result.theme.as_ref())?;
 
     // Merge pulled extension data (Wave A) — additive, never overwrites the
     // subscriber's keys. Each key ACTUALLY inserted gets an "extensionData"
     // ledger entry (id = name = the map key), so the Package Explorer shows
     // exactly which extension state came from the package.
-    for key in merge_pulled_extension_data(&state, &result.extension_data)? {
+    for key in merge_pulled_extension_data(&state, &effect, &result.extension_data)? {
         sub_objects.push(sub_object("extensionData", key.clone(), key));
     }
 
@@ -2712,7 +2727,7 @@ pub fn calp_pull(
     {
         let mut subscription = result.subscription;
         subscription.objects = sub_objects;
-        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
         subs.subscriptions.push(subscription);
     }
 
@@ -2743,6 +2758,7 @@ pub fn calp_pull(
             names.len() - sheets_pulled
         };
         restore_pulled_pivots(
+            &effect,
             &result.pivot_definitions,
             &result.bi_pivot_metadata,
             &state,
@@ -2757,7 +2773,7 @@ pub fn calp_pull(
     {
         let now = chrono::Utc::now().to_rfc3339();
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Subscribe,
                 &format!(
@@ -3181,7 +3197,7 @@ pub fn calp_get_subscriptions(
     window: tauri::Window,
 ) -> Result<SubscriptionManifest, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     Ok(subs.clone())
 }
 
@@ -3235,12 +3251,14 @@ pub struct SubscriptionTrustInfo {
 ///
 /// PASSIVE — `PinPolicy::VerifyOnly`. Reporting on trust must never create it.
 #[tauri::command]
+/// READ-ONLY (census had this as mutates-document, "verify"): it reads the subscription
+/// list and the TOFU pin files and reports; it writes no state, so it must not dirty.
 pub fn calp_subscription_trust(
     state: State<AppState>,
     window: tauri::Window,
 ) -> Result<Vec<SubscriptionTrustInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let profile_dir = calcula_profile_dir();
     let mut out = Vec::with_capacity(subs.subscriptions.len());
 
@@ -3347,7 +3365,7 @@ pub fn calp_get_package_objects(
     window: tauri::Window,
 ) -> Result<PackageObjectsResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let Some(sub) = subs
         .subscriptions
         .iter()
@@ -3378,21 +3396,21 @@ pub fn calp_get_package_objects(
     // no cross-family lock nesting, so no ordering constraint is engaged.
     let slicer_sheets: std::collections::HashMap<String, usize> = slicer_state
         .slicers
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .values()
         .map(|s| (s.id.to_string(), s.sheet_index))
         .collect();
     let ribbon_filter_ids: std::collections::HashSet<String> = ribbon_filter_state
         .filters
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .keys()
         .map(|id| id.to_string())
         .collect();
     let pivot_layout_ids: std::collections::HashSet<String> = state
         .pivot_layouts
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .iter()
         .map(|l| l.id.to_string())
@@ -3401,21 +3419,21 @@ pub fn calp_get_package_objects(
     // "present" = the key still exists in the live workbook's extension state.
     let extension_data_keys: std::collections::HashSet<String> = state
         .extension_data
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .keys()
         .cloned()
         .collect();
 
-    let tables = state.tables.lock().map_err(|e| e.to_string())?;
-    let charts = state.charts.lock().map_err(|e| e.to_string())?;
-    let named_ranges = state.named_ranges.lock().map_err(|e| e.to_string())?;
-    let object_scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
-    let pivot_tables = pivot_state.pivot_tables.lock().map_err(|e| e.to_string())?;
-    let workbook_scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+    let tables = state.tables.read().map_err(|e| e.to_string())?;
+    let charts = state.charts.read().map_err(|e| e.to_string())?;
+    let named_ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
+    let object_scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
+    let pivot_tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+    let workbook_scripts = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
     let workbook_notebooks = script_state
         .workbook_notebooks
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?;
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
     // Pane-control lock: safe alongside the AppState locks above (the
@@ -3505,7 +3523,7 @@ pub fn calp_get_overrides(
     window: tauri::Window,
 ) -> Result<calp::OverrideLayer, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let layer = state.override_layer.read().map_err(|e| e.to_string())?;
     Ok(layer.clone())
 }
 
@@ -3622,6 +3640,7 @@ fn apply_override_value_to_grid(
 #[tauri::command]
 pub fn calp_revert_override(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
@@ -3637,7 +3656,8 @@ pub fn calp_revert_override(
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
 
     let restore = {
-        let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
         let restore = layer
             .get(sid, cid)
             .map(|ovr| (ovr.baseline.clone(), ovr.position));
@@ -3668,6 +3688,7 @@ pub fn calp_revert_override(
 #[tauri::command]
 pub fn calp_accept_upstream(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
@@ -3683,7 +3704,8 @@ pub fn calp_accept_upstream(
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
 
     let restore = {
-        let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
         let restore = layer.get(sid, cid).map(|ovr| {
             // For a conflicted override the value to accept is the new
             // upstream; otherwise the baseline is the upstream value.
@@ -3712,6 +3734,7 @@ pub fn calp_accept_upstream(
 #[tauri::command]
 pub fn calp_keep_override(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     sheet_id: String,
     cell_id: String,
     window: tauri::Window,
@@ -3721,7 +3744,8 @@ pub fn calp_keep_override(
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let cid = CellId::parse(&cell_id)
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
-    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
     Ok(layer.keep_override(sid, cid))
 }
 
@@ -3733,11 +3757,11 @@ pub fn calp_export_overrides(
     window: tauri::Window,
 ) -> Result<calp::OverridePatch, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let layer = state.override_layer.read().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     // Determine baseline version from subscription manifest (first match wins).
     let baseline_version = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         subs.subscriptions.iter()
             .find(|s| s.package_name == package_name)
             .map(|s| s.resolved_version.clone())
@@ -3752,6 +3776,7 @@ pub fn calp_export_overrides(
 #[tauri::command]
 pub fn calp_import_overrides(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     patch_json: String,
     window: tauri::Window,
 ) -> Result<usize, String> {
@@ -3776,7 +3801,8 @@ pub fn calp_import_overrides(
     }
 
     let count = patch.overrides.len();
-    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
     patch.apply_to(&mut layer);
     Ok(count)
 }
@@ -3875,6 +3901,7 @@ pub(crate) fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -
 /// Writeback cells are excluded (they route to the draft layer instead).
 pub(crate) fn record_subscription_override_edits(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     sheet_index: usize,
     edits: &[(u32, u32, Option<engine::Cell>, Option<engine::Cell>)],
 ) {
@@ -3896,7 +3923,7 @@ pub(crate) fn record_subscription_override_edits(
 
     // Only sheets that belong to a subscription get overrides.
     {
-        let subs = match state.subscriptions.lock() {
+        let subs = match state.subscriptions.read() {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -3912,7 +3939,7 @@ pub(crate) fn record_subscription_override_edits(
     // LOCK ORDER: override_layer BEFORE id_registry — calp_refresh_apply and
     // the workbook-load path acquire them in that order; inverting it here
     // would be an ABBA deadlock under concurrent commands.
-    let mut layer = match state.override_layer.lock() {
+    let mut layer = match state.override_layer.write(effect) {
         Ok(l) => l,
         Err(_) => return,
     };
@@ -4026,8 +4053,8 @@ pub fn calp_refresh_preview(
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshPreview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-    let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+    let layer = state.override_layer.read().map_err(|e| e.to_string())?;
 
     let mut merged = calp::refresh::RefreshPreview {
         subscription_previews: Vec::new(),
@@ -4065,6 +4092,7 @@ pub fn calp_refresh_preview(
 #[tauri::command]
 pub fn calp_refresh_apply(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
@@ -4075,11 +4103,14 @@ pub fn calp_refresh_apply(
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // A refresh rewrites subscribed sheets, names, CF/DV and tables in place:
+    // same reasoning as calp_pull.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let now = chrono::Utc::now().to_rfc3339();
 
     // Pull new versions for all subscriptions that have updates.
     let payloads = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let mut all_payloads = Vec::new();
         for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
             let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
@@ -4120,7 +4151,7 @@ pub fn calp_refresh_apply(
     let mut payloads = payloads;
     {
         let mut taken = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         for payload in payloads.iter_mut() {
             let skip: std::collections::HashSet<SheetId> = subs
                 .subscriptions
@@ -4144,7 +4175,7 @@ pub fn calp_refresh_apply(
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
 
         for payload in &payloads {
             // Revalidate: a concurrent detach/subscribe between lock windows
@@ -4235,7 +4266,7 @@ pub fn calp_refresh_apply(
     // their own fresh local id (pulled.sheet.id). Runs AFTER sheet materialization
     // and BEFORE apply_refresh moves `payloads`.
     let cfdv_pkg_to_index: std::collections::HashMap<SheetId, usize> = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
         let mut map = std::collections::HashMap::new();
         for payload in &payloads {
@@ -4267,7 +4298,7 @@ pub fn calp_refresh_apply(
         // (Cannot distinguish a publisher-removed name from a subscriber's own
         // without provenance, so removals don't propagate — a known limit.)
         if payloads.iter().any(|p| !p.pull_result.named_ranges.is_empty()) {
-            let mut names = state.named_ranges.lock().map_err(|e| e.to_string())?;
+            let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
             for payload in &payloads {
                 for nr in &payload.pull_result.named_ranges {
                     names.insert(
@@ -4292,7 +4323,7 @@ pub fn calp_refresh_apply(
 
         let mut max_cf_id: u64 = 0;
         {
-            let mut store = state.conditional_formats.lock().map_err(|e| e.to_string())?;
+            let mut store = state.conditional_formats.write(&effect).map_err(|e| e.to_string())?;
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
@@ -4319,7 +4350,7 @@ pub fn calp_refresh_apply(
         }
 
         {
-            let mut store = state.data_validations.lock().map_err(|e| e.to_string())?;
+            let mut store = state.data_validations.write(&effect).map_err(|e| e.to_string())?;
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
@@ -4343,7 +4374,7 @@ pub fn calp_refresh_apply(
         // land (and a publisher who stopped opting comments in effectively
         // retracts them from subscribers on the next refresh).
         {
-            let mut store = state.comments.lock().map_err(|e| e.to_string())?;
+            let mut store = state.comments.write(&effect).map_err(|e| e.to_string())?;
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
@@ -4365,7 +4396,7 @@ pub fn calp_refresh_apply(
             }
         }
         {
-            let mut store = state.scenarios.lock().map_err(|e| e.to_string())?;
+            let mut store = state.scenarios.write(&effect).map_err(|e| e.to_string())?;
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
@@ -4386,7 +4417,7 @@ pub fn calp_refresh_apply(
             }
         }
         {
-            let mut store = state.outlines.lock().map_err(|e| e.to_string())?;
+            let mut store = state.outlines.write(&effect).map_err(|e| e.to_string())?;
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
@@ -4411,7 +4442,7 @@ pub fn calp_refresh_apply(
     {
         let refreshed_indices: std::collections::HashSet<usize> =
             cfdv_pkg_to_index.values().copied().collect();
-        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
         cell_types.retain(|(si, _, _), _| !refreshed_indices.contains(si));
         let saved: Vec<persistence::SavedSheetCellTypes> = payloads
             .iter()
@@ -4445,7 +4476,7 @@ pub fn calp_refresh_apply(
                 .iter()
                 .map(|p| (p.package_sheet_id, &p.sheet))
                 .collect();
-            materialize_pulled_sheet_state(&state, &pairs, &cfdv_pkg_to_index, active)?;
+            materialize_pulled_sheet_state(&state, &effect, &pairs, &cfdv_pkg_to_index, active)?;
         }
     }
 
@@ -4467,9 +4498,9 @@ pub fn calp_refresh_apply(
         // Removal first (its own lock scope), then the shared additive
         // materializer re-adds the v2 set.
         {
-            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-            let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
-            let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            let mut tables = state.tables.write(&effect).map_err(|e| e.to_string())?;
+            let mut table_names = state.table_names.write(&effect).map_err(|e| e.to_string())?;
             for payload in &payloads {
                 let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
                     continue;
@@ -4496,6 +4527,7 @@ pub fn calp_refresh_apply(
         for payload in &payloads {
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             materialize_pulled_tables(
+                &effect,
                 &state,
                 &payload.pull_result.tables,
                 &cfdv_pkg_to_index,
@@ -4509,8 +4541,8 @@ pub fn calp_refresh_apply(
     // sheet ids in the payload are the FRESH local ids this pull minted; map
     // fresh id -> package id -> existing local index.
     {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         for payload in &payloads {
             let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
                 continue;
@@ -4560,7 +4592,7 @@ pub fn calp_refresh_apply(
         let refreshed: std::collections::HashSet<usize> =
             cfdv_pkg_to_index.values().copied().collect();
         {
-            let mut sparklines = state.sparklines.lock().map_err(|e| e.to_string())?;
+            let mut sparklines = state.sparklines.write(&effect).map_err(|e| e.to_string())?;
             sparklines.retain(|e| !refreshed.contains(&e.sheet_index));
             for payload in &payloads {
                 let fresh_to_pkg: std::collections::HashMap<SheetId, SheetId> = payload
@@ -4587,7 +4619,7 @@ pub fn calp_refresh_apply(
             // first here would be an AB/BA inversion against them.
             let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
             let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-            let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+            let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
             controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
             // Cloned under the ALREADY-HELD controls lock (calling
             // snapshot_on_grid_controls here would re-lock and deadlock);
@@ -4643,7 +4675,7 @@ pub fn calp_refresh_apply(
         // controls — the same order as the table/chart removal blocks), then
         // the shared additive materializer re-adds the v2 set.
         {
-            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
             let mut controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
             for payload in &payloads {
                 let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
@@ -4701,11 +4733,11 @@ pub fn calp_refresh_apply(
     // Computed properties of removed slicers are dropped with them.
     {
         {
-            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-            let mut slicers = slicer_state.slicers.lock().map_err(|e| e.to_string())?;
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            let mut slicers = slicer_state.slicers.write(&effect).map_err(|e| e.to_string())?;
             let mut computed_props = slicer_state
                 .computed_properties
-                .lock()
+                .write(&effect)
                 .map_err(|e| e.to_string())?;
             for payload in &payloads {
                 let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
@@ -4732,6 +4764,7 @@ pub fn calp_refresh_apply(
             // Same sanitization as first pull: distributed computed-property
             // formulas never materialize.
             let applied = materialize_pulled_slicers(
+        &effect,
                 &slicer_state,
                 &sanitize_distributed_slicers(&payload.pull_result.slicers),
                 |sid| cfdv_pkg_to_index.get(&sid).copied(),
@@ -4750,8 +4783,8 @@ pub fn calp_refresh_apply(
     // workbook's package connections runs after the data-source refresh below.
     {
         {
-            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-            let mut filters = ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?;
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            let mut filters = ribbon_filter_state.filters.write(&effect).map_err(|e| e.to_string())?;
             for payload in &payloads {
                 let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
                     continue;
@@ -4777,6 +4810,7 @@ pub fn calp_refresh_apply(
             let applied = materialize_pulled_ribbon_filters(
                 &pane_control_state,
                 &ribbon_filter_state,
+                &effect,
                 &on_grid_snapshot,
                 &payload.pull_result.ribbon_filters,
                 &pulled_ds_ids,
@@ -4793,8 +4827,8 @@ pub fn calp_refresh_apply(
     // never in the ledger and are never removed).
     {
         {
-            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-            let mut layouts = state.pivot_layouts.lock().map_err(|e| e.to_string())?;
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            let mut layouts = state.pivot_layouts.write(&effect).map_err(|e| e.to_string())?;
             for payload in &payloads {
                 let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
                     continue;
@@ -4810,7 +4844,7 @@ pub fn calp_refresh_apply(
                 }
             }
         }
-        let mut layouts = state.pivot_layouts.lock().map_err(|e| e.to_string())?;
+        let mut layouts = state.pivot_layouts.write(&effect).map_err(|e| e.to_string())?;
         for payload in &payloads {
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for layout in &payload.pull_result.pivot_layouts {
@@ -4834,9 +4868,9 @@ pub fn calp_refresh_apply(
     // inserted (new in this version) get fresh "extensionData" ledger entries;
     // keys merged by an earlier pull carry over in the ledger merge below.
     for payload in &payloads {
-        apply_pulled_theme(&state, payload.pull_result.theme.as_ref())?;
+        apply_pulled_theme(&effect, &state, payload.pull_result.theme.as_ref())?;
         let inserted =
-            merge_pulled_extension_data(&state, &payload.pull_result.extension_data)?;
+            merge_pulled_extension_data(&state, &effect, &payload.pull_result.extension_data)?;
         if !inserted.is_empty() {
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for key in inserted {
@@ -4896,9 +4930,10 @@ pub fn calp_refresh_apply(
         if !ds_to_conn.is_empty() {
             crate::ribbon_filter::remap_ribbon_filter_connections(
                 &ribbon_filter_state,
+                &effect,
                 &ds_to_conn,
             );
-            remap_slicer_bi_connections(&slicer_state, &ds_to_conn);
+            remap_slicer_bi_connections(&effect, &slicer_state, &ds_to_conn);
         }
     }
 
@@ -4916,8 +4951,8 @@ pub fn calp_refresh_apply(
     // updates values in place; upstream row/column insertions are a known
     // limitation until packages carry cell-level ids.
     let (upstream_values, refreshed_sheet_ids) = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-        let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        let layer = state.override_layer.read().map_err(|e| e.to_string())?;
         let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
 
         let mut values: std::collections::HashMap<(SheetId, CellId), calp::OverrideValue> =
@@ -4974,8 +5009,8 @@ pub fn calp_refresh_apply(
             .collect();
 
     // Apply refresh: update subscription metadata and rebase overrides.
-    let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
+    let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
 
     // apply_refresh indexes subscriptions by payload.subscription_index; if a
     // concurrent detach shrank the list since the payloads were built, bail
@@ -5065,7 +5100,7 @@ pub fn calp_refresh_apply(
     let mut applied_script_entries: Vec<(String, Vec<calp::manifest::SubscribedObject>)> =
         Vec::new();
     {
-        let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+        let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
         for (package_name, new_scripts) in script_updates {
             scripts.retain(|s| {
                 !(matches!(s.provenance, persistence::ScriptProvenance::Distributed)
@@ -5111,7 +5146,7 @@ pub fn calp_refresh_apply(
     let mut any_custom_functions_changed = false;
     for (pkg, modules, notebooks) in &module_notebook_updates {
         let (applied_modules, applied_notebooks, cf_changed) =
-            materialize_distributed_scripts(&script_state, pkg, modules, notebooks)?;
+            materialize_distributed_scripts(&effect, &script_state, pkg, modules, notebooks)?;
         any_custom_functions_changed |= cf_changed;
         let mut entries: Vec<calp::manifest::SubscribedObject> = Vec::new();
         for (id, name) in applied_modules {
@@ -5142,7 +5177,7 @@ pub fn calp_refresh_apply(
     // their point of actual application. (The earlier merge replaced all
     // non-pivot/dataSource entries, so appending here cannot duplicate.)
     {
-        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
         for (pkg, entries) in applied_script_entries {
             if entries.is_empty() {
                 continue;
@@ -5177,7 +5212,7 @@ pub fn calp_refresh_apply(
 
             if !invalidated_ids.is_empty() {
                 let mut dropped = 0usize;
-                if let Ok(mut wb_layer) = state.writeback_layer.lock() {
+                if let Ok(mut wb_layer) = state.writeback_layer.write(&effect) {
                     let before = wb_layer.draft_count();
                     wb_layer.drafts.retain(|d| !invalidated_ids.contains(d.region_id.as_str()));
                     dropped = before - wb_layer.draft_count();
@@ -5278,7 +5313,7 @@ pub fn calp_refresh_apply(
     {
         let now = chrono::Utc::now().to_rfc3339();
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Refresh,
                 "Refreshed subscriptions from registry",
@@ -5328,7 +5363,7 @@ fn summarize_ids<'a>(ids: impl Iterator<Item = &'a str>) -> String {
 /// it is a record for workbooks that opted in — not a user-facing notice.
 fn record_writeback_invalidated(state: &AppState, description: &str) {
     let user = audit_user(state);
-    if let Ok(mut audit) = state.audit_log.lock() {
+    if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
         audit.record(
             calp::audit::AuditEvent::WritebackInvalidated,
             description,
@@ -5341,10 +5376,16 @@ fn record_writeback_invalidated(state: &AppState, description: &str) {
 /// Strip all subscriptions and overrides, converting the workbook to a
 /// standalone (detached) document.
 #[tauri::command]
-pub fn calp_detach(state: State<AppState>, window: tauri::Window) -> Result<(), String> {
+pub fn calp_detach(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    window: tauri::Window,
+) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    // Strips EVERY subscription and override: a large, irreversible document change.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
+    let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
 
     let detached_count = subs.subscriptions.len();
     calp::refresh::detach(&mut subs.subscriptions, &mut layer);
@@ -5369,7 +5410,7 @@ pub fn calp_detach(state: State<AppState>, window: tauri::Window) -> Result<(), 
     {
         let now = chrono::Utc::now().to_rfc3339();
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Detach,
                 &format!("Detached from {} subscription(s)", detached_count),
@@ -5400,10 +5441,15 @@ pub struct DevSubscribeParams {
 #[tauri::command]
 pub fn calp_dev_subscribe(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     params: DevSubscribeParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // A dev subscribe materializes package sheets, tables and controls into THIS
+    // workbook and records the subscription -- all persisted, and nothing resets
+    // the flag afterwards the way `open_file` does.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let source = std::path::Path::new(&params.source_path);
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -5453,12 +5499,12 @@ pub fn calp_dev_subscribe(
             .iter()
             .map(|p| (p.source_sheet_id, &p.sheet))
             .collect();
-        materialize_pulled_sheet_state(&state, &pairs, &dev_map, active)?;
+        materialize_pulled_sheet_state(&state, &effect, &pairs, &dev_map, active)?;
     }
     let mut dev_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
     let tables_pulled =
-        materialize_pulled_tables(&state, &result.tables, &dev_map, Some(&mut dev_objects))?;
-    materialize_dev_controls(&state, &result, &dev_map, &mut dev_objects)?;
+        materialize_pulled_tables(&effect, &state, &result.tables, &dev_map, Some(&mut dev_objects))?;
+    materialize_dev_controls(&state, &effect, &result, &dev_map, &mut dev_objects)?;
 
     // Store the dev subscription (with the provenance ledger, so the Package
     // Explorer works for dev subscriptions too).
@@ -5469,7 +5515,7 @@ pub fn calp_dev_subscribe(
             &now,
         );
         subscription.objects = dev_objects;
-        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
         subs.subscriptions.push(subscription);
     }
 
@@ -5492,6 +5538,7 @@ pub fn calp_dev_subscribe(
 /// controlSheet ledger entries. Shared by dev subscribe + dev refresh.
 fn materialize_dev_controls(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     result: &calp::dev_mode::DevPullResult,
     dev_map: &std::collections::HashMap<SheetId, usize>,
     ledger: &mut Vec<calp::manifest::SubscribedObject>,
@@ -5500,7 +5547,7 @@ fn materialize_dev_controls(
         return Ok(());
     }
     let sanitized = crate::controls::sanitize_distributed_controls(&result.controls);
-    let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+    let mut controls = state.controls.write(effect).map_err(|e| e.to_string())?;
     crate::controls::materialize_saved_controls(&sanitized, &mut controls, |sid| {
         dev_map.get(&sid).copied()
     });
@@ -5524,11 +5571,18 @@ fn materialize_dev_controls(
 
 /// Re-pull from the dev source, refreshing HEAD sheets in the workbook.
 #[tauri::command]
-pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result<PullResponse, String> {
+pub fn calp_dev_refresh(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    window: tauri::Window,
+) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // Re-materializes the dev source over this workbook: same reasoning as
+    // `calp_dev_subscribe`.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Find the dev subscription.
     let (source_path, sub_index) = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let idx = subs.subscriptions.iter().position(calp::dev_mode::is_dev_subscription)
             .ok_or_else(|| "No dev subscription found in current workbook".to_string())?;
         // A DEV subscription's `registry_url` is `file://<path-to-a-.cala-file>`
@@ -5546,7 +5600,7 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
 
     // Determine which sheet names were originally requested (empty = all).
     let sheet_names: Vec<String> = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         subs.subscriptions[sub_index].sheets.iter()
             .map(|s| s.local_name.clone())
             .collect()
@@ -5566,7 +5620,7 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let sub = &subs.subscriptions[sub_index];
 
         let old_sheet_ids: Vec<_> = sub.sheets.iter()
@@ -5613,12 +5667,12 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
             .iter()
             .map(|p| (p.source_sheet_id, &p.sheet))
             .collect();
-        materialize_pulled_sheet_state(&state, &pairs, &dev_map, active)?;
+        materialize_pulled_sheet_state(&state, &effect, &pairs, &dev_map, active)?;
     }
     {
         // Remove this dev subscription's ledger-owned tables, then re-add v2.
         let owned: std::collections::HashSet<String> = {
-            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
             subs.subscriptions[sub_index]
                 .objects
                 .iter()
@@ -5627,8 +5681,8 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
                 .collect()
         };
         if !owned.is_empty() {
-            let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
-            let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+            let mut tables = state.tables.write(&effect).map_err(|e| e.to_string())?;
+            let mut table_names = state.table_names.write(&effect).map_err(|e| e.to_string())?;
             for sheet_tables in tables.values_mut() {
                 sheet_tables.retain(|id, t| {
                     let keep = !owned.contains(&id.to_string());
@@ -5642,19 +5696,19 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
     }
     let mut dev_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
     let tables_pulled =
-        materialize_pulled_tables(&state, &result.tables, &dev_map, Some(&mut dev_objects))?;
+        materialize_pulled_tables(&effect, &state, &result.tables, &dev_map, Some(&mut dev_objects))?;
     {
         let refreshed: std::collections::HashSet<usize> = dev_map.values().copied().collect();
-        let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+        let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
         controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
     }
-    materialize_dev_controls(&state, &result, &dev_map, &mut dev_objects)?;
+    materialize_dev_controls(&state, &effect, &result, &dev_map, &mut dev_objects)?;
 
     // Update the subscription timestamp + provenance ledger (a dev
     // subscription only ever owns tables + control sheets, so wholesale
     // replacement is accurate).
     {
-        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
         subs.subscriptions[sub_index].resolved_at = now;
         subs.subscriptions[sub_index].objects = dev_objects;
     }
@@ -5677,6 +5731,7 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
 #[tauri::command]
 pub fn calp_rename_cell_id(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     sheet_id: String,
     old_cell_id: String,
     new_cell_id: String,
@@ -5690,13 +5745,20 @@ pub fn calp_rename_cell_id(
     let new = CellId::parse(&new_cell_id)
         .ok_or_else(|| format!("Invalid new_cell_id: {}", new_cell_id))?;
     let mut reg = state.id_registry.lock().map_err(|e| e.to_string())?;
-    Ok(reg.rename_cell(sid, old, new))
+    let renamed = reg.rename_cell(sid, old, new);
+    // CONDITIONAL: the registry is persisted, but a rename that matched nothing is not
+    // a document change.
+    if renamed {
+        let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
+    Ok(renamed)
 }
 
 /// Merge two stable CellIds (author-facing operation).
 #[tauri::command]
 pub fn calp_merge_cell_ids(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     sheet_id: String,
     survivor_cell_id: String,
     absorbed_cell_id: String,
@@ -5710,7 +5772,12 @@ pub fn calp_merge_cell_ids(
     let absorbed = CellId::parse(&absorbed_cell_id)
         .ok_or_else(|| format!("Invalid absorbed_cell_id: {}", absorbed_cell_id))?;
     let mut reg = state.id_registry.lock().map_err(|e| e.to_string())?;
-    Ok(reg.merge_cells(sid, survivor, absorbed))
+    let merged = reg.merge_cells(sid, survivor, absorbed);
+    // CONDITIONAL: same rule as calp_rename_cell_id.
+    if merged {
+        let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
+    Ok(merged)
 }
 
 // ============================================================================
@@ -5724,7 +5791,7 @@ pub fn calp_get_audit_log(
     window: tauri::Window,
 ) -> Result<calp::audit::AuditLog, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let log = state.audit_log.lock().map_err(|e| e.to_string())?;
+    let log = state.audit_log.read().map_err(|e| e.to_string())?;
     Ok(log.clone())
 }
 
@@ -5733,12 +5800,16 @@ pub fn calp_get_audit_log(
 #[tauri::command]
 pub fn calp_set_audit_enabled(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     enabled: bool,
     max_entries: usize,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
+    // `enabled` decides whether audit_log.json is written at all -- a user action ON the
+    // trail, not an entry in it, so it dirties (contrast `CleanReason::AuditTrail`).
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut log = state.audit_log.write(&effect).map_err(|e| e.to_string())?;
     log.enabled = enabled;
     log.max_entries = max_entries;
     Ok(())
@@ -5748,10 +5819,14 @@ pub fn calp_set_audit_enabled(
 #[tauri::command]
 pub fn calp_clear_audit_log(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
+    // Discarding the persisted transparency trail: without this, close-without-saving
+    // silently brings every cleared entry back.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut log = state.audit_log.write(&effect).map_err(|e| e.to_string())?;
     log.clear();
     Ok(())
 }
@@ -5950,7 +6025,7 @@ fn rebuild_writeback_index_inner(
 
     // CLONED, not held: the walk below is registry I/O (seconds, over HTTP), and
     // holding the subscriptions lock across it blocks every reader of the list.
-    let subscriptions = match state.subscriptions.lock() {
+    let subscriptions = match state.subscriptions.read() {
         Ok(s) => s.subscriptions.clone(),
         Err(_) => {
             return RebuildOutcome {
@@ -6149,7 +6224,7 @@ pub fn calp_get_writeback_draft_regions(
     window: tauri::Window,
 ) -> Result<Vec<calp::WritebackRegionDeclaration>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+    let drafts = state.writeback_draft_regions.read().map_err(|e| e.to_string())?;
     Ok(drafts.clone())
 }
 
@@ -6174,7 +6249,8 @@ pub fn calp_add_writeback_region(
     calp::WritebackIndex::from_declarations(&test_decls)
         .map_err(|e| format!("Invalid region: {}", e))?;
 
-    let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut drafts = state.writeback_draft_regions.write(&effect).map_err(|e| e.to_string())?;
 
     // Check for ID collision
     if drafts.iter().any(|r| r.id == region.id) {
@@ -6201,7 +6277,8 @@ pub fn calp_remove_writeback_region(
     window: tauri::Window,
 ) -> Result<bool, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut drafts = state.writeback_draft_regions.write(&effect).map_err(|e| e.to_string())?;
     let len_before = drafts.len();
     drafts.retain(|r| r.id != region_id);
     let removed = drafts.len() < len_before;
@@ -6232,7 +6309,8 @@ pub fn calp_update_writeback_region(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut drafts = state.writeback_draft_regions.write(&effect).map_err(|e| e.to_string())?;
 
     let pos = drafts.iter().position(|r| r.id == region.id)
         .ok_or_else(|| format!("Region '{}' not found", region.id))?;
@@ -6278,7 +6356,7 @@ fn owning_subscription_for_region(
     state: &AppState,
     region_id: &str,
 ) -> Result<(String, String, String), String> {
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     for sub in &subs.subscriptions {
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
@@ -6467,6 +6545,7 @@ fn check_lifecycle_policy(
 #[tauri::command]
 pub fn calp_save_writeback_draft(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     region_id: String,
     sheet_id: String,
     row: u32,
@@ -6516,7 +6595,7 @@ pub fn calp_save_writeback_draft(
 
         // Enforce the lifecycle policy (deadline / one-shot / locked)
         let already_submitted = {
-            let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+            let wb_layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
             wb_layer.drafts.iter().any(|d| {
                 d.region_id == region_id
                     && d.cell_row == row
@@ -6621,14 +6700,16 @@ pub fn calp_save_writeback_draft(
         Some(calp::writeback::SubmissionPolicy::Immediate)
     );
 
+    // Contributor data entry: the draft is persisted in user_files/writeback_drafts.json.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     {
-        let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let mut wb_layer = state.writeback_layer.write(&effect).map_err(|e| e.to_string())?;
         wb_layer.set_draft(submission);
     }
 
     // `immediate` regions go straight to the registry — saving IS submitting.
     if auto_submit {
-        submit_region_internal(&state, &region_id, window_app_handle(&window))?;
+        submit_region_internal(&state, &effect, &region_id, window_app_handle(&window))?;
     }
 
     Ok(())
@@ -6641,7 +6722,7 @@ pub fn calp_get_writeback_layer(
     window: tauri::Window,
 ) -> Result<calp::writeback::WritebackLayer, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+    let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
     Ok(layer.clone())
 }
 
@@ -6655,10 +6736,23 @@ pub fn calp_get_writeback_layer(
 /// subscriber's OWN current registry record for that (region, cell) slot —
 /// newest across the resolved version and older ones (lenient carry-forward).
 /// Unsent drafts (Draft state) are left untouched.
-fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
+/// Reconcile local submission states from the registry.
+///
+/// TAKES `&FileState`, NOT A READY-MADE `DocumentEffect`, ON PURPOSE. This runs on
+/// every workbook load (the Distribution extension calls `calp_reconcile_writeback`
+/// during bootstrap), and `DocumentEffect::mutates` dirties AT CONSTRUCTION. Building
+/// the effect up front therefore marked EVERY opened workbook as unsaved before the
+/// user touched anything — the close prompt fired on a document that had merely been
+/// looked at, which is precisely the "prompt stops meaning anything" failure the
+/// `Navigation` and `AuditTrail` clean arms exist to prevent. So the effect is
+/// constructed only once we know the registry actually disagrees with what we hold.
+fn reconcile_writeback_layer_internal(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+) -> Result<(), String> {
     // Which regions have a submitted entry whose status we should re-check?
     let region_ids: Vec<String> = {
-        let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
         let mut set = std::collections::BTreeSet::new();
         for d in &layer.drafts {
             if !matches!(d.state, calp::writeback::SubmissionState::Draft) {
@@ -6718,9 +6812,33 @@ fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
         }
     }
 
+    // Would adopting the registry actually CHANGE anything? Decided before any
+    // effect exists, so a reconcile that finds nothing new leaves the document
+    // exactly as clean as it was.
+    let has_changes = {
+        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
+        layer.drafts.iter().any(|d| {
+            if matches!(d.state, calp::writeback::SubmissionState::Draft) {
+                return false;
+            }
+            match by_slot.get(&(d.region_id.clone(), d.cell_row, d.cell_col)) {
+                Some(reg) => {
+                    d.state != reg.state
+                        || d.review_reason != reg.review_reason
+                        || d.reviewed_by != reg.reviewed_by
+                }
+                None => false,
+            }
+        })
+    };
+    if !has_changes {
+        return Ok(());
+    }
+
     // Adopt the registry state + review feedback onto local non-Draft entries.
     {
-        let mut layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut layer = state.writeback_layer.write(&effect).map_err(|e| e.to_string())?;
         for d in layer.drafts.iter_mut() {
             if matches!(d.state, calp::writeback::SubmissionState::Draft) {
                 continue;
@@ -6741,11 +6859,14 @@ fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
 #[tauri::command]
 pub fn calp_reconcile_writeback(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     window: tauri::Window,
 ) -> Result<calp::writeback::WritebackLayer, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    reconcile_writeback_layer_internal(&state)?;
-    let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+    // Reconciling only dirties when the registry actually moved a submission on --
+    // see `reconcile_writeback_layer_internal`; this runs on every workbook load.
+    reconcile_writeback_layer_internal(&state, &file_state)?;
+    let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
     Ok(layer.clone())
 }
 
@@ -7531,7 +7652,7 @@ mod writeback_validator_tests {
     /// validated". Adding such a parameter breaks this coercion.
     #[test]
     fn the_submit_path_accepts_no_caller_supplied_verdict() {
-        let _: fn(&AppState, &str, &tauri::AppHandle) -> Result<usize, String> =
+        let _: fn(&AppState, &crate::document_effect::DocumentEffect, &str, &tauri::AppHandle) -> Result<usize, String> =
             submit_region_internal;
     }
 }
@@ -7545,6 +7666,7 @@ mod writeback_validator_tests {
 /// because submit_region only advances Draft-state entries).
 fn submit_region_internal(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     region_id: &str,
     app: &tauri::AppHandle,
 ) -> Result<usize, String> {
@@ -7556,7 +7678,7 @@ fn submit_region_internal(
 
     // Snapshot the drafts to submit, as they would look once submitted.
     let to_submit: Vec<calp::writeback::WritebackSubmission> = {
-        let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let wb_layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
         wb_layer
             .drafts
             .iter()
@@ -7636,7 +7758,7 @@ fn submit_region_internal(
     // partial mandatory region (2 of 5 line items) believing they're done.
     if decl.schema.as_ref().map(|s| s.required).unwrap_or(false) {
         let sel = &decl.selector;
-        let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
         let mut missing = Vec::new();
         for row in sel.row_start..=sel.row_end {
             for col in sel.col_start..=sel.col_end {
@@ -7710,7 +7832,7 @@ fn submit_region_internal(
 
     // All writes succeeded — advance the local drafts.
     {
-        let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let mut wb_layer = state.writeback_layer.write(effect).map_err(|e| e.to_string())?;
         wb_layer.submit_region(region_id, &now);
     }
     invalidate_gather_cache(state);
@@ -7719,7 +7841,7 @@ fn submit_region_internal(
 
     // Audit log
     {
-        let mut audit = state.audit_log.lock().map_err(|e| e.to_string())?;
+        let mut audit = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)).map_err(|e| e.to_string())?;
         let user = state.subscriber_identity.lock()
             .ok()
             .and_then(|id| id.as_ref().map(|i| i.display_name.clone()))
@@ -7740,11 +7862,14 @@ fn submit_region_internal(
 #[tauri::command]
 pub fn calp_submit_region(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     region_id: String,
     window: tauri::Window,
 ) -> Result<usize, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    submit_region_internal(&state, &region_id, window_app_handle(&window))
+    // Submitting/reconciling advances the persisted writeback layer.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    submit_region_internal(&state, &effect, &region_id, window_app_handle(&window))
 }
 
 /// Submit the drafts of EVERY writeback region that has any — the "I'm done /
@@ -7761,11 +7886,12 @@ pub fn calp_submit_region(
 #[tauri::command]
 pub fn calp_submit_all_regions(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     window: tauri::Window,
 ) -> Result<usize, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let region_ids: Vec<String> = {
-        let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
         let mut set = std::collections::BTreeSet::new();
         for d in &layer.drafts {
             if matches!(d.state, calp::writeback::SubmissionState::Draft) {
@@ -7774,10 +7900,11 @@ pub fn calp_submit_all_regions(
         }
         set.into_iter().collect()
     };
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut total = 0usize;
     let mut submitted_regions = 0usize;
     for region_id in region_ids {
-        match submit_region_internal(&state, &region_id, window_app_handle(&window)) {
+        match submit_region_internal(&state, &effect, &region_id, window_app_handle(&window)) {
             Ok(n) => {
                 total += n;
                 if n > 0 {
@@ -7874,7 +8001,7 @@ pub fn calp_preview_region_submission(
 
     // Exactly the drafts submit_region_internal would send: Draft state, this region.
     let values: Vec<OutboundValue> = {
-        let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let wb_layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
         wb_layer
             .drafts
             .iter()
@@ -8112,7 +8239,7 @@ pub(crate) fn writeback_slot_has_draft(
 ) -> bool {
     state
         .writeback_layer
-        .lock()
+        .read()
         .map(|layer| {
             layer
                 .drafts
@@ -8672,7 +8799,7 @@ mod writeback_claim_tests {
         let (state, _) = state_with_region();
         state
             .writeback_layer
-            .lock()
+            .write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()))
             .unwrap()
             .set_draft(draft_for("r1", 0, 0));
 
@@ -8710,7 +8837,7 @@ mod writeback_claim_tests {
         // the human group-edit path must keep working.
         state
             .writeback_layer
-            .lock()
+            .write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()))
             .unwrap()
             .set_draft(draft_for("r1", 0, 0));
         assert!(ensure_writeback_draft_before_write_on_sheets(&state, &[0], 0, 0).is_ok());
@@ -8804,7 +8931,7 @@ mod writeback_claim_tests {
         let (state, _) = state_with_region();
         state
             .writeback_layer
-            .lock()
+            .write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()))
             .unwrap()
             .set_draft(draft_for("r1", 0, 0));
         assert!(ensure_writeback_draft_before_write(&state, 0, 0).is_ok());
@@ -8835,7 +8962,7 @@ fn owning_subscription_for_model_writeback(
     state: &AppState,
     writeback_id: &str,
 ) -> Result<(String, String, String, calp::writeback::ModelWritebackDeclaration), String> {
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     for sub in &subs.subscriptions {
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
@@ -8958,7 +9085,7 @@ pub(crate) fn submit_model_writeback(
     // Audit + refresh (the gather invalidation also queues the BI feeds).
     {
         let user = audit_user(state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::WritebackSubmitted,
                 &format!(
@@ -9083,7 +9210,7 @@ pub fn calp_set_model_submission_state(
 
     {
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.lock() {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::WritebackReviewed,
                 &format!(
@@ -9215,7 +9342,7 @@ pub fn calp_set_submission_state(
     // Audit the publisher decision — the provenance of the return leg, so a
     // contributor who is told "rejected" can see who decided and when.
     {
-        let mut audit = state.audit_log.lock().map_err(|e| e.to_string())?;
+        let mut audit = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)).map_err(|e| e.to_string())?;
         let user = state
             .subscriber_identity
             .lock()
@@ -10248,7 +10375,7 @@ pub(crate) fn queue_gather_refresh() {
 pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
     let mut result = std::collections::HashMap::new();
 
-    let subscriptions = match state.subscriptions.lock() {
+    let subscriptions = match state.subscriptions.read() {
         // CLONED, not held: the whole build below is seconds of network I/O,
         // and holding the subscriptions lock across it would block every
         // command that only wants to read the list.
@@ -10597,7 +10724,7 @@ mod writeback_rebuild_tests {
 
     fn state_with(subs: Vec<calp::manifest::Subscription>) -> AppState {
         let state = crate::create_app_state();
-        state.subscriptions.lock().unwrap().subscriptions = subs;
+        state.subscriptions.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().subscriptions = subs;
         state
     }
 
@@ -12034,8 +12161,14 @@ fn load_embedded_data_sources(
         );
     }
 
-    crate::ribbon_filter::remap_ribbon_filter_connections(ribbon_filter_state, &ds_to_conn);
-    remap_slicer_bi_connections(slicer_state, &ds_to_conn);
+    // `load_embedded_data_sources` runs on the OPEN path (restoring package
+    // connections from the file), so this re-bind must not dirty a freshly opened
+    // workbook -- same reasoning as every other store rebuild in open_file.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    crate::ribbon_filter::remap_ribbon_filter_connections(ribbon_filter_state, &load, &ds_to_conn);
+    remap_slicer_bi_connections(&load, slicer_state, &ds_to_conn);
 
     ds_to_conn
 }
@@ -12166,6 +12299,7 @@ fn refresh_embedded_data_sources(
 /// Restore pivot definitions from a pulled .calp package: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
 fn restore_pulled_pivots(
+    effect: &crate::document_effect::DocumentEffect,
     pivot_defs: &[persistence::SavedPivotDefinition],
     bi_pivot_metadata: &[serde_json::Value],
     state: &AppState,
@@ -12178,7 +12312,7 @@ fn restore_pulled_pivots(
     use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid, update_pivot_region};
     use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
 
-    let mut pivot_tables = match pivot_state.pivot_tables.lock() {
+    let mut pivot_tables = match pivot_state.pivot_tables.write(effect) {
         Ok(pt) => pt,
         Err(_) => return,
     };
@@ -12288,7 +12422,7 @@ fn restore_pulled_pivots(
         crate::log_info!("CALP-DIAG", "Restoring BI metadata: {} entries, embedded_connection_ids={:?}",
             bi_pivot_metadata.len(), embedded_connection_ids);
 
-        if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {
+        if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(effect) {
             for meta_json in bi_pivot_metadata {
                 if let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) {
                     // Route each pivot to ITS package data source. Packages
@@ -12629,7 +12763,7 @@ pub async fn calp_refresh_data(
         std::path::PathBuf,
         Option<String>, // saved connection string
     )> = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let mut result = Vec::new();
 
         for sub in &subs.subscriptions {
@@ -12818,13 +12952,15 @@ pub async fn calp_refresh_data(
 #[tauri::command]
 pub fn calp_save_data_source_config(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     data_source_id: String,
     connection_string: String,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let now = chrono::Utc::now().to_rfc3339();
-    let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
 
     for sub in &mut subs.subscriptions {
         // Find any subscription that references this data source.
@@ -12869,7 +13005,7 @@ pub fn calp_get_data_sources(
     window: tauri::Window,
 ) -> Result<Vec<DataSourceInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
 
     for sub in &subs.subscriptions {
@@ -12974,6 +13110,7 @@ pub struct CalpResetSheetSnapshot {
 #[tauri::command]
 pub fn calp_reset_subscription(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     params: ResetSubscriptionParams,
     window: tauri::Window,
@@ -12982,7 +13119,7 @@ pub fn calp_reset_subscription(
 
     // Locate the subscription and copy what we need (lock released after).
     let (resolved_version, tracked): (String, Vec<(SheetId, SheetId)>) = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let sub = subs
             .subscriptions
             .iter()
@@ -13085,7 +13222,7 @@ pub fn calp_reset_subscription(
             });
         }
         let overrides = {
-            let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+            let layer = state.override_layer.read().map_err(|e| e.to_string())?;
             layer
                 .overrides
                 .iter()
@@ -13121,7 +13258,7 @@ pub fn calp_reset_subscription(
     let published_pivots: Vec<(pivot_engine::PivotId, pivot_engine::PivotDefinition)> = {
         let pivot_tables = pivot_state
             .pivot_tables
-            .lock()
+            .read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         result
             .pivot_definitions
@@ -13159,7 +13296,7 @@ pub fn calp_reset_subscription(
     let current_pivot_snapshots: Vec<Vec<u8>> = {
         let pivot_tables = pivot_state
             .pivot_tables
-            .lock()
+            .read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         published_pivots
             .iter()
@@ -13253,10 +13390,15 @@ pub fn calp_reset_subscription(
         });
     }
 
+    // Reset replaces the tracked sheets' cells, pivot definitions and override layer
+    // with the published ones: a real document change relative to the LAST SAVE, even
+    // though it is a "revert" in intent. Constructed after every refusal above.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
     // Clear the override layer for the reset sheets — the pristine content IS
     // the state now; stale overrides would re-assert the discarded edits.
     {
-        let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
         layer
             .overrides
             .retain(|o| !local_sheet_ids.contains(&o.sheet_id));
@@ -13268,7 +13410,7 @@ pub fn calp_reset_subscription(
     let pivots_reset = {
         let mut pivot_tables = pivot_state
             .pivot_tables
-            .lock()
+            .write(&effect)
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         let mut n = 0usize;
         for (pid, def) in published_pivots {
@@ -13619,31 +13761,31 @@ mod c8_materialize_tests {
     #[test]
     fn materializes_modules_and_notebooks_into_script_state() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "x")]).unwrap();
-        let scripts = st.workbook_scripts.lock().unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "x")]).unwrap();
+        let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "v1");
         assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg"));
-        assert_eq!(st.workbook_notebooks.lock().unwrap().get("n1").unwrap().cells[0].source, "x");
+        assert_eq!(st.workbook_notebooks.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().get("n1").unwrap().cells[0].source, "x");
     }
 
     #[test]
     fn same_package_refresh_replaces_the_prior_version() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "old")]).unwrap();
-        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "v2-updated")], &[mk_notebook("pkg", "n1", "new")]).unwrap();
-        let scripts = st.workbook_scripts.lock().unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "old")]).unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v2-updated")], &[mk_notebook("pkg", "n1", "new")]).unwrap();
+        let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.len(), 1, "same id replaces, not duplicates");
         assert_eq!(scripts.get("m1").unwrap().source, "v2-updated");
-        assert_eq!(st.workbook_notebooks.lock().unwrap().get("n1").unwrap().cells[0].source, "new");
+        assert_eq!(st.workbook_notebooks.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().get("n1").unwrap().cells[0].source, "new");
     }
 
     #[test]
     fn removal_on_refresh_drops_a_module_the_package_no_longer_ships() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "a"), mk_module("pkg", "m2", "b")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "a"), mk_module("pkg", "m2", "b")], &[]).unwrap();
         // The next version ships only m1 -> m2 must be removed.
-        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "a2")], &[]).unwrap();
-        let scripts = st.workbook_scripts.lock().unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "a2")], &[]).unwrap();
+        let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.len(), 1);
         assert!(scripts.contains_key("m1"));
         assert!(!scripts.contains_key("m2"), "removed-upstream module must be dropped on refresh");
@@ -13653,7 +13795,7 @@ mod c8_materialize_tests {
     fn preserves_a_subscriber_local_same_id_module() {
         let st = ScriptState::new();
         // A genuinely local (subscriber-authored) module with id "m1".
-        st.workbook_scripts.lock().unwrap().insert(
+        st.workbook_scripts.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().insert(
             "m1".to_string(),
             WorkbookScript {
                 id: "m1".to_string(),
@@ -13665,8 +13807,8 @@ mod c8_materialize_tests {
             },
         );
         // A package ships its own "m1" -> the local one is preserved, package skipped.
-        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "upstream")], &[]).unwrap();
-        let scripts = st.workbook_scripts.lock().unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "upstream")], &[]).unwrap();
+        let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "my local edit");
         assert_eq!(scripts.get("m1").unwrap().source_package, None);
     }
@@ -13674,10 +13816,10 @@ mod c8_materialize_tests {
     #[test]
     fn does_not_let_one_package_shadow_anothers_same_id() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&st, "pkg-a", &[mk_module("pkg-a", "m1", "from-a")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-a", &[mk_module("pkg-a", "m1", "from-a")], &[]).unwrap();
         // A second package reuses the id -> the first package keeps ownership.
-        materialize_distributed_scripts(&st, "pkg-b", &[mk_module("pkg-b", "m1", "from-b")], &[]).unwrap();
-        let scripts = st.workbook_scripts.lock().unwrap();
+        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-b", &[mk_module("pkg-b", "m1", "from-b")], &[]).unwrap();
+        let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "from-a");
         assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg-a"));
     }
@@ -13754,7 +13896,7 @@ mod pane_control_pull_tests {
         let filters = RibbonFilterState::new();
         let names = pane_control_taken_names(
             pane.controls.lock().unwrap().values(),
-            filters.filters.lock().unwrap().values(),
+            filters.filters.read().unwrap().values(),
             &storage,
         );
         assert_eq!(

@@ -332,7 +332,7 @@ pub fn get_slicer_computed_properties(
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> SlicerComputedPropertyResult {
-    let props = slicer_state.computed_properties.lock().unwrap();
+    let props = slicer_state.computed_properties.read().unwrap();
     let slicer_props = props.get(&slicer_id);
 
     let properties: Vec<SlicerComputedPropertyData> = slicer_props
@@ -369,6 +369,7 @@ pub fn get_slicer_available_attributes() -> Vec<String> {
 #[tauri::command]
 pub fn add_slicer_computed_property(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -388,7 +389,7 @@ pub fn add_slicer_computed_property(
 
     // Check for duplicate attribute
     {
-        let props = slicer_state.computed_properties.lock().unwrap();
+        let props = slicer_state.computed_properties.read().unwrap();
         if let Some(list) = props.get(&slicer_id) {
             if list.iter().any(|p| p.attribute == attribute) {
                 return Err(format!(
@@ -401,7 +402,7 @@ pub fn add_slicer_computed_property(
 
     // Get slicer's sheet index
     let sheet_index = {
-        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicers = slicer_state.slicers.read().unwrap();
         let slicer = slicers
             .get(&slicer_id)
             .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -447,7 +448,8 @@ pub fn add_slicer_computed_property(
 
     // Apply to slicer
     let slicer_changed = {
-        let mut slicers = slicer_state.slicers.lock().unwrap();
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut slicers = slicer_state.slicers.write(&effect).unwrap();
         if let Some(slicer) = slicers.get_mut(&slicer_id) {
             apply_slicer_property_value(&attribute, &value, slicer)
         } else {
@@ -465,7 +467,7 @@ pub fn add_slicer_computed_property(
 
     // Store the property
     {
-        let mut props = slicer_state.computed_properties.lock().unwrap();
+        let mut props = slicer_state.computed_properties.write(&crate::document_effect::DocumentEffect::mutates(&file_state)).unwrap();
         props.entry(slicer_id).or_default().push(prop);
     }
 
@@ -478,7 +480,7 @@ pub fn add_slicer_computed_property(
     );
 
     // Build result
-    let props = slicer_state.computed_properties.lock().unwrap();
+    let props = slicer_state.computed_properties.read().unwrap();
     let slicer_props = props.get(&slicer_id);
     let properties: Vec<SlicerComputedPropertyData> = slicer_props
         .map(|list| {
@@ -505,6 +507,7 @@ pub fn add_slicer_computed_property(
 #[tauri::command]
 pub fn update_slicer_computed_property(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -526,7 +529,7 @@ pub fn update_slicer_computed_property(
 
     // Find the property and its slicer
     let (slicer_id, sheet_index) = {
-        let props = slicer_state.computed_properties.lock().unwrap();
+        let props = slicer_state.computed_properties.read().unwrap();
         let mut found = None;
         for (sid, list) in props.iter() {
             if list.iter().any(|p| p.id == prop_id) {
@@ -536,7 +539,7 @@ pub fn update_slicer_computed_property(
         }
         let slicer_id = found.ok_or_else(|| format!("Property {} not found", prop_id))?;
 
-        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicers = slicer_state.slicers.read().unwrap();
         let sheet_index = slicers
             .get(&slicer_id)
             .map(|s| s.sheet_index)
@@ -546,7 +549,7 @@ pub fn update_slicer_computed_property(
 
     // Check for duplicate attribute (if changing attribute)
     if let Some(ref new_attr) = attribute {
-        let props = slicer_state.computed_properties.lock().unwrap();
+        let props = slicer_state.computed_properties.read().unwrap();
         if let Some(list) = props.get(&slicer_id) {
             if list
                 .iter()
@@ -563,7 +566,8 @@ pub fn update_slicer_computed_property(
     // Update the property
     let updated_attr;
     {
-        let mut props = slicer_state.computed_properties.lock().unwrap();
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut props = slicer_state.computed_properties.write(&effect).unwrap();
         let list = props
             .get_mut(&slicer_id)
             .ok_or_else(|| "Slicer properties not found".to_string())?;
@@ -593,7 +597,7 @@ pub fn update_slicer_computed_property(
     let styles = state.style_registry.lock().unwrap();
 
     let value = {
-        let props = slicer_state.computed_properties.lock().unwrap();
+        let props = slicer_state.computed_properties.read().unwrap();
         let list = props.get(&slicer_id).unwrap();
         let prop = list.iter().find(|p| p.id == prop_id).unwrap();
         evaluate_slicer_property(
@@ -610,7 +614,7 @@ pub fn update_slicer_computed_property(
 
     // Update cached value
     {
-        let mut props = slicer_state.computed_properties.lock().unwrap();
+        let mut props = slicer_state.computed_properties.write(&crate::document_effect::DocumentEffect::mutates(&file_state)).unwrap();
         let list = props.get_mut(&slicer_id).unwrap();
         let prop = list.iter_mut().find(|p| p.id == prop_id).unwrap();
         prop.cached_value = Some(value.clone());
@@ -618,7 +622,7 @@ pub fn update_slicer_computed_property(
 
     // Apply to slicer
     let slicer_changed = {
-        let mut slicers = slicer_state.slicers.lock().unwrap();
+        let mut slicers = slicer_state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&file_state)).unwrap();
         if let Some(slicer) = slicers.get_mut(&slicer_id) {
             apply_slicer_property_value(&updated_attr, &value, slicer)
         } else {
@@ -629,7 +633,7 @@ pub fn update_slicer_computed_property(
     // Update dependencies if formula changed
     if formula.is_some() {
         let current_formula = {
-            let props = slicer_state.computed_properties.lock().unwrap();
+            let props = slicer_state.computed_properties.read().unwrap();
             let list = props.get(&slicer_id).unwrap();
             let prop = list.iter().find(|p| p.id == prop_id).unwrap();
             prop.formula.clone()
@@ -648,7 +652,7 @@ pub fn update_slicer_computed_property(
     }
 
     // Build result
-    let props = slicer_state.computed_properties.lock().unwrap();
+    let props = slicer_state.computed_properties.read().unwrap();
     let slicer_props = props.get(&slicer_id);
     let properties: Vec<SlicerComputedPropertyData> = slicer_props
         .map(|list| {
@@ -674,12 +678,13 @@ pub fn update_slicer_computed_property(
 /// Remove a slicer computed property.
 #[tauri::command]
 pub fn remove_slicer_computed_property(
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     prop_id: identity::EntityId,
 ) -> Result<SlicerComputedPropertyResult, String> {
     // Find which slicer owns this property
     let slicer_id = {
-        let props = slicer_state.computed_properties.lock().unwrap();
+        let props = slicer_state.computed_properties.read().unwrap();
         let mut found = None;
         for (sid, list) in props.iter() {
             if list.iter().any(|p| p.id == prop_id) {
@@ -692,7 +697,8 @@ pub fn remove_slicer_computed_property(
 
     // Remove the property
     {
-        let mut props = slicer_state.computed_properties.lock().unwrap();
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut props = slicer_state.computed_properties.write(&effect).unwrap();
         if let Some(list) = props.get_mut(&slicer_id) {
             list.retain(|p| p.id != prop_id);
             if list.is_empty() {
@@ -724,7 +730,7 @@ pub fn remove_slicer_computed_property(
     );
 
     // Build result
-    let props = slicer_state.computed_properties.lock().unwrap();
+    let props = slicer_state.computed_properties.read().unwrap();
     let slicer_props = props.get(&slicer_id);
     let properties: Vec<SlicerComputedPropertyData> = slicer_props
         .map(|list| {
@@ -751,6 +757,7 @@ pub fn remove_slicer_computed_property(
 /// Called from the main recalculation flow when cells change.
 /// Returns a set of slicer IDs that were modified.
 pub fn re_evaluate_slicer_computed_properties(
+    effect: &crate::document_effect::DocumentEffect,
     changed_cells: &[(usize, u32, u32)],
     grids: &[Grid],
     sheet_names: &[String],
@@ -778,8 +785,8 @@ pub fn re_evaluate_slicer_computed_properties(
     }
 
     // Re-evaluate each affected property
-    let mut props = slicer_state.computed_properties.lock().unwrap();
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let mut props = slicer_state.computed_properties.write(effect).unwrap();
+    let mut slicers = slicer_state.slicers.write(effect).unwrap();
 
     for prop_id in &affected_prop_ids {
         // Find the property across all slicers
@@ -843,7 +850,7 @@ pub fn get_slicer_computed_attributes(
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> Vec<String> {
-    let props = slicer_state.computed_properties.lock().unwrap();
+    let props = slicer_state.computed_properties.read().unwrap();
     props
         .get(&slicer_id)
         .map(|list| list.iter().map(|p| p.attribute.clone()).collect())

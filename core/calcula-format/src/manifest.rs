@@ -41,7 +41,13 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 ///
 /// v5 adds the per-sheet view state -- zoom and split bars
 /// (`SHEET_VIEW_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 5;
+///
+/// v6 adds the per-sheet DISPLAY FLAGS -- display-zeros, show-formulas, view mode and
+/// display-headings (`SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION`). These could NOT ride v5:
+/// a build that stamps v5 today knows nothing about the four new fields, so it would
+/// drop them on its next save, which is precisely the mishandling a version link exists
+/// to prevent.
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 6;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -82,6 +88,24 @@ pub const USER_HIDDEN_MIN_FORMAT_VERSION: u32 = 4;
 /// error anywhere. Stamped only when a sheet actually carries a non-default
 /// zoom or a split, so ordinary workbooks stay openable by older builds.
 pub const SHEET_VIEW_MIN_FORMAT_VERSION: u32 = 5;
+
+/// Minimum `.cala` format version a reader must be to handle the per-sheet DISPLAY
+/// FLAGS: `displayZeros`, `showFormulas`, `viewMode` and `displayHeadings`.
+///
+/// Before this these four lived ONLY in the frontend Core grid state -- there was no
+/// authoritative Rust copy at all, so they were never written to the archive and every
+/// one of them silently reset on reload.
+///
+/// Same test as the sets above, and it passes for the same reason zoom and split did:
+/// an older reader does not merely ignore them, it drops them on its next save. A sheet
+/// deliberately showing formulas instead of results, or hiding zeros so a report reads
+/// cleanly, comes back looking like a different document with no error anywhere.
+/// `showFormulas` is the sharpest case: the sheet returns showing VALUES where the
+/// author left FORMULAS on screen for review.
+///
+/// Stamped ONLY when some sheet actually carries a non-default flag, so an ordinary
+/// workbook still writes v1-v5 and stays openable by older builds.
+pub const SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION: u32 = 6;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

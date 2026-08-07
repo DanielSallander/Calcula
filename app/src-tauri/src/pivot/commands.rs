@@ -24,6 +24,82 @@ use tauri::{Emitter, State};
 // HELPERS
 // ============================================================================
 
+/// Refusal-first write access to the pivot store.
+///
+/// WHY THIS EXISTS. `PivotState::pivot_tables` is `Persisted<T>` (it is written into the
+/// .cala by `persistence::collect_pivots_for_save`), so mutating it requires a
+/// `DocumentEffect`. `DocumentEffect::mutates` sets the dirty flag EAGERLY -- possession
+/// of the token is proof the flag is set -- which means it must not be constructed until
+/// the command has actually decided to mutate. Every pivot mutation begins with the same
+/// refusal ("does this pivot exist?"), so that check happens here under a READ guard and
+/// the token is minted only afterwards. A refused pivot command therefore leaves the
+/// document clean, which is the contract `document_effect_pilot_tests` pins.
+///
+/// Returns the token alongside the guard: the caller keeps it alive for the whole
+/// mutation and may pass `&effect` to any other `Persisted<T>` the same command touches.
+fn pivot_write<'a>(
+    pivot_state: &'a PivotState,
+    file_state: &crate::persistence::FileState,
+    pivot_id: PivotId,
+) -> Result<
+    (
+        crate::document_effect::DocumentEffect,
+        crate::document_effect::WriteGuard<'a, std::collections::HashMap<PivotId, (PivotDefinition, PivotCache)>>,
+    ),
+    String,
+> {
+    {
+        let tables = pivot_state
+            .pivot_tables
+            .read()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        if !tables.contains_key(&pivot_id) {
+            return Err(format!("Pivot table {} not found", pivot_id));
+        }
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let guard = pivot_state
+        .pivot_tables
+        .write(&effect)
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    Ok((effect, guard))
+}
+
+/// Refusal-first mutation token for a pivot command that takes the store guard SEVERAL
+/// times, or takes it inside nested scopes.
+///
+/// [`pivot_write`] hands back a live guard, which is wrong when the command needs the
+/// guard more than once (the token would be scoped to the first block). This runs the
+/// same "does this pivot exist?" refusal under a READ guard, releases it, and returns
+/// only the token -- which then authorises every later `.write(&effect)` in the command.
+fn pivot_mutation_token(
+    pivot_state: &PivotState,
+    file_state: &crate::persistence::FileState,
+    pivot_id: PivotId,
+) -> Result<crate::document_effect::DocumentEffect, String> {
+    {
+        let tables = pivot_state
+            .pivot_tables
+            .read()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        if !tables.contains_key(&pivot_id) {
+            return Err(format!("Pivot table {} not found", pivot_id));
+        }
+    }
+    Ok(crate::document_effect::DocumentEffect::mutates(file_state))
+}
+
+/// Rendering a pivot needs `&mut PivotCache` -- the cache memoises interned values as it
+/// lays the view out -- but rendering is NOT a document edit. Merely LOOKING at a pivot
+/// must never make the workbook prompt to save, or the prompt stops meaning anything.
+/// These read paths therefore declare `DerivedCache`: the cache is rebuilt from the
+/// definition, which is itself persisted and owns the flag.
+fn pivot_render_effect() -> crate::document_effect::DocumentEffect {
+    crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::DerivedCache,
+    )
+}
+
 /// Store a computed PivotView for later windowed cell fetching.
 fn store_view(pivot_state: &PivotState, pivot_id: PivotId, view: &PivotView) {
     pivot_state.views.lock().unwrap().insert(pivot_id, view.clone());
@@ -161,10 +237,11 @@ fn agg_label(agg: AggregationType) -> &'static str {
 #[tauri::command]
 pub fn create_pivot_table(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     request: CreatePivotRequest,
 ) -> Result<PivotViewResponse, String> {
-    create_pivot_inner(state, pivot_state, request, Vec::new(), Vec::new())
+    create_pivot_inner(state, file_state, pivot_state, request, Vec::new(), Vec::new())
 }
 
 /// Core pivot creation, optionally with row/value fields configured UP FRONT so
@@ -173,11 +250,16 @@ pub fn create_pivot_table(
 /// to source-column indices against the freshly built cache.
 pub fn create_pivot_inner(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     request: CreatePivotRequest,
     row_field_names: Vec<String>,
     value_specs: Vec<(String, AggregationType)>,
 ) -> Result<PivotViewResponse, String> {
+    // Creating a pivot: nothing to refuse on identity, the command has already
+    // committed by this point.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
     log_info!(
         "PIVOT",
         "create_pivot_table source={} dest={} dest_sheet={:?}",
@@ -371,7 +453,7 @@ pub fn create_pivot_inner(
     }
 
     // Store pivot table
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
     pivot_tables.insert(pivot_id, (definition, cache_mut));
 
     // Set as active pivot
@@ -438,11 +520,16 @@ pub fn cancel_pivot_operation(
 #[tauri::command]
 pub fn revert_pivot_operation(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, pivot_id)?;
+
     let prev = pivot_state.previous_states.lock().unwrap().remove(&pivot_id);
     if let Some((old_def, old_cache)) = prev {
         log_info!("PIVOT", "revert_pivot_operation pivot_id={}", pivot_id);
@@ -457,7 +544,7 @@ pub fn revert_pivot_operation(
 
         // Restore definition + cache
         {
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
                 *def = old_def;
                 *c = cache;
@@ -486,11 +573,16 @@ pub fn revert_pivot_operation(
 #[tauri::command]
 pub fn undo_pivot_overwrite(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, pivot_id)?;
+
     log_info!("PIVOT", "undo_pivot_overwrite pivot_id={}", pivot_id);
 
     // 1. Pop the undo entry so Ctrl+Z doesn't replay it
@@ -519,7 +611,7 @@ pub fn undo_pivot_overwrite(
                             let destination = snapshot.definition.destination;
 
                             // Restore definition and recalculate
-                            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+                            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
                             if let Some((def, cache)) = pivot_tables.get_mut(&pivot_id) {
                                 *def = snapshot.definition;
                                 let view = safe_calculate_pivot(def, cache);
@@ -563,12 +655,17 @@ pub fn undo_pivot_overwrite(
 pub async fn update_pivot_fields(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, request.pivot_id)?;
+
     log_info!("PIVOT", "update_pivot_fields pivot_id={}", request.pivot_id);
 
     let t_total = Instant::now();
@@ -583,7 +680,7 @@ pub async fn update_pivot_fields(
     // leaving the other filter fields untouched.
     if let Some(ref filter_configs) = request.filter_fields {
         let calc_group_touched = {
-            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            let bi_meta = pivot_state.bi_metadata.read().unwrap();
             bi_meta.get(&pivot_id).is_some_and(|meta| {
                 filter_configs
                     .iter()
@@ -592,7 +689,7 @@ pub async fn update_pivot_fields(
         };
         if calc_group_touched {
             {
-                let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+                let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
                 let (definition, _) = pivot_tables
                     .get_mut(&pivot_id)
                     .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -618,6 +715,7 @@ pub async fn update_pivot_fields(
             return refresh_pivot_cache(
                 window,
                 state,
+                file_state,
                 pivot_state,
                 pane_control_state,
                 ribbon_filter_state,
@@ -634,7 +732,7 @@ pub async fn update_pivot_fields(
 
     // 1. Lock briefly: apply field updates, clone old + new state, release lock
     let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx) = {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         let (definition, cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -751,7 +849,7 @@ pub async fn update_pivot_fields(
     if token.is_cancelled() {
         log_info!("PIVOT", "update_pivot_fields pivot_id={} CANCELLED after calculation", pivot_id);
         {
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
                 *def = old_definition;
                 *c = old_cache;
@@ -772,7 +870,7 @@ pub async fn update_pivot_fields(
 
     // 5. Put updated definition + cache back
     {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
             *def = definition;
             *c = cache;
@@ -789,7 +887,7 @@ pub async fn update_pivot_fields(
     if token.is_cancelled() {
         log_info!("PIVOT", "update_pivot_fields pivot_id={} CANCELLED before grid write", pivot_id);
         {
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
                 *def = old_definition;
                 *c = old_cache;
@@ -858,11 +956,16 @@ pub async fn update_pivot_fields(
 #[tauri::command]
 pub fn toggle_pivot_group(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ToggleGroupRequest,
 ) -> Result<PivotViewResponse, String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, request.pivot_id)?;
+
     log_info!(
         "PIVOT",
         "toggle_pivot_group pivot_id={} is_row={} field_idx={}",
@@ -874,7 +977,7 @@ pub fn toggle_pivot_group(
     let t_total = Instant::now();
     let pivot_id = request.pivot_id;
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -987,7 +1090,7 @@ pub fn toggle_pivot_group(
                 log_info!("PIVOT", "toggle_pivot_group: FAST path had no effect (children not in view), falling through to SLOW path");
                 drop(pivot_tables);
                 // Re-acquire for the SLOW path below
-                let mut pivot_tables = pivot_state.pivot_tables.lock()
+                let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
                     .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
                 let (definition, cache) = pivot_tables
                     .get_mut(&pivot_id)
@@ -1115,7 +1218,7 @@ pub fn get_pivot_view(
 
     log_debug!("PIVOT", "get_pivot_view pivot_id={}", id);
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&pivot_render_effect()).unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&id)
         .ok_or_else(|| format!("Pivot table {} not found", id))?;
@@ -1179,11 +1282,20 @@ pub fn get_pivot_cell_window(
 
 /// Deletes a pivot table
 #[tauri::command]
-pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotState>, pivot_id: PivotId) -> Result<(), String> {
+pub fn delete_pivot_table(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<(), String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, pivot_id)?;
+
     log_info!("PIVOT", "delete_pivot_table pivot_id={}", pivot_id);
 
     // Get pivot info before removing
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, cache) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -1241,7 +1353,7 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
     }
 
     // Remove pivot table
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
     pivot_tables.remove(&pivot_id);
 
     // Remove cached view
@@ -1258,8 +1370,11 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
     regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
     drop(regions);
 
+    // Deleting a pivot drops it from `workbook.pivot_definitions`, clears its grid
+    // region and prunes its object script -- all persisted.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // C10: a deleted pivot must not leave its object script mounted/persisted.
-    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &pivot_id.to_string());
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &pivot_id.to_string());
 
     Ok(())
 }
@@ -1269,6 +1384,7 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
 #[tauri::command]
 pub fn relocate_pivot(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -1276,11 +1392,15 @@ pub fn relocate_pivot(
     new_row: u32,
     new_col: u32,
 ) -> Result<(), String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, pivot_id)?;
+
     log_info!("PIVOT", "relocate_pivot pivot_id={} to ({},{})", pivot_id, new_row, new_col);
 
     // 1. Update the definition's destination
     let view = {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         let (definition, cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -1298,7 +1418,7 @@ pub fn relocate_pivot(
 
     // 3. Resolve sheet index
     let dest_sheet_idx = {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
         let (definition, _) = pivot_tables.get(&pivot_id).unwrap();
         resolve_dest_sheet_index(&state, definition)
     };
@@ -1340,7 +1460,7 @@ pub fn get_pivot_source_data(
     // would be a classic AB/BA deadlock between two concurrent commands.
     let sheet_names_snapshot = sheet_names_snapshot(&state);
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, cache) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -1423,12 +1543,17 @@ where
 pub async fn refresh_pivot_cache(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, pivot_id)?;
+
     log_info!("PIVOT", "refresh_pivot_cache pivot_id={}", pivot_id);
 
     let t_total = Instant::now();
@@ -1439,17 +1564,17 @@ pub async fn refresh_pivot_cache(
 
     // Check if this is a BI-backed pivot. BI pivots re-query the live database
     // via update_bi_pivot_fields rather than rebuilding from grid cells.
-    let is_bi_pivot = pivot_state.bi_metadata.lock().unwrap().contains_key(&pivot_id);
+    let is_bi_pivot = pivot_state.bi_metadata.read().unwrap().contains_key(&pivot_id);
 
     if is_bi_pivot {
         log_info!("CALP-DIAG", "refresh_pivot_cache: BI pivot {} — re-querying live database", pivot_id);
         // Reconstruct an UpdateBiPivotFieldsRequest from the stored definition
         let bi_request = {
-            let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let pivot_tables = pivot_state.pivot_tables.read().unwrap();
             let (definition, cache) = pivot_tables
                 .get(&pivot_id)
                 .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
-            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            let bi_meta = pivot_state.bi_metadata.read().unwrap();
             let meta = bi_meta.get(&pivot_id)
                 .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
 
@@ -1605,7 +1730,7 @@ pub async fn refresh_pivot_cache(
         }
 
         // Delegate to update_bi_pivot_fields which handles the full BI query flow
-        return update_bi_pivot_fields(state, pivot_state, pane_control_state, ribbon_filter_state, bi_state, bi_request).await;
+        return update_bi_pivot_fields(state, file_state, pivot_state, pane_control_state, ribbon_filter_state, bi_state, bi_request).await;
     }
 
     // Snapshot sheet names BEFORE the pivot_tables lock — `delete_sheet` takes
@@ -1616,7 +1741,7 @@ pub async fn refresh_pivot_cache(
 
     // 1. Lock briefly: read source info, build new cache from grid, release locks
     let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx, destination) = {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
         let (definition, cache) = pivot_tables
             .get(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -1646,9 +1771,9 @@ pub async fn refresh_pivot_cache(
                 .unwrap_or(0);
             // If the pivot is linked to a table, its current range wins.
             if let Some(ref table_name) = source_table_name {
-                let table_names = state.table_names.lock().unwrap();
+                let table_names = state.table_names.read().unwrap();
                 if let Some((sheet_index, table_id)) = table_names.get(&table_name.to_uppercase()) {
-                    let tables = state.tables.lock().unwrap();
+                    let tables = state.tables.read().unwrap();
                     if let Some(sheet_tables) = tables.get(sheet_index) {
                         if let Some(table) = sheet_tables.get(table_id) {
                             source_start = (table.start_row, table.start_col);
@@ -1682,7 +1807,7 @@ pub async fn refresh_pivot_cache(
             drop(grids);
 
             // Update stored cache + bump version
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             let (definition, cache) = pivot_tables
                 .get_mut(&pivot_id)
                 .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -1720,7 +1845,7 @@ pub async fn refresh_pivot_cache(
     if token.is_cancelled() {
         log_info!("PIVOT", "refresh_pivot_cache pivot_id={} CANCELLED after calculation", pivot_id);
         {
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
                 *def = old_definition;
                 *c = old_cache;
@@ -1739,7 +1864,7 @@ pub async fn refresh_pivot_cache(
 
     // 5. Put updated definition + cache back
     {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
             *def = definition;
             *c = cache;
@@ -1756,7 +1881,7 @@ pub async fn refresh_pivot_cache(
     if token.is_cancelled() {
         log_info!("PIVOT", "refresh_pivot_cache pivot_id={} CANCELLED before grid write", pivot_id);
         {
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
                 *def = old_definition;
                 *c = old_cache;
@@ -1818,7 +1943,7 @@ pub fn get_pivot_at_cell(
     log_debug!("PIVOT", "get_pivot_at_cell ({},{}) found pivot_id={}", row, col, pivot_id);
     
     // Get pivot info
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, cache) = match pivot_tables.get(&pivot_id) {
         Some(t) => t,
         None => return Ok(None),
@@ -1977,7 +2102,7 @@ pub fn get_pivot_at_cell(
 
     // Check if this is a BI-backed pivot and populate bi_model
     let bi_model = {
-        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
         bi_meta.get(&pivot_id).map(|meta| {
             log_info!(
                 "CALP-DIAG",
@@ -2046,7 +2171,7 @@ pub fn get_pivot_data_formula(
         _ => return Ok(None),
     };
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
 
     Ok(crate::pivot::operations::resolve_pivot_data_formula(
@@ -2065,7 +2190,7 @@ pub fn get_pivot_regions_for_sheet(
 ) -> Vec<PivotRegionData> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let regions = state.protected_regions.lock().unwrap();
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
 
     regions
         .iter()
@@ -2108,7 +2233,7 @@ pub fn get_pivot_field_unique_values(
         field_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&pivot_render_effect()).unwrap();
     let (_, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -2125,7 +2250,7 @@ pub fn get_pivot_field_unique_values(
     // single applied item or the no-item sentinel, so cache uniques would be
     // wrong (canonical lock order pivot_tables -> bi_metadata).
     {
-        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
         if let Some(meta) = bi_meta.get(&pivot_id) {
             if let Some(g) = meta.calculation_groups.iter().find(|g| g.name == field_name) {
                 return Ok(FieldUniqueValuesResponse {
@@ -2178,7 +2303,7 @@ pub fn get_pivot_table_info(
 ) -> Result<PivotTableInfo, String> {
     log_debug!("PIVOT", "get_pivot_table_info pivot_id={}", pivot_id);
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, _) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -2205,12 +2330,13 @@ pub fn get_pivot_table_info(
 #[tauri::command]
 pub fn update_pivot_properties(
     _state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     request: UpdatePivotPropertiesRequest,
 ) -> Result<PivotTableInfo, String> {
     log_info!("PIVOT", "update_pivot_properties pivot_id={}", request.pivot_id);
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, _) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2256,11 +2382,16 @@ pub fn update_pivot_properties(
 pub async fn change_pivot_data_source(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ChangePivotDataSourceRequest,
 ) -> Result<PivotViewResponse, String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, request.pivot_id)?;
+
     let pivot_id = request.pivot_id;
     log_info!(
         "PIVOT",
@@ -2297,7 +2428,7 @@ pub async fn change_pivot_data_source(
 
     // Update definition and rebuild cache
     let (definition, cache, dest_sheet_idx, destination) = {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         let (definition, _cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -2325,7 +2456,7 @@ pub async fn change_pivot_data_source(
         drop(grids);
 
         // Store the new cache
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         let (definition, cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -2348,14 +2479,14 @@ pub async fn change_pivot_data_source(
 
     // Store updated cache
     {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         if let Some((_def, cache)) = pivot_tables.get_mut(&pivot_id) {
             *cache = cache_mut;
         }
     }
 
     let mut final_cache = {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
         let (_def, cache) = pivot_tables.get(&pivot_id).unwrap();
         cache.clone()
     };
@@ -2383,7 +2514,7 @@ pub fn get_pivot_layout_ranges(
 ) -> Result<PivotLayoutRanges, String> {
     log_debug!("PIVOT", "get_pivot_layout_ranges pivot_id={}", pivot_id);
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&pivot_render_effect()).unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -2498,6 +2629,7 @@ pub fn get_pivot_layout_ranges(
 #[tauri::command]
 pub fn update_pivot_layout(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -2505,7 +2637,7 @@ pub fn update_pivot_layout(
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_layout pivot_id={}", request.pivot_id);
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2573,7 +2705,7 @@ pub fn get_pivot_hierarchies(
 ) -> Result<PivotHierarchiesInfo, String> {
     log_debug!("PIVOT", "get_pivot_hierarchies pivot_id={}", pivot_id);
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, cache) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -2653,7 +2785,7 @@ pub fn get_pivot_hierarchies(
 
     // Check if this is a BI-backed pivot and include bi_model
     let bi_model = {
-        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
         bi_meta.get(&pivot_id).map(|meta| {
             BiPivotModelInfo {
                 connection_id: meta.connection_id,
@@ -2684,7 +2816,7 @@ pub fn get_pivot_hierarchies(
                         .map(|f| f.name.as_str())
                         .collect();
                     // Check if the column belongs to any known table in BI metadata
-                    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+                    let bi_meta = pivot_state.bi_metadata.read().unwrap();
                     if let Some(meta) = bi_meta.get(&pivot_id) {
                         for t in &meta.model_tables {
                             if t.columns.iter().any(|c| c.name == name) {
@@ -2720,6 +2852,7 @@ pub fn get_pivot_hierarchies(
 #[tauri::command]
 pub fn add_pivot_hierarchy(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -2733,7 +2866,7 @@ pub fn add_pivot_hierarchy(
         request.axis
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2815,6 +2948,7 @@ pub fn add_pivot_hierarchy(
 #[tauri::command]
 pub fn remove_pivot_hierarchy(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -2828,7 +2962,7 @@ pub fn remove_pivot_hierarchy(
         request.position
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2889,6 +3023,7 @@ pub fn remove_pivot_hierarchy(
 #[tauri::command]
 pub fn move_pivot_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -2902,7 +3037,7 @@ pub fn move_pivot_field(
         request.target_axis
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3021,6 +3156,7 @@ pub fn move_pivot_field(
 #[tauri::command]
 pub fn set_pivot_aggregation(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3034,7 +3170,7 @@ pub fn set_pivot_aggregation(
         request.summarize_by
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3072,6 +3208,7 @@ pub fn set_pivot_aggregation(
 #[tauri::command]
 pub fn set_pivot_number_format(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3085,7 +3222,7 @@ pub fn set_pivot_number_format(
         request.number_format
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3123,6 +3260,7 @@ pub fn set_pivot_number_format(
 pub async fn apply_pivot_filter(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3141,7 +3279,7 @@ pub async fn apply_pivot_filter(
     // `None` = the changed field is a calculation group and needs a BI
     // re-query; `Some(response)` = handled locally.
     let local_response: Option<PivotViewResponse> = {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
         let (definition, cache) = pivot_tables
             .get_mut(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3154,7 +3292,7 @@ pub async fn apply_pivot_filter(
         // pivot_tables -> bi_metadata).
         let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
         let calc_group_items: Option<Vec<String>> = {
-            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            let bi_meta = pivot_state.bi_metadata.read().unwrap();
             bi_meta.get(&request.pivot_id).and_then(|meta| {
                 field_name.as_deref().and_then(|n| {
                     meta.calculation_groups
@@ -3269,6 +3407,7 @@ pub async fn apply_pivot_filter(
     refresh_pivot_cache(
         window,
         state,
+        file_state,
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
@@ -3283,6 +3422,7 @@ pub async fn apply_pivot_filter(
 pub async fn clear_pivot_filter(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3300,7 +3440,7 @@ pub async fn clear_pivot_filter(
     // the await below (the Tauri command future must be Send). `None` = the
     // cleared field is a calculation group and needs a BI re-query.
     let local_response: Option<PivotViewResponse> = {
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
         let (definition, cache) = pivot_tables
             .get_mut(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3310,7 +3450,7 @@ pub async fn clear_pivot_filter(
         // needs a BI re-query, like apply_pivot_filter.
         let is_calc_group_field = {
             let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
-            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            let bi_meta = pivot_state.bi_metadata.read().unwrap();
             bi_meta.get(&request.pivot_id).is_some_and(|meta| {
                 field_name
                     .as_deref()
@@ -3365,6 +3505,7 @@ pub async fn clear_pivot_filter(
     refresh_pivot_cache(
         window,
         state,
+        file_state,
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
@@ -3378,6 +3519,7 @@ pub async fn clear_pivot_filter(
 #[tauri::command]
 pub fn sort_pivot_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3391,7 +3533,7 @@ pub fn sort_pivot_field(
         request.sort_by
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3441,7 +3583,7 @@ pub fn get_pivot_field_info(
 ) -> Result<PivotFieldInfo, String> {
     log_debug!("PIVOT", "get_pivot_field_info pivot_id={} field={}", pivot_id, field_index);
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&pivot_render_effect()).unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -3516,6 +3658,7 @@ pub fn get_pivot_field_info(
 #[tauri::command]
 pub fn set_pivot_item_visibility(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3530,7 +3673,7 @@ pub fn set_pivot_item_visibility(
         request.visible
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3590,7 +3733,7 @@ pub fn get_all_pivot_tables(
 ) -> Vec<PivotTableInfo> {
     log_debug!("PIVOT", "get_all_pivot_tables");
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
 
     pivot_tables.iter()
         .map(|(id, (definition, _))| {
@@ -3623,8 +3766,8 @@ pub fn get_pivot_bi_metadata(
 ) -> Option<serde_json::Value> {
     // Lock order: pivot_tables before bi_metadata (canonical — see
     // bi_pivots_for_connection).
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let bi_meta = pivot_state.bi_metadata.read().unwrap();
 
     if let Some(meta) = bi_meta.get(&pivot_id) {
         // Get the sheet index from the pivot definition
@@ -3661,8 +3804,8 @@ pub(crate) fn bi_pivots_for_connection(
     // Lock order: pivot_tables BEFORE bi_metadata — the order every site that
     // holds both uses (refresh_pivot_cache, collect_pivot_definitions); the
     // reverse order would be an ABBA deadlock.
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let bi_meta = pivot_state.bi_metadata.read().unwrap();
     let connection_key = connection_id.to_string();
 
     bi_meta
@@ -3694,6 +3837,7 @@ pub fn get_pivots_for_bi_connection(
 #[tauri::command]
 pub fn set_pivot_item_expanded(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3708,7 +3852,7 @@ pub fn set_pivot_item_expanded(
         request.is_expanded
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3758,6 +3902,7 @@ pub fn set_pivot_item_expanded(
 #[tauri::command]
 pub fn expand_collapse_level(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3772,7 +3917,7 @@ pub fn expand_collapse_level(
         request.expand
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3819,6 +3964,7 @@ pub fn expand_collapse_level(
 #[tauri::command]
 pub fn expand_collapse_all(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3831,7 +3977,7 @@ pub fn expand_collapse_all(
         request.expand
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -3864,6 +4010,7 @@ pub fn expand_collapse_all(
 pub async fn refresh_all_pivot_tables(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -3872,13 +4019,13 @@ pub async fn refresh_all_pivot_tables(
     log_info!("PIVOT", "refresh_all_pivot_tables");
 
     let pivot_ids: Vec<PivotId> = {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
         pivot_tables.keys().cloned().collect()
     };
 
     let mut responses = Vec::new();
     for pivot_id in pivot_ids {
-        match refresh_pivot_cache(window.clone(), state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), bi_state.clone(), pivot_id).await {
+        match refresh_pivot_cache(window.clone(), state.clone(), file_state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), bi_state.clone(), pivot_id).await {
             Ok(response) => responses.push(response),
             Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
         }
@@ -3998,6 +4145,7 @@ fn show_values_as_to_api(vf: &pivot_engine::ValueField, fields: &[pivot_engine::
 #[tauri::command]
 pub fn group_pivot_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -4011,7 +4159,7 @@ pub fn group_pivot_field(
         request.grouping
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4053,6 +4201,7 @@ pub fn group_pivot_field(
 #[tauri::command]
 pub fn create_manual_group(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -4067,7 +4216,7 @@ pub fn create_manual_group(
         request.member_items
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4127,6 +4276,7 @@ pub fn create_manual_group(
 #[tauri::command]
 pub fn ungroup_pivot_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -4139,7 +4289,7 @@ pub fn ungroup_pivot_field(
         request.field_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4350,6 +4500,7 @@ fn detail_value_to_cell(value: Option<String>) -> engine::CellValue {
 #[tauri::command]
 pub async fn drill_through_to_sheet(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     request: DrillThroughRequest,
@@ -4378,11 +4529,11 @@ pub async fn drill_through_to_sheet(
     )> = {
         let bi_meta = pivot_state
             .bi_metadata
-            .lock()
+            .read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         let pivot_tables = pivot_state
             .pivot_tables
-            .lock()
+            .read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         let (definition, cache) = pivot_tables
             .get(&request.pivot_id)
@@ -4567,7 +4718,11 @@ pub async fn drill_through_to_sheet(
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
     let mut current_grid = state.grid.lock().unwrap();
-    let mut freeze_configs = state.freeze_configs.lock().unwrap();
+    // Drill-through APPENDS A WHOLE NEW SHEET of detail rows. The non-verb name is
+    // exactly why a mutating-verb heuristic missed it; the sheet and its per-sheet
+    // vectors are persisted like any other.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
 
     // Generate a unique sheet name
     let base_name = "DrillThrough";
@@ -4627,13 +4782,26 @@ pub async fn drill_through_to_sheet(
 /// the pivot's BI metadata; saved with the workbook and carried into `.calp`.
 #[tauri::command]
 pub fn set_pivot_drill_behavior(
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     behavior: Option<super::types::DrillThroughBehavior>,
 ) -> Result<(), String> {
+    // Refusal-first: verify this really is a BI-backed pivot under a READ guard,
+    // so a refused call never mints the eager `mutates` token.
+    {
+        let probe = pivot_state
+            .bi_metadata
+            .read()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        if !probe.contains_key(&pivot_id) {
+            return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
+        }
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut bi_meta = pivot_state
         .bi_metadata
-        .lock()
+        .write(&effect)
         .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
     let meta = bi_meta
         .get_mut(&pivot_id)
@@ -4649,13 +4817,26 @@ pub fn set_pivot_drill_behavior(
 /// (the model's perspectives may change under the pivot).
 #[tauri::command]
 pub fn set_pivot_perspective(
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     perspective: Option<String>,
 ) -> Result<(), String> {
+    // Refusal-first: verify this really is a BI-backed pivot under a READ guard,
+    // so a refused call never mints the eager `mutates` token.
+    {
+        let probe = pivot_state
+            .bi_metadata
+            .read()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        if !probe.contains_key(&pivot_id) {
+            return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
+        }
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut bi_meta = pivot_state
         .bi_metadata
-        .lock()
+        .write(&effect)
         .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
     let meta = bi_meta
         .get_mut(&pivot_id)
@@ -4674,7 +4855,7 @@ pub fn get_pivot_drill_behavior(
 ) -> Result<Option<super::types::DrillThroughBehavior>, String> {
     let bi_meta = pivot_state
         .bi_metadata
-        .lock()
+        .read()
         .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
     Ok(bi_meta.get(&pivot_id).and_then(|m| m.drill_through.clone()))
 }
@@ -5148,10 +5329,15 @@ pub(crate) fn extract_calc_groups(engine: &bi_engine::Engine) -> Vec<BiCalcGroup
 #[tauri::command]
 pub async fn create_pivot_from_bi_model(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     bi_state: State<'_, BiState>,
     request: CreatePivotFromBiModelRequest,
 ) -> Result<PivotViewResponse, String> {
+    // Creating a pivot: nothing to refuse on identity, the command has already
+    // committed by this point.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
     let connection_id = request.connection_id;
     log_info!(
         "PIVOT",
@@ -5278,7 +5464,7 @@ pub async fn create_pivot_from_bi_model(
     }
 
     // Store pivot
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
     pivot_tables.insert(pivot_id, (definition, cache_mut));
     drop(pivot_tables);
 
@@ -5305,7 +5491,7 @@ pub async fn create_pivot_from_bi_model(
     };
     pivot_state
         .bi_metadata
-        .lock()
+        .write(&effect)
         .unwrap()
         .insert(pivot_id, bi_meta);
 
@@ -5344,12 +5530,17 @@ struct CalcGroupPlacement {
 #[tauri::command]
 pub async fn update_bi_pivot_fields(
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, BiState>,
     request: UpdateBiPivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
+    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
+    // token, so a refused command leaves the document clean.
+    let effect = pivot_mutation_token(&pivot_state, &file_state, request.pivot_id)?;
+
     let t_total = Instant::now();
     log_info!("PIVOT", "update_bi_pivot_fields pivot_id={}", request.pivot_id);
 
@@ -5357,7 +5548,7 @@ pub async fn update_bi_pivot_fields(
 
     // Verify pivot exists and is BI-backed
     {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         if !bi_meta.contains_key(&pivot_id) {
             return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
@@ -5402,7 +5593,7 @@ pub async fn update_bi_pivot_fields(
 
     // Save previous state for revert-on-cancel
     {
-        let pivot_tables = pivot_state.pivot_tables.lock()
+        let pivot_tables = pivot_state.pivot_tables.read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         if let Some((def, cache)) = pivot_tables.get(&pivot_id) {
             if let Ok(mut prev) = pivot_state.previous_states.lock() {
@@ -5415,7 +5606,7 @@ pub async fn update_bi_pivot_fields(
     // changes to dimensions, measures, filters, layout, etc.), skip the
     // expensive BI query and just recalculate the view from the existing cache.
     {
-        let mut pivot_tables = pivot_state.pivot_tables.lock()
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         if let Some((definition, stored_cache)) = pivot_tables.get_mut(&pivot_id) {
             // A placed calculation group was STRIPPED from the request's field
@@ -5485,7 +5676,7 @@ pub async fn update_bi_pivot_fields(
     // If no fields at all, clear to empty pivot
     if !has_values && !has_dimensions && !has_filters && !has_slicer_fields && placement.is_none() {
         log_info!("PIVOT", "No fields assigned, clearing to empty pivot");
-        let mut pivot_tables = pivot_state.pivot_tables.lock()
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         let (definition, _cache) = pivot_tables
             .get_mut(&pivot_id)
@@ -5509,7 +5700,7 @@ pub async fn update_bi_pivot_fields(
         drop(pivot_tables);
 
         // Replace cache with empty
-        let mut pt = pivot_state.pivot_tables.lock()
+        let mut pt = pivot_state.pivot_tables.write(&effect)
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         if let Some((_, cache)) = pt.get_mut(&pivot_id) {
             *cache = empty_cache;
@@ -5527,7 +5718,7 @@ pub async fn update_bi_pivot_fields(
     // any value_field in the pivot definition, so the engine renders blank data cells
     // — matching Excel's behaviour of showing distinct dimension values without aggregates.
     let synthetic_measure: Option<String> = if !has_values && (has_dimensions || has_filters || has_slicer_fields) {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         bi_meta.get(&pivot_id)
             .and_then(|m| m.measures.first())
@@ -5541,7 +5732,7 @@ pub async fn update_bi_pivot_fields(
     // across deselect/reselect) and show an empty pivot.
     if !has_values && synthetic_measure.is_none() && (has_dimensions || has_filters || has_slicer_fields) {
         log_info!("PIVOT", "No measures in model for synthetic query, saving fields only");
-        let mut pivot_tables = pivot_state.pivot_tables.lock()
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         let (definition, stored_cache) = pivot_tables
             .get_mut(&pivot_id)
@@ -5583,7 +5774,7 @@ pub async fn update_bi_pivot_fields(
 
     // Get the connection_id from BI metadata
     let connection_id = {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         let meta = bi_meta.get(&pivot_id);
         log_info!("CALP-DIAG", "update_bi_pivot_fields: pivot_id={}, bi_metadata exists={}, connection_id={:?}",
@@ -5606,7 +5797,7 @@ pub async fn update_bi_pivot_fields(
     }
     // Also include tables referenced by measures (e.g., fact_sales for SUM(fact_sales[linetotal]))
     {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         if let Some(meta) = bi_meta.get(&pivot_id) {
             for measure_name in request.value_fields.iter().map(|v| &v.measure_name) {
@@ -5689,7 +5880,7 @@ pub async fn update_bi_pivot_fields(
     let mut hierarchy_metas: Vec<HierarchyMeta> = Vec::new();
 
     {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         let meta = bi_meta.get(&pivot_id);
 
@@ -5745,7 +5936,7 @@ pub async fn update_bi_pivot_fields(
     // change the number of groups.
     let mut sort_by_extra_fields: Vec<BiFieldRef> = Vec::new();
     {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         if let Some(meta) = bi_meta.get(&pivot_id) {
             // Collect all (table, column) pairs already in group_by
@@ -5883,7 +6074,7 @@ pub async fn update_bi_pivot_fields(
                 };
                 let found = live_groups.iter().find(|g| g.name == p.group).cloned();
                 {
-                    let mut bi_meta = pivot_state.bi_metadata.lock()
+                    let mut bi_meta = pivot_state.bi_metadata.write(&effect)
                         .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
                     if let Some(meta) = bi_meta.get_mut(&pivot_id) {
                         meta.calculation_groups = live_groups;
@@ -6001,7 +6192,7 @@ pub async fn update_bi_pivot_fields(
         // Collect all tables referenced by the query (dimensions + measure tables)
         let tables_to_refresh: Vec<String> = {
             let mut tables = referenced_tables.clone();
-            let bi_meta = pivot_state.bi_metadata.lock()
+            let bi_meta = pivot_state.bi_metadata.read()
                 .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
             if let Some(meta) = bi_meta.get(&pivot_id) {
                 for measure_name in &query_measures {
@@ -6044,7 +6235,7 @@ pub async fn update_bi_pivot_fields(
             // an empty view.
             if synthetic_measure.is_some() {
                 log_info!("PIVOT", "Synthetic measure query failed ({}), saving fields only", e);
-                let mut pivot_tables = pivot_state.pivot_tables.lock()
+                let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
                     .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
                 let (definition, stored_cache) = pivot_tables
                     .get_mut(&pivot_id)
@@ -6227,7 +6418,7 @@ pub async fn update_bi_pivot_fields(
         // Page-filter/slicer hidden items survive the definition rebuild
         // below (preserved from the old definition), so consult it too.
         let preserved_filters_active = {
-            let pivot_tables = pivot_state.pivot_tables.lock()
+            let pivot_tables = pivot_state.pivot_tables.read()
                 .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
             pivot_tables.get(&pivot_id).is_some_and(|(def, _)| {
                 (!request.filter_fields.is_empty()
@@ -6287,7 +6478,7 @@ pub async fn update_bi_pivot_fields(
     // Build sort-by resolution map: (table, column) -> cache_index_of_sort_by_column.
     // Used to set sort_by_field_index on PivotField for BI columns with sort_by_column.
     let sort_by_resolution: std::collections::HashMap<(String, String), usize> = {
-        let bi_meta = pivot_state.bi_metadata.lock()
+        let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         let mut map = std::collections::HashMap::new();
         if let Some(meta) = bi_meta.get(&pivot_id) {
@@ -6314,7 +6505,7 @@ pub async fn update_bi_pivot_fields(
         sort_by_resolution.get(&(f.table.clone(), f.column.clone())).copied()
     };
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock()
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
         .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
     let (definition, stored_cache) = pivot_tables
         .get_mut(&pivot_id)
@@ -6705,7 +6896,7 @@ pub async fn update_bi_pivot_fields(
 
     // Store last query + lookup column set in bi_metadata
     {
-        let mut bi_meta = pivot_state.bi_metadata.lock()
+        let mut bi_meta = pivot_state.bi_metadata.write(&effect)
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         if let Some(meta) = bi_meta.get_mut(&pivot_id) {
             let group_fields: Vec<BiFieldRef> = request
@@ -6768,11 +6959,27 @@ pub async fn update_bi_pivot_fields(
 /// no pivot recalculation, no grid update.
 #[tauri::command]
 pub fn set_bi_lookup_columns(
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     lookup_columns: Vec<String>,
 ) -> Result<(), String> {
-    let mut bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    // Refusal-first: verify this really is a BI-backed pivot under a READ guard,
+    // so a refused call never mints the eager `mutates` token.
+    {
+        let probe = pivot_state
+            .bi_metadata
+            .read()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        if !probe.contains_key(&pivot_id) {
+            return Err(format!("No BI metadata for pivot {}", pivot_id));
+        }
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut bi_meta = pivot_state
+        .bi_metadata
+        .write(&effect)
+        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
     let meta = bi_meta
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
@@ -6789,6 +6996,7 @@ pub fn set_bi_lookup_columns(
 #[tauri::command]
 pub fn show_report_filter_pages(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     filter_field_index: usize,
@@ -6800,7 +7008,7 @@ pub fn show_report_filter_pages(
         filter_field_index
     );
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, cache) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -6822,6 +7030,10 @@ pub fn show_report_filter_pages(
         return Ok(Vec::new());
     }
 
+    // Past every refusal (pivot exists, field is a filter, values non-empty). This
+    // generates one NEW SHEET per filter value -- a large document change behind a
+    // name that reads like a view action.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut created_sheets = Vec::new();
 
     for (_vid, value_label) in &unique_values {
@@ -6911,6 +7123,7 @@ fn sanitize_sheet_name(name: &str) -> String {
 #[tauri::command]
 pub fn add_calculated_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -6928,7 +7141,7 @@ pub fn add_calculated_field(
     pivot_engine::calculated::parse_calc_formula(&request.formula)
         .map_err(|e| format!("Invalid formula: {}", e))?;
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -6961,6 +7174,7 @@ pub fn add_calculated_field(
 #[tauri::command]
 pub fn update_calculated_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -6978,7 +7192,7 @@ pub fn update_calculated_field(
     pivot_engine::calculated::parse_calc_formula(&request.formula)
         .map_err(|e| format!("Invalid formula: {}", e))?;
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7019,6 +7233,7 @@ pub fn update_calculated_field(
 #[tauri::command]
 pub fn remove_calculated_field(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -7031,7 +7246,7 @@ pub fn remove_calculated_field(
         request.field_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7071,6 +7286,7 @@ pub fn remove_calculated_field(
 #[tauri::command]
 pub fn add_calculated_item(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -7088,7 +7304,7 @@ pub fn add_calculated_item(
     pivot_engine::calculated::parse_calc_formula(&request.formula)
         .map_err(|e| format!("Invalid formula: {}", e))?;
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7121,6 +7337,7 @@ pub fn add_calculated_item(
 #[tauri::command]
 pub fn remove_calculated_item(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
@@ -7133,7 +7350,7 @@ pub fn remove_calculated_item(
         request.item_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (_effect, mut pivot_tables) = pivot_write(&pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;

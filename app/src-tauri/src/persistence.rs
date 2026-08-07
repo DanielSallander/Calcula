@@ -39,9 +39,84 @@ pub struct FileState {
 /// by the save path must call this: the close prompt and auto-recover both gate
 /// on `is_modified`, so a mutation that never sets it is silently discarded at
 /// close on an otherwise-clean document.
+///
+/// PREFER `document_effect::DocumentEffect::mutates(&file_state)` IN NEW CODE.
+/// This function states the rule but cannot enforce it -- 256 mutating commands
+/// documented here and still forgot, because nothing made them call it.
+/// `DocumentEffect` inverts that: a persisted store (`Persisted<T>`) cannot be
+/// written without one, so silence is a compile error. This remains only for the
+/// stores that have not been onboarded to `Persisted<T>` yet; once they all are,
+/// `FileState::is_modified` should become private and `DocumentEffect` the sole
+/// writer.
 pub(crate) fn mark_workbook_modified(file_state: &FileState) {
     if let Ok(mut modified) = file_state.is_modified.lock() {
         *modified = true;
+    }
+}
+
+/// The extension `open_file` should ROUTE on, which is not always the literal
+/// one.
+///
+/// `auto_recover_save` writes a Calcula-format snapshot to
+/// `~$<name>.cala.recovery`. Routing on the literal extension sent every
+/// recovery snapshot to the xlsx reader, which failed with
+/// "File not found 'xl/_rels/workbook.xml.rels'" — so the one artifact that
+/// exists purely to give the user their work back could not be opened by the
+/// app that wrote it.
+///
+/// `auto_recover_save` calls `save_calcula_opt` UNCONDITIONALLY — a snapshot of
+/// an .xlsx document is still a .cala inside — so `.recovery` always routes to
+/// the Calcula reader, never to the extension underneath it.
+fn format_extension(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "recovery" {
+        return "cala".to_string();
+    }
+    ext
+}
+
+#[cfg(test)]
+mod format_extension_tests {
+    use super::format_extension;
+    use std::path::Path;
+
+    #[test]
+    fn plain_extensions_route_unchanged() {
+        assert_eq!(format_extension(Path::new("C:/tmp/book.cala")), "cala");
+        assert_eq!(format_extension(Path::new("C:/tmp/book.xlsx")), "xlsx");
+        assert_eq!(format_extension(Path::new("C:/tmp/BOOK.CALA")), "cala");
+        assert_eq!(format_extension(Path::new("C:/tmp/noext")), "");
+    }
+
+    #[test]
+    fn autorecover_snapshots_route_to_the_calcula_reader() {
+        // The exact shape auto_recover_save writes next to the open document.
+        assert_eq!(
+            format_extension(Path::new("C:/tmp/~$book.cala.recovery")),
+            "cala"
+        );
+        // The no-current-file variant.
+        assert_eq!(
+            format_extension(Path::new("C:/tmp/~$calcula_unsaved.cala.recovery")),
+            "cala"
+        );
+    }
+
+    #[test]
+    fn a_recovery_snapshot_of_an_xlsx_document_still_reads_as_calcula() {
+        // THE TRAP: auto_recover_save calls save_calcula_opt whatever the
+        // document's own format, so `~$book.xlsx.recovery` is a .cala inside.
+        // Routing on the extension underneath `.recovery` would send it to the
+        // xlsx reader and lose exactly the work the snapshot was taken to save.
+        assert_eq!(
+            format_extension(Path::new("C:/tmp/~$book.xlsx.recovery")),
+            "cala"
+        );
     }
 }
 
@@ -327,7 +402,7 @@ pub fn build_workbook_for_save(
     let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
     let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
-    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let tables = state.tables.read().map_err(|e| e.to_string())?;
     let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
 
     let mut workbook = Workbook::new();
@@ -378,13 +453,13 @@ pub fn build_workbook_for_save(
     workbook.charts = collect_charts_for_save(state, &sheet_ids);
     workbook.sparklines = collect_sparklines_for_save(state, &sheet_ids);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
-    workbook.theme = state.theme.lock().unwrap().clone();
+    workbook.theme = state.theme.read().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
 
     // Include workbook properties
     {
-        let props = state.workbook_properties.lock().unwrap();
+        let props = state.workbook_properties.read().unwrap();
         workbook.properties = persistence::WorkbookProperties {
             title: props.title.clone(),
             author: props.author.clone(),
@@ -414,9 +489,9 @@ pub fn build_workbook_for_save_with_slicers(
     let sheet_ids_bwfs = state.sheet_ids.lock().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_bwfs);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
-    workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
-    workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
-    workbook.extension_data = state.extension_data.lock().unwrap().clone();
+    workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
+    workbook.object_scripts = state.object_scripts.read().unwrap().clone();
+    workbook.extension_data = state.extension_data.read().unwrap().clone();
     Ok(workbook)
 }
 
@@ -433,7 +508,7 @@ fn collect_cf_dv_for_save(
     Vec<persistence::SavedSheetDataValidations>,
 ) {
     let mut conditional_formats = Vec::new();
-    if let Ok(store) = state.conditional_formats.lock() {
+    if let Ok(store) = state.conditional_formats.read() {
         for (idx, defs) in store.iter() {
             if defs.is_empty() {
                 continue;
@@ -447,7 +522,7 @@ fn collect_cf_dv_for_save(
         }
     }
     let mut data_validations = Vec::new();
-    if let Ok(store) = state.data_validations.lock() {
+    if let Ok(store) = state.data_validations.read() {
         for (idx, ranges) in store.iter() {
             if ranges.is_empty() {
                 continue;
@@ -478,7 +553,7 @@ fn collect_comments_scenarios_outlines_for_save(
     Vec<persistence::SavedSheetOutline>,
 ) {
     let mut comments = Vec::new();
-    if let Ok(store) = state.comments.lock() {
+    if let Ok(store) = state.comments.read() {
         let mut indices: Vec<usize> = store.keys().copied().collect();
         indices.sort_unstable();
         for idx in indices {
@@ -500,7 +575,7 @@ fn collect_comments_scenarios_outlines_for_save(
         }
     }
     let mut scenarios = Vec::new();
-    if let Ok(store) = state.scenarios.lock() {
+    if let Ok(store) = state.scenarios.read() {
         let mut indices: Vec<usize> = store.keys().copied().collect();
         indices.sort_unstable();
         for idx in indices {
@@ -517,7 +592,7 @@ fn collect_comments_scenarios_outlines_for_save(
         }
     }
     let mut outlines = Vec::new();
-    if let Ok(store) = state.outlines.lock() {
+    if let Ok(store) = state.outlines.read() {
         let mut indices: Vec<usize> = store.keys().copied().collect();
         indices.sort_unstable();
         for idx in indices {
@@ -579,7 +654,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     }
 
     // ---- Freeze panes ----
-    if let Ok(freeze_configs) = state.freeze_configs.lock() {
+    if let Ok(freeze_configs) = state.freeze_configs.read() {
         if let Some(fc) = freeze_configs.get(i) {
             workbook.sheets[i].freeze_row = fc.freeze_row;
             workbook.sheets[i].freeze_col = fc.freeze_col;
@@ -621,7 +696,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
         }
     }
     // Grouping hidden rows/cols
-    if let Ok(outlines) = state.outlines.lock() {
+    if let Ok(outlines) = state.outlines.read() {
         if let Some(outline) = outlines.get(&i) {
             for group in &outline.row_groups {
                 if group.collapsed {
@@ -641,21 +716,21 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     }
 
     // ---- Tab color ----
-    if let Ok(tab_colors) = state.tab_colors.lock() {
+    if let Ok(tab_colors) = state.tab_colors.read() {
         if let Some(color) = tab_colors.get(i) {
             workbook.sheets[i].tab_color = color.clone();
         }
     }
 
     // ---- Sheet visibility ----
-    if let Ok(vis) = state.sheet_visibility.lock() {
+    if let Ok(vis) = state.sheet_visibility.read() {
         if let Some(v) = vis.get(i) {
             workbook.sheets[i].visibility = v.clone();
         }
     }
 
     // ---- Notes ----
-    if let Ok(notes) = state.notes.lock() {
+    if let Ok(notes) = state.notes.read() {
         if let Some(sheet_notes) = notes.get(&i) {
             workbook.sheets[i].notes = sheet_notes
                 .values()
@@ -676,7 +751,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     }
 
     // ---- Hyperlinks ----
-    if let Ok(hyperlinks) = state.hyperlinks.lock() {
+    if let Ok(hyperlinks) = state.hyperlinks.read() {
         if let Some(sheet_links) = hyperlinks.get(&i) {
             workbook.sheets[i].hyperlinks = sheet_links
                 .values()
@@ -692,7 +767,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     }
 
     // ---- Page setup ----
-    if let Ok(page_setups) = state.page_setups.lock() {
+    if let Ok(page_setups) = state.page_setups.read() {
         if let Some(ps) = page_setups.get(i) {
             workbook.sheets[i].page_setup = Some(SavedPageSetup {
                 paper_size: ps.paper_size.clone(),
@@ -721,15 +796,25 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     }
 
     // ---- Gridlines visibility ----
-    if let Ok(gridlines) = state.show_gridlines.lock() {
+    if let Ok(gridlines) = state.show_gridlines.read() {
         if let Some(&visible) = gridlines.get(i) {
             workbook.sheets[i].show_gridlines = visible;
+        }
+    }
+
+    // ---- Display flags (zeros / formulas / view mode / headings) ----
+    if let Ok(flags) = state.sheet_display_flags.read() {
+        if let Some(f) = flags.get(i) {
+            workbook.sheets[i].display_zeros = f.display_zeros;
+            workbook.sheets[i].show_formulas = f.show_formulas;
+            workbook.sheets[i].view_mode = f.view_mode.clone();
+            workbook.sheets[i].display_headings = f.display_headings;
         }
     }
     } // end per-sheet loop
 
     // ---- Named ranges (workbook-level) ----
-    if let Ok(named_ranges) = state.named_ranges.lock() {
+    if let Ok(named_ranges) = state.named_ranges.read() {
         workbook.named_ranges = named_ranges
             .values()
             .map(|nr| SavedNamedRange {
@@ -760,18 +845,18 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     // ---- Controls (cell-anchored button/checkbox metadata, per-sheet) ----
     // Without this, onSelect wiring and formula-driven properties lived only
     // in AppState and vanished on every save/reload (and never published).
-    if let Ok(controls) = state.controls.lock() {
+    if let Ok(controls) = state.controls.read() {
         workbook.controls = crate::controls::collect_controls_for_save(&controls, sheet_ids);
     }
 
     // ---- Cell-type assignments (granular bricks, per-sheet) ----
-    if let Ok(cell_types) = state.cell_types.lock() {
+    if let Ok(cell_types) = state.cell_types.read() {
         workbook.cell_types =
             crate::cell_types::collect_cell_types_for_save(&cell_types, sheet_ids);
     }
 
     // ---- Cell-behavior bindings (granular bricks phase 2, per-binding) ----
-    if let Ok(behaviors) = state.cell_behaviors.lock() {
+    if let Ok(behaviors) = state.cell_behaviors.read() {
         workbook.cell_behaviors =
             crate::cell_behaviors::collect_cell_behaviors_for_save(&behaviors, sheet_ids);
     }
@@ -930,8 +1015,8 @@ fn collect_slicers_for_save(
     slicer_state: &State<crate::slicer::SlicerState>,
     sheet_ids: &[SheetId],
 ) -> Vec<persistence::SavedSlicer> {
-    let slicers = slicer_state.slicers.lock().unwrap();
-    let computed_props = slicer_state.computed_properties.lock().unwrap();
+    let slicers = slicer_state.slicers.read().unwrap();
+    let computed_props = slicer_state.computed_properties.read().unwrap();
     slicers
         .values()
         .map(|s| {
@@ -1105,8 +1190,12 @@ fn restore_slicers(
     slicer_state: &State<crate::slicer::SlicerState>,
     workbook: &persistence::Workbook,
 ) {
-    let mut slicers = slicer_state.slicers.lock().unwrap();
-    let mut computed_props = slicer_state.computed_properties.lock().unwrap();
+    // LOAD PATH: rebuilding the slicer stores from the file just read.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut slicers = slicer_state.slicers.write(&load).unwrap();
+    let mut computed_props = slicer_state.computed_properties.write(&load).unwrap();
 
     slicers.clear();
     computed_props.clear();
@@ -1131,7 +1220,7 @@ fn restore_slicers(
 fn collect_ribbon_filters_for_save(
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
 ) -> Vec<persistence::SavedRibbonFilter> {
-    let filters = ribbon_filter_state.filters.lock().unwrap();
+    let filters = ribbon_filter_state.filters.read().unwrap();
     filters
         .values()
         .map(|f| ribbon_filter_to_saved(f))
@@ -1272,7 +1361,9 @@ fn restore_ribbon_filters(
     saved_filters: &[persistence::SavedRibbonFilter],
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
 ) {
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    // Load path: rebuilding the store FROM the file is not an edit TO the document.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk);
+    let mut filters = ribbon_filter_state.filters.write(&load).unwrap();
 
     filters.clear();
 
@@ -1382,7 +1473,7 @@ fn restore_pane_controls(
 
 /// Collect charts from AppState into SavedChart format for persistence.
 pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedChart> {
-    let charts = state.charts.lock().unwrap();
+    let charts = state.charts.read().unwrap();
     charts
         .iter()
         .map(|c| persistence::SavedChart {
@@ -1395,7 +1486,9 @@ pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[Shee
 
 /// Restore charts from SavedChart format into AppState.
 fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>, workbook: &persistence::Workbook) {
-    let mut charts = state.charts.lock().unwrap();
+    // Load path: rebuilding the store FROM the file is not an edit TO the document.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk);
+    let mut charts = state.charts.write(&load).unwrap();
     charts.clear();
     for s in saved {
         charts.push(crate::api_types::ChartEntry {
@@ -1408,7 +1501,7 @@ fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>, wo
 
 /// Collect sparkline entries from AppState for saving to .cala.
 pub(crate) fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedSparkline> {
-    let sparklines = state.sparklines.lock().unwrap();
+    let sparklines = state.sparklines.read().unwrap();
     sparklines
         .iter()
         .map(|s| persistence::SavedSparkline {
@@ -1420,7 +1513,9 @@ pub(crate) fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[
 
 /// Restore sparklines from SavedSparkline format into AppState.
 fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppState>, workbook: &persistence::Workbook) {
-    let mut sparklines = state.sparklines.lock().unwrap();
+    // Load path, same reasoning as restore_charts.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk);
+    let mut sparklines = state.sparklines.write(&load).unwrap();
     sparklines.clear();
     for s in saved {
         sparklines.push(crate::api_types::SparklineEntry {
@@ -1444,11 +1539,11 @@ pub(crate) fn collect_pivot_definitions(
     use persistence::SavedPivotDefinition;
     use crate::pivot::types::SavedBiPivotMetadata;
 
-    let pivot_tables = match pivot_state.pivot_tables.lock() {
+    let pivot_tables = match pivot_state.pivot_tables.read() {
         Ok(pt) => pt,
         Err(_) => return,
     };
-    let bi_metadata = match pivot_state.bi_metadata.lock() {
+    let bi_metadata = match pivot_state.bi_metadata.read() {
         Ok(bm) => bm,
         Err(_) => return,
     };
@@ -1526,7 +1621,13 @@ fn restore_pivot_definitions(
     use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
     use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, update_pivot_region};
 
-    let mut pivot_tables = match pivot_state.pivot_tables.lock() {
+    // LOAD PATH: rebuilding the pivot store from the file just read. `open_file`
+    // assigns `is_modified = false` as its last act, so a dirty mark here would fight
+    // it and make every freshly-opened workbook prompt to save.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut pivot_tables = match pivot_state.pivot_tables.write(&load) {
         Ok(pt) => pt,
         Err(_) => return,
     };
@@ -1598,7 +1699,11 @@ fn restore_pivot_definitions(
     }
 
     // Restore BI metadata
-    let mut bi_metadata = match pivot_state.bi_metadata.lock() {
+    // LOAD PATH: same reasoning as the pivot definitions above.
+    let load_bi = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut bi_metadata = match pivot_state.bi_metadata.write(&load_bi) {
         Ok(bm) => bm,
         Err(_) => return,
     };
@@ -1666,9 +1771,9 @@ fn assemble_workbook_for_save(
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pane_controls = collect_pane_controls_for_save(pane_control_state);
-    workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
-    workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
-    workbook.extension_data = state.extension_data.lock().unwrap().clone();
+    workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
+    workbook.object_scripts = state.object_scripts.read().unwrap().clone();
+    workbook.extension_data = state.extension_data.read().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(script_state);
     workbook.notebooks = collect_notebooks_for_save(script_state);
 
@@ -1689,7 +1794,7 @@ fn assemble_workbook_for_save(
 
     // Serialize subscription metadata into user_files so it persists in the .cala archive
     {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         if !subs.subscriptions.is_empty() {
             let json = serde_json::to_vec_pretty(&*subs).map_err(|e| e.to_string())?;
             workbook.user_files.insert("subscriptions.json".to_string(), json);
@@ -1698,7 +1803,7 @@ fn assemble_workbook_for_save(
 
     // Serialize override layer into user_files so it persists in the .cala archive
     {
-        let overrides = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let overrides = state.override_layer.read().map_err(|e| e.to_string())?;
         if !overrides.overrides.is_empty() {
             let json = serde_json::to_vec_pretty(&*overrides).map_err(|e| e.to_string())?;
             workbook.user_files.insert("overrides.json".to_string(), json);
@@ -1707,7 +1812,7 @@ fn assemble_workbook_for_save(
 
     // Serialize audit log into user_files if enabled or has entries
     {
-        let audit = state.audit_log.lock().map_err(|e| e.to_string())?;
+        let audit = state.audit_log.read().map_err(|e| e.to_string())?;
         if audit.enabled || !audit.entries.is_empty() {
             let json = serde_json::to_vec_pretty(&*audit).map_err(|e| e.to_string())?;
             workbook.user_files.insert("audit_log.json".to_string(), json);
@@ -1716,7 +1821,7 @@ fn assemble_workbook_for_save(
 
     // Serialize writeback layer (drafts) into user_files
     {
-        let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let wb_layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
         if !wb_layer.drafts.is_empty() {
             let json = serde_json::to_vec_pretty(&*wb_layer).map_err(|e| e.to_string())?;
             workbook.user_files.insert("writeback_drafts.json".to_string(), json);
@@ -1750,7 +1855,7 @@ fn assemble_workbook_for_save(
     // published) — without this an author who saves and reopens before
     // publishing loses every region designation.
     {
-        let regions = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+        let regions = state.writeback_draft_regions.read().map_err(|e| e.to_string())?;
         if !regions.is_empty() {
             let json = serde_json::to_vec_pretty(&*regions).map_err(|e| e.to_string())?;
             workbook
@@ -1778,7 +1883,7 @@ fn assemble_workbook_for_save(
     // Copy workbook properties (read-only; last_modified stamping is the
     // caller's decision — save_file stamps, auto-recover does not).
     {
-        let props = state.workbook_properties.lock().unwrap();
+        let props = state.workbook_properties.read().unwrap();
         workbook.properties = persistence::WorkbookProperties {
             title: props.title.clone(),
             author: props.author.clone(),
@@ -1879,7 +1984,7 @@ fn persist_scheduled_jobs(workbook: &mut Workbook) {
 /// restore — including every refusal path — is exercisable in a unit test
 /// without a Tauri app handle.
 fn restore_scheduled_jobs(
-    audit_log: &Mutex<calp::audit::AuditLog>,
+    audit_log: &crate::document_effect::Persisted<calp::audit::AuditLog>,
     workbook: &mut Workbook,
 ) {
     use calcula_format::features::scheduled_jobs::{ScheduledJobsFile, SCHEDULED_JOBS_FILE};
@@ -1975,6 +2080,10 @@ fn restore_distribution_user_files(
     state: &AppState,
     workbook: &mut Workbook,
 ) -> Result<(), String> {
+    // LOAD PATH: every store below is being rebuilt from the file just read.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
     let subscriptions = match workbook.user_files.remove("subscriptions.json") {
         Some(bytes) => serde_json::from_slice::<calp::manifest::SubscriptionManifest>(&bytes)
             .unwrap_or_else(|e| {
@@ -1987,7 +2096,7 @@ fn restore_distribution_user_files(
             }),
         None => calp::manifest::SubscriptionManifest::default(),
     };
-    *state.subscriptions.lock().map_err(|e| e.to_string())? = subscriptions;
+    *state.subscriptions.write(&load).map_err(|e| e.to_string())? = subscriptions;
 
     let overrides = match workbook.user_files.remove("overrides.json") {
         Some(bytes) => {
@@ -2002,7 +2111,7 @@ fn restore_distribution_user_files(
         }
         None => calp::OverrideLayer::new(),
     };
-    *state.override_layer.lock().map_err(|e| e.to_string())? = overrides;
+    *state.override_layer.write(&load).map_err(|e| e.to_string())? = overrides;
 
     let audit = match workbook.user_files.remove("audit_log.json") {
         Some(bytes) => {
@@ -2017,7 +2126,7 @@ fn restore_distribution_user_files(
         }
         None => calp::audit::AuditLog::new(),
     };
-    *state.audit_log.lock().map_err(|e| e.to_string())? = audit;
+    *state.audit_log.write(&load).map_err(|e| e.to_string())? = audit;
 
     let drafts = match workbook.user_files.remove("writeback_drafts.json") {
         Some(bytes) => serde_json::from_slice::<calp::writeback::WritebackLayer>(&bytes)
@@ -2031,7 +2140,7 @@ fn restore_distribution_user_files(
             }),
         None => calp::writeback::WritebackLayer::new(),
     };
-    *state.writeback_layer.lock().map_err(|e| e.to_string())? = drafts;
+    *state.writeback_layer.write(&load).map_err(|e| e.to_string())? = drafts;
 
     Ok(())
 }
@@ -2094,7 +2203,12 @@ pub fn save_file(
     // Stamp last_modified BEFORE assembly so the snapshot carries it (the
     // background auto-recover path deliberately does NOT stamp).
     {
-        let mut props = state.workbook_properties.lock().unwrap();
+        // Stamping last_modified is part of SAVING, not an edit to be saved: save_file
+        // assigns is_modified = false a few lines below, and dirtying here would make a
+        // just-saved workbook prompt again. (`auto_recover_save` deliberately does not
+        // stamp at all -- see its own note.)
+        let saving = crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk);
+        let mut props = state.workbook_properties.write(&saving).unwrap();
         props.last_modified = chrono::Utc::now().to_rfc3339();
     }
 
@@ -2185,12 +2299,17 @@ pub fn open_file(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let path_buf = PathBuf::from(&path);
 
-    // Route by file extension
-    let ext = path_buf
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    // Rebuilding every store FROM disk is not an edit TO the document: `open_file`
+    // assigns `is_modified = false` as its last act, and dirtying here would make
+    // every freshly-opened workbook prompt to save. ONE decision authorises every
+    // store rebuild below -- `rg deliberately_clean` lists them all.
+    let load_effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+
+    // Route by file extension (see `format_extension`: an AutoRecover snapshot
+    // must not be handed to the xlsx reader).
+    let ext = format_extension(&path_buf);
 
     let mut workbook = match ext.as_str() {
         "cala" => {
@@ -2288,8 +2407,12 @@ pub fn open_file(
         deps.clear();
 
         // Restore table state
-        let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
-        let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+        // LOAD PATH: `open_file` assigns is_modified = false as its last act.
+        let load_tables = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+        let mut tables = state.tables.write(&load_tables).map_err(|e| e.to_string())?;
+        let mut table_names = state.table_names.write(&load_tables).map_err(|e| e.to_string())?;
         *tables = new_tables;
         *table_names = new_table_names;
 
@@ -2298,7 +2421,7 @@ pub fn open_file(
         *state.default_column_width.lock().unwrap() = workbook.default_column_width;
 
         // ---- Freeze pane configs for all sheets ----
-        let mut freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        let mut freeze_configs = state.freeze_configs.write(&load_effect).map_err(|e| e.to_string())?;
         freeze_configs.clear();
         for sheet in &workbook.sheets {
             freeze_configs.push(crate::sheets::FreezeConfig {
@@ -2324,14 +2447,14 @@ pub fn open_file(
         }
 
         // ---- Tab colors for all sheets ----
-        let mut tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
+        let mut tab_colors = state.tab_colors.write(&load_effect).map_err(|e| e.to_string())?;
         tab_colors.clear();
         for sheet in &workbook.sheets {
             tab_colors.push(sheet.tab_color.clone());
         }
 
         // ---- Sheet visibility for all sheets ----
-        let mut sheet_visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
+        let mut sheet_visibility = state.sheet_visibility.write(&load_effect).map_err(|e| e.to_string())?;
         sheet_visibility.clear();
         for sheet in &workbook.sheets {
             sheet_visibility.push(sheet.visibility.clone());
@@ -2362,14 +2485,26 @@ pub fn open_file(
         restore_user_hidden_from_workbook(&state, &workbook, active_idx)?;
 
         // ---- Per-sheet gridlines visibility ----
-        let mut show_gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
+        let mut show_gridlines = state.show_gridlines.write(&load_effect).map_err(|e| e.to_string())?;
         show_gridlines.clear();
         for sheet in &workbook.sheets {
             show_gridlines.push(sheet.show_gridlines);
         }
 
+        // ---- Per-sheet display flags ----
+        let mut display_flags = state.sheet_display_flags.write(&load_effect).map_err(|e| e.to_string())?;
+        display_flags.clear();
+        for sheet in &workbook.sheets {
+            display_flags.push(crate::api_types::SheetDisplayFlags {
+                display_zeros: sheet.display_zeros,
+                show_formulas: sheet.show_formulas,
+                view_mode: sheet.view_mode.clone(),
+                display_headings: sheet.display_headings,
+            });
+        }
+
         // ---- Page setups for all sheets ----
-        let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        let mut page_setups = state.page_setups.write(&load_effect).map_err(|e| e.to_string())?;
         page_setups.clear();
         for sheet in &workbook.sheets {
             if let Some(ps) = &sheet.page_setup {
@@ -2403,7 +2538,7 @@ pub fn open_file(
         }
 
         // ---- Notes for all sheets ----
-        let mut notes_storage = state.notes.lock().map_err(|e| e.to_string())?;
+        let mut notes_storage = state.notes.write(&load_effect).map_err(|e| e.to_string())?;
         notes_storage.clear();
         for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
             if !sheet.notes.is_empty() {
@@ -2439,7 +2574,7 @@ pub fn open_file(
         }
 
         // ---- Hyperlinks for all sheets ----
-        let mut hyperlinks_storage = state.hyperlinks.lock().map_err(|e| e.to_string())?;
+        let mut hyperlinks_storage = state.hyperlinks.write(&load_effect).map_err(|e| e.to_string())?;
         hyperlinks_storage.clear();
         for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
             if !sheet.hyperlinks.is_empty() {
@@ -2471,7 +2606,7 @@ pub fn open_file(
     restore_pane_controls(&workbook.pane_controls, &pane_control_state);
 
     // Restore pivot layouts from workbook
-    *state.pivot_layouts.lock().unwrap() = workbook.pivot_layouts.clone();
+    *state.pivot_layouts.write(&load_effect).unwrap() = workbook.pivot_layouts.clone();
 
     // Restore full pivot definitions into PivotState
     restore_pivot_definitions(&workbook, &pivot_state, &state);
@@ -2486,7 +2621,11 @@ pub fn open_file(
             &workbook.bi_connection_caches,
         );
         if !id_map.is_empty() {
-            if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {
+            // LOAD PATH: remapping connection ids on the just-loaded metadata.
+            let load_meta = crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::LoadingFromDisk,
+            );
+            if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(&load_meta) {
                 for meta in bi_meta.values_mut() {
                     if let Some(conn_id) = meta
                         .data_source_id
@@ -2506,15 +2645,15 @@ pub fn open_file(
     crate::bi::commands::load_pending_roles(&bi_state, &workbook.bi_connection_roles);
 
     // Restore object scripts (scriptable objects) from workbook
-    *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();
-    *state.extension_data.lock().unwrap() = workbook.extension_data.clone();
+    *state.object_scripts.write(&load_effect).unwrap() = workbook.object_scripts.clone();
+    *state.extension_data.write(&load_effect).unwrap() = workbook.extension_data.clone();
 
     // Restore grid reports from extension_data (their cells reload as ordinary
     // grid content; re-register each report's protected region from its bounds).
     {
         let reports: Vec<crate::report::SavedReport> = state
             .extension_data
-            .lock()
+            .read()
             .unwrap()
             .get(crate::report::REPORTS_EXT_KEY)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -2530,7 +2669,7 @@ pub fn open_file(
     // the parsed names never reach runtime state — so defined names silently
     // vanished on every reload. Map the persisted SheetId back to this session's
     // sheet index (workbook-scoped names carry no sheet_id).
-    if let Ok(mut named_ranges) = state.named_ranges.lock() {
+    if let Ok(mut named_ranges) = state.named_ranges.write(&load_effect) {
         named_ranges.clear();
         for nr in &workbook.named_ranges {
             // The map is keyed by the UPPERCASED name (case-insensitive lookup
@@ -2554,7 +2693,7 @@ pub fn open_file(
     // app-owned opaque payloads, and advance next_cf_rule_id past any restored
     // CF id so a later add_conditional_format can't collide. Like named ranges,
     // these were silently lost on every reload before this.
-    if let Ok(mut store) = state.conditional_formats.lock() {
+    if let Ok(mut store) = state.conditional_formats.write(&load_effect) {
         store.clear();
         let mut max_id: u64 = 0;
         for entry in &workbook.conditional_formats {
@@ -2575,7 +2714,7 @@ pub fn open_file(
             }
         }
     }
-    if let Ok(mut store) = state.data_validations.lock() {
+    if let Ok(mut store) = state.data_validations.write(&load_effect) {
         store.clear();
         for entry in &workbook.data_validations {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
@@ -2684,7 +2823,7 @@ pub fn open_file(
     // Restore controls (cell-anchored button/checkbox metadata). Like CF/DV
     // these were lost on every reload before this — the CellStyle button flag
     // survived but the onSelect wiring and formula properties did not.
-    if let Ok(mut controls) = state.controls.lock() {
+    if let Ok(mut controls) = state.controls.write(&load_effect) {
         controls.clear();
         crate::controls::materialize_saved_controls(
             &workbook.controls,
@@ -2694,7 +2833,7 @@ pub fn open_file(
     }
 
     // Restore cell-type assignments (granular bricks: typed cells).
-    if let Ok(mut cell_types) = state.cell_types.lock() {
+    if let Ok(mut cell_types) = state.cell_types.write(&load_effect) {
         cell_types.clear();
         crate::cell_types::materialize_saved_cell_types(
             &workbook.cell_types,
@@ -2704,7 +2843,7 @@ pub fn open_file(
     }
 
     // Restore cell-behavior bindings (granular bricks phase 2).
-    if let Ok(mut behaviors) = state.cell_behaviors.lock() {
+    if let Ok(mut behaviors) = state.cell_behaviors.write(&load_effect) {
         behaviors.clear();
         crate::cell_behaviors::materialize_saved_cell_behaviors(
             &workbook.cell_behaviors,
@@ -2717,7 +2856,7 @@ pub fn open_file(
     // on every reload before this. The persisted payload is the thread list;
     // rebuild the (row, col)-keyed store and re-stamp each thread's
     // sheet_index with THIS session's index (the persisted one is stale).
-    if let Ok(mut store) = state.comments.lock() {
+    if let Ok(mut store) = state.comments.write(&load_effect) {
         store.clear();
         for entry in &workbook.comments {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
@@ -2734,7 +2873,7 @@ pub fn open_file(
     }
 
     // Restore what-if scenarios (Wave B), re-stamping sheet_index like comments.
-    if let Ok(mut store) = state.scenarios.lock() {
+    if let Ok(mut store) = state.scenarios.write(&load_effect) {
         store.clear();
         for entry in &workbook.scenarios {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
@@ -2752,7 +2891,7 @@ pub fn open_file(
     // Restore outline groups (Wave B). The collapsed groups' hidden rows/cols
     // were already restored with the sheet metadata; this restores the group
     // STRUCTURE so expand/collapse and outline symbols work after reload.
-    if let Ok(mut store) = state.outlines.lock() {
+    if let Ok(mut store) = state.outlines.write(&load_effect) {
         store.clear();
         for entry in &workbook.outlines {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
@@ -2790,7 +2929,11 @@ pub fn open_file(
             .remove("writeback_draft_regions.json")
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        *state.writeback_draft_regions.lock().map_err(|e| e.to_string())? = restored;
+        // LOAD PATH: author-side draft regions rebuilt from the file just read.
+        let load_drafts = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        *state.writeback_draft_regions.write(&load_drafts).map_err(|e| e.to_string())? = restored;
     }
 
     // Restore CUSTOM named cell styles (built-ins stay seeded; customs from a
@@ -2843,7 +2986,7 @@ pub fn open_file(
     // after reopen would mint a NEW CellId and create a duplicate override
     // for the same cell.
     {
-        let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let layer = state.override_layer.read().map_err(|e| e.to_string())?;
         if !layer.overrides.is_empty() {
             let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
             for ovr in &layer.overrides {
@@ -2878,7 +3021,11 @@ pub fn open_file(
         // one-per-sheet, so pick the best geometric match — the table whose
         // header row and column span the filter actually covers — and link only
         // that one. Ties break on the lowest (row, col) for determinism.
-        let mut tables_guard = state.tables.lock().map_err(|e| e.to_string())?;
+        // LOAD PATH: linking just-restored tables to their autofilters.
+        let load_link = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut tables_guard = state.tables.write(&load_link).map_err(|e| e.to_string())?;
         for (sheet_index, sheet_tables) in tables_guard.iter_mut() {
             // Seed a filter from the lowest filter-button table when the
             // workbook has none saved (pre-existing behavior, kept).
@@ -2913,12 +3060,15 @@ pub fn open_file(
 
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
-    // Restore document theme
-    *state.theme.lock().map_err(|e| e.to_string())? = workbook.theme;
+    // Restore document theme (LOAD PATH).
+    let load_theme = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    *state.theme.write(&load_theme).map_err(|e| e.to_string())? = workbook.theme;
 
     // Restore workbook properties
     {
-        let mut props = state.workbook_properties.lock().unwrap();
+        let mut props = state.workbook_properties.write(&load_effect).unwrap();
         *props = crate::api_types::WorkbookProperties {
             title: workbook.properties.title,
             author: workbook.properties.author,
@@ -3018,14 +3168,21 @@ pub fn new_file(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // Tearing the old document down to build a new blank one. `new_file` ends by
+    // assigning is_modified = false, so none of the resets below may dirty -- ONE
+    // decision authorises them all. `rg deliberately_clean` lists every such decision.
+    let reset_effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
     {
         let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
         let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
         let mut col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
         let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
         let mut deps = state.dependents.lock().map_err(|e| e.to_string())?;
-        let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
-        let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+        let mut tables = state.tables.write(&reset_effect).map_err(|e| e.to_string())?;
+        let mut table_names = state.table_names.write(&reset_effect).map_err(|e| e.to_string())?;
 
         *grid = engine::grid::Grid::new();
         *styles = engine::style::StyleRegistry::new();
@@ -3061,7 +3218,7 @@ pub fn new_file(
         reset_default_geometry(state.inner());
 
         // Reset freeze/split/scroll configs to single default sheet
-        let mut freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        let mut freeze_configs = state.freeze_configs.write(&reset_effect).map_err(|e| e.to_string())?;
         freeze_configs.clear();
         freeze_configs.push(crate::sheets::FreezeConfig { freeze_row: None, freeze_col: None });
 
@@ -3078,11 +3235,11 @@ pub fn new_file(
         scroll_areas.push(None);
 
         // Reset tab colors and sheet visibility
-        let mut tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
+        let mut tab_colors = state.tab_colors.write(&reset_effect).map_err(|e| e.to_string())?;
         tab_colors.clear();
         tab_colors.push(String::new());
 
-        let mut sheet_visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
+        let mut sheet_visibility = state.sheet_visibility.write(&reset_effect).map_err(|e| e.to_string())?;
         sheet_visibility.clear();
         sheet_visibility.push("visible".to_string());
 
@@ -3103,29 +3260,34 @@ pub fn new_file(
         all_uhc.push(std::collections::HashSet::new());
 
         // Reset gridlines visibility
-        let mut show_gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
+        let mut show_gridlines = state.show_gridlines.write(&reset_effect).map_err(|e| e.to_string())?;
         show_gridlines.clear();
         show_gridlines.push(true);
 
+        // Reset display flags
+        let mut display_flags = state.sheet_display_flags.write(&reset_effect).map_err(|e| e.to_string())?;
+        display_flags.clear();
+        display_flags.push(crate::api_types::SheetDisplayFlags::default());
+
         // Reset page setups
-        let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        let mut page_setups = state.page_setups.write(&reset_effect).map_err(|e| e.to_string())?;
         page_setups.clear();
         page_setups.push(crate::api_types::PageSetup::default());
     }
 
     // Clear notes, hyperlinks, comments
-    state.notes.lock().map_err(|e| e.to_string())?.clear();
-    state.hyperlinks.lock().map_err(|e| e.to_string())?.clear();
-    state.comments.lock().map_err(|e| e.to_string())?.clear();
+    state.notes.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+    state.hyperlinks.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+    state.comments.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear named ranges
-    state.named_ranges.lock().map_err(|e| e.to_string())?.clear();
+    state.named_ranges.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear data validations
-    state.data_validations.lock().map_err(|e| e.to_string())?.clear();
+    state.data_validations.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear conditional formats
-    state.conditional_formats.lock().map_err(|e| e.to_string())?.clear();
+    state.conditional_formats.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear cross-sheet dependencies
     state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?.clear();
@@ -3147,25 +3309,25 @@ pub fn new_file(
     state.auto_filters.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear outlines/grouping
-    state.outlines.lock().map_err(|e| e.to_string())?.clear();
+    state.outlines.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear protected regions
     state.protected_regions.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear computed properties
-    state.computed_properties.lock().map_err(|e| e.to_string())?.clear();
+    state.computed_properties.write(&reset_effect).map_err(|e| e.to_string())?.clear();
     *state.next_computed_prop_id.lock().map_err(|e| e.to_string())? = 1;
     state.computed_prop_dependencies.lock().map_err(|e| e.to_string())?.clear();
     state.computed_prop_dependents.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear controls
-    state.controls.lock().map_err(|e| e.to_string())?.clear();
+    state.controls.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear cell-type assignments
-    state.cell_types.lock().map_err(|e| e.to_string())?.clear();
+    state.cell_types.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear cell-behavior bindings
-    state.cell_behaviors.lock().map_err(|e| e.to_string())?.clear();
+    state.cell_behaviors.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear spill tracking
     state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
@@ -3185,20 +3347,20 @@ pub fn new_file(
     *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;
 
     // Clear scenarios
-    state.scenarios.lock().map_err(|e| e.to_string())?.clear();
+    state.scenarios.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear named styles
-    state.named_styles.lock().map_err(|e| e.to_string())?.clear();
+    state.named_styles.write(&reset_effect).map_err(|e| e.to_string())?.clear();
     // Re-seed built-in styles: the clear above wiped them too, which left the
     // Cell Styles gallery empty after File > New.
     crate::named_styles_cmd::init_builtin_named_styles(&state);
 
     // Reset theme to default
-    *state.theme.lock().map_err(|e| e.to_string())? = engine::ThemeDefinition::office();
+    *state.theme.write(&reset_effect).map_err(|e| e.to_string())? = engine::ThemeDefinition::office();
 
     // Clear slicer state
-    slicer_state.slicers.lock().unwrap().clear();
-    slicer_state.computed_properties.lock().unwrap().clear();
+    slicer_state.slicers.write(&reset_effect).unwrap().clear();
+    slicer_state.computed_properties.write(&reset_effect).unwrap().clear();
     slicer_state.computed_prop_dependencies.lock().unwrap().clear();
     slicer_state.computed_prop_dependents.lock().unwrap().clear();
 
@@ -3206,14 +3368,14 @@ pub fn new_file(
     pane_control_state.controls.lock().unwrap().clear();
 
     // Clear chart state
-    state.charts.lock().unwrap().clear();
+    state.charts.write(&reset_effect).unwrap().clear();
 
     // Clear sparkline state (BUG-0004: sparklines survived File > New)
-    state.sparklines.lock().unwrap().clear();
+    state.sparklines.write(&reset_effect).unwrap().clear();
 
     // Clear script/notebook state
-    script_state.workbook_scripts.lock().unwrap().clear();
-    script_state.workbook_notebooks.lock().unwrap().clear();
+    script_state.workbook_scripts.write(&reset_effect).unwrap().clear();
+    script_state.workbook_notebooks.write(&reset_effect).unwrap().clear();
 
     // Drop the scheduled-job registry with the scripts that own it. Without
     // this the previous workbook's schedule would survive into the blank
@@ -3224,25 +3386,25 @@ pub fn new_file(
     // Clear object scripts — otherwise the previous workbook's scripts
     // (including distributed ones) leak into the new workbook and get saved
     // with it. Same family as the writeback-index leak fixed in Wave 0.
-    state.object_scripts.lock().unwrap().clear();
-    state.extension_data.lock().unwrap().clear();
-    state.pivot_layouts.lock().unwrap().clear();
+    state.object_scripts.write(&reset_effect).unwrap().clear();
+    state.extension_data.write(&reset_effect).unwrap().clear();
+    state.pivot_layouts.write(&reset_effect).unwrap().clear();
     state.report_definitions.lock().unwrap().clear();
 
     // Clear subscription metadata
-    *state.subscriptions.lock().map_err(|e| e.to_string())? =
+    *state.subscriptions.write(&reset_effect).map_err(|e| e.to_string())? =
         calp::manifest::SubscriptionManifest::default();
 
     // Clear override layer
-    *state.override_layer.lock().map_err(|e| e.to_string())? =
+    *state.override_layer.write(&reset_effect).map_err(|e| e.to_string())? =
         calp::OverrideLayer::new();
 
     // Reset audit log
-    *state.audit_log.lock().map_err(|e| e.to_string())? =
+    *state.audit_log.write(&reset_effect).map_err(|e| e.to_string())? =
         calp::audit::AuditLog::new();
 
     // Reset writeback layer
-    *state.writeback_layer.lock().map_err(|e| e.to_string())? =
+    *state.writeback_layer.write(&reset_effect).map_err(|e| e.to_string())? =
         calp::writeback::WritebackLayer::new();
 
     // Reset writeback index/declarations (otherwise the previous workbook's
@@ -3255,14 +3417,14 @@ pub fn new_file(
     // the blank workbook and make the next refresh diff report the PREVIOUS
     // workbook's columns as removed.
     state.model_writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
-    state.writeback_draft_regions.lock().map_err(|e| e.to_string())?.clear();
+    state.writeback_draft_regions.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
 
     // Reset workbook properties with defaults
     {
-        let mut props = state.workbook_properties.lock().unwrap();
+        let mut props = state.workbook_properties.write(&reset_effect).unwrap();
         let author = std::env::var("USERNAME")
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_default();
@@ -3313,6 +3475,9 @@ pub fn is_document_encrypted(file_state: State<FileState>) -> bool {
 pub fn set_session_password(file_state: State<FileState>, password: String) -> Result<(), String> {
     *file_state.session_password.lock().map_err(|e| e.to_string())? = Some(Zeroizing::new(password));
     *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = true;
+    // Staging the passphrase changes what the NEXT save writes to disk (encrypted vs
+    // plain), so an otherwise-untouched document is now genuinely unsaved.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
@@ -3322,6 +3487,9 @@ pub fn set_session_password(file_state: State<FileState>, password: String) -> R
 pub fn clear_session_password(file_state: State<FileState>) -> Result<(), String> {
     *file_state.session_password.lock().map_err(|e| e.to_string())? = None;
     *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = false;
+    // Host half of "Remove Password" (clear, then save). Without this the document
+    // looks clean while the file on disk is still encrypted.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
@@ -3340,15 +3508,18 @@ pub fn mark_file_modified(file_state: State<FileState>) {
 pub fn get_workbook_properties(
     state: State<AppState>,
 ) -> crate::api_types::WorkbookProperties {
-    state.workbook_properties.lock().unwrap().clone()
+    state.workbook_properties.read().unwrap().clone()
 }
 
 #[tauri::command]
 pub fn set_workbook_properties(
     state: State<AppState>,
+    file_state: State<FileState>,
     props: crate::api_types::WorkbookProperties,
 ) -> crate::api_types::WorkbookProperties {
-    let mut stored = state.workbook_properties.lock().unwrap();
+    // `workbook.properties` (title, author, company, custom properties) is persisted.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut stored = state.workbook_properties.write(&effect).unwrap();
     *stored = props;
     // Update last_modified timestamp
     stored.last_modified = chrono::Utc::now().to_rfc3339();
@@ -3706,7 +3877,7 @@ pub(crate) fn collect_scripts_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
 ) -> Vec<persistence::SavedScript> {
     use crate::scripting::types::ScriptScope;
-    let scripts = script_state.workbook_scripts.lock().unwrap();
+    let scripts = script_state.workbook_scripts.read().unwrap();
     scripts
         .values()
         .map(|s| persistence::SavedScript {
@@ -3781,7 +3952,7 @@ pub(crate) fn saved_output_to_item(
 pub(crate) fn collect_notebooks_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
 ) -> Vec<persistence::SavedNotebook> {
-    let notebooks = script_state.workbook_notebooks.lock().unwrap();
+    let notebooks = script_state.workbook_notebooks.read().unwrap();
     notebooks
         .values()
         .map(|n| persistence::SavedNotebook {
@@ -3811,7 +3982,11 @@ fn restore_scripts(
     script_state: &State<crate::scripting::types::ScriptState>,
 ) {
     use crate::scripting::types::ScriptScope;
-    let mut scripts = script_state.workbook_scripts.lock().unwrap();
+    // LOAD PATH: rebuilding from the file just read.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut scripts = script_state.workbook_scripts.write(&load).unwrap();
     scripts.clear();
     for s in saved {
         scripts.insert(
@@ -3891,23 +4066,23 @@ pub fn xlsx_save_loss_report(
     };
 
     check(
-        state.conditional_formats.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        state.conditional_formats.read().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
         "Conditional formatting",
     );
     check(
-        state.data_validations.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        state.data_validations.read().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
         "Data validation",
     );
     check(
-        !pivot_state.pivot_tables.lock().map_err(|e| e.to_string())?.is_empty(),
+        !pivot_state.pivot_tables.read().map_err(|e| e.to_string())?.is_empty(),
         "Pivot tables",
     );
     check(
-        !slicer_state.slicers.lock().map_err(|e| e.to_string())?.is_empty(),
+        !slicer_state.slicers.read().map_err(|e| e.to_string())?.is_empty(),
         "Slicers",
     );
     check(
-        !ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?.is_empty(),
+        !ribbon_filter_state.filters.read().map_err(|e| e.to_string())?.is_empty(),
         "Ribbon filters",
     );
     check(
@@ -3915,35 +4090,35 @@ pub fn xlsx_save_loss_report(
         "Pane controls",
     );
     check(
-        state.comments.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        state.comments.read().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
         "Threaded comments",
     );
     check(
-        state.scenarios.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        state.scenarios.read().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
         "What-if scenarios",
     );
     check(
-        !state.outlines.lock().map_err(|e| e.to_string())?.is_empty(),
+        !state.outlines.read().map_err(|e| e.to_string())?.is_empty(),
         "Outline groups",
     );
     check(
-        !state.object_scripts.lock().map_err(|e| e.to_string())?.is_empty(),
+        !state.object_scripts.read().map_err(|e| e.to_string())?.is_empty(),
         "Object scripts",
     );
     {
-        let scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+        let scripts = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
         check(!scripts.is_empty(), "Workbook scripts (incl. custom functions)");
     }
     check(
-        !script_state.workbook_notebooks.lock().map_err(|e| e.to_string())?.is_empty(),
+        !script_state.workbook_notebooks.read().map_err(|e| e.to_string())?.is_empty(),
         "Notebooks",
     );
     check(
-        !state.cell_types.lock().map_err(|e| e.to_string())?.is_empty(),
+        !state.cell_types.read().map_err(|e| e.to_string())?.is_empty(),
         "Cell types (bricks)",
     );
     check(
-        !state.cell_behaviors.lock().map_err(|e| e.to_string())?.is_empty(),
+        !state.cell_behaviors.read().map_err(|e| e.to_string())?.is_empty(),
         "Cell behaviors (bricks)",
     );
     check(
@@ -3956,26 +4131,26 @@ pub fn xlsx_save_loss_report(
         "BI model connections",
     );
     check(
-        !state.subscriptions.lock().map_err(|e| e.to_string())?.subscriptions.is_empty(),
+        !state.subscriptions.read().map_err(|e| e.to_string())?.subscriptions.is_empty(),
         "Package subscriptions",
     );
     check(
-        !state.writeback_layer.lock().map_err(|e| e.to_string())?.drafts.is_empty()
-            || !state.writeback_draft_regions.lock().map_err(|e| e.to_string())?.is_empty(),
+        !state.writeback_layer.read().map_err(|e| e.to_string())?.drafts.is_empty()
+            || !state.writeback_draft_regions.read().map_err(|e| e.to_string())?.is_empty(),
         "Writeback drafts/regions",
     );
     check(
-        !state.extension_data.lock().map_err(|e| e.to_string())?.is_empty(),
+        !state.extension_data.read().map_err(|e| e.to_string())?.is_empty(),
         "Extension data (animations, grid reports, ...)",
     );
     check(
-        state.computed_properties.lock().map_err(|e| e.to_string())?.values().any(|s| {
+        state.computed_properties.read().map_err(|e| e.to_string())?.values().any(|s| {
             !s.column_props.is_empty() || !s.row_props.is_empty() || !s.cell_props.is_empty()
         }),
         "Computed properties",
     );
     check(
-        state.named_styles.lock().map_err(|e| e.to_string())?.values().any(|ns| !ns.built_in),
+        state.named_styles.read().map_err(|e| e.to_string())?.values().any(|ns| !ns.built_in),
         "Custom named styles",
     );
     // xlsx has nowhere to keep a schedule, so "Save As .xlsx" silently disarms
@@ -4061,7 +4236,11 @@ fn restore_notebooks(
     saved: &[persistence::SavedNotebook],
     script_state: &State<crate::scripting::types::ScriptState>,
 ) {
-    let mut notebooks = script_state.workbook_notebooks.lock().unwrap();
+    // LOAD PATH: rebuilding from the file just read.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut notebooks = script_state.workbook_notebooks.write(&load).unwrap();
     notebooks.clear();
     for n in saved {
         notebooks.insert(
@@ -4101,7 +4280,7 @@ pub fn get_extension_data(
     extension_id: String,
     state: State<AppState>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    let data = state.extension_data.read().map_err(|e| e.to_string())?;
     Ok(data.get(&extension_id).cloned())
 }
 
@@ -4111,8 +4290,23 @@ pub fn set_extension_data(
     extension_id: String,
     value: Option<serde_json::Value>,
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> Result<(), String> {
-    let mut data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    set_extension_data_impl(&state, &file_state, extension_id, value)
+}
+
+/// Command body over plain references (see `document_effect_wave2_tests`).
+pub(crate) fn set_extension_data_impl(
+    state: &AppState,
+    file_state: &FileState,
+    extension_id: String,
+    value: Option<serde_json::Value>,
+) -> Result<(), String> {
+    // THE SANCTIONED EXTENSION PERSISTENCE TIER (`workbook.extension_data`). Every
+    // extension that persists state -- animations, grid reports, third-party add-ins --
+    // went through this one hole, so a single missing flag lost all of them at once.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut data = state.extension_data.write(&effect).map_err(|e| e.to_string())?;
     match value {
         Some(v) => {
             data.insert(extension_id, v);
@@ -4134,14 +4328,20 @@ pub fn set_extension_data_undoable(
     value: Option<serde_json::Value>,
     description: String,
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> Result<(), String> {
     // Snapshot the prior value (lock released before recording undo / re-locking).
     let previous = {
-        let data = state.extension_data.lock().map_err(|e| e.to_string())?;
+        let data = state.extension_data.read().map_err(|e| e.to_string())?;
         data.get(&extension_id).cloned()
     };
     crate::undo_commands::record_extension_data_undo(&state, extension_id.clone(), previous, &description);
-    let mut data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    // This command explicitly RECORDS UNDO and still marked nothing dirty -- the
+    // clearest single proof that undo-recording and dirty-marking had drifted apart.
+    // Recording undo is an unambiguous declaration that a change is user-meaningful
+    // and persistent; the two now travel together.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut data = state.extension_data.write(&effect).map_err(|e| e.to_string())?;
     match value {
         Some(v) => {
             data.insert(extension_id, v);
@@ -4220,7 +4420,7 @@ mod distribution_user_file_restore_tests {
     fn state_of_workbook_a() -> AppState {
         let state = crate::create_app_state();
         {
-            let mut subs = state.subscriptions.lock().unwrap();
+            let mut subs = state.subscriptions.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap();
             subs.subscriptions.push(a_subscription(
                 "acme.finance",
                 "https://registry.example.com/reg",
@@ -4228,7 +4428,7 @@ mod distribution_user_file_restore_tests {
         }
         // ScriptExecuted is one of the ALWAYS-recorded events, so this lands
         // without having to enable opt-in distribution auditing first.
-        state.audit_log.lock().unwrap().record(
+        state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)).unwrap().record(
             calp::audit::AuditEvent::ScriptExecuted,
             "workbook A ran a script",
             "local",
@@ -4236,7 +4436,7 @@ mod distribution_user_file_restore_tests {
         );
         state
             .writeback_layer
-            .lock()
+            .write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()))
             .unwrap()
             .drafts
             .push(calp::writeback::WritebackSubmission {
@@ -4286,20 +4486,20 @@ mod distribution_user_file_restore_tests {
         restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
 
         assert!(
-            state.subscriptions.lock().unwrap().subscriptions.is_empty(),
+            state.subscriptions.read().unwrap().subscriptions.is_empty(),
             "workbook A's SUBSCRIPTIONS must not survive into workbook B - they \
              drive rebuild_writeback_index, GATHER, refresh and registry I/O"
         );
         assert!(
-            state.override_layer.lock().unwrap().overrides.is_empty(),
+            state.override_layer.read().unwrap().overrides.is_empty(),
             "workbook A's overrides must not survive"
         );
         assert!(
-            state.audit_log.lock().unwrap().entries.is_empty(),
+            state.audit_log.read().unwrap().entries.is_empty(),
             "workbook A's audit trail must not be shown for workbook B"
         );
         assert!(
-            state.writeback_layer.lock().unwrap().drafts.is_empty(),
+            state.writeback_layer.read().unwrap().drafts.is_empty(),
             "workbook A's drafts must not survive - a draft is the proof a cell \
              passed the writeback gate"
         );
@@ -4312,10 +4512,10 @@ mod distribution_user_file_restore_tests {
 
         restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
 
-        assert!(state.subscriptions.lock().unwrap().subscriptions.is_empty());
-        assert!(state.override_layer.lock().unwrap().overrides.is_empty());
-        assert!(state.audit_log.lock().unwrap().entries.is_empty());
-        assert!(state.writeback_layer.lock().unwrap().drafts.is_empty());
+        assert!(state.subscriptions.read().unwrap().subscriptions.is_empty());
+        assert!(state.override_layer.read().unwrap().overrides.is_empty());
+        assert!(state.audit_log.read().unwrap().entries.is_empty());
+        assert!(state.writeback_layer.read().unwrap().drafts.is_empty());
     }
 
     #[test]
@@ -4344,10 +4544,10 @@ mod distribution_user_file_restore_tests {
 
         restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
 
-        let subs = state.subscriptions.lock().unwrap();
+        let subs = state.subscriptions.read().unwrap();
         assert_eq!(subs.subscriptions.len(), 1);
         assert_eq!(subs.subscriptions[0].package_name, "b.pkg");
-        assert_eq!(state.audit_log.lock().unwrap().entries.len(), 1);
+        assert_eq!(state.audit_log.read().unwrap().entries.len(), 1);
     }
 
     /// The files are CONSUMED, so a later `user_files` sweep cannot re-surface
@@ -4393,8 +4593,8 @@ mod scheduled_job_persistence_tests {
         super::scheduler_test_guard()
     }
 
-    fn audit() -> Mutex<calp::audit::AuditLog> {
-        Mutex::new(calp::audit::AuditLog::new())
+    fn audit() -> crate::document_effect::Persisted<calp::audit::AuditLog> {
+        crate::document_effect::Persisted::new(calp::audit::AuditLog::new())
     }
 
     /// A minimal workbook carrying ONE object script, which is what a job may
@@ -4557,7 +4757,7 @@ mod scheduled_job_persistence_tests {
             "a job whose owning script is gone must not be restored"
         );
         assert!(
-            !log.lock().unwrap().entries.is_empty(),
+            !log.read().unwrap().entries.is_empty(),
             "the refusal must be visible in the audit trail"
         );
         reset_jobs();

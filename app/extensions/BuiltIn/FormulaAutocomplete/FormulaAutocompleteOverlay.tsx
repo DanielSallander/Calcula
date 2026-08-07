@@ -80,6 +80,7 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
       {visible && items.length > 0 && (
         <S.DropdownContainer
           ref={listRef}
+          data-testid="formula-autocomplete"
           style={{
             left: dropdownX,
             top: dropdownY,
@@ -103,6 +104,7 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
       {/* Argument Hint Tooltip */}
       {argumentHintVisible && argumentHintFunction && (
         <S.ArgumentHintContainer
+          data-testid="formula-argument-hint"
           style={{ left: dropdownX, top: hintY }}
           onMouseDown={preventBlur}
         >

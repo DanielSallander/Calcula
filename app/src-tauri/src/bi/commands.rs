@@ -1108,6 +1108,7 @@ pub(crate) fn restore_local_bi_connections(
 #[tauri::command]
 pub async fn bi_set_active_role(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
     role: Option<String>,
     window: tauri::Window,
@@ -1141,6 +1142,10 @@ pub async fn bi_set_active_role(
     let conn = connections
         .get_mut(&connection_id)
         .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    // Past the window guard, the "role exists" lookup, the dynamic-identity refusal and
+    // the "connection not found" bail: the role is really being set.
+    // `workbook.bi_connection_roles` is persisted, so this changes what a save writes.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     conn.active_role = role;
     Ok(())
 }
@@ -1727,6 +1732,7 @@ mod calc_group_mapping_tests {
 #[tauri::command]
 pub async fn bi_create_connection(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     request: CreateConnectionRequest,
     window: tauri::Window,
 ) -> Result<ConnectionInfo, String> {
@@ -1753,7 +1759,7 @@ pub async fn bi_create_connection(
         _ => return Err("Provide either modelJson or modelPath".to_string()),
     };
 
-    create_connection_core(
+    let info = create_connection_core(
         &bi_state,
         request.name,
         request.description,
@@ -1761,7 +1767,12 @@ pub async fn bi_create_connection(
         request.model_path.filter(|p| !p.is_empty()),
         json_value,
     )
-    .await
+    .await?;
+    // A connection was registered. `capture_local_bi_connections` writes it into
+    // `workbook.bi_connections` at save time, so the workbook now differs from disk.
+    // Marked on the entry point rather than in the shared core -- see the note there.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    Ok(info)
 }
 
 /// Create a connection from INLINE model JSON (no filesystem identity). The
@@ -1926,6 +1937,10 @@ async fn create_connection_core(
     };
 
     let info = connection.to_info();
+    // NOTE: the dirty flag is NOT set here. This core is shared by the Model Editor's
+    // `create_connection_from_json` path, which marks the document itself; the flag
+    // belongs to the entry points so it is not set twice and so a caller that is
+    // rebuilding connections during a LOAD can decline it.
     bi_state.connections.lock().unwrap().insert(id, connection);
 
     log_info!(
@@ -1950,6 +1965,7 @@ async fn create_connection_core(
 pub async fn bi_delete_connection(
     bi_state: State<'_, BiState>,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
 ) -> Result<(), String> {
     log_info!("BI", "bi_delete_connection: id={}", connection_id);
@@ -1962,6 +1978,10 @@ pub async fn bi_delete_connection(
         let region_ids: Vec<identity::EntityId> = conn.active_queries.keys().copied().collect();
         (conn.model_key, conn.model_path.is_none(), region_ids)
     };
+    // The `?` above means a connection really was removed. It is persisted
+    // (`workbook.bi_connections`), and this also drops its protected regions and can
+    // delete its on-disk cache -- an irreversible change that must not be lost at close.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Remove any protected regions owned by this connection's queries
     if !region_ids.is_empty() {
@@ -1991,6 +2011,7 @@ pub async fn bi_delete_connection(
 #[tauri::command]
 pub async fn bi_update_connection(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     request: UpdateConnectionRequest,
 ) -> Result<ConnectionInfo, String> {
     log_info!("BI", "bi_update_connection: id={}", request.id);
@@ -1998,6 +2019,10 @@ pub async fn bi_update_connection(
     let mut connections = bi_state.connections.lock().unwrap();
     let conn = connections.get_mut(&request.id)
         .ok_or_else(|| format!("Connection {} not found", request.id))?;
+
+    // The connection resolved. Name/description/connection-string are captured into
+    // `workbook.bi_connections` at save time, so editing them dirties the document.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     if let Some(name) = request.name {
         conn.name = name;
@@ -2058,6 +2083,7 @@ pub async fn bi_get_connection(
 #[tauri::command]
 pub async fn bi_connect(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     request: BiConnectRequest,
     window: tauri::Window,
 ) -> Result<ConnectionInfo, String> {
@@ -2186,6 +2212,10 @@ pub async fn bi_connect(
             Ok(report) => {
                 if !report.refreshed.is_empty() {
                     log_info!("BI", "Refreshed stale tables after connect: {}", report.refreshed.join(", "));
+                    // CONDITIONAL: the refreshed rows change what
+                    // `capture_local_bi_connections` writes. Marking unconditionally
+                    // would dirty a workbook that merely auto-connected on open.
+                    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
                 }
                 for failure in &report.failures {
                     log_info!("BI", "Stale-table refresh failed for {}: {}", failure.table, failure.detail);
@@ -2248,6 +2278,10 @@ pub async fn bi_disconnect(
     let conn = connections.get_mut(&connection_id)
         .ok_or_else(|| format!("Connection {} not found", connection_id))?;
 
+    // SESSION-ONLY, deliberately: this clears only the live connector handle and the
+    // is_connected flag. `capture_local_bi_connections` keys off `conn.engine`, which is
+    // NOT cleared here, so a disconnect changes nothing a save would write. (Same
+    // reasoning as `bi_model_connect`.)
     conn.connector_index = None;
     conn.is_connected = false;
 
@@ -2258,6 +2292,7 @@ pub async fn bi_disconnect(
 #[tauri::command]
 pub async fn bi_bind_table(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
     request: BiBindRequest,
     window: tauri::Window,
@@ -2292,7 +2327,10 @@ pub async fn bi_bind_table(
         engine.bind_table(&request.model_table, connector_index, binding);
     }
 
-    // Store binding for potential re-connect
+    // Store binding for potential re-connect. The binding changes the model that
+    // `capture_local_bi_connections` serializes into the .cala, so this is a document
+    // change; past every refusal above.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     {
         let mut connections = bi_state.connections.lock().unwrap();
         if let Some(conn) = connections.get_mut(&connection_id) {
@@ -2746,6 +2784,7 @@ pub async fn bi_get_column_available_values(
 pub async fn bi_insert_result(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     request: BiInsertRequest,
     query_result: BiQueryResult,
     query_request: BiQueryRequest,
@@ -2869,7 +2908,10 @@ pub async fn bi_insert_result(
             .cloned()
             .unwrap_or_else(|| format!("Sheet{}", request.sheet_index + 1));
 
-        let mut named_ranges = state.named_ranges.lock().unwrap();
+        // The BIResult.* names ride in `workbook.named_ranges`, and the result
+        // block itself is written into the grid: this changes what a save writes.
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut named_ranges = state.named_ranges.write(&effect).unwrap();
 
         for (col_idx, col_name) in query_result.columns.iter().enumerate() {
             let safe_name: String = col_name
@@ -2941,6 +2983,7 @@ pub async fn bi_insert_result(
 pub async fn bi_refresh_connection(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
     window: tauri::Window,
 ) -> Result<Vec<BiQueryResult>, String> {
@@ -3096,7 +3139,10 @@ pub async fn bi_refresh_connection(
                 .cloned()
                 .unwrap_or_else(|| format!("Sheet{}", active_query.sheet_index + 1));
 
-            let mut named_ranges = state.named_ranges.lock().unwrap();
+            // Refresh rewrites the locked grid region and re-points the
+            // BIResult.* names at the new extent.
+            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+            let mut named_ranges = state.named_ranges.write(&effect).unwrap();
 
             for (col_idx, col_name) in result.columns.iter().enumerate() {
                 let safe_name: String = col_name
@@ -3162,6 +3208,7 @@ pub async fn bi_refresh_connection(
 #[tauri::command]
 pub async fn bi_refresh_all_in_memory(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
 ) -> Result<Vec<String>, String> {
     log_info!("BI", "bi_refresh_all_in_memory: conn={}", connection_id);
@@ -3196,6 +3243,11 @@ pub async fn bi_refresh_all_in_memory(
     save_cache_for_connection(&bi_state, connection_id).await;
 
     log_info!("BI", "Refreshed {} in-memory tables", table_names.len());
+    // CONDITIONAL: same rule as bi_connect -- a refresh that moved nothing is not a
+    // document change.
+    if !table_names.is_empty() {
+        let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
     Ok(table_names)
 }
 
@@ -3264,9 +3316,14 @@ pub async fn bi_get_region_at_cell(
 #[tauri::command]
 pub async fn bi_save_all_caches(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
 ) -> Result<usize, String> {
     let saved = bi_state.engine_registry.save_all_caches();
     log_info!("BI", "bi_save_all_caches: saved {} engines", saved);
+    // CONDITIONAL: only a cache that actually changed alters what a save writes.
+    if saved > 0 {
+        let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
     Ok(saved)
 }
 

@@ -4,6 +4,7 @@
 // style_index in the StyleRegistry. Built-in styles are seeded on app start.
 
 use crate::api_types::{CellData, FormattingResult, NamedCellStyle, StyleData, StyleEntry};
+use crate::document_effect::{CleanReason, DocumentEffect};
 use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
@@ -19,7 +20,7 @@ use tauri::State;
 /// Get all named styles.
 #[tauri::command]
 pub fn get_named_styles(state: State<AppState>) -> Vec<NamedCellStyle> {
-    let named = state.named_styles.lock().unwrap();
+    let named = state.named_styles.read().unwrap();
     let mut result: Vec<NamedCellStyle> = named.values().cloned().collect();
     // Sort by category then name for consistent ordering
     result.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
@@ -30,15 +31,35 @@ pub fn get_named_styles(state: State<AppState>) -> Vec<NamedCellStyle> {
 #[tauri::command]
 pub fn create_named_style(
     state: State<AppState>,
+    file_state: State<FileState>,
     name: String,
     style_index: usize,
     category: String,
 ) -> Result<NamedCellStyle, String> {
-    let mut named = state.named_styles.lock().unwrap();
+    create_named_style_impl(&state, &file_state, name, style_index, category)
+}
 
-    if named.contains_key(&name) {
+/// Command body over plain references, so the "a refused create stays clean" contract
+/// is unit-testable (see `document_effect_wave2_tests`).
+pub(crate) fn create_named_style_impl(
+    state: &AppState,
+    file_state: &FileState,
+    name: String,
+    style_index: usize,
+    category: String,
+) -> Result<NamedCellStyle, String> {
+    // Custom named styles are persisted (user_files/named_styles.json), so creating
+    // one changes what a save writes. `apply_named_style` in this same file already
+    // dirtied while create/delete did not -- an in-file contradiction the census
+    // singled out.
+    //
+    // Resolve the refusal under a READ guard first: `DocumentEffect::mutates` sets the
+    // flag in its constructor, so a duplicate-name rejection must not reach it.
+    if state.named_styles.read().unwrap().contains_key(&name) {
         return Err(format!("Named style '{}' already exists", name));
     }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut named = state.named_styles.write(&effect).unwrap();
 
     let style = NamedCellStyle {
         name: name.clone(),
@@ -55,18 +76,31 @@ pub fn create_named_style(
 #[tauri::command]
 pub fn delete_named_style(
     state: State<AppState>,
+    file_state: State<FileState>,
     name: String,
 ) -> Result<(), String> {
-    let mut named = state.named_styles.lock().unwrap();
+    delete_named_style_impl(&state, &file_state, name)
+}
 
-    if let Some(existing) = named.get(&name) {
-        if existing.built_in {
+/// Command body over plain references (see `document_effect_wave2_tests`).
+pub(crate) fn delete_named_style_impl(
+    state: &AppState,
+    file_state: &FileState,
+    name: String,
+) -> Result<(), String> {
+    // Both refusals below are resolved under a READ guard, before the decision:
+    // deleting a built-in, or a style that does not exist, must leave the document
+    // exactly as clean as it was.
+    match state.named_styles.read().unwrap().get(&name) {
+        Some(existing) if existing.built_in => {
             return Err(format!("Cannot delete built-in style '{}'", name));
         }
-    } else {
-        return Err(format!("Named style '{}' not found", name));
+        Some(_) => {}
+        None => return Err(format!("Named style '{}' not found", name)),
     }
 
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut named = state.named_styles.write(&effect).unwrap();
     named.remove(&name);
     Ok(())
 }
@@ -134,7 +168,7 @@ pub(crate) fn apply_named_style_impl(
 
     // Look up the named style
     let style_index = {
-        let named = state.named_styles.lock().unwrap();
+        let named = state.named_styles.read().unwrap();
         match named.get(name) {
             Some(ns) => ns.style_index,
             None => return Err(format!("Named style '{}' not found", name)),
@@ -232,7 +266,7 @@ pub(crate) fn apply_named_style_impl(
     undo_stack.commit_transaction();
 
     // Collect all styles
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     let updated_styles: Vec<StyleEntry> = styles
         .all_styles()
         .iter()
@@ -282,7 +316,7 @@ mod rect_apply_tests {
 
         let good_index = state
             .named_styles
-            .lock()
+            .read()
             .unwrap()
             .get("Good")
             .expect("built-in style")
@@ -350,7 +384,7 @@ struct SavedNamedStyle {
 /// Serialize the workbook's CUSTOM named styles for user_files, or None when
 /// there are none. Sorted by name for deterministic artifact bytes.
 pub fn collect_named_styles_for_save(state: &AppState) -> Option<Vec<u8>> {
-    let named = state.named_styles.lock().ok()?;
+    let named = state.named_styles.read().ok()?;
     let styles = state.style_registry.lock().ok()?;
     let mut customs: Vec<SavedNamedStyle> = named
         .values()
@@ -372,7 +406,9 @@ pub fn collect_named_styles_for_save(state: &AppState) -> Option<Vec<u8>> {
 /// customs are removed (built-ins stay), then this file's set is inserted with
 /// registry indices minted via get_or_create.
 pub fn restore_named_styles(state: &AppState, bytes: Option<&[u8]>) {
-    let Ok(mut named) = state.named_styles.lock() else { return };
+    // Load path: rebuilding the store FROM the file is not an edit TO the document.
+    let load = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+    let Ok(mut named) = state.named_styles.write(&load) else { return };
     named.retain(|_, ns| ns.built_in);
     let Some(bytes) = bytes else { return };
     let Ok(customs) = serde_json::from_slice::<Vec<SavedNamedStyle>>(bytes) else {
@@ -405,7 +441,11 @@ pub fn restore_named_styles(state: &AppState, bytes: Option<&[u8]>) {
 /// Called once during `create_app_state()`.
 pub fn init_builtin_named_styles(state: &AppState) {
     let mut styles = state.style_registry.lock().unwrap();
-    let mut named = state.named_styles.lock().unwrap();
+    // Seeding the built-ins of a BLANK document (app startup and File > New). Same
+    // class as the load path: `new_file` assigns is_modified = false as its last act,
+    // and a brand-new workbook must not open already prompting to save.
+    let seed = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+    let mut named = state.named_styles.write(&seed).unwrap();
 
     // Helper to register a named style
     let mut register = |name: &str, category: &str, cell_style: CellStyle| {

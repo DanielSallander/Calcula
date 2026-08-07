@@ -421,6 +421,7 @@ pub fn grant_script_capability(
 #[tauri::command]
 pub fn script_writeback(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     cap_store: State<CapabilityStore>,
     script_id: String,
     action: String,
@@ -510,7 +511,7 @@ pub fn script_writeback(
 
     // (7) Dispatch.
     let detail = audit_detail(act, &p);
-    let result = dispatch(act, target, &state, &p, &window);
+    let result = dispatch(act, target, &state, &file_state, &p, &window);
 
     // (8) Always-on audit (success + failure), mirroring bi.query/bi.sql/bi.model.
     match &result {
@@ -601,6 +602,7 @@ fn dispatch(
     act: Action,
     target: Option<PublisherTarget>,
     state: &State<AppState>,
+    file_state: &State<'_, crate::persistence::FileState>,
     p: &serde_json::Map<String, Value>,
     window: &Window,
 ) -> Result<Value, String> {
@@ -621,6 +623,7 @@ fn dispatch(
             let value: calp::writeback::SubmissionValue = field(p, "value")?;
             calp_cmds::calp_save_writeback_draft(
                 state.clone(),
+                file_state.clone(),
                 region_id,
                 sheet_id,
                 row,
@@ -633,7 +636,7 @@ fn dispatch(
         Action::SubmitRegion => {
             let region_id: String = field(p, "regionId")?;
             let submitted =
-                calp_cmds::calp_submit_region(state.clone(), region_id, window.clone())?;
+                calp_cmds::calp_submit_region(state.clone(), file_state.clone(), region_id, window.clone())?;
             Ok(json!({ "submitted": submitted }))
         }
         Action::PreviewSubmission => {
@@ -722,6 +725,7 @@ fn dispatch(
             // script sees the real reason.
             calp_cmds::calp_save_writeback_draft(
                 state.clone(),
+                file_state.clone(),
                 region_id.clone(),
                 sid.to_string(),
                 row,
@@ -954,14 +958,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn audit_entries(
-        log: &std::sync::Mutex<calp::audit::AuditLog>,
+        log: &crate::document_effect::Persisted<calp::audit::AuditLog>,
     ) -> Vec<calp::audit::AuditEntry> {
-        log.lock().unwrap().entries.clone()
+        log.read().unwrap().entries.clone()
     }
 
     #[test]
     fn denials_and_successes_both_write_an_audit_row() {
-        let log = std::sync::Mutex::new(calp::audit::AuditLog::default());
+        let log = crate::document_effect::Persisted::new(calp::audit::AuditLog::default());
 
         // The exact call the gateway's grant-denial branch makes.
         crate::net_commands::record_capability_call(

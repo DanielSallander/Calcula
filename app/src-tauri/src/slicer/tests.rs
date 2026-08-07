@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn test_slicer_state_new() {
         let state = SlicerState::new();
-        let slicers = state.slicers.lock().unwrap();
+        let slicers = state.slicers.read().unwrap();
         assert!(slicers.is_empty());
     }
 
@@ -105,29 +105,29 @@ mod tests {
             }],
         };
 
-        state.slicers.lock().unwrap().insert(slicer_id, slicer);
-        assert_eq!(state.slicers.lock().unwrap().len(), 1);
+        state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().insert(slicer_id, slicer);
+        assert_eq!(state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().len(), 1);
 
         // Read
-        let s = state.slicers.lock().unwrap().get(&slicer_id).unwrap().clone();
+        let s = state.slicers.read().unwrap().get(&slicer_id).unwrap().clone();
         assert_eq!(s.name, "Region");
         assert!(s.selected_items.is_none());
 
         // Update selection
         {
-            let mut slicers = state.slicers.lock().unwrap();
+            let mut slicers = state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap();
             let s = slicers.get_mut(&slicer_id).unwrap();
             s.selected_items = Some(vec!["North".to_string(), "South".to_string()]);
         }
         {
-            let slicers = state.slicers.lock().unwrap();
+            let slicers = state.slicers.read().unwrap();
             let s = slicers.get(&slicer_id).unwrap();
             assert_eq!(s.selected_items.as_ref().unwrap().len(), 2);
         }
 
         // Clear filter
         {
-            let mut slicers = state.slicers.lock().unwrap();
+            let mut slicers = state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap();
             let s = slicers.get_mut(&slicer_id).unwrap();
             s.selected_items = None;
             assert!(s.selected_items.is_none());
@@ -135,7 +135,7 @@ mod tests {
 
         // Delete
         {
-            let mut slicers = state.slicers.lock().unwrap();
+            let mut slicers = state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap();
             slicers.remove(&slicer_id);
             assert!(slicers.is_empty());
         }

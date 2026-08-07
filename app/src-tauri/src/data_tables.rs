@@ -10,8 +10,16 @@ use crate::api_types::{
     CellData, DataTableCell, DataTableOneVarParams, DataTableResult, DataTableTwoVarParams,
     MergedRegion,
 };
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{evaluate_formula_multi_sheet, format_cell_value, AppState};
 use engine::{Cell, CellValue, Grid, StyleRegistry};
+
+// A what-if data table WRITES its computed results into the grid, which is persisted,
+// so both commands dirty the document. Neither took a `FileState` before.
+//
+// The effect is constructed after the sheet-protection gate AND after the orientation
+// check that rejects "no input cell specified", so a refused call stays clean.
 
 // ============================================================================
 // Helper: build CellData from grid
@@ -100,6 +108,7 @@ fn cell_value_to_string(val: &CellValue) -> String {
 #[tauri::command]
 pub fn data_table_one_var(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: DataTableOneVarParams,
 ) -> DataTableResult {
     // BACKGROUND: a what-if table is rows x cols full evaluations driven by a
@@ -155,6 +164,9 @@ pub fn data_table_one_var(
             error: Some("Must specify either row input cell or column input cell.".to_string()),
         };
     }
+
+    // Past the protection gate and the orientation check: results are written below.
+    let _effect = DocumentEffect::mutates(&file_state);
 
     let mut result_cells = Vec::new();
     let mut updated_cells = Vec::new();
@@ -335,6 +347,7 @@ pub fn data_table_one_var(
 #[tauri::command]
 pub fn data_table_two_var(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: DataTableTwoVarParams,
 ) -> DataTableResult {
     // See data_table_one_var: same surface, quadratically more of it.
@@ -390,6 +403,9 @@ pub fn data_table_two_var(
             };
         }
     };
+
+    // Past the protection gate and the "top-left cell must contain a formula" check.
+    let _effect = DocumentEffect::mutates(&file_state);
 
     // Save original input cell values
     let original_row_input = grids[sheet_idx]

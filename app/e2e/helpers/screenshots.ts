@@ -13,17 +13,126 @@
  *   await takeDialogScreenshot(page, "format-cells-dialog", ".dialog-container");
  */
 import { type Page, type Locator, expect } from "@playwright/test";
+import { readGridGeometry, cellRangeRectFrom, parseCellRef, type GridGeometry } from "./grid";
+
+// ============================================================================
+// Selector resolution
+//
+// EVERY capture helper in this file resolves its target through `resolveOne`.
+//
+// The rule it enforces: a screenshot helper that cannot find what it was asked
+// to photograph must FAIL, never return. Two helpers here used to do the
+// opposite — `takeStatusBarScreenshot` returned silently when its selector
+// matched nothing, and `takeRibbonScreenshot` fell back to a fixed page clip —
+// so both phantom-passed for months against selectors that match zero nodes in
+// the shipping app. A helper that silently succeeds is worse than no test: the
+// suite reports coverage it does not have.
+// ============================================================================
+
+/**
+ * Resolve the first of `selectors` that matches exactly one VISIBLE element.
+ *
+ * Throws with the full list of candidates and what each one matched when
+ * nothing usable is found — the failure message must be enough to fix the
+ * selector without re-running under a debugger.
+ */
+async function resolveOne(
+  page: Page,
+  description: string,
+  selectors: string[]
+): Promise<Locator> {
+  const report: string[] = [];
+  for (const selector of selectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count();
+    if (count === 0) {
+      report.push(`  ${selector} -> 0 nodes`);
+      continue;
+    }
+    const first = locator.first();
+    if (!(await first.isVisible())) {
+      report.push(`  ${selector} -> ${count} node(s), none visible`);
+      continue;
+    }
+    const box = await first.boundingBox();
+    if (!box || box.width === 0 || box.height === 0) {
+      report.push(`  ${selector} -> ${count} node(s), zero-sized`);
+      continue;
+    }
+    return first;
+  }
+  throw new Error(
+    `[screenshot] cannot capture ${description}: no selector matched a visible, ` +
+      `non-empty element.\n${report.join("\n")}\n` +
+      `Fix the selector or add a data-testid to the component — do NOT let the ` +
+      `helper return without asserting.`
+  );
+}
 
 // Default comparison options - tuned for Canvas rendering which can have
 // minor anti-aliasing differences between runs.
+// ============================================================================
+// Comparison gates
+//
+// `threshold` is pixelmatch's YIQ colour-distance gate: a pixel is only
+// COUNTED as different when its squared YIQ distance exceeds
+// 35215 * threshold^2. It is not a per-channel tolerance, and it is the
+// setting that decides whether the suite can see the grid at all.
+//
+// Measured on the default skin (see the numbers below — re-measure if the skin
+// changes): gridlines paint #f1f1f1 on white (ΔY 14) and the faintest hairline
+// #f5f5f5 (ΔY 10). pixelmatch stops seeing them above threshold 0.053 and
+// 0.038 respectively. At the old 0.2 an ENTIRE erased gridline scored
+// literally 0 differing pixels; at 0.02 the same defect scores 520 (vertical)
+// / 1193 (horizontal) / 1042 (shifted 1px). 0.02 keeps ~2x margin on the
+// faintest line the renderer paints.
+//
+// The pixel budget is the second half of the gate: min(maxDiffPixels,
+// maxDiffPixelRatio * imagePixels). The old 0.005 ratio allowed 3425 pixels on
+// a grid capture — six whole gridlines' worth — so a tighter threshold alone
+// would still have passed single-line defects. 200 sits at the geometric mean
+// of the measured noise ceiling (77 px: the marching-ants copy border, the
+// only non-deterministic thing in either suite over two cold runs of all 76
+// captures — everything else was bit-identical) and the smallest single-line
+// defect (520 px). On small captures the ratio is what binds: 15 px on a
+// status-bar strip, ~9 px on a region crop.
+//
+// Do not loosen these to make a shot pass. A shot that cannot hold this gate
+// is capturing something non-deterministic; fix the capture.
+// ============================================================================
 const DEFAULT_SCREENSHOT_OPTIONS = {
-  // Allow 0.5% of pixels to differ (anti-aliasing tolerance)
-  maxDiffPixelRatio: 0.005,
-  // Individual pixel color difference threshold (0-255 per channel)
-  threshold: 0.2,
+  // Pixel budget: min(200 px, 0.05% of the image).
+  maxDiffPixels: 200,
+  maxDiffPixelRatio: 0.0005,
+  // YIQ colour-distance gate — must stay below 0.038 to see a gridline.
+  threshold: 0.02,
   // Animation settling time
   animations: "disabled" as const,
 };
+
+/**
+ * WHY REGION CAPTURES DO NOT HAVE THEIR OWN GATE.
+ *
+ * `takeGridRegionScreenshot` briefly carried a REGION_SCREENSHOT_OPTIONS
+ * override of `maxDiffPixelRatio: 0.001`. That was written when the default
+ * ratio was 0.005, where 0.001 was 5x TIGHTER and the override earned its
+ * place. The default is now 0.0005, so the same override would LOOSEN the gate
+ * by 2x on precisely the captures it existed to sharpen:
+ *
+ *   region 144x56 =   8064 px -> default 4 px budget, override would give 8
+ *   region 320x120 = 38400 px -> default 19 px budget, override would give 38
+ *
+ * It was removed rather than re-tuned. The ratio-plus-cap default already
+ * scales correctly: on a whole-grid shot the 200 px cap binds, and on a small
+ * clip the 0.0005 ratio binds, which is exactly the behaviour the override was
+ * hand-rolling. Region shots use DEFAULT_SCREENSHOT_OPTIONS.
+ *
+ * The scale argument that motivated region clipping in the first place still
+ * holds and is the reason the helper exists: a note-indicator triangle is 66
+ * device pixels. On a whole-grid 1232x556 shot that is 0.0096% of the frame,
+ * under a 200 px budget — invisible at any threshold. Clipped to one cell it is
+ * 0.82% of the frame against a 4 px budget, a ~16x margin.
+ */
 
 /**
  * Reset the app to a brand-new empty workbook via the Tauri `new_file` command.
@@ -35,6 +144,17 @@ export async function resetToNewWorkbook(page: Page): Promise<void> {
     const tauri = (window as any).__TAURI__;
     if (tauri?.core?.invoke) {
       await tauri.core.invoke("new_file", {});
+      // `new_file` clears the backend's per-column/row overrides AND resets the
+      // default geometry (persistence::reset_default_geometry). The FRONTEND
+      // caches both: Spreadsheet.tsx re-reads dimensions only on mount or on
+      // "dimensions:refresh", and SheetTabs.tsx reloads only on mount or on
+      // "app:sheet-changed". Dispatching "grid:refresh" alone therefore repaints
+      // the canvas with geometry the backend has already discarded — goldens
+      // captured after this helper would encode ghost 100px/24px lines and a
+      // phantom "Sheet2" tab, states the app can never actually be in. (The
+      // product is unaffected: File > New does a full window.location.reload().)
+      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+      window.dispatchEvent(new Event("app:sheet-changed"));
       window.dispatchEvent(new Event("grid:refresh"));
     }
   });
@@ -123,6 +243,41 @@ export async function waitForGridStable(page: Page, timeoutMs = 3000): Promise<v
 }
 
 /**
+ * Wait until the rendered page stops changing, or `timeoutMs` elapses.
+ *
+ * `waitForGridStable` only waits a fixed 500ms + two rAF ticks, which is not
+ * enough for work that finishes on a backend round-trip. Pivot refreshes, for
+ * example, paint a "Preparing…/Calculating…/Updating grid… (n/4)" progress
+ * indicator with a Cancel button onto the grid OVERLAY canvas — it is drawn
+ * state, not a DOM node, so there is no selector to await. A checkpoint that
+ * races it bakes that transient overlay into the golden, which then fails
+ * nondeterministically forever after.
+ *
+ * Polls full-page screenshots and returns as soon as two consecutive samples
+ * are byte-identical. On timeout it returns quietly rather than throwing: the
+ * screenshot assertion that follows is the real check.
+ *
+ * DELIBERATELY NOT called from `waitForGridStable`. Some grid goldens contain
+ * genuinely animated canvas chrome — the marching-ants copy border in the
+ * paste-special shots — which never reaches two identical frames. Those would
+ * burn the full timeout on every capture and still settle on an arbitrary
+ * frame. Use this only where a transient overlay is the risk.
+ */
+export async function waitForVisualStability(
+  page: Page,
+  { timeoutMs = 6000, intervalMs = 250 }: { timeoutMs?: number; intervalMs?: number } = {}
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let previous: Buffer | null = null;
+  while (Date.now() < deadline) {
+    const shot = await page.screenshot({ animations: "disabled" });
+    if (previous && shot.equals(previous)) return;
+    previous = shot;
+    await page.waitForTimeout(intervalMs);
+  }
+}
+
+/**
  * Take a full-page screenshot checkpoint for visual regression comparison.
  * This captures the entire application window including ribbon, grid, and status bar.
  *
@@ -149,6 +304,14 @@ export async function takeCheckpoint(
   await waitForGridStable(page);
   const { target, ...rest } = options ?? {};
   if (target) {
+    // A `target` that matches nothing would make toHaveScreenshot time out with
+    // a generic message; say what was actually asked for instead.
+    if ((await target.count()) === 0) {
+      throw new Error(
+        `[screenshot] checkpoint "${name}" was given a target locator that ` +
+          `matches 0 nodes — nothing to capture.`
+      );
+    }
     await expect(target).toHaveScreenshot(`${name}.png`, {
       ...DEFAULT_SCREENSHOT_OPTIONS,
       ...rest,
@@ -162,12 +325,141 @@ export async function takeCheckpoint(
   });
 }
 
+/** The composited grid: canvas + every DOM layer stacked on it. */
+const GRID_CONTAINER_SELECTORS = ["[data-grid-area]"];
+
 /**
- * Take a screenshot of just the grid canvas area (excludes ribbon and status bar).
- * More focused comparison that ignores UI chrome changes.
+ * Scroll a cell range into view, and return the geometry it is visible under.
  *
- * @param page - Playwright page
- * @param name - Unique checkpoint name
+ * A region capture is only meaningful if the cells it frames are on screen, and
+ * the specs cannot be trusted to have put them there: `GridHelper.navigateTo`
+ * drives the Name Box, and OBSERVED ACROSS RUNS it sometimes commits the jump
+ * and sometimes leaves `scrollX` at 0 with the target 300px off the right edge.
+ * A capture that inherits that coin flip is either a hard error or — worse — a
+ * golden of blank grid.
+ *
+ * `app:navigate-to-cell` is the app's own scroll-to-cell path (useSpreadsheet
+ * dispatches scrollToCell and refreshes the cells). `select: false` keeps the
+ * caller's selection, so scrolling here cannot change what the golden shows.
+ * Bottom-right first, then top-left, so a range that fits ends up fully framed.
+ */
+/**
+ * Move the selection OFF the range about to be photographed.
+ *
+ * WHY THIS EXISTS — measured, not theorised. The active-cell highlight is
+ * painted after the cell decorations, and it covers the top-right corner of the
+ * cell, which is exactly where Review paints its annotation triangles. Probed
+ * against the running app on an isolated cell carrying a note:
+ *
+ *     note cell SELECTED     -> 15 red px in the clip
+ *     note cell NOT selected -> 15 red px  ... selected: 0
+ *
+ * i.e. selecting the cell erases the indicator completely. Every spec here
+ * reaches its capture via `navigateTo(topLeftCell)`, which selects that cell,
+ * so every single-cell feature golden was a picture of the selection border
+ * with the feature painted underneath it. That is how goldens named
+ * `...-cell-with-indicator` came to hold one stray pixel of indicator colour.
+ *
+ * Parking six rows below the range keeps the viewport in the same
+ * neighbourhood (so re-framing does not trigger a long scroll, which would
+ * change the row-header width and the geometry with it) while putting the
+ * selection chrome far outside a clip that extends only `padding` px past the
+ * range.
+ */
+async function parkSelectionAwayFrom(
+  page: Page,
+  from: string,
+  to: string
+): Promise<void> {
+  const a = parseCellRef(from);
+  const b = parseCellRef(to);
+  const parkRow = Math.max(a.row, b.row) + 6;
+  const parkCol = Math.min(a.col, b.col);
+  await page.evaluate(
+    ({ row, col }) => {
+      window.dispatchEvent(
+        new CustomEvent("app:navigate-to-cell", {
+          detail: { row, col, select: true },
+        })
+      );
+    },
+    { row: parkRow, col: parkCol }
+  );
+  await page.waitForTimeout(300);
+}
+
+async function ensureRangeVisible(
+  page: Page,
+  from: string,
+  to: string,
+  canvasBox: { x: number; y: number; width: number; height: number }
+): Promise<GridGeometry> {
+  const a = parseCellRef(from);
+  const b = parseCellRef(to);
+  const topLeft = { row: Math.min(a.row, b.row), col: Math.min(a.col, b.col) };
+  const bottomRight = { row: Math.max(a.row, b.row), col: Math.max(a.col, b.col) };
+
+  const fits = (geo: GridGeometry): boolean => {
+    const r = cellRangeRectFrom(from, to, geo);
+    return (
+      r.x >= -0.5 &&
+      r.y >= -0.5 &&
+      r.x + r.width <= canvasBox.width + 0.5 &&
+      r.y + r.height <= canvasBox.height + 0.5
+    );
+  };
+
+  let geo = await readGridGeometry(page);
+  for (let attempt = 0; attempt < 3 && !fits(geo); attempt++) {
+    for (const target of [bottomRight, topLeft]) {
+      await page.evaluate(
+        ({ row, col }) => {
+          window.dispatchEvent(
+            new CustomEvent("app:navigate-to-cell", {
+              detail: { row, col, select: false },
+            })
+          );
+        },
+        target
+      );
+      await page.waitForTimeout(350);
+    }
+    geo = await readGridGeometry(page);
+  }
+  return geo;
+}
+
+/**
+ * Take a screenshot of the whole grid area (excludes ribbon and status bar).
+ *
+ * WHAT THIS CAPTURES, AND WHY IT IS THE CONTAINER AND NOT THE CANVAS
+ *
+ * This used to grab `page.locator("canvas").first()`. The grid is drawn on a
+ * SINGLE canvas — verified against the running app, which has exactly one
+ * <canvas> node in the main window — so all the extension chrome (Review's
+ * note/comment triangles via registerCellDecoration, the grouping outline bar
+ * via the post-header overlay, grid layers, region overlays) really does land
+ * on those same pixels. The premise that a second "overlay canvas" existed is
+ * false; there is nothing to stitch.
+ *
+ * The container is still the right target, because DOM layers sit ON TOP of
+ * that canvas inside `[data-grid-area]` and a canvas-element capture drops
+ * them:
+ *   - the InlineEditor (a real <input>, rendered as a sibling of the canvas
+ *     inside CanvasLayer) — so every "editing mode" golden was previously a
+ *     picture of the grid WITHOUT the editor that the shot exists to show;
+ *   - the row/column scrollbars and the corner box.
+ * Capturing `[data-grid-area]` composites all of it, positioned exactly as the
+ * user sees it, with no image stitching.
+ *
+ * SCALE CAVEAT — read before adding a new feature golden here. A whole-grid
+ * shot is 1232x556 = 685k pixels, so the `maxDiffPixels: 200` cap is what binds
+ * (the 0.0005 ratio would allow 342). A note-indicator triangle is 66 device
+ * pixels — a third of the budget, and that is the BEST case, where the triangle
+ * is the only thing that moved. Its presence or absence cannot be relied on to
+ * fail this assertion. For a golden that is supposed to prove a specific piece
+ * of chrome rendered, use `takeGridRegionScreenshot` and clip to the cells that
+ * own it; whole-grid shots prove layout and data, not chrome.
  */
 export async function takeGridScreenshot(
   page: Page,
@@ -178,10 +470,123 @@ export async function takeGridScreenshot(
   }
 ): Promise<void> {
   await waitForGridStable(page);
-  const canvas = page.locator("canvas").first();
-  await expect(canvas).toHaveScreenshot(`grid-${name}.png`, {
+  const grid = await resolveOne(page, "the grid area", GRID_CONTAINER_SELECTORS);
+  await expect(grid).toHaveScreenshot(`grid-${name}.png`, {
     ...DEFAULT_SCREENSHOT_OPTIONS,
     ...options,
+  });
+}
+
+/**
+ * Take a screenshot of the grid CLIPPED to a cell range — the capture to use
+ * when a golden is meant to prove that a specific piece of chrome rendered.
+ *
+ * Rationale: the pixel budget is min(maxDiffPixels, maxDiffPixelRatio * px), so
+ * on a large image it is a FLAT allowance that the feature must singlehandedly
+ * blow through. Photographing the whole grid to assert a 6x6px triangle, a
+ * trace arrow or an outline bracket leaves the feature at ~0.01% of the frame
+ * and a third of the 200 px budget, so the golden can pass whether or not the
+ * feature painted. Clipping to the cells that own the chrome shrinks the image
+ * until the ratio binds instead (a 1-cell clip has a 4 px budget), which the
+ * feature trips by more than an order of magnitude.
+ *
+ * The clip is a PAGE clip in viewport coordinates, so it composites canvas
+ * pixels and DOM overlays exactly like `takeGridScreenshot` does.
+ *
+ * @param range - inclusive cell range, e.g. `{ from: "W1", to: "X3" }`
+ * @param padding - extra CSS px around the range (default 8). Keep it small:
+ *                  padding is dead pixels that dilute the assertion again.
+ * @param includeHeaders - extend the clip left and up to the canvas edge so the
+ *                  row/column headers are in frame. Required for chrome that
+ *                  paints in the header margin rather than over the cells —
+ *                  the grouping outline bar is the case that matters, since it
+ *                  is drawn at x < rowHeaderWidth and a cell-only clip would
+ *                  frame everything EXCEPT the feature under test.
+ * @param keepSelection - leave the selection where the caller put it. Default
+ *                  false, i.e. the selection is parked away from the range
+ *                  first, because the active-cell highlight paints OVER cell
+ *                  chrome (see parkSelectionAwayFrom — it erases annotation
+ *                  indicators outright). Set true only for a golden whose
+ *                  subject genuinely is the selection rectangle.
+ */
+export async function takeGridRegionScreenshot(
+  page: Page,
+  name: string,
+  range: { from: string; to: string },
+  options?: {
+    maxDiffPixelRatio?: number;
+    threshold?: number;
+    padding?: number;
+    includeHeaders?: boolean;
+    keepSelection?: boolean;
+  }
+): Promise<void> {
+  await waitForGridStable(page);
+  const {
+    padding = 4,
+    includeHeaders = false,
+    keepSelection = false,
+    ...compare
+  } = options ?? {};
+
+  const grid = await resolveOne(page, "the grid area", GRID_CONTAINER_SELECTORS);
+  const gridBox = await grid.boundingBox();
+  if (!gridBox) {
+    throw new Error(`[screenshot] grid area has no bounding box for "${name}"`);
+  }
+  // The canvas is inset inside the grid area by the scrollbars; cell
+  // coordinates are relative to the CANVAS, so anchor on it.
+  const canvasBox = await page.locator("canvas").first().boundingBox();
+  if (!canvasBox) {
+    throw new Error(`[screenshot] grid canvas has no bounding box for "${name}"`);
+  }
+
+  // Park BEFORE framing: parking dispatches a navigate that can scroll, so the
+  // range has to be re-framed afterwards, not before.
+  if (!keepSelection) {
+    await parkSelectionAwayFrom(page, range.from, range.to);
+  }
+
+  const geo = await ensureRangeVisible(page, range.from, range.to, canvasBox);
+  const rect = cellRangeRectFrom(range.from, range.to, geo);
+
+  // Off-canvas AFTER the helper has done its own scrolling means the range
+  // genuinely cannot be framed (too large for the viewport, or hidden). Capture
+  // it anyway and the golden is a picture of blank grid — the silent pass this
+  // helper exists to prevent — so fail with the numbers needed to fix the spec.
+  const onCanvas =
+    rect.x >= -1 &&
+    rect.y >= -1 &&
+    rect.x + rect.width <= canvasBox.width + 1 &&
+    rect.y + rect.height <= canvasBox.height + 1;
+  if (!onCanvas) {
+    throw new Error(
+      `[screenshot] range ${range.from}:${range.to} is not fully on screen for "${name}" ` +
+        `even after scrolling to it.\n` +
+        `  range rect (canvas-relative) = x:${rect.x.toFixed(1)} y:${rect.y.toFixed(1)} ` +
+        `w:${rect.width.toFixed(1)} h:${rect.height.toFixed(1)}\n` +
+        `  canvas = w:${canvasBox.width} h:${canvasBox.height}\n` +
+        `  scroll = x:${geo.scrollX} y:${geo.scrollY} zoom:${geo.zoom}\n` +
+        `Use a smaller range, or check that the rows/columns are not hidden.`
+    );
+  }
+
+  // Padding is a nicety, not part of the assertion — clamp it to the canvas
+  // rather than failing when the range happens to touch an edge.
+  const clampX = (v: number) =>
+    Math.min(Math.max(v, canvasBox.x), canvasBox.x + canvasBox.width);
+  const clampY = (v: number) =>
+    Math.min(Math.max(v, canvasBox.y), canvasBox.y + canvasBox.height);
+
+  const x = includeHeaders ? canvasBox.x : clampX(canvasBox.x + rect.x - padding);
+  const y = includeHeaders ? canvasBox.y : clampY(canvasBox.y + rect.y - padding);
+  const width = clampX(canvasBox.x + rect.x + rect.width + padding) - x;
+  const height = clampY(canvasBox.y + rect.y + rect.height + padding) - y;
+
+  await expect(page).toHaveScreenshot(`grid-${name}.png`, {
+    ...DEFAULT_SCREENSHOT_OPTIONS,
+    ...compare,
+    clip: { x, y, width, height },
   });
 }
 
@@ -201,11 +606,13 @@ export async function takeDialogScreenshot(
     threshold?: number;
   }
 ): Promise<void> {
-  // Wait for dialog to fully render
+  // Wait for dialog to fully render. waitForSelector THROWS on a miss, which is
+  // the behaviour every helper in this file must have; resolveOne then also
+  // rejects a matched-but-zero-sized dialog.
   await page.waitForSelector(selector, { state: "visible", timeout: 5000 });
   await page.waitForTimeout(300);
 
-  const element = page.locator(selector).first();
+  const element = await resolveOne(page, `dialog "${name}"`, [selector]);
   await expect(element).toHaveScreenshot(`dialog-${name}.png`, {
     ...DEFAULT_SCREENSHOT_OPTIONS,
     ...options,
@@ -250,6 +657,25 @@ export async function takeRegionScreenshot(
   }
 ): Promise<void> {
   await waitForGridStable(page);
+  // A clip that is empty or lies outside the viewport photographs nothing and
+  // would still "pass" against a baseline recorded from the same nothing.
+  const viewport = await page.evaluate(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  if (
+    clip.width <= 0 ||
+    clip.height <= 0 ||
+    clip.x < 0 ||
+    clip.y < 0 ||
+    clip.x + clip.width > viewport.width ||
+    clip.y + clip.height > viewport.height
+  ) {
+    throw new Error(
+      `[screenshot] region "${name}" clip ${JSON.stringify(clip)} is empty or ` +
+        `outside the ${viewport.width}x${viewport.height} viewport.`
+    );
+  }
   await expect(page).toHaveScreenshot(`region-${name}.png`, {
     ...DEFAULT_SCREENSHOT_OPTIONS,
     ...options,
@@ -258,7 +684,23 @@ export async function takeRegionScreenshot(
 }
 
 /**
- * Take a screenshot of the ribbon/toolbar area only.
+ * Take a screenshot of the ribbon (tab strip + content band).
+ *
+ * `[data-testid='ribbon']` is RibbonContainer's `S.RibbonFrame` — the tab strip
+ * AND the content band, which is what a "ribbon" golden is supposed to show:
+ * the active-tab highlight is the evidence that a tab switch happened, and the
+ * band is the evidence of what that tab contains.
+ *
+ * `[data-ribbon-content]` is the fallback, but it is only the content band and
+ * it is `display: none` while the ribbon is minimized — which is precisely when
+ * some of these goldens are taken — so it must not be the primary target.
+ *
+ * There is no page-clip fallback any more. The old one clipped a fixed
+ * 1280x180 rectangle off the top of the window, which (a) fired unconditionally
+ * because all three of its selectors matched zero nodes in the shipping app,
+ * and (b) is 17px TALLER than menu bar + tab strip + band, so every ribbon
+ * golden also framed part of the formula bar and whatever cell content happened
+ * to be in it. Those goldens churned on unrelated cell edits.
  */
 export async function takeRibbonScreenshot(
   page: Page,
@@ -269,27 +711,31 @@ export async function takeRibbonScreenshot(
   }
 ): Promise<void> {
   await page.waitForTimeout(300);
-  const ribbon = page.locator("[data-testid='ribbon'], .ribbon-container, .toolbar-container").first();
-  // If a specific ribbon selector doesn't exist, fall back to taking top portion
-  const exists = await ribbon.count();
-  if (exists > 0) {
-    await expect(ribbon).toHaveScreenshot(`ribbon-${name}.png`, {
-      ...DEFAULT_SCREENSHOT_OPTIONS,
-      ...options,
-    });
-  } else {
-    // Capture the top of the page as the ribbon area: menu bar (~28px) +
-    // tab strip (35px) + 100px content band, with a little slack.
-    await expect(page).toHaveScreenshot(`ribbon-${name}.png`, {
-      ...DEFAULT_SCREENSHOT_OPTIONS,
-      ...options,
-      clip: { x: 0, y: 0, width: 1280, height: 180 },
-    });
-  }
+  const ribbon = await resolveOne(page, "the ribbon", [
+    "[data-testid='ribbon']",
+    "[data-ribbon-content]",
+  ]);
+  await expect(ribbon).toHaveScreenshot(`ribbon-${name}.png`, {
+    ...DEFAULT_SCREENSHOT_OPTIONS,
+    ...options,
+  });
 }
 
 /**
- * Take a screenshot of the status bar area only.
+ * Take a screenshot of the status bar.
+ *
+ * The status bar shows LIVE SELECTION AGGREGATES (Sum/Average/Count from the
+ * StatusBarAggregation extension) alongside the zoom slider and the calculation
+ * mode. Its content is therefore a function of the current selection: a caller
+ * that captures without first establishing a known selection over known values
+ * bakes whatever the previous test left behind into the golden. Establish the
+ * selection first — see status-bar.spec.ts.
+ *
+ * Previously this returned SILENTLY when its selector matched nothing, which it
+ * always did (StatusBar.tsx renders a bare inline-styled <div> with neither a
+ * testid nor a class). Every call had been a no-op since May and the golden
+ * directory was empty. The component now carries `data-testid="status-bar"` and
+ * a miss throws.
  */
 export async function takeStatusBarScreenshot(
   page: Page,
@@ -300,12 +746,11 @@ export async function takeStatusBarScreenshot(
   }
 ): Promise<void> {
   await page.waitForTimeout(200);
-  const statusBar = page.locator("[data-testid='status-bar'], .status-bar").first();
-  const exists = await statusBar.count();
-  if (exists > 0) {
-    await expect(statusBar).toHaveScreenshot(`statusbar-${name}.png`, {
-      ...DEFAULT_SCREENSHOT_OPTIONS,
-      ...options,
-    });
-  }
+  const statusBar = await resolveOne(page, "the status bar", [
+    "[data-testid='status-bar']",
+  ]);
+  await expect(statusBar).toHaveScreenshot(`statusbar-${name}.png`, {
+    ...DEFAULT_SCREENSHOT_OPTIONS,
+    ...options,
+  });
 }

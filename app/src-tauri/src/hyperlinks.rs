@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use tauri::State;
 
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 
 /// Record a hyperlink change to the undo stack.
 fn record_hyperlink_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>, description: &str) {
@@ -306,6 +308,7 @@ fn resolve_hyperlink_sheet(state: &AppState, sheet_index: Option<usize>) -> Resu
 #[tauri::command]
 pub fn add_hyperlink(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: AddHyperlinkParams,
 ) -> HyperlinkResult {
     let target_sheet = match resolve_hyperlink_sheet(&state, params.sheet_index) {
@@ -319,7 +322,10 @@ pub fn add_hyperlink(
     ) {
         return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
     }
-    let mut hyperlinks = state.hyperlinks.lock().unwrap();
+    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
+    // path, so changing one changes what a save would write.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut hyperlinks = state.hyperlinks.write(&effect).unwrap();
 
     // Create the hyperlink based on type
     let mut hyperlink = match params.link_type {
@@ -378,6 +384,7 @@ pub fn add_hyperlink(
 #[tauri::command]
 pub fn update_hyperlink(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: UpdateHyperlinkParams,
 ) -> HyperlinkResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -387,7 +394,17 @@ pub fn update_hyperlink(
     ) {
         return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
     }
-    let mut hyperlinks = state.hyperlinks.lock().unwrap();
+    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
+    // path, so changing one changes what a save would write.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "are there any hyperlinks on this sheet?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.hyperlinks.read().unwrap().contains_key(&active_sheet) {
+        return HyperlinkResult::err("No hyperlinks on this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut hyperlinks = state.hyperlinks.write(&effect).unwrap();
 
     let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {
         Some(h) => h,
@@ -424,6 +441,19 @@ pub fn update_hyperlink(
 #[tauri::command]
 pub fn remove_hyperlink(
     state: State<AppState>,
+    file_state: State<FileState>,
+    row: u32,
+    col: u32,
+    sheet_index: Option<usize>,
+) -> HyperlinkResult {
+    remove_hyperlink_impl(&state, &file_state, row, col, sheet_index)
+}
+
+/// Command body over plain references, so the refusal contract is unit-testable
+/// without a Tauri `State` (see `document_effect_objects_tests`).
+pub(crate) fn remove_hyperlink_impl(
+    state: &AppState,
+    file_state: &FileState,
     row: u32,
     col: u32,
     sheet_index: Option<usize>,
@@ -438,7 +468,17 @@ pub fn remove_hyperlink(
     ) {
         return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
     }
-    let mut hyperlinks = state.hyperlinks.lock().unwrap();
+    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
+    // path, so changing one changes what a save would write.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "are there any hyperlinks on this sheet?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.hyperlinks.read().unwrap().contains_key(&target_sheet) {
+        return HyperlinkResult::err("No hyperlinks on this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut hyperlinks = state.hyperlinks.write(&effect).unwrap();
 
     let sheet_hyperlinks = match hyperlinks.get_mut(&target_sheet) {
         Some(h) => h,
@@ -465,7 +505,7 @@ pub fn get_hyperlink(
     sheet_index: Option<usize>,
 ) -> Option<Hyperlink> {
     let target_sheet = resolve_hyperlink_sheet(&state, sheet_index).ok()?;
-    let hyperlinks = state.hyperlinks.lock().unwrap();
+    let hyperlinks = state.hyperlinks.read().unwrap();
 
     hyperlinks
         .get(&target_sheet)
@@ -476,7 +516,7 @@ pub fn get_hyperlink(
 #[tauri::command]
 pub fn get_all_hyperlinks(state: State<AppState>, sheet_index: Option<usize>) -> Result<Vec<Hyperlink>, String> {
     let target_sheet = resolve_hyperlink_sheet(&state, sheet_index)?;
-    let hyperlinks = state.hyperlinks.lock().unwrap();
+    let hyperlinks = state.hyperlinks.read().unwrap();
 
     Ok(hyperlinks
         .get(&target_sheet)
@@ -488,7 +528,7 @@ pub fn get_all_hyperlinks(state: State<AppState>, sheet_index: Option<usize>) ->
 #[tauri::command]
 pub fn get_hyperlink_indicators(state: State<AppState>) -> Vec<HyperlinkIndicator> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let hyperlinks = state.hyperlinks.lock().unwrap();
+    let hyperlinks = state.hyperlinks.read().unwrap();
 
     hyperlinks
         .get(&active_sheet)
@@ -508,7 +548,7 @@ pub fn get_hyperlinks_in_range(
     end_col: u32,
 ) -> Vec<HyperlinkIndicator> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let hyperlinks = state.hyperlinks.lock().unwrap();
+    let hyperlinks = state.hyperlinks.read().unwrap();
 
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
@@ -537,7 +577,7 @@ pub fn has_hyperlink(
     col: u32,
 ) -> bool {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let hyperlinks = state.hyperlinks.lock().unwrap();
+    let hyperlinks = state.hyperlinks.read().unwrap();
 
     hyperlinks
         .get(&active_sheet)
@@ -549,6 +589,7 @@ pub fn has_hyperlink(
 #[tauri::command]
 pub fn clear_hyperlinks_in_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -559,7 +600,10 @@ pub fn clear_hyperlinks_in_range(
     // so a refusal would be an indistinguishable 0 — a silent no-op is worse
     // than no gate. Clearing hyperlinks still goes through the per-cell write
     // gates; the allowInsertHyperlinks flag is enforced on add/update/remove.
-    let mut hyperlinks = state.hyperlinks.lock().unwrap();
+    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
+    // path, so changing one changes what a save would write.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut hyperlinks = state.hyperlinks.write(&effect).unwrap();
 
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
@@ -590,6 +634,7 @@ pub fn clear_hyperlinks_in_range(
 #[tauri::command]
 pub fn move_hyperlink(
     state: State<AppState>,
+    file_state: State<FileState>,
     from_row: u32,
     from_col: u32,
     to_row: u32,
@@ -602,7 +647,17 @@ pub fn move_hyperlink(
     ) {
         return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
     }
-    let mut hyperlinks = state.hyperlinks.lock().unwrap();
+    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
+    // path, so changing one changes what a save would write.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "are there any hyperlinks on this sheet?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.hyperlinks.read().unwrap().contains_key(&active_sheet) {
+        return HyperlinkResult::err("No hyperlinks on this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut hyperlinks = state.hyperlinks.write(&effect).unwrap();
 
     let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {
         Some(h) => h,

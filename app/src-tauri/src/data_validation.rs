@@ -4,6 +4,8 @@
 //! TextLength, Custom), operators, error alerts, and input prompts.
 
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use engine::{CellValue, Grid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -576,6 +578,7 @@ fn resolve_validation_sheet(state: &AppState, sheet_index: Option<usize>) -> Res
 #[tauri::command]
 pub fn set_data_validation(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -589,7 +592,10 @@ pub fn set_data_validation(
             return DataValidationResult { success: false, validation: None, error: Some(e) }
         }
     };
-    let mut validations = state.data_validations.lock().unwrap();
+    // Validation rules are persisted (`workbook.data_validations`) and written
+    // only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut validations = state.data_validations.write(&effect).unwrap();
 
     let sheet_validations = validations.entry(target_sheet).or_insert_with(Vec::new);
 
@@ -638,6 +644,7 @@ pub fn set_data_validation(
 #[tauri::command]
 pub fn clear_data_validation(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -650,7 +657,10 @@ pub fn clear_data_validation(
             return DataValidationResult { success: false, validation: None, error: Some(e) }
         }
     };
-    let mut validations = state.data_validations.lock().unwrap();
+    // Validation rules are persisted (`workbook.data_validations`) and written
+    // only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut validations = state.data_validations.write(&effect).unwrap();
 
     let previous = if let Some(sheet_validations) = validations.get_mut(&target_sheet) {
         let previous = sheet_validations.clone();
@@ -695,7 +705,7 @@ pub fn get_data_validation(
     sheet_index: Option<usize>,
 ) -> Option<DataValidation> {
     let target_sheet = resolve_validation_sheet(&state, sheet_index).ok()?;
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&target_sheet) {
         if let Some(validation) = get_validation_for_cell(sheet_validations, row, col) {
@@ -713,7 +723,7 @@ pub fn get_all_data_validations(
     sheet_index: Option<usize>,
 ) -> Result<Vec<ValidationRange>, String> {
     let target_sheet = resolve_validation_sheet(&state, sheet_index)?;
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     Ok(validations.get(&target_sheet).cloned().unwrap_or_default())
 }
@@ -730,7 +740,7 @@ pub fn validate_cell(
     // four-second formula would read as a frozen keyboard.
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
@@ -794,7 +804,7 @@ pub fn get_validation_prompt(
     col: u32,
 ) -> Option<DataValidationPrompt> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
         if let Some(validation) = get_validation_for_cell(sheet_validations, row, col) {
@@ -815,7 +825,7 @@ pub fn get_invalid_cells(
 ) -> InvalidCellsResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
@@ -871,7 +881,7 @@ pub fn get_validation_list_values(
     col: u32,
 ) -> Option<Vec<String>> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
@@ -900,7 +910,7 @@ pub fn has_in_cell_dropdown(
     col: u32,
 ) -> bool {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
         if let Some(validation) = get_validation_for_cell(sheet_validations, row, col) {
@@ -924,7 +934,7 @@ pub fn validate_pending_value(
 ) -> CellValidationResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let validations = state.data_validations.lock().unwrap();
+    let validations = state.data_validations.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 

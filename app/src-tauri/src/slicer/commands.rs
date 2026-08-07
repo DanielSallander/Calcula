@@ -18,6 +18,7 @@ use crate::log_debug;
 #[tauri::command]
 pub fn create_slicer(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     params: CreateSlicerParams,
 ) -> Result<Slicer, String> {
@@ -64,7 +65,9 @@ pub fn create_slicer(
     );
 
     let result = slicer.clone();
-    slicer_state.slicers.lock().unwrap().insert(id, slicer);
+    // Slicers are persisted (`workbook.slicers`); creating one is a document change.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    slicer_state.slicers.write(&effect).unwrap().insert(id, slicer);
 
     // Record undo for slicer creation (undo = delete the slicer)
     {
@@ -84,12 +87,14 @@ pub fn create_slicer(
 #[tauri::command]
 pub fn delete_slicer(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("SLICER", "delete_slicer id={}", slicer_id);
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
     let removed = slicers
         .remove(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -109,7 +114,7 @@ pub fn delete_slicer(
     }
 
     // Clean up computed properties for this slicer
-    let mut computed_props = slicer_state.computed_properties.lock().unwrap();
+    let mut computed_props = slicer_state.computed_properties.write(&effect).unwrap();
     if let Some(props) = computed_props.remove(&slicer_id) {
         let mut deps = slicer_state.computed_prop_dependencies.lock().unwrap();
         let mut rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
@@ -127,8 +132,10 @@ pub fn delete_slicer(
         }
     }
 
+    // `workbook.slicers` and the pruned object script are both persisted.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // C10: a deleted slicer must not leave its object script mounted/persisted.
-    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &slicer_id.to_string());
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &slicer_id.to_string());
 
     Ok(())
 }
@@ -137,13 +144,15 @@ pub fn delete_slicer(
 #[tauri::command]
 pub fn update_slicer(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
     params: UpdateSlicerParams,
 ) -> Result<Slicer, String> {
     log_debug!("SLICER", "update_slicer id={}", slicer_id);
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -223,6 +232,7 @@ pub fn update_slicer(
 /// Update slicer position and size (called after drag/resize).
 #[tauri::command]
 pub fn update_slicer_position(
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
     x: f64,
@@ -230,7 +240,8 @@ pub fn update_slicer_position(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -246,6 +257,7 @@ pub fn update_slicer_position(
 #[tauri::command]
 pub fn update_slicer_selection(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
@@ -257,7 +269,8 @@ pub fn update_slicer_selection(
         selected_items.as_ref().map(|v| v.len())
     );
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -292,7 +305,7 @@ pub fn get_slicer(
 ) -> Result<Slicer, String> {
     slicer_state
         .slicers
-        .lock()
+        .read()
         .unwrap()
         .get(&slicer_id)
         .cloned()
@@ -303,10 +316,12 @@ pub fn get_slicer(
 #[tauri::command]
 pub fn clear_slicer_filter(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -337,6 +352,7 @@ pub fn clear_slicer_filter(
 pub fn set_slicer_item_selected(
     state: State<AppState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
+    file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
     value: String,
@@ -344,7 +360,7 @@ pub fn set_slicer_item_selected(
 ) -> Result<(), String> {
     // Record undo snapshot before any selection change
     {
-        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicers = slicer_state.slicers.read().unwrap();
         if let Some(slicer) = slicers.get(&slicer_id) {
             #[derive(serde::Serialize)]
             struct SlicerSnapshot {
@@ -361,7 +377,7 @@ pub fn set_slicer_item_selected(
 
     // Get the full item list to know when all are selected
     let all_items: Vec<String> = {
-        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicers = slicer_state.slicers.read().unwrap();
         let slicer = slicers
             .get(&slicer_id)
             .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -377,7 +393,8 @@ pub fn set_slicer_item_selected(
                 current.retain(|v| v != &value);
             }
             drop(slicers);
-            let mut slicers = slicer_state.slicers.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
             let slicer = slicers.get_mut(&slicer_id).unwrap();
             slicer.selected_items = if current.is_empty() { None } else { Some(current) };
             return Ok(());
@@ -401,7 +418,9 @@ pub fn set_slicer_item_selected(
         }
     };
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    // Own commit point: the early-return branch above mints its own token.
+    let toggle_effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut slicers = slicer_state.slicers.write(&toggle_effect).unwrap();
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -434,7 +453,7 @@ pub fn get_all_slicers(
 ) -> Vec<Slicer> {
     slicer_state
         .slicers
-        .lock()
+        .read()
         .unwrap()
         .values()
         .cloned()
@@ -449,7 +468,7 @@ pub fn get_slicers_for_sheet(
 ) -> Vec<Slicer> {
     slicer_state
         .slicers
-        .lock()
+        .read()
         .unwrap()
         .values()
         .filter(|s| s.sheet_index == sheet_index)
@@ -478,7 +497,7 @@ pub fn get_slicer_items(
     let ribbon_candidates: Vec<(String, Vec<String>, bool, std::collections::HashSet<identity::EntityId>)> = {
         use crate::ribbon_filter::ConnectionMode;
         let snapshot: Vec<_> = {
-            let filters = ribbon_filter_state.filters.lock().unwrap();
+            let filters = ribbon_filter_state.filters.read().unwrap();
             filters
                 .values()
                 .filter(|f| f.selected_items.is_some())
@@ -518,7 +537,7 @@ pub fn get_slicer_items(
             .collect()
     };
 
-    let slicers = slicer_state.slicers.lock().unwrap();
+    let slicers = slicer_state.slicers.read().unwrap();
     let slicer = slicers
         .get(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -638,7 +657,7 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
 
 /// Get unique values from a table column.
 fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -695,7 +714,7 @@ fn get_table_available_values(
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -777,7 +796,7 @@ fn get_pivot_field_values(
     use pivot_engine::VALUE_ID_EMPTY;
 
     let pivot_id = source_id;
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)).unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -842,7 +861,7 @@ fn get_pivot_available_values(
     use pivot_engine::VALUE_ID_EMPTY;
 
     let pivot_id = source_id;
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)).unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;

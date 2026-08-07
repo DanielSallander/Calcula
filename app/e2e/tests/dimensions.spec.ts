@@ -18,18 +18,29 @@ import {
 
 test.describe("Column Width & Row Height", () => {
   // These tests mutate global grid geometry (column widths / row heights) via
-  // the Tauri API. The GridHelper computes click coordinates from the DEFAULT
-  // geometry (100px columns, 24px rows), so any leaked resize would make
-  // clickCell() target the wrong cell in every subsequent test file.
-  // Reset the columns/rows touched here back to defaults after each test —
-  // mirrors the cleanup already done in column-row-ops.spec.ts.
+  // the Tauri API. A leaked 300px column would otherwise show up in the goldens
+  // of every subsequent screenshot-bearing spec.
+  //
+  // The restore values are READ FROM THE BACKEND, never hardcoded. They used to
+  // be literal 100.0 / 24.0 labelled "back to defaults" — values that stopped
+  // being the defaults when they moved to 20.0 / 64.29
+  // (persistence::DEFAULT_ROW_HEIGHT_PX / DEFAULT_COLUMN_WIDTH_PX). That stale
+  // pair wrote a real override on top of a clean grid, so goldens recorded after
+  // this spec encoded 100px columns the app never actually defaults to.
   test.afterEach(async ({ sharedPage }) => {
     await sharedPage.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
+      const defaults = await tauri.core.invoke("get_default_dimensions");
       for (const col of [0, 1, 2]) {
-        await tauri.core.invoke("set_column_width", { col, width: 100.0 });
+        await tauri.core.invoke("set_column_width", {
+          col,
+          width: defaults.defaultColumnWidth,
+        });
       }
-      await tauri.core.invoke("set_row_height", { row: 0, height: 24.0 });
+      await tauri.core.invoke("set_row_height", {
+        row: 0,
+        height: defaults.defaultRowHeight,
+      });
       window.dispatchEvent(new CustomEvent("dimensions:refresh"));
       window.dispatchEvent(new Event("grid:refresh"));
     });

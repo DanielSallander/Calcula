@@ -60,7 +60,11 @@ describe("scenario driver backend wiring", () => {
     expect(animSnapshot).toHaveBeenCalledWith(expect.stringMatching(/^anim-scenario-0-/), 0, [[0, 0]]);
 
     await d.applyFrame(5); // lerp 0 -> 10 at u=0.5 = 5
-    expect(animApplyFrame).toHaveBeenCalledWith(0, [{ row: 0, col: 0, value: "5" }]);
+    expect(animApplyFrame).toHaveBeenCalledWith(
+      expect.stringMatching(/^anim-scenario-0-/),
+      0,
+      [{ row: 0, col: 0, value: "5" }],
+    );
 
     expect(d.frameLabel?.(5)).toBe("A → B 50%");
   });

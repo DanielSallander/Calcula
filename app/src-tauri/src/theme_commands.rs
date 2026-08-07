@@ -11,7 +11,7 @@ use tauri::State;
 /// Get the active document theme.
 #[tauri::command]
 pub fn get_document_theme(state: State<AppState>) -> ThemeDefinitionData {
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     ThemeDefinitionData::from_theme(&theme)
 }
 
@@ -19,16 +19,21 @@ pub fn get_document_theme(state: State<AppState>) -> ThemeDefinitionData {
 #[tauri::command]
 pub fn set_document_theme(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     theme: ThemeDefinitionData,
 ) -> Result<SetThemeResult, String> {
     let new_theme = theme.to_theme();
 
+    // The document theme is persisted (`workbook.theme`) and restyles every cell in
+    // the workbook, so changing it is a document mutation.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
     // Update the theme
-    *state.theme.lock().unwrap() = new_theme;
+    *state.theme.write(&effect).unwrap() = new_theme;
 
     // Re-resolve all styles against the new theme
     let styles = state.style_registry.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     let updated_styles: Vec<StyleEntry> = styles
         .all_styles()
         .iter()
@@ -57,7 +62,7 @@ pub fn list_builtin_themes() -> Vec<ThemeDefinitionData> {
 /// Returns 10 base colors + 5 tint rows = 60 total entries.
 #[tauri::command]
 pub fn get_theme_color_palette(state: State<AppState>) -> Vec<ThemeColorInfo> {
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     let mut palette = Vec::with_capacity(60);
 
     // Row 1: Base colors (10 picker slots)

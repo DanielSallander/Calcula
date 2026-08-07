@@ -324,6 +324,30 @@ pub struct PublishedSheetMetadata {
     pub split_row: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_col: Option<u32>,
+    /// Per-sheet DISPLAY FLAGS, carried so a published report opens in the display
+    /// mode its author designed it for (a formulas-visible review sheet stays that
+    /// way; a zeros-hidden summary does not sprout zeros for the subscriber).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub display_zeros: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_formulas: bool,
+    #[serde(default = "default_view_mode", skip_serializing_if = "is_default_view_mode")]
+    pub view_mode: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub display_headings: bool,
+}
+
+fn default_view_mode() -> String {
+    persistence::DEFAULT_SHEET_VIEW_MODE.to_string()
+}
+fn is_default_view_mode(v: &str) -> bool {
+    v == persistence::DEFAULT_SHEET_VIEW_MODE
+}
+fn is_true(v: &bool) -> bool {
+    *v
+}
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 fn default_zoom() -> f64 {
@@ -359,6 +383,10 @@ impl Default for PublishedSheetMetadata {
             zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
             split_row: None,
             split_col: None,
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: default_view_mode(),
+            display_headings: true,
         }
     }
 }
@@ -383,6 +411,10 @@ impl PublishedSheetMetadata {
             zoom: sheet.zoom,
             split_row: sheet.split_row,
             split_col: sheet.split_col,
+            display_zeros: sheet.display_zeros,
+            show_formulas: sheet.show_formulas,
+            view_mode: sheet.view_mode.clone(),
+            display_headings: sheet.display_headings,
         }
     }
 

@@ -4192,6 +4192,7 @@ pub fn bi_model_calculated_table_dependents(
 #[tauri::command]
 pub async fn bi_model_materialize_calculated_table(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
     connection_id: ConnectionId,
     name: String,
     window: tauri::Window,
@@ -4205,10 +4206,20 @@ pub async fn bi_model_materialize_calculated_table(
             .ok_or("Connection has no engine")?
     };
     let mut guard = engine_arc.lock().await;
-    guard
+    let outcome = guard
         .materialize_calculated_table(&name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    if outcome.is_ok() {
+        // The ONLY member of this command family that skipped `mutate_and_overview`
+        // (the helper that keeps the other ~45 model-editor commands correct), so it
+        // was the family's single dirty-flag hole. Materializing swaps a calculated
+        // table to stored rows, which ride in the .cala, so a save now writes
+        // different bytes. Marked only on success: a failed materialization leaves
+        // the model as it was.
+        let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
+    outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -4708,6 +4719,7 @@ pub async fn bi_model_set_table_refresh(
 #[tauri::command]
 pub async fn bi_model_refresh_table(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
     connection_id: ConnectionId,
     table_name: String,
     window: tauri::Window,
@@ -4727,6 +4739,11 @@ pub async fn bi_model_refresh_table(
     let duration_ms = started.elapsed().as_millis() as u64;
     match outcome {
         Ok(()) => {
+            // A successful refresh replaces the table's cached rows, and Import-mode
+            // caches are persisted (`workbook.bi_connection_caches`), so what a save
+            // writes has changed. Only on the Ok arm: a failed refresh leaves the
+            // previous cache in place and must not dirty.
+            let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
             emit_refresh_completed(
                 &connection_id,
                 vec![RefreshCompletedTable { name: table_name, ok: true, error: None }],

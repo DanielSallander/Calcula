@@ -383,6 +383,11 @@ pub fn pull(
             zoom: metadata.zoom,
             split_row: metadata.split_row,
             split_col: metadata.split_col,
+            // Package sheets carry their author's display flags, same as zoom/split.
+            display_zeros: metadata.display_zeros,
+            show_formulas: metadata.show_formulas,
+            view_mode: metadata.view_mode.clone(),
+            display_headings: metadata.display_headings,
         };
 
         pulled_sheets.push(PulledSheet {

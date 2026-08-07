@@ -11,6 +11,15 @@ use tauri::State;
 
 use crate::log_debug;
 
+// RIBBON FILTERS ARE PERSISTED (`workbook.ribbon_filters`), so every mutator dirties.
+//
+// The census singled this file out for a specific reason: the near-identical
+// `pane_control` family -- same shape, same kind of entity, same save path -- has
+// always marked the document dirty, and this one never did. Two modules that do the
+// same thing disagreeing about the dirty flag is exactly the "unpredictable mix" that
+// destroys trust in the close prompt, because the user cannot tell which control they
+// just touched.
+
 // ============================================================================
 // CRUD COMMANDS
 // ============================================================================
@@ -19,6 +28,7 @@ use crate::log_debug;
 #[tauri::command]
 pub fn create_ribbon_filter(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     bi_state: State<crate::bi::BiState>,
     ribbon_filter_state: State<RibbonFilterState>,
     params: CreateRibbonFilterParams,
@@ -82,7 +92,9 @@ pub fn create_ribbon_filter(
     );
 
     let result = filter.clone();
-    ribbon_filter_state.filters.lock().unwrap().insert(id, filter);
+    // Past the model-connection validation above, which can still refuse.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    ribbon_filter_state.filters.write(&effect).unwrap().insert(id, filter);
 
     // Record undo for ribbon filter creation (undo = delete)
     {
@@ -102,14 +114,18 @@ pub fn create_ribbon_filter(
 #[tauri::command]
 pub fn delete_ribbon_filter(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("RIBBON_FILTER", "delete_ribbon_filter id={}", filter_id);
 
+    // Ribbon filters live in `workbook.ribbon_filters`; deleting one changes what a
+    // save writes. (The sibling pane_control family has always done this.)
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let removed = ribbon_filter_state
         .filters
-        .lock()
+        .write(&effect)
         .unwrap()
         .remove(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
@@ -135,13 +151,15 @@ pub fn delete_ribbon_filter(
 #[tauri::command]
 pub fn update_ribbon_filter(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
     params: UpdateRibbonFilterParams,
 ) -> Result<RibbonFilter, String> {
     log_debug!("RIBBON_FILTER", "update_ribbon_filter id={}", filter_id);
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
@@ -222,6 +240,7 @@ pub fn update_ribbon_filter(
 #[tauri::command]
 pub fn update_ribbon_filter_selection(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
@@ -233,7 +252,8 @@ pub fn update_ribbon_filter_selection(
         selected_items.as_ref().map(|v| v.len())
     );
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
@@ -267,7 +287,7 @@ pub fn get_all_ribbon_filters(
 ) -> Vec<RibbonFilter> {
     ribbon_filter_state
         .filters
-        .lock()
+        .read()
         .unwrap()
         .values()
         .cloned()
@@ -283,7 +303,7 @@ pub fn get_ribbon_filter(
 ) -> Result<RibbonFilter, String> {
     ribbon_filter_state
         .filters
-        .lock()
+        .read()
         .unwrap()
         .get(&filter_id)
         .cloned()
@@ -295,12 +315,14 @@ pub fn get_ribbon_filter(
 #[tauri::command]
 pub fn clear_ribbon_filter(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("RIBBON_FILTER", "clear_ribbon_filter id={}", filter_id);
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
@@ -330,6 +352,7 @@ pub fn clear_ribbon_filter(
 #[tauri::command]
 pub fn set_ribbon_filter_item_selected(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
     value: String,
@@ -343,7 +366,8 @@ pub fn set_ribbon_filter_item_selected(
         selected
     );
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
@@ -385,9 +409,10 @@ pub fn set_ribbon_filter_item_selected(
 /// (mirrors the pivot bi_metadata remap in restore_pulled_pivots).
 pub fn remap_ribbon_filter_connections(
     ribbon_filter_state: &RibbonFilterState,
+    effect: &crate::document_effect::DocumentEffect,
     ds_to_conn: &std::collections::HashMap<String, identity::EntityId>,
 ) {
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
     for filter in filters.values_mut() {
         if let Some(conn_id) = filter
             .data_source_id

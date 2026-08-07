@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -341,6 +343,17 @@ pub struct CommentIndicator {
 #[tauri::command]
 pub fn add_comment(
     state: State<AppState>,
+    file_state: State<FileState>,
+    params: AddCommentParams,
+) -> CommentResult {
+    add_comment_impl(&state, &file_state, params)
+}
+
+/// Command body over plain references, so the dirty-flag contract is unit-testable
+/// without a Tauri `State` (see `document_effect_wave2_tests`).
+pub(crate) fn add_comment_impl(
+    state: &AppState,
+    file_state: &FileState,
     params: AddCommentParams,
 ) -> CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -348,7 +361,7 @@ pub fn add_comment(
 
     // Mutual exclusivity: check if cell has a note
     {
-        let notes = state.notes.lock().unwrap();
+        let notes = state.notes.read().unwrap();
         if let Some(sheet_notes) = notes.get(&active_sheet) {
             if sheet_notes.contains_key(&key) {
                 return CommentResult {
@@ -360,7 +373,10 @@ pub fn add_comment(
         }
     }
 
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     // Check if a comment already exists at this cell
     let sheet_comments = comments.entry(active_sheet).or_insert_with(HashMap::new);
@@ -414,10 +430,25 @@ pub fn add_comment(
 #[tauri::command]
 pub fn update_comment(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: UpdateCommentParams,
 ) -> CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return CommentResult {
+            success: false,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -462,10 +493,35 @@ pub fn update_comment(
 #[tauri::command]
 pub fn delete_comment(
     state: State<AppState>,
+    file_state: State<FileState>,
+    comment_id: String,
+) -> CommentResult {
+    delete_comment_impl(&state, &file_state, comment_id)
+}
+
+/// Command body over plain references, so the refusal contract is unit-testable
+/// without a Tauri `State` (see `document_effect_objects_tests`).
+pub(crate) fn delete_comment_impl(
+    state: &AppState,
+    file_state: &FileState,
     comment_id: String,
 ) -> CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return CommentResult {
+            success: false,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -515,7 +571,7 @@ pub fn get_comment(
     col: u32,
 ) -> Option<Comment> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -530,7 +586,7 @@ pub fn get_comment_by_id(
     comment_id: String,
 ) -> Option<Comment> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -545,7 +601,7 @@ pub fn get_all_comments(
     state: State<AppState>,
 ) -> Vec<Comment> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -559,7 +615,7 @@ pub fn get_comments_for_sheet(
     state: State<AppState>,
     sheet_index: usize,
 ) -> Vec<Comment> {
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&sheet_index)
@@ -573,7 +629,7 @@ pub fn get_comment_indicators(
     state: State<AppState>,
 ) -> Vec<CommentIndicator> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -601,7 +657,7 @@ pub fn get_comment_indicators_in_range(
     end_col: u32,
 ) -> Vec<CommentIndicator> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -627,11 +683,26 @@ pub fn get_comment_indicators_in_range(
 #[tauri::command]
 pub fn resolve_comment(
     state: State<AppState>,
+    file_state: State<FileState>,
     comment_id: String,
     resolved: bool,
 ) -> CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return CommentResult {
+            success: false,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -667,10 +738,26 @@ pub fn resolve_comment(
 #[tauri::command]
 pub fn add_reply(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: AddReplyParams,
 ) -> ReplyResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return ReplyResult {
+            success: false,
+            reply: None,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -726,10 +813,26 @@ pub fn add_reply(
 #[tauri::command]
 pub fn update_reply(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: UpdateReplyParams,
 ) -> ReplyResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return ReplyResult {
+            success: false,
+            reply: None,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -785,11 +888,27 @@ pub fn update_reply(
 #[tauri::command]
 pub fn delete_reply(
     state: State<AppState>,
+    file_state: State<FileState>,
     comment_id: String,
     reply_id: String,
 ) -> ReplyResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return ReplyResult {
+            success: false,
+            reply: None,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -841,12 +960,27 @@ pub fn delete_reply(
 #[tauri::command]
 pub fn move_comment(
     state: State<AppState>,
+    file_state: State<FileState>,
     comment_id: String,
     new_row: u32,
     new_col: u32,
 ) -> CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.comments.read().unwrap().contains_key(&active_sheet) {
+        return CommentResult {
+            success: false,
+            comment: None,
+            error: Some("No comments found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,
@@ -916,7 +1050,7 @@ pub fn get_comment_count(
     state: State<AppState>,
 ) -> usize {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -932,7 +1066,7 @@ pub fn has_comment(
     col: u32,
 ) -> bool {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let comments = state.comments.lock().unwrap();
+    let comments = state.comments.read().unwrap();
 
     comments
         .get(&active_sheet)
@@ -944,9 +1078,13 @@ pub fn has_comment(
 #[tauri::command]
 pub fn clear_all_comments(
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> usize {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     comments
         .get_mut(&active_sheet)
@@ -962,13 +1100,17 @@ pub fn clear_all_comments(
 #[tauri::command]
 pub fn clear_comments_in_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
     end_col: u32,
 ) -> usize {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut comments = state.comments.lock().unwrap();
+    // Comments live in `sheet.comments` and are written only by the save path,
+    // so changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut comments = state.comments.write(&effect).unwrap();
 
     let sheet_comments = match comments.get_mut(&active_sheet) {
         Some(sc) => sc,

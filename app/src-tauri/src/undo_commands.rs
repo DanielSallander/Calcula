@@ -258,6 +258,13 @@ fn apply_changes(
     let mut merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
+    // Undo/redo rewrites persisted state, so it dirties -- deliberately even when the
+    // restore lands back on the last-saved content. Tracking true equality with disk
+    // would need a whole-workbook content hash at every step; a false-positive prompt
+    // is cheap, a false negative loses data. (bi_model_undo/redo already work this way.)
+    // Built up-front so the restore adapters below can reach `Persisted::write`.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+
     let description = transaction.description.clone();
     let mut updated_cells = Vec::new();
     let mut merge_changed = false;
@@ -475,7 +482,7 @@ fn apply_changes(
                     Some(spec) => {
                         (spec.restore)(
                             state, pivot_state, slicer_state, ribbon_filter_state,
-                            pane_control_state, kind, data, &mut inverse_transaction,
+                            pane_control_state, &effect, kind, data, &mut inverse_transaction,
                         );
                         set_restore_change_flag(
                             spec.change_class,
@@ -490,8 +497,7 @@ fn apply_changes(
         }
     }
 
-    // Mark workbook as dirty
-    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    // (dirty flag already set by `effect` at the top of the restore pass)
 
     // Drop all grid/style locks BEFORE processing deferred restores
     // (pivot/slicer/ribbon_filter restores need to acquire grid/state locks)
@@ -506,7 +512,7 @@ fn apply_changes(
 
     // Keep subscriber overrides in step with the restored cells (no-op when
     // the active sheet isn't subscribed).
-    crate::calp_commands::record_subscription_override_edits(state, active_sheet, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(state, &effect, active_sheet, &override_edits);
 
     // Process deferred pivot/slicer/ribbon_filter restores (now safe to acquire locks)
     for (kind, data) in deferred_restores {
@@ -514,7 +520,7 @@ fn apply_changes(
             Some(spec) => {
                 (spec.restore)(
                     state, pivot_state, slicer_state, ribbon_filter_state,
-                    pane_control_state, &kind, &data, &mut inverse_transaction,
+                    pane_control_state, &effect, &kind, &data, &mut inverse_transaction,
                 );
                 set_restore_change_flag(
                     spec.change_class,
@@ -638,12 +644,17 @@ enum CustomRestoreKind {
 /// each adapter forwards to its concrete `apply_*_restore` using only what it
 /// uses (the rest are ignored). `kind` is passed through for handlers that key
 /// off it (default-dimension, object-swap).
+// The restore adapters carry a `&DocumentEffect` for the same reason every other
+// mutation path does: an undo/redo restore rewrites persisted stores, so the leaves
+// need the token to reach `Persisted::write`. `apply_changes` builds it once (see
+// `DocumentEffect::mutates` there) and hands the same decision to every adapter.
 type RestoreFn = fn(
     &AppState,
     &PivotState,
     &SlicerState,
     &RibbonFilterState,
     &PaneControlState,
+    &crate::document_effect::DocumentEffect,
     &str,
     &[u8],
     &mut Transaction,
@@ -657,29 +668,29 @@ struct RestoreSpec {
 }
 
 // --- Adapters: forward the uniform signature to each concrete restore fn. ----
-fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_comment_restore(s, d, inv); }
-fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_note_restore(s, d, inv); }
-fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_hyperlink_restore(s, d, inv); }
-fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_default_dimension_restore(s, k, d, inv); }
-fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_definition_restore(s, p, rf, pc, d, inv); }
-fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_create_restore(s, p, d, inv); }
-fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_delete_restore(s, p, rf, pc, d, inv); }
-fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_restore(sl, d, inv); }
-fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_create_restore(sl, d, inv); }
-fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_delete_restore(sl, d, inv); }
-fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_restore(rf, d, inv); }
-fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_create_restore(rf, d, inv); }
-fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_delete_restore(rf, d, inv); }
-fn r_pane_control(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_restore(pc, d, inv); }
-fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_create_restore(pc, d, inv); }
-fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_delete_restore(pc, d, inv); }
-fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
-fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
-fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_merge_regions_restore(s, d, inv); }
-fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_structural_restore(s, d, inv); }
-fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, d, inv); }
-fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_calp_reset_restore(s, d, inv); }
-fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_user_hidden_restore(s, d, inv); }
+fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_comment_restore(s, e, d, inv); }
+fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_note_restore(s, e, d, inv); }
+fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_hyperlink_restore(s, e, d, inv); }
+fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction) { apply_default_dimension_restore(s, k, d, inv); }
+fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_definition_restore(s, p, rf, pc, e, d, inv); }
+fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_create_restore(s, p, d, inv, e); }
+fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_delete_restore(s, p, rf, pc, d, inv, e); }
+fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_restore(sl, e, d, inv); }
+fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_create_restore(sl, e, d, inv); }
+fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_delete_restore(sl, e, d, inv); }
+fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_restore(rf, e, d, inv); }
+fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_create_restore(rf, e, d, inv); }
+fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_delete_restore(rf, e, d, inv); }
+fn r_pane_control(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_restore(pc, d, inv); }
+fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_create_restore(pc, d, inv); }
+fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_delete_restore(pc, d, inv); }
+fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, e, k, d, inv); }
+fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
+fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_merge_regions_restore(s, d, inv); }
+fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_structural_restore(s, d, inv); }
+fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, e, d, inv); }
+fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_calp_reset_restore(s, e, d, inv); }
+fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction) { apply_user_hidden_restore(s, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -1100,6 +1111,7 @@ fn apply_sheet_structural_restore(
 /// so it works offline without re-running the design query.
 fn apply_report_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1176,7 +1188,7 @@ fn apply_report_restore(
     for r in &snapshot.definitions {
         crate::report::reregister_report_region(state, r);
     }
-    crate::report::sync_reports_to_extension_data(state);
+    crate::report::sync_reports_to_extension_data(state, effect);
 
     inverse_transaction.add_change(CellChange::CustomRestore {
         kind: "report_restore".to_string(),
@@ -1199,6 +1211,7 @@ fn apply_report_restore(
 /// needed; dependency maps are rebuilt when the active sheet was swapped.
 fn apply_calp_reset_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1288,7 +1301,7 @@ fn apply_calp_reset_restore(
 
     // --- Override layer: swap the affected sheets' entries ---
     let inverse_overrides = {
-        let mut layer = state.override_layer.lock().unwrap();
+        let mut layer = state.override_layer.write(effect).unwrap();
         let affected: std::collections::HashSet<_> =
             snapshot.override_sheet_ids.iter().cloned().collect();
         let current: Vec<calp::CellOverride> = layer
@@ -1320,6 +1333,7 @@ fn apply_calp_reset_restore(
 /// Restore a comment snapshot for undo/redo.
 fn apply_comment_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1341,7 +1355,7 @@ fn apply_comment_restore(
         }
     };
 
-    let mut comments = state.comments.lock().unwrap();
+    let mut comments = state.comments.write(effect).unwrap();
     let sheet_comments = comments.entry(snapshot.sheet_index).or_default();
     let key = (snapshot.row, snapshot.col);
 
@@ -1368,6 +1382,7 @@ fn apply_comment_restore(
 /// Restore a note snapshot for undo/redo.
 fn apply_note_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1389,7 +1404,7 @@ fn apply_note_restore(
         }
     };
 
-    let mut notes = state.notes.lock().unwrap();
+    let mut notes = state.notes.write(effect).unwrap();
     let sheet_notes = notes.entry(snapshot.sheet_index).or_default();
     let key = (snapshot.row, snapshot.col);
 
@@ -1416,6 +1431,7 @@ fn apply_note_restore(
 /// Restore a hyperlink snapshot for undo/redo.
 fn apply_hyperlink_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1437,7 +1453,7 @@ fn apply_hyperlink_restore(
         }
     };
 
-    let mut hyperlinks = state.hyperlinks.lock().unwrap();
+    let mut hyperlinks = state.hyperlinks.write(effect).unwrap();
     let sheet_links = hyperlinks.entry(snapshot.sheet_index).or_default();
     let key = (snapshot.row, snapshot.col);
 
@@ -1655,6 +1671,7 @@ fn apply_pivot_definition_restore(
     pivot_state: &PivotState,
     ribbon_filter_state: &RibbonFilterState,
     pane_control_state: &PaneControlState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1668,7 +1685,7 @@ fn apply_pivot_definition_restore(
 
     let pivot_id = snapshot.pivot_id;
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
     if let Some((definition, cache)) = pivot_tables.get_mut(&pivot_id) {
         // Save current definition for inverse transaction
         let dest_sheet_idx_current = resolve_dest_sheet_index(state, definition);
@@ -1730,6 +1747,7 @@ fn apply_pivot_create_restore(
     pivot_state: &PivotState,
     data: &[u8],
     inverse_transaction: &mut Transaction,
+    effect: &crate::document_effect::DocumentEffect,
 ) {
     let snapshot: PivotFullSnapshot = match serde_json::from_slice(data) {
         Ok(s) => s,
@@ -1742,7 +1760,7 @@ fn apply_pivot_create_restore(
     let pivot_id = snapshot.pivot_id;
 
     // Save current state for redo (redo = re-create the pivot)
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
     if let Some((definition, cache)) = pivot_tables.get(&pivot_id) {
         let redo_snapshot = PivotFullSnapshot {
             pivot_id,
@@ -1806,6 +1824,7 @@ fn apply_pivot_delete_restore(
     pane_control_state: &PaneControlState,
     data: &[u8],
     inverse_transaction: &mut Transaction,
+    effect: &crate::document_effect::DocumentEffect,
 ) {
     let snapshot: PivotFullSnapshot = match serde_json::from_slice(data) {
         Ok(s) => s,
@@ -1839,7 +1858,7 @@ fn apply_pivot_delete_restore(
     let dest_sheet_idx = resolve_dest_sheet_index(state, &definition);
 
     // Restore pivot
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
     pivot_tables.insert(pivot_id, (definition, cache));
     drop(pivot_tables);
 
@@ -1867,6 +1886,7 @@ struct SlicerCreateSnapshot {
 /// Restore a slicer's previous state (properties/selection).
 fn apply_slicer_restore(
     slicer_state: &SlicerState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1878,7 +1898,7 @@ fn apply_slicer_restore(
         }
     };
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let mut slicers = slicer_state.slicers.write(effect).unwrap();
     if let Some(slicer) = slicers.get_mut(&snapshot.slicer_id) {
         // Save current state for inverse
         let inverse_snapshot = SlicerSnapshot {
@@ -1899,6 +1919,7 @@ fn apply_slicer_restore(
 /// Undo slicer creation: remove the slicer.
 fn apply_slicer_create_restore(
     slicer_state: &SlicerState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1910,7 +1931,7 @@ fn apply_slicer_create_restore(
         }
     };
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let mut slicers = slicer_state.slicers.write(effect).unwrap();
     if let Some(slicer) = slicers.remove(&snapshot.slicer_id) {
         // Save for redo (redo = re-create)
         let redo_snapshot = SlicerSnapshot {
@@ -1928,6 +1949,7 @@ fn apply_slicer_create_restore(
 /// Undo slicer deletion: re-create the slicer from snapshot.
 fn apply_slicer_delete_restore(
     slicer_state: &SlicerState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1950,7 +1972,7 @@ fn apply_slicer_delete_restore(
     });
 
     // Restore slicer
-    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let mut slicers = slicer_state.slicers.write(effect).unwrap();
     slicers.insert(snapshot.slicer_id, snapshot.previous);
 }
 
@@ -1974,6 +1996,7 @@ struct RibbonFilterCreateSnapshot {
 /// Restore a ribbon filter's previous state (properties/selection).
 fn apply_ribbon_filter_restore(
     ribbon_filter_state: &RibbonFilterState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1985,7 +2008,7 @@ fn apply_ribbon_filter_restore(
         }
     };
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
     if let Some(filter) = filters.get_mut(&snapshot.filter_id) {
         // Save current state for inverse
         let inverse_snapshot = RibbonFilterSnapshot {
@@ -2006,6 +2029,7 @@ fn apply_ribbon_filter_restore(
 /// Undo ribbon filter creation: remove the filter.
 fn apply_ribbon_filter_create_restore(
     ribbon_filter_state: &RibbonFilterState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -2017,7 +2041,7 @@ fn apply_ribbon_filter_create_restore(
         }
     };
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
     if let Some(filter) = filters.remove(&snapshot.filter_id) {
         let redo_snapshot = RibbonFilterSnapshot {
             filter_id: snapshot.filter_id,
@@ -2034,6 +2058,7 @@ fn apply_ribbon_filter_create_restore(
 /// Undo ribbon filter deletion: re-create the filter from snapshot.
 fn apply_ribbon_filter_delete_restore(
     ribbon_filter_state: &RibbonFilterState,
+    effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -2054,7 +2079,7 @@ fn apply_ribbon_filter_delete_restore(
         data: redo_data,
     });
 
-    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
     filters.insert(snapshot.filter_id, snapshot.previous);
 }
 
@@ -2589,6 +2614,7 @@ fn push_obj_inverse<T: serde::Serialize>(
 
 fn apply_object_swap_restore(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     kind: &str,
     data: &[u8],
     inverse_transaction: &mut Transaction,
@@ -2599,7 +2625,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_chart snapshot: {}", e); return; }
             };
-            let mut charts = state.charts.lock().unwrap();
+            let mut charts = state.charts.write(effect).unwrap();
             let current = charts
                 .iter()
                 .position(|c| c.id == snap.chart_id)
@@ -2617,7 +2643,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_sparklines snapshot: {}", e); return; }
             };
-            let mut sparklines = state.sparklines.lock().unwrap();
+            let mut sparklines = state.sparklines.write(effect).unwrap();
             let current = sparklines
                 .iter()
                 .position(|s| s.sheet_index == snap.sheet_index)
@@ -2638,8 +2664,8 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_table snapshot: {}", e); return; }
             };
-            let mut tables = state.tables.lock().unwrap();
-            let mut table_names = state.table_names.lock().unwrap();
+            let mut tables = state.tables.write(effect).unwrap();
+            let mut table_names = state.table_names.write(effect).unwrap();
             let sheet_tables = tables.entry(snap.sheet_index).or_default();
             let current = sheet_tables.remove(&snap.table_id);
             if let Some(ref t) = current {
@@ -2675,7 +2701,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_validation snapshot: {}", e); return; }
             };
-            let mut validations = state.data_validations.lock().unwrap();
+            let mut validations = state.data_validations.write(effect).unwrap();
             let current = validations.remove(&snap.sheet_index).unwrap_or_default();
             push_obj_inverse(inverse_transaction, kind, &ValidationObjSnapshot {
                 sheet_index: snap.sheet_index,
@@ -2690,7 +2716,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_cell_types snapshot: {}", e); return; }
             };
-            let mut cell_types = state.cell_types.lock().unwrap();
+            let mut cell_types = state.cell_types.write(effect).unwrap();
             let current = crate::cell_types::entries_for_sheet(&cell_types, snap.sheet_index);
             push_obj_inverse(inverse_transaction, kind, &CellTypesObjSnapshot {
                 sheet_index: snap.sheet_index,
@@ -2707,7 +2733,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_cell_behaviors snapshot: {}", e); return; }
             };
-            let mut behaviors = state.cell_behaviors.lock().unwrap();
+            let mut behaviors = state.cell_behaviors.write(effect).unwrap();
             let current = crate::cell_behaviors::all_bindings(&behaviors);
             push_obj_inverse(inverse_transaction, kind, &CellBehaviorsObjSnapshot {
                 previous: current,
@@ -2758,7 +2784,7 @@ fn apply_object_swap_restore(
                 Err(e) => { eprintln!("[undo] bad obj_controls snapshot: {}", e); return; }
             };
             let current_controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)> = {
-                let mut store = state.controls.lock().unwrap();
+                let mut store = state.controls.write(effect).unwrap();
                 let current = store.iter().map(|(k, v)| (*k, v.clone())).collect();
                 store.clear();
                 for (k, v) in snap.controls {
@@ -2767,7 +2793,7 @@ fn apply_object_swap_restore(
                 current
             };
             let current_ids = {
-                let mut scripts = state.object_scripts.lock().unwrap();
+                let mut scripts = state.object_scripts.write(effect).unwrap();
                 let mut prev = Vec::new();
                 for (script_id, restore_to) in snap.script_instance_ids {
                     if let Some(script) = scripts.iter_mut().find(|s| s.id == script_id) {
@@ -2865,7 +2891,7 @@ fn apply_object_swap_restore(
                 Err(e) => { eprintln!("[undo] bad obj_range_strings snapshot: {}", e); return; }
             };
             let idx = snap.sheet_index;
-            let cur_print = state.page_setups.lock().ok().and_then(|mut v| {
+            let cur_print = state.page_setups.write(effect).ok().and_then(|mut v| {
                 let ps = v.get_mut(idx)?;
                 let prev = ps.print_area.clone();
                 ps.print_area = snap.print_area.clone().unwrap_or_default();
@@ -2888,7 +2914,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_named_ranges snapshot: {}", e); return; }
             };
-            let mut store = state.named_ranges.lock().unwrap();
+            let mut store = state.named_ranges.write(effect).unwrap();
             let current: Vec<(String, crate::named_ranges::NamedRange)> =
                 store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             store.clear();
@@ -2905,17 +2931,17 @@ fn apply_object_swap_restore(
             let idx = snap.sheet_index;
             // Swap each store, capturing the CURRENT value as the inverse so
             // redo re-applies the shift.
-            let cur_outline = state.outlines.lock().ok().and_then(|mut m| {
+            let cur_outline = state.outlines.write(effect).ok().and_then(|mut m| {
                 let prev = m.remove(&idx);
                 if let Some(v) = snap.outline.clone() { m.insert(idx, v); }
                 prev
             });
-            let cur_scenarios = state.scenarios.lock().ok().and_then(|mut m| {
+            let cur_scenarios = state.scenarios.write(effect).ok().and_then(|mut m| {
                 let prev = m.remove(&idx);
                 if let Some(v) = snap.scenarios.clone() { m.insert(idx, v); }
                 prev
             });
-            let cur_computed = state.computed_properties.lock().ok().and_then(|mut m| {
+            let cur_computed = state.computed_properties.write(effect).ok().and_then(|mut m| {
                 let prev = m.remove(&idx);
                 if let Some(v) = snap.computed.clone() { m.insert(idx, v); }
                 prev
@@ -2955,7 +2981,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_conditional_formats snapshot: {}", e); return; }
             };
-            let mut store = state.conditional_formats.lock().unwrap();
+            let mut store = state.conditional_formats.write(effect).unwrap();
             let current = store.remove(&snap.sheet_index).unwrap_or_default();
             push_obj_inverse(inverse_transaction, kind, &ConditionalFormatsObjSnapshot {
                 sheet_index: snap.sheet_index,
@@ -2964,15 +2990,15 @@ fn apply_object_swap_restore(
             store.insert(snap.sheet_index, snap.previous);
         }
         "obj_comments" => {
-            let mut store = state.comments.lock().unwrap();
+            let mut store = state.comments.write(effect).unwrap();
             apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
         }
         "obj_notes" => {
-            let mut store = state.notes.lock().unwrap();
+            let mut store = state.notes.write(effect).unwrap();
             apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
         }
         "obj_hyperlinks" => {
-            let mut store = state.hyperlinks.lock().unwrap();
+            let mut store = state.hyperlinks.write(effect).unwrap();
             apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
         }
         "obj_object_scripts" => {
@@ -2980,7 +3006,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_object_scripts snapshot: {}", e); return; }
             };
-            let mut scripts = state.object_scripts.lock().unwrap();
+            let mut scripts = state.object_scripts.write(effect).unwrap();
             let current = scripts.clone();
             push_obj_inverse(inverse_transaction, kind, &ObjectScriptsObjSnapshot {
                 previous: current,
@@ -2992,7 +3018,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_writeback_regions snapshot: {}", e); return; }
             };
-            let mut regions = state.writeback_draft_regions.lock().unwrap();
+            let mut regions = state.writeback_draft_regions.write(effect).unwrap();
 
             // What this apply is about to change, computed BEFORE mutating, so
             // the inverse is an exact mirror: whatever we insert, redo removes;
@@ -3042,7 +3068,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_named_range snapshot: {}", e); return; }
             };
-            let mut named_ranges = state.named_ranges.lock().unwrap();
+            let mut named_ranges = state.named_ranges.write(effect).unwrap();
             let current = named_ranges.remove(&snap.key);
             push_obj_inverse(inverse_transaction, kind, &NamedRangeObjSnapshot {
                 key: snap.key.clone(),
@@ -3057,7 +3083,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_freeze snapshot: {}", e); return; }
             };
-            let mut freeze_configs = state.freeze_configs.lock().unwrap();
+            let mut freeze_configs = state.freeze_configs.write(effect).unwrap();
             while freeze_configs.len() <= snap.sheet_index {
                 freeze_configs.push(crate::sheets::FreezeConfig::default());
             }
@@ -3073,7 +3099,7 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_extension_data snapshot: {}", e); return; }
             };
-            let mut ext_data = state.extension_data.lock().unwrap();
+            let mut ext_data = state.extension_data.write(effect).unwrap();
             let current = ext_data.remove(&snap.extension_id);
             push_obj_inverse(inverse_transaction, kind, &ExtensionDataObjSnapshot {
                 extension_id: snap.extension_id.clone(),

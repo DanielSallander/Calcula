@@ -45,15 +45,18 @@ export function animSnapshot(
 
 /**
  * Apply one frame's transient writes and recalculate dependents. Does NOT touch
- * the undo stack and does NOT mark the document dirty. The returned cells should
+ * the undo stack and does NOT mark the document dirty. `token` must be the token
+ * passed to {@link animSnapshot}: the backend refuses a frame whose restore buffer
+ * is not on file, so the no-dirty exemption is proven rather than assumed. The returned cells should
  * be pushed to the repaint path (emit CELLS_UPDATED) so charts + grid update.
  */
 export function animApplyFrame(
+  token: string,
   sheetIndex: number,
   writes: TransientCellWrite[],
 ): Promise<AnimationFrameResult> {
   return animationBackend.invoke<AnimationFrameResult>("anim_apply_frame", {
-    params: { sheetIndex, writes },
+    params: { token, sheetIndex, writes },
   });
 }
 

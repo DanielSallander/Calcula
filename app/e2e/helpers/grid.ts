@@ -34,7 +34,7 @@ const FALLBACK_CELL_WIDTH = 64.29;
 const FALLBACK_CELL_HEIGHT = 20;
 
 /** Live grid geometry, in LOGICAL (pre-zoom) pixels plus the zoom factor. */
-interface GridGeometry {
+export interface GridGeometry {
   rowHeaderWidth: number;
   colHeaderHeight: number;
   defaultCellWidth: number;
@@ -70,12 +70,119 @@ function colLetterToIndex(letters: string): number {
 /**
  * Parse a cell reference like "A1", "B2", "AA10" into { row, col } (0-based).
  */
-function parseCellRef(ref: string): { row: number; col: number } {
+export function parseCellRef(ref: string): { row: number; col: number } {
   const match = ref.match(/^([A-Za-z]+)(\d+)$/);
   if (!match) throw new Error(`Invalid cell reference: ${ref}`);
   return {
     col: colLetterToIndex(match[1]),
     row: Number(match[2]) - 1, // 1-based in UI, 0-based internally
+  };
+}
+
+/**
+ * Read the grid's LIVE geometry out of the running app, standalone.
+ *
+ * Same source of truth as `GridHelper.readGeometry` (which delegates here) so
+ * that a caller without a GridHelper — the screenshot helpers, notably — can
+ * translate a cell reference into pixels without a second, drifting copy of
+ * this logic.
+ */
+export async function readGridGeometry(page: Page): Promise<GridGeometry> {
+  const geo = await page.evaluate(() => {
+    const gs = (window as any).__CALCULA_GRID_STATE__;
+    if (!gs) return null;
+    const cfg = gs.config ?? {};
+    const dims = gs.dimensions ?? {};
+    const toRecord = (m: unknown): Record<number, number> => {
+      const out: Record<number, number> = {};
+      if (m instanceof Map) {
+        for (const [k, v] of m.entries()) out[Number(k)] = Number(v);
+      } else if (m && typeof m === "object") {
+        for (const [k, v] of Object.entries(m as Record<string, number>)) {
+          out[Number(k)] = Number(v);
+        }
+      }
+      return out;
+    };
+    const toArray = (s: unknown): number[] => {
+      if (s instanceof Set) return Array.from(s as Set<number>);
+      if (Array.isArray(s)) return s as number[];
+      return [];
+    };
+    return {
+      rowHeaderWidth: cfg.rowHeaderWidth,
+      colHeaderHeight: cfg.colHeaderHeight,
+      defaultCellWidth: cfg.defaultCellWidth,
+      defaultCellHeight: cfg.defaultCellHeight,
+      columnWidths: toRecord(dims.columnWidths),
+      rowHeights: toRecord(dims.rowHeights),
+      hiddenCols: toArray(dims.hiddenCols),
+      hiddenRows: toArray(dims.hiddenRows),
+      zoom: gs.zoom,
+      scrollX: gs.viewport?.scrollX ?? 0,
+      scrollY: gs.viewport?.scrollY ?? 0,
+    };
+  });
+
+  return {
+    rowHeaderWidth: geo?.rowHeaderWidth ?? FALLBACK_ROW_HEADER_WIDTH,
+    colHeaderHeight: geo?.colHeaderHeight ?? FALLBACK_COL_HEADER_HEIGHT,
+    defaultCellWidth: geo?.defaultCellWidth ?? FALLBACK_CELL_WIDTH,
+    defaultCellHeight: geo?.defaultCellHeight ?? FALLBACK_CELL_HEIGHT,
+    columnWidths: geo?.columnWidths ?? {},
+    rowHeights: geo?.rowHeights ?? {},
+    hiddenCols: geo?.hiddenCols ?? [],
+    hiddenRows: geo?.hiddenRows ?? [],
+    zoom: geo?.zoom ?? 1,
+    scrollX: geo?.scrollX ?? 0,
+    scrollY: geo?.scrollY ?? 0,
+  };
+}
+
+/**
+ * The rectangle a cell RANGE occupies in CANVAS CSS pixels, scroll-aware.
+ *
+ * `cellCenterFrom` answers "where do I click"; this answers "which pixels does
+ * this range own", which is what a region screenshot needs. Same accounting:
+ * per-column/row overrides, hidden lines (size 0), scroll offset, zoom.
+ */
+export function cellRangeRectFrom(
+  fromRef: string,
+  toRef: string,
+  geo: GridGeometry
+): { x: number; y: number; width: number; height: number } {
+  const a = parseCellRef(fromRef);
+  const b = parseCellRef(toRef);
+  const startRow = Math.min(a.row, b.row);
+  const endRow = Math.max(a.row, b.row);
+  const startCol = Math.min(a.col, b.col);
+  const endCol = Math.max(a.col, b.col);
+
+  const hiddenCols = new Set(geo.hiddenCols);
+  const hiddenRows = new Set(geo.hiddenRows);
+  const colWidth = (c: number): number =>
+    hiddenCols.has(c) ? 0 : geo.columnWidths[c] ?? geo.defaultCellWidth;
+  const rowHeight = (r: number): number =>
+    hiddenRows.has(r) ? 0 : geo.rowHeights[r] ?? geo.defaultCellHeight;
+
+  let xOffset = 0;
+  for (let c = 0; c < startCol; c++) xOffset += colWidth(c);
+  let yOffset = 0;
+  for (let r = 0; r < startRow; r++) yOffset += rowHeight(r);
+
+  let width = 0;
+  for (let c = startCol; c <= endCol; c++) width += colWidth(c);
+  let height = 0;
+  for (let r = startRow; r <= endRow; r++) height += rowHeight(r);
+
+  const logicalX = geo.rowHeaderWidth + xOffset - geo.scrollX;
+  const logicalY = geo.colHeaderHeight + yOffset - geo.scrollY;
+
+  return {
+    x: logicalX * geo.zoom,
+    y: logicalY * geo.zoom,
+    width: width * geo.zoom,
+    height: height * geo.zoom,
   };
 }
 
@@ -118,55 +225,7 @@ export class GridHelper {
    * exactly like "no custom column widths").
    */
   async readGeometry(): Promise<GridGeometry> {
-    const geo = await this.page.evaluate(() => {
-      const gs = (window as any).__CALCULA_GRID_STATE__;
-      if (!gs) return null;
-      const cfg = gs.config ?? {};
-      const dims = gs.dimensions ?? {};
-      const toRecord = (m: unknown): Record<number, number> => {
-        const out: Record<number, number> = {};
-        if (m instanceof Map) {
-          for (const [k, v] of m.entries()) out[Number(k)] = Number(v);
-        } else if (m && typeof m === "object") {
-          for (const [k, v] of Object.entries(m as Record<string, number>)) {
-            out[Number(k)] = Number(v);
-          }
-        }
-        return out;
-      };
-      const toArray = (s: unknown): number[] => {
-        if (s instanceof Set) return Array.from(s as Set<number>);
-        if (Array.isArray(s)) return s as number[];
-        return [];
-      };
-      return {
-        rowHeaderWidth: cfg.rowHeaderWidth,
-        colHeaderHeight: cfg.colHeaderHeight,
-        defaultCellWidth: cfg.defaultCellWidth,
-        defaultCellHeight: cfg.defaultCellHeight,
-        columnWidths: toRecord(dims.columnWidths),
-        rowHeights: toRecord(dims.rowHeights),
-        hiddenCols: toArray(dims.hiddenCols),
-        hiddenRows: toArray(dims.hiddenRows),
-        zoom: gs.zoom,
-        scrollX: gs.viewport?.scrollX ?? 0,
-        scrollY: gs.viewport?.scrollY ?? 0,
-      };
-    });
-
-    return {
-      rowHeaderWidth: geo?.rowHeaderWidth ?? FALLBACK_ROW_HEADER_WIDTH,
-      colHeaderHeight: geo?.colHeaderHeight ?? FALLBACK_COL_HEADER_HEIGHT,
-      defaultCellWidth: geo?.defaultCellWidth ?? FALLBACK_CELL_WIDTH,
-      defaultCellHeight: geo?.defaultCellHeight ?? FALLBACK_CELL_HEIGHT,
-      columnWidths: geo?.columnWidths ?? {},
-      rowHeights: geo?.rowHeights ?? {},
-      hiddenCols: geo?.hiddenCols ?? [],
-      hiddenRows: geo?.hiddenRows ?? [],
-      zoom: geo?.zoom ?? 1,
-      scrollX: geo?.scrollX ?? 0,
-      scrollY: geo?.scrollY ?? 0,
-    };
+    return readGridGeometry(this.page);
   }
 
   /**

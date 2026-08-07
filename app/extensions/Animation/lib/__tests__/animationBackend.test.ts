@@ -28,14 +28,16 @@ describe("animationBackend wrappers", () => {
     expect(res).toEqual({ success: true, error: null });
   });
 
-  it("animApplyFrame -> anim_apply_frame with sheetIndex/writes", async () => {
+  it("animApplyFrame -> anim_apply_frame with token/sheetIndex/writes", async () => {
     const invoke = vi.fn().mockResolvedValue({ updatedCells: [], error: null });
     animationBackend.set(invoke);
 
-    await animApplyFrame(0, [{ row: 1, col: 1, value: "42" }]);
+    await animApplyFrame("tok-1", 0, [{ row: 1, col: 1, value: "42" }]);
 
     expect(invoke).toHaveBeenCalledWith("anim_apply_frame", {
-      params: { sheetIndex: 0, writes: [{ row: 1, col: 1, value: "42" }] },
+      // The token is REQUIRED: the backend refuses a frame whose anim_snapshot restore
+      // buffer is not on file, which is what makes the no-dirty exemption provable.
+      params: { token: "tok-1", sheetIndex: 0, writes: [{ row: 1, col: 1, value: "42" }] },
     });
   });
 

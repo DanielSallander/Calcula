@@ -133,7 +133,7 @@ pub fn grant_script_net_origin(
 /// optional NON-SENSITIVE specifier (e.g. a net origin or a SQL prefix); never
 /// the full URL/SQL, which may carry query strings / credentials.
 pub(crate) fn record_capability_call(
-    audit_log: &std::sync::Mutex<calp::audit::AuditLog>,
+    audit_log: &crate::document_effect::Persisted<calp::audit::AuditLog>,
     capability: &str,
     script_id: &str,
     ok: bool,
@@ -163,7 +163,11 @@ pub(crate) fn record_capability_call(
             error.map(|e| format!(" ({})", e)).unwrap_or_default()
         ),
     };
-    match audit_log.lock() {
+    // The entry RECORDS an action; it is not itself one. See `CleanReason::AuditTrail`.
+    let audit_effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::AuditTrail,
+    );
+    match audit_log.write(&audit_effect) {
         Ok(mut audit) => {
             audit.record_with_extra(calp::audit::AuditEvent::CapabilityCall, &desc, "local", &now, extra);
         }

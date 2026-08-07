@@ -176,9 +176,35 @@ test.describe("Workflow: Keyboard-Only Data Entry", () => {
     await grid.typeAndEnter("Bob");
     await grid.typeAndEnter("Charlie");
 
-    // Navigate to B1 via Ctrl+Home then Right
-    await appPage.keyboard.press("Control+Home");
+    // Navigate to B1 via Ctrl+Home then Right.
+    //
+    // WHY THIS IS ASSERTED RATHER THAN ASSUMED. Ctrl+Home has to survive
+    // WebView2's key interception to reach the grid, and intermittently does
+    // not. When it is swallowed the cursor stays at A5 (where the four Enters
+    // left it), ArrowRight lands on B5, and the Score block is written to
+    // B5:B8 instead of B1:B4 — a grid that looks plausible and differs from
+    // the golden by five rows. That coin flip was observed in the wild and is
+    // exactly the kind of nondeterminism a re-record silently bakes in.
+    // Retry the shortcut until the Name Box confirms A1, then fail loudly.
+    let landed = "";
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await grid.spreadsheet.focus();
+      await appPage.keyboard.press("Control+Home");
+      await appPage.waitForTimeout(250);
+      landed = await grid.getNameBoxValue();
+      if (landed.toUpperCase() === "A1") break;
+    }
+    expect(
+      landed.toUpperCase(),
+      "Ctrl+Home never reached the grid, so the data block would be written at " +
+        "the wrong row and the golden would encode a drifted layout"
+    ).toBe("A1");
+
     await grid.pressArrow("ArrowRight");
+    expect(
+      (await grid.getNameBoxValue()).toUpperCase(),
+      "expected the keyboard cursor at B1 before entering the Score column"
+    ).toBe("B1");
 
     await grid.typeAndEnter("Score");
     await grid.typeAndEnter("85");

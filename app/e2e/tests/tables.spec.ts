@@ -5,10 +5,35 @@
  * via Tauri API commands. Uses cells in columns R-T, rows 1-15.
  */
 import { test, expect } from "../fixtures";
-import {
-  takeGridScreenshot,
-  takeCheckpoint,
-} from "../helpers/screenshots";
+import { takeGridRegionScreenshot } from "../helpers/screenshots";
+import type { Page } from "@playwright/test";
+
+/**
+ * Tell the frontend that table definitions changed.
+ *
+ * These tests create tables by invoking the RUST command directly, which is a
+ * backend-only mutation: no TypeScript code hears about it. The Table
+ * extension keeps the drawn table region (drawTableBorder, registered as a grid
+ * overlay) in sync via `refreshCache()`, which it runs on the
+ * TABLE_DEFINITIONS_UPDATED / TABLE_CREATED window events. That is the same
+ * path the backend's own out-of-band "tables:refresh" Tauri event is bridged
+ * onto for MCP-created tables, so it is the documented hook for exactly this
+ * case — not a test-only backdoor.
+ *
+ * Without it the overlay cache stays empty and NO table chrome is ever drawn.
+ * VERIFIED before this was added: `grid-tables-before-create.png` and
+ * `grid-tables-after-create.png` were BYTE-IDENTICAL (sha256
+ * f1e50575...), i.e. the pair asserted that creating a table changes nothing.
+ */
+async function announceTablesChanged(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("app:table-created"));
+    window.dispatchEvent(new Event("app:table-definitions-updated"));
+  });
+  // refreshCache() is an async backend round-trip; the repaint it drives only
+  // lands once it resolves.
+  await page.waitForTimeout(800);
+}
 
 test.describe("Structured Tables", () => {
   test("create a table with headers", async ({ appPage, grid }) => {
@@ -28,7 +53,7 @@ test.describe("Structured Tables", () => {
     await grid.page.waitForTimeout(300);
 
     await grid.navigateTo("R1");
-    await takeGridScreenshot(appPage, "tables-before-create");
+    await takeGridRegionScreenshot(appPage, "tables-before-create", { from: "R1", to: "T4" });
 
     // Create a table via Tauri API
     const result: any = await grid.page.evaluate(async () => {
@@ -50,8 +75,9 @@ test.describe("Structured Tables", () => {
     expect(result.table).toBeDefined();
     expect(result.table.name).toBeTruthy();
 
+    await announceTablesChanged(grid.page);
     await grid.navigateTo("R1");
-    await takeGridScreenshot(appPage, "tables-after-create");
+    await takeGridRegionScreenshot(appPage, "tables-after-create", { from: "R1", to: "T4" });
   });
 
   test("rename a table", async ({ grid }) => {
@@ -144,7 +170,11 @@ test.describe("Structured Tables", () => {
     expect(totalsResult.success).toBe(true);
 
     await grid.navigateTo("R7");
-    await takeGridScreenshot(appPage, "tables-totals-row-sum");
+    // R7:S11 = the TotalsTest table (rows 6-9) plus the totals row below it.
+    await takeGridRegionScreenshot(appPage, "tables-totals-row-sum", {
+      from: "R7",
+      to: "S11",
+    });
   });
 
   test("delete a table converts back to range", async ({ grid }) => {

@@ -134,6 +134,7 @@ pub async fn bi_get_calculated_measures(
 #[tauri::command]
 pub async fn bi_set_calculated_measures(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
     measures: Vec<CalculatedMeasure>,
     window: tauri::Window,
@@ -192,6 +193,11 @@ pub async fn bi_set_calculated_measures(
     // Calculated measures belong to the MODEL: mirror the set onto every
     // connection sharing this engine so deleting any one connection cannot drop
     // the model's measures (each persists the full set on save).
+    // Every refusal is behind us -- the shape validation, the package-connection
+    // refusal, and `build_combined_model`, which the comment above deliberately runs
+    // BEFORE mutating any state. Calculated measures are workbook-local and each
+    // connection persists the full set on save, so this changes what a save writes.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     {
         let mut conns = bi_state.connections.lock().unwrap();
         for c in conns.values_mut() {

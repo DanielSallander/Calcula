@@ -8,6 +8,8 @@ use tauri::State;
 
 use crate::api_types::CellData;
 use crate::commands::utils::get_cell_internal_with_merge;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::AppState;
 
 /// A named range definition.
@@ -147,6 +149,21 @@ impl NamedRange {
 #[tauri::command]
 pub fn create_named_range(
     state: State<AppState>,
+    file_state: State<FileState>,
+    name: String,
+    sheet_index: Option<usize>,
+    refers_to: String,
+    comment: Option<String>,
+    folder: Option<String>,
+) -> NamedRangeResult {
+    create_named_range_impl(&state, &file_state, name, sheet_index, refers_to, comment, folder)
+}
+
+/// Command body over plain references, so the dirty-flag contract is unit-testable
+/// without a Tauri `State` (see `document_effect_pilot_tests`).
+pub(crate) fn create_named_range_impl(
+    state: &AppState,
+    file_state: &FileState,
     name: String,
     sheet_index: Option<usize>,
     refers_to: String,
@@ -169,7 +186,7 @@ pub fn create_named_range(
     // Which one won then depended on resolution order (names are resolved
     // first, then tables, at every call site) — the same formula could mean
     // different things depending on the path that resolved it.
-    if let Ok(table_names) = state.table_names.lock() {
+    if let Ok(table_names) = state.table_names.read() {
         if table_names.contains_key(&key) {
             return NamedRangeResult {
                 success: false,
@@ -182,7 +199,11 @@ pub fn create_named_range(
         }
     }
 
-    let mut named_ranges = state.named_ranges.lock().unwrap();
+    // `workbook.named_ranges` is persisted and written only by the save path.
+    // Constructed AFTER the validity / table-namespace gates above, so a refusal
+    // leaves the document clean.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
 
     // Check for duplicate name (case-insensitive)
     if named_ranges.contains_key(&key) {
@@ -205,7 +226,7 @@ pub fn create_named_range(
     drop(named_ranges);
 
     // BUG-0007 (user decision: undo-everything): name creation is undoable.
-    crate::undo_commands::record_named_range_undo(&state, &key, None, "Define name");
+    crate::undo_commands::record_named_range_undo(state, &key, None, "Define name");
 
     NamedRangeResult {
         success: true,
@@ -218,13 +239,15 @@ pub fn create_named_range(
 #[tauri::command]
 pub fn update_named_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     name: String,
     sheet_index: Option<usize>,
     refers_to: String,
     comment: Option<String>,
     folder: Option<String>,
 ) -> NamedRangeResult {
-    let mut named_ranges = state.named_ranges.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
 
     let key = name.to_uppercase();
     if !named_ranges.contains_key(&key) {
@@ -259,9 +282,11 @@ pub fn update_named_range(
 #[tauri::command]
 pub fn delete_named_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     name: String,
 ) -> NamedRangeResult {
-    let mut named_ranges = state.named_ranges.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
 
     let key = name.to_uppercase();
     match named_ranges.remove(&key) {
@@ -277,7 +302,7 @@ pub fn delete_named_range(
             // C10 cleanup: prune any object scripts attached to this name so a
             // deleted name leaves no dangling scripts behind. instanceId == the
             // name string (matched case-insensitively to be safe).
-            if let Ok(mut scripts) = state.object_scripts.lock() {
+            if let Ok(mut scripts) = state.object_scripts.write(&effect) {
                 scripts.retain(|s| {
                     !(s.object_type == persistence::ScriptableObjectType::NamedRange
                         && s.instance_id
@@ -307,7 +332,7 @@ pub fn get_named_range(
     state: State<AppState>,
     name: String,
 ) -> Option<NamedRange> {
-    let named_ranges = state.named_ranges.lock().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
     let key = name.to_uppercase();
     named_ranges.get(&key).cloned()
 }
@@ -317,7 +342,7 @@ pub fn get_named_range(
 pub fn get_all_named_ranges(
     state: State<AppState>,
 ) -> Vec<NamedRange> {
-    let named_ranges = state.named_ranges.lock().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
     named_ranges.values().cloned().collect()
 }
 
@@ -333,7 +358,7 @@ pub fn get_named_range_for_selection(
     end_row: u32,
     end_col: u32,
 ) -> Option<NamedRange> {
-    let named_ranges = state.named_ranges.lock().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let current_sheet_name = sheet_names.get(sheet_index).cloned().unwrap_or_default();
 
@@ -480,7 +505,7 @@ pub fn resolve_named_range_coords(
     state: State<AppState>,
     name: String,
 ) -> Result<NamedRangeCoords, String> {
-    let named_ranges = state.named_ranges.lock().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
 
     let key = name.to_uppercase();
@@ -521,6 +546,7 @@ pub fn resolve_named_range_coords(
 #[tauri::command]
 pub fn rename_named_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     old_name: String,
     new_name: String,
 ) -> NamedRangeResult {
@@ -533,7 +559,8 @@ pub fn rename_named_range(
         };
     }
 
-    let mut named_ranges = state.named_ranges.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
 
     let old_key = old_name.to_uppercase();
     let new_key = new_name.to_uppercase();
@@ -723,13 +750,14 @@ fn replace_ref_in_formula(formula: &str, patterns: &[String], name: &str) -> Str
 #[tauri::command]
 pub fn apply_names_to_formulas(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     names: Vec<String>,
     start_row: Option<u32>,
     start_col: Option<u32>,
     end_row: Option<u32>,
     end_col: Option<u32>,
 ) -> Result<ApplyNamesResult, String> {
-    let named_ranges = state.named_ranges.lock().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
@@ -788,7 +816,13 @@ pub fn apply_names_to_formulas(
         }
     }
 
-    // Apply modifications
+    // Apply modifications -- rewrites formula ASTs across the scanned range.
+    // Conditional: only mint the token if there is actually something to rewrite.
+    let _effect = if modifications.is_empty() {
+        None
+    } else {
+        Some(crate::document_effect::DocumentEffect::mutates(&file_state))
+    };
     let mut updated_cells: Vec<CellData> = Vec::new();
 
     for (row, col, new_formula) in &modifications {

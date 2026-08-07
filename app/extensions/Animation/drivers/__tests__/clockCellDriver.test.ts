@@ -47,7 +47,11 @@ describe("clock-cell driver backend wiring", () => {
     );
 
     await d.applyFrame(42);
-    expect(animApplyFrame).toHaveBeenCalledWith(2, [{ row: 0, col: 1, value: "42" }]);
+    expect(animApplyFrame).toHaveBeenCalledWith(
+      expect.stringMatching(/^anim-clock-2-0-1-/),
+      2,
+      [{ row: 0, col: 1, value: "42" }],
+    );
     expect(repaintFromCells).toHaveBeenCalledTimes(1);
 
     await d.restore();

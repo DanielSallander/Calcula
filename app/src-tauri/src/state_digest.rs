@@ -245,12 +245,12 @@ pub fn get_workbook_state_digest(
         let active_rh = state.row_heights.lock().map_err(|e| e.to_string())?;
         let all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
         let active_merged = state.merged_regions.lock().map_err(|e| e.to_string())?;
-        let freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        let freeze_configs = state.freeze_configs.read().map_err(|e| e.to_string())?;
         let split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
-        let tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
-        let visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
-        let gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
-        let page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        let tab_colors = state.tab_colors.read().map_err(|e| e.to_string())?;
+        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+        let gridlines = state.show_gridlines.read().map_err(|e| e.to_string())?;
+        let page_setups = state.page_setups.read().map_err(|e| e.to_string())?;
         let scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
         let sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
 
@@ -424,41 +424,41 @@ pub fn get_workbook_state_digest(
     }
 
     // ---- Workbook-level stores ----
-    if let Ok(named_ranges) = state.named_ranges.lock() {
+    if let Ok(named_ranges) = state.named_ranges.read() {
         for (name, nr) in named_ranges.iter() {
             digest.named_ranges.insert(name.clone(), to_value_or_null(nr));
         }
     }
-    if let Ok(named_styles) = state.named_styles.lock() {
+    if let Ok(named_styles) = state.named_styles.read() {
         for (name, ns) in named_styles.iter() {
             digest.named_styles.insert(name.clone(), to_value_or_null(ns));
         }
     }
-    if let Ok(tables) = state.tables.lock() {
+    if let Ok(tables) = state.tables.read() {
         for sheet_tables in tables.values() {
             for (id, table) in sheet_tables.iter() {
                 digest.tables.insert(id_key(id), to_value_or_null(table));
             }
         }
     }
-    if let Ok(slicers) = slicer_state.slicers.lock() {
+    if let Ok(slicers) = slicer_state.slicers.read() {
         for (id, slicer) in slicers.iter() {
             digest.slicers.insert(id_key(id), to_value_or_null(slicer));
         }
     }
-    if let Ok(filters) = ribbon_filter_state.filters.lock() {
+    if let Ok(filters) = ribbon_filter_state.filters.read() {
         for (id, filter) in filters.iter() {
             digest
                 .ribbon_filters
                 .insert(id_key(id), to_value_or_null(filter));
         }
     }
-    if let Ok(charts) = state.charts.lock() {
+    if let Ok(charts) = state.charts.read() {
         for chart in charts.iter() {
             digest.charts.insert(id_key(&chart.id), to_value_or_null(chart));
         }
     }
-    if let Ok(sparklines) = state.sparklines.lock() {
+    if let Ok(sparklines) = state.sparklines.read() {
         for entry in sparklines.iter() {
             digest
                 .sparklines
@@ -470,7 +470,7 @@ pub fn get_workbook_state_digest(
             groups.sort_unstable();
         }
     }
-    if let Ok(pivot_tables) = pivot_state.pivot_tables.lock() {
+    if let Ok(pivot_tables) = pivot_state.pivot_tables.read() {
         for (id, (definition, _cache)) in pivot_tables.iter() {
             digest.pivots.insert(id_key(id), to_value_or_null(definition));
         }
@@ -482,7 +482,7 @@ pub fn get_workbook_state_digest(
     // which any delete-the-last-rule path produces, including the structural
     // shift — showed up as a phantom `"0": []` that vanished across a
     // save/reload or undo/redo round trip and was reported as a diff.
-    if let Ok(cf) = state.conditional_formats.lock() {
+    if let Ok(cf) = state.conditional_formats.read() {
         for (sheet, defs) in cf.iter() {
             if defs.is_empty() {
                 continue;
@@ -492,7 +492,7 @@ pub fn get_workbook_state_digest(
                 .insert(sheet.to_string(), to_value_or_null(defs));
         }
     }
-    if let Ok(dv) = state.data_validations.lock() {
+    if let Ok(dv) = state.data_validations.read() {
         for (sheet, ranges) in dv.iter() {
             if ranges.is_empty() {
                 continue;
@@ -514,7 +514,7 @@ pub fn get_workbook_state_digest(
         }
         value
     }
-    if let Ok(comments) = state.comments.lock() {
+    if let Ok(comments) = state.comments.read() {
         for (sheet, sheet_comments) in comments.iter() {
             for ((row, col), comment) in sheet_comments.iter() {
                 digest.comments.insert(
@@ -524,7 +524,7 @@ pub fn get_workbook_state_digest(
             }
         }
     }
-    if let Ok(notes) = state.notes.lock() {
+    if let Ok(notes) = state.notes.read() {
         for (sheet, sheet_notes) in notes.iter() {
             for ((row, col), note) in sheet_notes.iter() {
                 digest.notes.insert(
@@ -534,7 +534,7 @@ pub fn get_workbook_state_digest(
             }
         }
     }
-    if let Ok(hyperlinks) = state.hyperlinks.lock() {
+    if let Ok(hyperlinks) = state.hyperlinks.read() {
         for (sheet, sheet_links) in hyperlinks.iter() {
             for ((row, col), link) in sheet_links.iter() {
                 digest
@@ -556,21 +556,21 @@ pub fn get_workbook_state_digest(
                 .insert(sheet.to_string(), value);
         }
     }
-    if let Ok(outlines) = state.outlines.lock() {
+    if let Ok(outlines) = state.outlines.read() {
         for (sheet, outline) in outlines.iter() {
             digest
                 .outlines
                 .insert(sheet.to_string(), to_value_or_null(outline));
         }
     }
-    if let Ok(scenarios) = state.scenarios.lock() {
+    if let Ok(scenarios) = state.scenarios.read() {
         for (sheet, list) in scenarios.iter() {
             digest
                 .scenarios
                 .insert(sheet.to_string(), to_value_or_null(list));
         }
     }
-    if let Ok(controls) = state.controls.lock() {
+    if let Ok(controls) = state.controls.read() {
         for ((sheet, row, col), metadata) in controls.iter() {
             digest.controls.insert(
                 sheet_cell_key(*sheet, *row, *col),
@@ -578,7 +578,7 @@ pub fn get_workbook_state_digest(
             );
         }
     }
-    if let Ok(props) = state.computed_properties.lock() {
+    if let Ok(props) = state.computed_properties.read() {
         // ComputedProperty carries derived caches (AST, cached value) and tuple
         // map keys, so digest only the semantic fields, with string keys.
         fn prop_list(list: &[crate::computed_properties::ComputedProperty]) -> Value {
@@ -651,13 +651,13 @@ pub fn get_workbook_state_digest(
         list.sort_unstable_by_key(|v| v["id"].to_string());
         digest.protected_regions = list;
     }
-    if let Ok(layouts) = state.pivot_layouts.lock() {
+    if let Ok(layouts) = state.pivot_layouts.read() {
         digest.pivot_layouts = layouts.iter().map(to_value_or_null).collect();
     }
-    if let Ok(scripts) = state.object_scripts.lock() {
+    if let Ok(scripts) = state.object_scripts.read() {
         digest.object_scripts = scripts.iter().map(to_value_or_null).collect();
     }
-    if let Ok(theme) = state.theme.lock() {
+    if let Ok(theme) = state.theme.read() {
         digest.theme = to_value_or_null(&*theme);
     }
 

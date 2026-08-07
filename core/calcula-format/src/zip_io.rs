@@ -16,7 +16,8 @@ use crate::features::scheduled_jobs::{
 };
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
-    PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_VIEW_MIN_FORMAT_VERSION,
+    PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
+    SHEET_VIEW_MIN_FORMAT_VERSION,
     USER_HIDDEN_MIN_FORMAT_VERSION,
     CALA_MAX_SUPPORTED_FORMAT_VERSION,
 };
@@ -136,6 +137,20 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }) {
         manifest.features.push("sheet_view".to_string());
         stamp_feature_format_version(&mut manifest, SHEET_VIEW_MIN_FORMAT_VERSION);
+    }
+    // Per-sheet display flags: same argument again. Before v6 these four lived only in
+    // the frontend reducer, so they were lost on every save; an older reader that
+    // ignored them would drop them on its next save and silently hand back a sheet
+    // showing values where the author left formulas. Stamped only when a sheet
+    // actually carries a non-default flag, so ordinary workbooks stay v1-v5.
+    if workbook.sheets.iter().any(|s| {
+        !s.display_zeros
+            || s.show_formulas
+            || s.view_mode != persistence::DEFAULT_SHEET_VIEW_MODE
+            || !s.display_headings
+    }) {
+        manifest.features.push("sheet_display_flags".to_string());
+        stamp_feature_format_version(&mut manifest, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -567,6 +582,12 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
             show_gridlines: true,
             // Overwritten below by metadata.json when the sheet carries any.
             zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
+            // Defaults here; the real values arrive from metadata.json below via
+            // SheetMetadata::apply_to_sheet, exactly like zoom and the split bars.
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: persistence::DEFAULT_SHEET_VIEW_MODE.to_string(),
+            display_headings: true,
             split_row: None,
             split_col: None,
         };
@@ -1126,6 +1147,10 @@ mod tests {
             zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
             split_row: None,
             split_col: None,
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: persistence::DEFAULT_SHEET_VIEW_MODE.to_string(),
+            display_headings: true,
         };
 
         Workbook {
@@ -1583,6 +1608,69 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert!(manifest.format_version < SHEET_VIEW_MIN_FORMAT_VERSION);
         assert!(!manifest.features.iter().any(|f| f == "sheet_view"));
+    }
+
+    /// The four DISPLAY FLAGS round-trip the real archive and stamp v6. Before this
+    /// they lived only in the frontend reducer, so they never reached the file at all;
+    /// an older reader that ignored them would drop them on its next save and hand back
+    /// a sheet showing VALUES where the author left FORMULAS, with no error anywhere.
+    #[test]
+    fn test_display_flags_roundtrip_and_stamp_the_version() {
+        let mut workbook = make_test_workbook();
+        workbook.sheets[0].display_zeros = false;
+        workbook.sheets[0].show_formulas = true;
+        workbook.sheets[0].view_mode = "pageBreakPreview".to_string();
+        workbook.sheets[0].display_headings = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("display-flags.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert!(!loaded.sheets[0].display_zeros, "displayZeros lost through the archive");
+        assert!(loaded.sheets[0].show_formulas, "showFormulas lost through the archive");
+        assert_eq!(loaded.sheets[0].view_mode, "pageBreakPreview");
+        assert!(!loaded.sheets[0].display_headings, "displayHeadings lost through the archive");
+
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == "sheet_display_flags"));
+    }
+
+    /// ONE non-default flag is enough to stamp -- the four are a unit, and a partial
+    /// rule would silently drop whichever flag was left out of the condition.
+    #[test]
+    fn test_any_single_display_flag_alone_stamps_the_version() {
+        for (label, apply) in [
+            ("displayZeros", (|s: &mut persistence::Sheet| s.display_zeros = false) as fn(&mut persistence::Sheet)),
+            ("showFormulas", |s: &mut persistence::Sheet| s.show_formulas = true),
+            ("viewMode", |s: &mut persistence::Sheet| s.view_mode = "pageLayout".to_string()),
+            ("displayHeadings", |s: &mut persistence::Sheet| s.display_headings = false),
+        ] {
+            let mut workbook = make_test_workbook();
+            apply(&mut workbook.sheets[0]);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("one-flag.cala");
+            write_calcula(&workbook, &path).unwrap();
+            let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                manifest.format_version, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
+                "{label} alone must stamp the display-flags version"
+            );
+        }
+    }
+
+    /// A workbook at the defaults must NOT be stamped up to v6 -- otherwise every
+    /// ordinary save demands a newer reader for nothing.
+    #[test]
+    fn test_default_display_flags_mean_no_version_stamp() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain-display.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.format_version < SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == "sheet_display_flags"));
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.

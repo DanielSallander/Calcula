@@ -6,12 +6,12 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, setFreezeConfig, updateConfig, setDisplayGridlines, scrollToPosition } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, setFreezeConfig, updateConfig, setDisplayGridlines, setDisplayZeros, setShowFormulas, setViewMode, setDisplayHeadings, scrollToPosition } from "../../state/gridActions";
 import { refreshUserHidden } from "../../lib/hiddenRowsCols";
-import { loadSheetViewState, persistSheetZoom } from "../../lib/sheetViewState";
+import { loadSheetViewState, persistSheetZoom, loadSheetDisplayFlags } from "../../lib/sheetViewState";
 import { invoke } from "@tauri-apps/api/core";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
-import type { Selection, Viewport, VirtualBounds } from "../../types";
+import type { Selection, Viewport, VirtualBounds, ViewMode } from "../../types";
 import { GridCanvas } from "../Grid";
 import { useActiveGridTheme } from "../../theme/useActiveGridTheme";
 import { InlineEditor } from "../InlineEditor";
@@ -300,6 +300,18 @@ function SpreadsheetContent({
   // app that just booted must not write a zoom nobody asked for.
   const lastSyncedZoomFactorRef = useRef<number>(gridState.zoom);
 
+  // The four display flags now have a backend authority and round-trip the .cala,
+  // so they must be re-read on mount AND on every sheet switch -- exactly like zoom
+  // and the split bars. Hydrating only at startup is the bug that made a freeze on
+  // sheet 2 show sheet 1's panes.
+  const hydrateSheetDisplayFlags = useCallback(async () => {
+    const flags = await loadSheetDisplayFlags();
+    dispatch(setDisplayZeros(flags.displayZeros));
+    dispatch(setShowFormulas(flags.showFormulas));
+    dispatch(setViewMode(flags.viewMode as ViewMode));
+    dispatch(setDisplayHeadings(flags.displayHeadings));
+  }, [dispatch]);
+
   const hydrateSheetView = useCallback(async () => {
     const view = await loadSheetViewState();
     lastSyncedZoomFactorRef.current = view.zoomFactor;
@@ -360,6 +372,7 @@ function SpreadsheetContent({
     // .cala file. Hydrate them the same way gridlines are, or a workbook saved
     // at 60% with a split reopens at 100% with one pane.
     hydrateSheetView();
+    hydrateSheetDisplayFlags();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -427,6 +440,7 @@ function SpreadsheetContent({
       // in Excel and now here too, so switching sheets must adopt the new
       // sheet's zoom rather than carrying the old one across.
       hydrateSheetView();
+      hydrateSheetDisplayFlags();
 
       // Restore the new sheet's saved state if available
       const savedState = sheetStatesMap.get(newSheetIndex);

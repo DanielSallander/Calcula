@@ -1513,7 +1513,7 @@ pub(crate) fn recalculate_sheet_formulas(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     // Build pivot data lookup closure for GETPIVOTDATA evaluation
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         lookup_pivot_data(&pivot_tables, &pivot_views, data_field, pivot_row, pivot_col, pairs)
@@ -1532,9 +1532,9 @@ pub(crate) fn recalculate_sheet_formulas(
         return;
     }
 
-    let tables_map = state.tables.lock().unwrap();
-    let table_names_map = state.table_names.lock().unwrap();
-    let named_ranges_map = state.named_ranges.lock().unwrap();
+    let tables_map = state.tables.read().unwrap();
+    let table_names_map = state.table_names.read().unwrap();
+    let named_ranges_map = state.named_ranges.read().unwrap();
     let row_heights = state.row_heights.lock().unwrap();
     let column_widths = state.column_widths.lock().unwrap();
 

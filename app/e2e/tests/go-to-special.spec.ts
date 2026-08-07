@@ -7,6 +7,7 @@
 import { test, expect } from "../fixtures";
 import {
   takeGridScreenshot,
+  takeGridRegionScreenshot,
   softly,
 } from "../helpers/screenshots";
 
@@ -98,7 +99,9 @@ test.describe("Go To Special", () => {
     // Set up at least two formulas so the test is self-contained and does not
     // rely on data left behind by prior tests (the regression sampler may run
     // this test in isolation).
+    await grid.setCellValueDirect("AD6", "10");
     await grid.setCellValueDirect("AD7", "=AD6*2");
+    await grid.setCellValueDirect("AD8", "30");
     await grid.setCellValueDirect("AD9", "=AD6+AD8");
     await grid.page.waitForTimeout(200);
 
@@ -116,7 +119,18 @@ test.describe("Go To Special", () => {
     // Should find at least the formulas we set up in prior tests
     expect(result.cells.length).toBeGreaterThanOrEqual(2);
 
-    await grid.navigateTo("A1");
-    await softly(takeGridScreenshot(appPage, "go-to-special-formulas-sheet"));
+    // Capture the cells that hold the formulas this test just wrote.
+    //
+    // It used to write formulas at AD6:AD9 and then `navigateTo("A1")` before
+    // capturing — scrolling the evidence off-screen. The golden was a picture
+    // of the top-left corner of the sheet and would have been byte-identical if
+    // go_to_special had returned nothing at all.
+    await grid.navigateTo("AD6");
+    await softly(
+      takeGridRegionScreenshot(appPage, "go-to-special-formulas-sheet", {
+        from: "AD6",
+        to: "AD9",
+      })
+    );
   });
 });

@@ -4,7 +4,7 @@
 //! execute cells in a persistent QuickJS runtime with shared variables,
 //! and support snapshot-based rewind.
 
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::AppState;
 use super::types::{
@@ -19,6 +19,7 @@ use super::types::{
 /// Create a new empty notebook.
 #[tauri::command]
 pub fn notebook_create(
+    file_state: State<'_, crate::persistence::FileState>,
     script_state: State<ScriptState>,
     id: String,
     name: String,
@@ -38,9 +39,9 @@ pub fn notebook_create(
         source_package: None,
     };
 
-    let mut notebooks = script_state
-        .workbook_notebooks
-        .lock()
+    // Scripts/notebooks are persisted in the .cala; this is a document change.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut notebooks = script_state.workbook_notebooks.write(&effect)
         .map_err(|e| e.to_string())?;
     notebooks.insert(id, notebook.clone());
 
@@ -50,12 +51,13 @@ pub fn notebook_create(
 /// Save (create or update) a notebook document.
 #[tauri::command]
 pub fn notebook_save(
+    file_state: State<'_, crate::persistence::FileState>,
     script_state: State<ScriptState>,
     notebook: NotebookDocument,
 ) -> Result<(), String> {
-    let mut notebooks = script_state
-        .workbook_notebooks
-        .lock()
+    // Scripts/notebooks are persisted in the .cala; this is a document change.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut notebooks = script_state.workbook_notebooks.write(&effect)
         .map_err(|e| e.to_string())?;
     notebooks.insert(notebook.id.clone(), notebook);
     Ok(())
@@ -69,7 +71,7 @@ pub fn notebook_load(
 ) -> Result<NotebookDocument, String> {
     let notebooks = script_state
         .workbook_notebooks
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?;
     notebooks
         .get(&id)
@@ -84,7 +86,7 @@ pub fn notebook_list(
 ) -> Result<Vec<NotebookSummary>, String> {
     let notebooks = script_state
         .workbook_notebooks
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?;
 
     let mut summaries: Vec<NotebookSummary> = notebooks
@@ -103,6 +105,7 @@ pub fn notebook_list(
 /// Delete a notebook by ID. Also clears any active runtime for it.
 #[tauri::command]
 pub async fn notebook_delete(
+    file_state: State<'_, crate::persistence::FileState>,
     script_state: State<'_, ScriptState>,
     id: String,
 ) -> Result<(), String> {
@@ -110,9 +113,11 @@ pub async fn notebook_delete(
     let _exec = script_state.notebook_exec_lock.lock().await;
 
     {
+        // Notebooks are persisted (`workbook.notebooks`).
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut notebooks = script_state
             .workbook_notebooks
-            .lock()
+            .write(&effect)
             .map_err(|e| e.to_string())?;
         if notebooks.remove(&id).is_none() {
             return Err(format!("Notebook '{}' not found", id));
@@ -283,9 +288,13 @@ async fn run_cell_internal(
 
     // 8. Update the notebook document's cell with execution results
     {
+        // The notebook document (source + last outputs) is persisted, so recording a
+        // run is a document change in its own right.
+        let file_state = app.state::<crate::persistence::FileState>();
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut notebooks = script_state
             .workbook_notebooks
-            .lock()
+            .write(&effect)
             .map_err(|e| e.to_string())?;
         if let Some(notebook) = notebooks.get_mut(notebook_id) {
             if let Some(cell) = notebook.cells.iter_mut().find(|c| c.id == cell_id) {
@@ -406,7 +415,7 @@ pub async fn notebook_run_all(
     let cell_sources: Vec<(String, String)> = {
         let notebooks = script_state
             .workbook_notebooks
-            .lock()
+            .read()
             .map_err(|e| e.to_string())?;
         let notebook = notebooks
             .get(&notebook_id)
@@ -496,7 +505,7 @@ async fn notebook_rewind_internal(
         // Determine which cells come before the target in the notebook
         let notebooks = script_state
             .workbook_notebooks
-            .lock()
+            .read()
             .map_err(|e| e.to_string())?;
         let notebook = notebooks
             .get(&request.notebook_id)
@@ -550,9 +559,11 @@ async fn notebook_rewind_internal(
 
     // 4. Mark target and subsequent cells as stale in the notebook document
     {
+        let file_state = app.state::<crate::persistence::FileState>();
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut notebooks = script_state
             .workbook_notebooks
-            .lock()
+            .write(&effect)
             .map_err(|e| e.to_string())?;
         if let Some(notebook) = notebooks.get_mut(&request.notebook_id) {
             let target_pos = notebook
@@ -620,7 +631,7 @@ pub async fn notebook_run_from(
     let cells_from_target: Vec<(String, String)> = {
         let notebooks = script_state
             .workbook_notebooks
-            .lock()
+            .read()
             .map_err(|e| e.to_string())?;
         let notebook = notebooks
             .get(&request.notebook_id)

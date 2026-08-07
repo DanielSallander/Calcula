@@ -114,13 +114,17 @@ fn require_tier(handle: &AppHandle, tool: &str) -> Result<(), String> {
 /// Mark the document modified so an AI-only editing session still prompts to
 /// save. (`apply_cell_formatting` does this; the create_* tools did not.)
 pub(crate) fn mark_dirty(handle: &AppHandle) {
-    if let Ok(mut modified) = handle
-        .state::<crate::persistence::FileState>()
-        .is_modified
-        .lock()
-    {
-        *modified = true;
-    }
+    let _ = mcp_effect(handle);
+}
+
+/// Mint the `DocumentEffect` for an MCP tool that mutates the document.
+///
+/// MCP tools are the clearest case for putting the mark in the BACKEND: an AI client
+/// never runs the frontend code that used to compensate for missing flags, so an
+/// AI-only editing session relied entirely on whatever the backend did. Constructing
+/// this sets `is_modified`, which is why `mark_dirty` above is now just a call to it.
+pub(crate) fn mcp_effect(handle: &AppHandle) -> crate::document_effect::DocumentEffect {
+    crate::document_effect::DocumentEffect::mutates(&handle.state::<crate::persistence::FileState>())
 }
 
 /// Record the tool's audit entry. Thin wrapper so every tool here records
@@ -172,6 +176,7 @@ impl ChartPlacement {
 /// Returns a human-readable summary of what changed.
 pub(crate) fn update_chart_core(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     chart_id: &str,
     spec: Option<&serde_json::Value>,
     name: Option<&str>,
@@ -193,7 +198,7 @@ pub(crate) fn update_chart_core(
     // Resolve the current entry (and its sheet) BEFORE taking any other lock,
     // so the protection check never runs while holding the charts mutex.
     let previous: ChartEntry = {
-        let charts = state.charts.lock().map_err(|e| e.to_string())?;
+        let charts = state.charts.read().map_err(|e| e.to_string())?;
         charts
             .iter()
             .find(|c| c.id == id)
@@ -263,7 +268,7 @@ pub(crate) fn update_chart_core(
         spec_json,
     };
     {
-        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        let mut charts = state.charts.write(effect).map_err(|e| e.to_string())?;
         let slot = charts
             .iter_mut()
             .find(|c| c.id == id)
@@ -289,7 +294,10 @@ pub fn update_chart(
 ) -> Result<String, String> {
     require_tier(handle, "update_chart")?;
     let state = handle.state::<AppState>();
-    let summary = update_chart_core(&state, chart_id, spec, name, sheet_index, placement)?;
+    // Built after `require_tier`; update_chart_core still resolves "no such chart"
+    // and the protection gate under a read guard before it writes.
+    let effect = mcp_effect(handle);
+    let summary = update_chart_core(&state, &effect, chart_id, spec, name, sheet_index, placement)?;
     drop(state);
 
     let _ = handle.emit("charts:refresh", ());
@@ -310,11 +318,15 @@ pub fn update_chart(
 
 /// Delete a stored chart, over `&AppState` so undo + script pruning are testable.
 /// Returns the deleted chart's sheet index.
-pub(crate) fn delete_chart_core(state: &AppState, chart_id: &str) -> Result<usize, String> {
+pub(crate) fn delete_chart_core(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    chart_id: &str,
+) -> Result<usize, String> {
     let id = parse_entity_id(chart_id, "chart", "list_charts")?;
 
     let previous: ChartEntry = {
-        let charts = state.charts.lock().map_err(|e| e.to_string())?;
+        let charts = state.charts.read().map_err(|e| e.to_string())?;
         charts
             .iter()
             .find(|c| c.id == id)
@@ -324,12 +336,12 @@ pub(crate) fn delete_chart_core(state: &AppState, chart_id: &str) -> Result<usiz
     crate::protection::check_sheet_action(state, previous.sheet_index, "editObjects", "delete objects")?;
 
     {
-        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        let mut charts = state.charts.write(effect).map_err(|e| e.to_string())?;
         charts.retain(|c| c.id != id);
     }
     crate::undo_commands::record_chart_undo(state, id, Some(previous.clone()), "Delete chart (AI)");
     // C10 lifecycle hygiene, exactly like chart_commands::delete_chart.
-    crate::scripting::object_script_commands::prune_scripts_for_instance(state, &id.to_string());
+    crate::scripting::object_script_commands::prune_scripts_for_instance(state, effect, &id.to_string());
 
     Ok(previous.sheet_index)
 }
@@ -338,11 +350,13 @@ pub(crate) fn delete_chart_core(state: &AppState, chart_id: &str) -> Result<usiz
 pub fn delete_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String> {
     require_tier(handle, "delete_chart")?;
     let state = handle.state::<AppState>();
-    let sheet = delete_chart_core(&state, chart_id)?;
+    // Built after `require_tier`; `delete_chart_core` still resolves "no such chart"
+    // and the protection gate under a read guard before touching anything.
+    let effect = mcp_effect(handle);
+    let sheet = delete_chart_core(&state, &effect, chart_id)?;
     drop(state);
 
     let _ = handle.emit("charts:refresh", ());
-    mark_dirty(handle);
     audit(
         handle,
         "delete_chart",
@@ -369,7 +383,7 @@ pub(crate) fn take_named_range_scripts(
     state: &AppState,
     name: &str,
 ) -> Vec<persistence::SavedObjectScript> {
-    let Ok(scripts) = state.object_scripts.lock() else {
+    let Ok(scripts) = state.object_scripts.read() else {
         return Vec::new();
     };
     scripts
@@ -389,13 +403,14 @@ pub(crate) fn take_named_range_scripts(
 /// empty list.
 pub(crate) fn restore_named_range_scripts(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     mut scripts: Vec<persistence::SavedObjectScript>,
     instance_id: &str,
 ) {
     if scripts.is_empty() {
         return;
     }
-    let Ok(mut stored) = state.object_scripts.lock() else {
+    let Ok(mut stored) = state.object_scripts.write(effect) else {
         return;
     };
     for script in scripts.drain(..) {
@@ -438,7 +453,7 @@ pub fn update_named_range(
     let key = name.to_uppercase();
     let existing = {
         let state = handle.state::<AppState>();
-        let ranges = state.named_ranges.lock().map_err(|e| e.to_string())?;
+        let ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
         ranges.get(&key).cloned().ok_or_else(|| {
             format!("Named range '{}' does not exist. Use list_named_ranges to see the names.", name)
         })?
@@ -461,16 +476,18 @@ pub fn update_named_range(
         // (undoable + fully validated). Two entries; reported honestly.
         let removed = crate::named_ranges::delete_named_range(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             name.to_string(),
         );
         if !removed.success {
-            restore_named_range_scripts(&handle.state::<AppState>(), attached, &existing.name);
+            restore_named_range_scripts(&handle.state::<AppState>(), &mcp_effect(handle), attached, &existing.name);
             return Err(removed
                 .error
                 .unwrap_or_else(|| format!("Failed to remove named range '{}'", name)));
         }
         let created = crate::named_ranges::create_named_range(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             target_name.to_string(),
             target_scope,
             target_refers_to.clone(),
@@ -481,23 +498,25 @@ pub fn update_named_range(
             // Put the original back so a rejected rename is not a silent delete.
             let _ = crate::named_ranges::create_named_range(
                 handle.state::<AppState>(),
+                handle.state::<crate::persistence::FileState>(),
                 existing.name.clone(),
                 existing.sheet_index,
                 existing.refers_to.clone(),
                 existing.comment.clone(),
                 existing.folder.clone(),
             );
-            restore_named_range_scripts(&handle.state::<AppState>(), attached, &existing.name);
+            restore_named_range_scripts(&handle.state::<AppState>(), &mcp_effect(handle), attached, &existing.name);
             return Err(created
                 .error
                 .unwrap_or_else(|| format!("Failed to create named range '{}'", target_name)));
         }
         // Re-point the rescued scripts at the new name.
-        restore_named_range_scripts(&handle.state::<AppState>(), attached, target_name);
+        restore_named_range_scripts(&handle.state::<AppState>(), &mcp_effect(handle), attached, target_name);
         undo_steps = 2;
     } else {
         let result = crate::named_ranges::update_named_range(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             existing.name.clone(),
             target_scope,
             target_refers_to.clone(),
@@ -538,6 +557,7 @@ pub fn delete_named_range(handle: &AppHandle, name: &str) -> Result<String, Stri
 
     let result = crate::named_ranges::delete_named_range(
         handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
         name.to_string(),
     );
     if !result.success {
@@ -589,6 +609,7 @@ pub fn update_table(
 
     if let Some(name) = new_name {
         let result = crate::tables::rename_table(
+            handle.state::<crate::persistence::FileState>(),
             handle.state::<AppState>(),
             id,
             name.to_string(),
@@ -606,6 +627,7 @@ pub fn update_table(
             return Err("update_table range is inverted: end_row/end_col must be >= start_row/start_col.".to_string());
         }
         let result = crate::tables::resize_table(
+            handle.state::<crate::persistence::FileState>(),
             handle.state::<AppState>(),
             crate::tables::ResizeTableParams {
                 table_id: id,
@@ -656,7 +678,11 @@ pub fn delete_table(handle: &AppHandle, table_id: &str) -> Result<String, String
     require_tier(handle, "delete_table")?;
     let id = parse_entity_id(table_id, "table", "list_tables")?;
 
-    let result = crate::tables::delete_table(handle.state::<AppState>(), id);
+    let result = crate::tables::delete_table(
+        handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
+        id,
+    );
     if !result.success {
         return Err(result
             .error
@@ -855,7 +881,7 @@ pub fn update_pivot(
 
     // Snapshot the definition + its field names BEFORE anything changes.
     let (before_definition, field_names, value_field_names) = {
-        let tables = pivot_state.pivot_tables.lock().map_err(|e| e.to_string())?;
+        let tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
         let (definition, cache) = tables.get(&id).ok_or_else(|| {
             format!("No pivot with id '{}'. Use list_pivots to see available ids.", pivot_id)
         })?;
@@ -909,6 +935,7 @@ pub fn update_pivot(
     if let Some(n) = name {
         crate::pivot::commands::update_pivot_properties(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             handle.state::<crate::pivot::PivotState>(),
             crate::pivot::types::UpdatePivotPropertiesRequest {
                 pivot_id: id,
@@ -925,6 +952,7 @@ pub fn update_pivot(
     for (index, axis, position, label) in resolved_moves {
         crate::pivot::commands::move_pivot_field(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             handle.state::<crate::pivot::PivotState>(),
             handle.state::<crate::pane_control::PaneControlState>(),
             handle.state::<crate::ribbon_filter::RibbonFilterState>(),
@@ -941,6 +969,7 @@ pub fn update_pivot(
     for (index, function, label) in resolved_aggs {
         crate::pivot::commands::set_pivot_aggregation(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             handle.state::<crate::pivot::PivotState>(),
             handle.state::<crate::pane_control::PaneControlState>(),
             handle.state::<crate::ribbon_filter::RibbonFilterState>(),
@@ -956,6 +985,7 @@ pub fn update_pivot(
     if let Some((row, col)) = destination {
         crate::pivot::commands::relocate_pivot(
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
             handle.state::<crate::pivot::PivotState>(),
             handle.state::<crate::pane_control::PaneControlState>(),
             handle.state::<crate::ribbon_filter::RibbonFilterState>(),
@@ -997,6 +1027,7 @@ pub fn delete_pivot(handle: &AppHandle, pivot_id: &str) -> Result<String, String
 
     crate::pivot::commands::delete_pivot_table(
         handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::PivotState>(),
         id,
     )?;
@@ -1053,7 +1084,11 @@ pub fn list_sheets(handle: &AppHandle) -> Result<String, String> {
 /// Add a sheet at the end of the workbook.
 pub fn add_sheet(handle: &AppHandle, name: Option<&str>) -> Result<String, String> {
     require_tier(handle, "add_sheet")?;
-    let result = crate::sheets::add_sheet(handle.state::<AppState>(), name.map(|s| s.to_string()))?;
+    let result = crate::sheets::add_sheet(
+        handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
+        name.map(|s| s.to_string()),
+    )?;
     let added = result
         .sheets
         .last()
@@ -1125,6 +1160,7 @@ pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> 
     };
     let result = crate::sheets::delete_sheet(
         handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::PivotState>(),
         index,
     )?;
@@ -1160,7 +1196,12 @@ pub fn move_sheet(handle: &AppHandle, from_index: usize, to_index: usize) -> Res
             .cloned()
             .ok_or_else(|| format!("Sheet index {} out of range. Use list_sheets.", from_index))?
     };
-    crate::sheets::move_sheet(handle.state::<AppState>(), from_index, to_index)?;
+    crate::sheets::move_sheet(
+        handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
+        from_index,
+        to_index,
+    )?;
 
     let _ = handle.emit("sheets:refresh", ());
     mark_dirty(handle);
@@ -1310,13 +1351,16 @@ mod tests {
     #[test]
     fn update_chart_merges_fields_and_records_one_undo_entry() {
         let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
+        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
         let entry = chart_entry("Old", 0);
         let id = entry.id.to_string();
-        state.charts.lock().unwrap().push(entry);
+        state.charts.write(&effect).unwrap().push(entry);
         assert!(!state.undo_stack.lock().unwrap().can_undo());
 
         let summary = update_chart_core(
             &state,
+            &effect,
             &id,
             Some(&valid_spec()),
             Some("Revenue by Region"),
@@ -1326,7 +1370,7 @@ mod tests {
         .expect("update should succeed");
         assert!(summary.contains("Updated chart"));
 
-        let charts = state.charts.lock().unwrap();
+        let charts = state.charts.read().unwrap();
         let stored: serde_json::Value = serde_json::from_str(&charts[0].spec_json).unwrap();
         assert_eq!(stored["name"], "Revenue by Region");
         assert_eq!(stored["spec"]["mark"], "line");
@@ -1346,22 +1390,24 @@ mod tests {
     #[test]
     fn update_chart_rejects_an_unknown_id_a_bad_spec_and_an_empty_edit() {
         let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
+        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
         let entry = chart_entry("Only", 0);
         let id = entry.id.to_string();
-        state.charts.lock().unwrap().push(entry);
+        state.charts.write(&effect).unwrap().push(entry);
 
         // Unknown id.
         let missing = identity::EntityId::from_bytes([9u8; 16]).to_string();
-        assert!(update_chart_core(&state, &missing, None, Some("x"), None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &effect, &missing, None, Some("x"), None, &ChartPlacement::default()).is_err());
         // Not an EntityId at all.
-        assert!(update_chart_core(&state, "not-a-uuid", None, Some("x"), None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &effect, "not-a-uuid", None, Some("x"), None, &ChartPlacement::default()).is_err());
         // A spec that fails the structural backstop.
-        assert!(update_chart_core(&state, &id, Some(&json!({ "mark": "bar" })), None, None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &effect, &id, Some(&json!({ "mark": "bar" })), None, None, &ChartPlacement::default()).is_err());
         // Nothing to change.
-        assert!(update_chart_core(&state, &id, None, None, None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &effect, &id, None, None, None, &ChartPlacement::default()).is_err());
         // None of the failures recorded an undo entry or touched the chart.
         assert!(!state.undo_stack.lock().unwrap().can_undo());
-        let charts = state.charts.lock().unwrap();
+        let charts = state.charts.read().unwrap();
         let stored: serde_json::Value = serde_json::from_str(&charts[0].spec_json).unwrap();
         assert_eq!(stored["name"], "Only");
     }
@@ -1374,15 +1420,26 @@ mod tests {
         let keep_id = keep.id;
         let drop_id = drop_me.id.to_string();
         {
-            let mut charts = state.charts.lock().unwrap();
+            // Fixture seeding, not a document edit.
+            let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::LoadingFromDisk,
+            );
+            let mut charts = state.charts.write(&seed).unwrap();
             charts.push(keep);
             charts.push(drop_me);
         }
 
-        let sheet = delete_chart_core(&state, &drop_id).expect("delete should succeed");
+        let fs = crate::persistence::FileState::default();
+        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
+        let sheet =
+            delete_chart_core(&state, &effect, &drop_id).expect("delete should succeed");
+        assert!(
+            *fs.is_modified.lock().unwrap(),
+            "an AI-driven chart delete must dirty the document: the MCP path never runs              the frontend, so nothing else would"
+        );
         assert_eq!(sheet, 1);
 
-        let charts = state.charts.lock().unwrap();
+        let charts = state.charts.read().unwrap();
         assert_eq!(charts.len(), 1);
         assert_eq!(charts[0].id, keep_id);
         drop(charts);
@@ -1393,15 +1450,17 @@ mod tests {
 
         // Deleting it twice is an error, not a silent success.
         drop(undo);
-        assert!(delete_chart_core(&state, &drop_id).is_err());
+        assert!(delete_chart_core(&state, &effect, &drop_id).is_err());
     }
 
     #[test]
     fn chart_edits_respect_sheet_protection() {
         let state = crate::create_app_state();
+        let seed_fs = crate::persistence::FileState::default();
+        let seed = crate::document_effect::DocumentEffect::mutates(&seed_fs);
         let entry = chart_entry("Protected", 0);
         let id = entry.id.to_string();
-        state.charts.lock().unwrap().push(entry);
+        state.charts.write(&seed).unwrap().push(entry);
         {
             let mut protection = state.sheet_protection.lock().unwrap();
             let mut p = crate::protection::SheetProtection::default();
@@ -1410,10 +1469,12 @@ mod tests {
             protection.insert(0, p);
         }
 
-        assert!(update_chart_core(&state, &id, None, Some("nope"), None, &ChartPlacement::default()).is_err());
-        assert!(delete_chart_core(&state, &id).is_err());
+        let fs = crate::persistence::FileState::default();
+        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
+        assert!(update_chart_core(&state, &effect, &id, None, Some("nope"), None, &ChartPlacement::default()).is_err());
+        assert!(delete_chart_core(&state, &effect, &id).is_err());
         // Nothing changed, nothing recorded.
-        assert_eq!(state.charts.lock().unwrap().len(), 1);
+        assert_eq!(state.charts.read().unwrap().len(), 1);
         assert!(!state.undo_stack.lock().unwrap().can_undo());
     }
 
@@ -1439,7 +1500,10 @@ mod tests {
     fn renaming_a_name_carries_its_object_scripts_over_instead_of_pruning_them() {
         let state = crate::create_app_state();
         {
-            let mut scripts = state.object_scripts.lock().unwrap();
+            let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::LoadingFromDisk,
+            );
+            let mut scripts = state.object_scripts.write(&seed).unwrap();
             scripts.push(named_range_script("s-tax", "TaxRate"));
             // A script on an unrelated name must not be touched.
             scripts.push(named_range_script("s-other", "OtherName"));
@@ -1456,7 +1520,10 @@ mod tests {
 
         // Simulate what delete_named_range does to them.
         {
-            let mut scripts = state.object_scripts.lock().unwrap();
+            let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::LoadingFromDisk,
+            );
+            let mut scripts = state.object_scripts.write(&seed).unwrap();
             scripts.retain(|s| {
                 !(s.object_type == persistence::ScriptableObjectType::NamedRange
                     && s.instance_id.as_deref() == Some("TaxRate"))
@@ -1464,9 +1531,11 @@ mod tests {
             assert_eq!(scripts.len(), 2);
         }
 
-        restore_named_range_scripts(&state, taken, "VatRate");
+        let fs = crate::persistence::FileState::default();
+        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
+        restore_named_range_scripts(&state, &effect, taken, "VatRate");
 
-        let scripts = state.object_scripts.lock().unwrap();
+        let scripts = state.object_scripts.read().unwrap();
         assert_eq!(scripts.len(), 3, "nothing was lost and nothing duplicated");
         let carried = scripts.iter().find(|s| s.id == "s-tax").expect("the macro survived");
         assert_eq!(carried.instance_id.as_deref(), Some("VatRate"), "re-pointed at the new name");
@@ -1487,8 +1556,10 @@ mod tests {
     #[test]
     fn restoring_no_scripts_is_a_no_op() {
         let state = crate::create_app_state();
-        restore_named_range_scripts(&state, Vec::new(), "Whatever");
-        assert!(state.object_scripts.lock().unwrap().is_empty());
+        let fs = crate::persistence::FileState::default();
+        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
+        restore_named_range_scripts(&state, &effect, Vec::new(), "Whatever");
+        assert!(state.object_scripts.read().unwrap().is_empty());
         assert!(take_named_range_scripts(&state, "Nothing").is_empty());
     }
 
@@ -1499,7 +1570,7 @@ mod tests {
         let state = crate::create_app_state();
         // Distribution auditing is OFF by default; script activity is recorded
         // regardless, which is exactly what these tools rely on.
-        assert!(!state.audit_log.lock().unwrap().enabled);
+        assert!(!state.audit_log.read().unwrap().enabled);
 
         crate::scripting::commands::record_mcp_tool_action(
             &state,
@@ -1508,7 +1579,7 @@ mod tests {
             vec![("chartId", json!("abc")), ("sheet", json!(1))],
         );
 
-        let log = state.audit_log.lock().unwrap();
+        let log = state.audit_log.read().unwrap();
         assert_eq!(log.entries.len(), 1);
         let entry = &log.entries[0];
         assert!(entry.description.contains("deleted chart abc"));

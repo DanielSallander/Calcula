@@ -701,7 +701,25 @@ pub struct Sheet {
     pub split_row: Option<u32>,
     /// Split-bar column for this sheet (`None` = no vertical split).
     pub split_col: Option<u32>,
+    /// Whether zero values render as "0" or blank (Excel's `showZeros`).
+    ///
+    /// AUTHORITIES, like `zoom` above: these four flags lived ONLY in the frontend
+    /// Core grid reducer, with no backend copy at all, so every one of them reset on
+    /// save/reload. They are landed together because they are one user-facing unit --
+    /// the sheet's display mode -- and share a single command and format-version link.
+    pub display_zeros: bool,
+    /// Whether cells show their FORMULA text instead of the computed value
+    /// (Excel's Ctrl+`). The sharpest of the four: losing it silently swaps what the
+    /// author left on screen for review.
+    pub show_formulas: bool,
+    /// Sheet view mode: "normal", "pageLayout" or "pageBreakPreview".
+    pub view_mode: String,
+    /// Whether row/column headings (1,2,3 / A,B,C) are shown.
+    pub display_headings: bool,
 }
+
+/// Default for `Sheet::view_mode` and `SheetMetadata::view_mode`.
+pub const DEFAULT_SHEET_VIEW_MODE: &str = "normal";
 
 impl Sheet {
     pub fn new(name: String) -> Self {
@@ -730,6 +748,10 @@ impl Sheet {
             zoom: DEFAULT_SHEET_ZOOM_PERCENT,
             split_row: None,
             split_col: None,
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: DEFAULT_SHEET_VIEW_MODE.to_string(),
+            display_headings: true,
         }
     }
 
@@ -771,6 +793,10 @@ impl Sheet {
             zoom: DEFAULT_SHEET_ZOOM_PERCENT,
             split_row: None,
             split_col: None,
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: DEFAULT_SHEET_VIEW_MODE.to_string(),
+            display_headings: true,
         }
     }
 

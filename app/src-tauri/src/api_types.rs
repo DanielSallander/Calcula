@@ -1853,6 +1853,11 @@ pub struct AnimSnapshotParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnimApplyFrameParams {
+    /// The snapshot token this frame belongs to. Required: a frame may only be
+    /// applied while its `anim_snapshot` restore buffer is on file, which is how
+    /// the transient-write exemption from the dirty flag is PROVEN rather than
+    /// asserted (see `document_effect::TransientScope`).
+    pub token: String,
     /// Sheet index (0-based)
     pub sheet_index: usize,
     /// Transient writes for this frame.
@@ -2325,4 +2330,46 @@ pub struct WorkbookProperties {
     pub created: String,
     /// ISO 8601 date string
     pub last_modified: String,
+}
+
+/// Per-sheet DISPLAY FLAGS — the sheet's display mode, landed as one unit.
+///
+/// These four lived ONLY in the frontend Core grid reducer until .cala v6: there was no
+/// authoritative Rust copy, so every one of them silently reset on save/reload. They
+/// share a struct, a command and a format-version link because they are a single
+/// user-facing concept and because four parallel `Vec`s would be four chances to forget
+/// to resize on sheet insert.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDisplayFlags {
+    /// Zeros render as "0" (true, default) or blank.
+    pub display_zeros: bool,
+    /// Cells show formula TEXT instead of the computed value (Excel's Ctrl+`).
+    pub show_formulas: bool,
+    /// "normal" (default), "pageLayout" or "pageBreakPreview".
+    pub view_mode: String,
+    /// Row/column headings (1,2,3 / A,B,C) are shown.
+    pub display_headings: bool,
+}
+
+impl Default for SheetDisplayFlags {
+    fn default() -> Self {
+        SheetDisplayFlags {
+            display_zeros: true,
+            show_formulas: false,
+            view_mode: ::persistence::DEFAULT_SHEET_VIEW_MODE.to_string(),
+            display_headings: true,
+        }
+    }
+}
+
+/// Partial update for [`SheetDisplayFlags`]: every field optional, so a caller that
+/// toggles one flag does not have to know the other three (and cannot clobber them).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SheetDisplayFlagsPatch {
+    pub display_zeros: Option<bool>,
+    pub show_formulas: Option<bool>,
+    pub view_mode: Option<String>,
+    pub display_headings: Option<bool>,
 }

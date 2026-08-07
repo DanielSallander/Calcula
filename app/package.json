@@ -27,6 +27,8 @@
     "e2e:visual": "playwright test --project=visual",
     "e2e:all": "playwright test",
     "e2e:manual": "cross-env E2E_MANUAL=1 playwright test --project=functional",
+    "e2e:journey": "playwright test --project=journey",
+    "e2e:journey:manual": "cross-env E2E_MANUAL=1 playwright test --project=journey",
     "e2e:manual:all": "cross-env E2E_MANUAL=1 playwright test",
     "e2e:visual:update": "playwright test --project=visual --update-snapshots",
     "e2e:visual:baseline": "playwright test --project=visual --update-snapshots && node ../tests/regression/validate-baselines.mjs",

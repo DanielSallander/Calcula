@@ -235,9 +235,11 @@ pub struct UpdateSlicerParams {
 /// Slicer state managed by Tauri.
 pub struct SlicerState {
     /// All slicers: id -> Slicer
-    pub slicers: Mutex<HashMap<identity::EntityId, Slicer>>,
+    /// PERSISTED (`workbook.slicers`) -> `Persisted<T>`.
+    pub slicers: crate::document_effect::Persisted<HashMap<identity::EntityId, Slicer>>,
     /// Computed properties: slicer_id -> list of properties
-    pub computed_properties: Mutex<super::computed::SlicerComputedPropertiesStorage>,
+    /// PERSISTED with the slicers -> `Persisted<T>`.
+    pub computed_properties: crate::document_effect::Persisted<super::computed::SlicerComputedPropertiesStorage>,
     /// Dependency tracking: prop_id -> cells it references
     pub computed_prop_dependencies: Mutex<super::computed::SlicerComputedPropDependencies>,
     /// Reverse dependency: cell -> prop_ids
@@ -247,8 +249,8 @@ pub struct SlicerState {
 impl SlicerState {
     pub fn new() -> Self {
         Self {
-            slicers: Mutex::new(HashMap::new()),
-            computed_properties: Mutex::new(HashMap::new()),
+            slicers: crate::document_effect::Persisted::new(HashMap::new()),
+            computed_properties: crate::document_effect::Persisted::new(HashMap::new()),
             computed_prop_dependencies: Mutex::new(HashMap::new()),
             computed_prop_dependents: Mutex::new(HashMap::new()),
         }

@@ -565,8 +565,9 @@ fn off_sheet_replace_all_rewrites_the_target_and_records_sheet_tagged_undo() {
     });
     let a = aux();
 
+    assert!(!*a.file.is_modified.lock().unwrap(), "clean before the replace");
     let result = crate::commands::search::replace_all_off_sheet(
-        &state, &a.files, &a.pivots, &a.pane, &a.filters,
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters,
         1,
         "beta".to_string(),
         "gamma".to_string(),
@@ -575,6 +576,13 @@ fn off_sheet_replace_all_rewrites_the_target_and_records_sheet_tagged_undo() {
     )
     .expect("replace succeeds");
     assert_eq!(result.replacement_count, 1);
+    // A write to a NON-ACTIVE sheet is invisible on the current canvas, so nothing
+    // else in the system would ever mark it: if this regresses, Replace All across
+    // sheets is lost at close with no prompt.
+    assert!(
+        *a.file.is_modified.lock().unwrap(),
+        "an off-sheet Replace All must dirty the workbook"
+    );
     assert_eq!(
         value_at(&state, 1, 0, 0),
         Some(CellValue::Text("alpha gamma".to_string()))
@@ -610,7 +618,7 @@ fn off_sheet_replace_all_is_blocked_by_target_protection() {
     let a = aux();
 
     let err = crate::commands::search::replace_all_off_sheet(
-        &state, &a.files, &a.pivots, &a.pane, &a.filters,
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters,
         1,
         "beta".to_string(),
         "gamma".to_string(),
@@ -620,6 +628,15 @@ fn off_sheet_replace_all_is_blocked_by_target_protection() {
     .expect_err("protected target (cells locked by default) must refuse");
     assert!(err.to_lowercase().contains("protect"), "{err}");
     assert_eq!(value_at(&state, 1, 0, 0), Some(CellValue::Text("beta".to_string())));
+    // THE ORDERING CONTRACT. `DocumentEffect::mutates` sets the dirty flag in its
+    // constructor, so it must be built only after the protection gate. A refusal that
+    // changed nothing must leave the document exactly as clean as it found it --
+    // otherwise the close prompt starts firing for work that was never done, and a
+    // prompt users learn to dismiss is worth no more than no prompt at all.
+    assert!(
+        !*a.file.is_modified.lock().unwrap(),
+        "a REFUSED off-sheet replace must leave the document clean"
+    );
 }
 
 #[test]
@@ -635,7 +652,7 @@ fn off_sheet_replace_single_rewrites_one_cell_on_the_target() {
     let a = aux();
 
     let result = crate::commands::search::replace_single_off_sheet(
-        &state, &a.files, &a.pivots, &a.pane, &a.filters,
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters,
         1, 2, 3,
         "old".to_string(),
         "new".to_string(),
@@ -643,6 +660,10 @@ fn off_sheet_replace_single_rewrites_one_cell_on_the_target() {
     )
     .expect("replace succeeds");
     assert!(result.is_some(), "a replacement happened");
+    assert!(
+        *a.file.is_modified.lock().unwrap(),
+        "an off-sheet Replace Next must dirty the workbook"
+    );
     assert_eq!(value_at(&state, 1, 2, 3), Some(CellValue::Text("new".to_string())));
     mirror_untouched(&state);
 

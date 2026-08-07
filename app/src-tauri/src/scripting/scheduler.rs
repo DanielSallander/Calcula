@@ -827,6 +827,7 @@ pub struct SchedulerRequest {
 #[tauri::command]
 pub fn script_scheduler(
     cap_store: State<'_, CapabilityStore>,
+    file_state: State<'_, crate::persistence::FileState>,
     script_state: State<'_, crate::scripting::types::ScriptState>,
     app_state: State<'_, crate::AppState>,
     request: SchedulerRequest,
@@ -865,6 +866,9 @@ pub fn script_scheduler(
     match request.op.as_str() {
         // ---- Registration -------------------------------------------------
         "every" | "at" | "once" => {
+            // Scheduled jobs ride in the .cala (`persist_scheduled_jobs`), so
+            // registering/cancelling/toggling one is a document change.
+            let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
             let script_id = request.script_id.clone().unwrap_or_default();
             let cadence = match request.op.as_str() {
                 "at" => CADENCE_DAILY_AT,
@@ -928,6 +932,9 @@ pub fn script_scheduler(
             serde_json::to_value(jobs).map_err(|e| e.to_string())
         }
         "cancel" => {
+            // Scheduled jobs ride in the .cala (`persist_scheduled_jobs`), so
+            // registering/cancelling/toggling one is a document change.
+            let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
             let job_id = request
                 .job_id
                 .as_deref()
@@ -957,6 +964,9 @@ pub fn script_scheduler(
             Ok(serde_json::json!({ "cancelled": removed }))
         }
         "setEnabled" => {
+            // Scheduled jobs ride in the .cala (`persist_scheduled_jobs`), so
+            // registering/cancelling/toggling one is a document change.
+            let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
             let job_id = request
                 .job_id
                 .as_deref()

@@ -524,7 +524,7 @@ pub(crate) fn relink_autofilter_owner(
 fn name_collides_with_defined_name(state: &AppState, name: &str) -> bool {
     state
         .named_ranges
-        .lock()
+        .read()
         .map(|names| names.contains_key(&name.to_uppercase()))
         .unwrap_or(false)
 }
@@ -556,12 +556,14 @@ fn is_valid_table_name(name: &str) -> bool {
 /// Create a new table
 #[tauri::command]
 pub fn create_table(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     params: CreateTableParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut tables = state.tables.lock().unwrap();
-    let mut table_names = state.table_names.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
 
     // Validate or generate name
     let name = if params.name.is_empty() {
@@ -705,6 +707,7 @@ pub fn create_table(
 #[tauri::command]
 pub fn delete_table(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -713,8 +716,12 @@ pub fn delete_table(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
-    let mut table_names = state.table_names.lock().unwrap();
+    // Past the protection gate. Deleting a table drops it from `workbook.tables`,
+    // rewrites every dependent structured reference, and prunes its object scripts --
+    // three persisted stores, and none of them dirtied before.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
 
@@ -757,7 +764,7 @@ pub fn delete_table(
     // C10 cleanup: prune any object scripts attached to this table so a deleted
     // table leaves no dangling scripts behind. instanceId == the table id.
     let table_id_str = table_id.to_string();
-    let scripts_before = if let Ok(mut scripts) = state.object_scripts.lock() {
+    let scripts_before = if let Ok(mut scripts) = state.object_scripts.write(&effect) {
         let before = scripts.clone();
         scripts.retain(|s| {
             !(s.object_type == persistence::ScriptableObjectType::Table
@@ -823,6 +830,7 @@ pub fn delete_table(
 /// Rename a table
 #[tauri::command]
 pub fn rename_table(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
     new_name: String,
@@ -842,8 +850,9 @@ pub fn rename_table(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
-    let mut table_names = state.table_names.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
 
@@ -997,6 +1006,7 @@ fn rename_table_refs_in_formulas(
 /// Update table style options
 #[tauri::command]
 pub fn update_table_style(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     params: UpdateTableStyleParams,
 ) -> TableResult {
@@ -1006,7 +1016,8 @@ pub fn update_table_style(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1031,6 +1042,7 @@ pub fn update_table_style(
 /// Add a column to a table
 #[tauri::command]
 pub fn add_table_column(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
     column_name: String,
@@ -1042,7 +1054,8 @@ pub fn add_table_column(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1080,12 +1093,14 @@ pub fn add_table_column(
 /// Remove a column from a table
 #[tauri::command]
 pub fn remove_table_column(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
     column_name: String,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1116,6 +1131,7 @@ pub fn remove_table_column(
 /// Rename a table column
 #[tauri::command]
 pub fn rename_table_column(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
     old_name: String,
@@ -1127,7 +1143,8 @@ pub fn rename_table_column(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1162,6 +1179,7 @@ pub fn rename_table_column(
 /// Also writes the corresponding SUBTOTAL formula into the totals row cell.
 #[tauri::command]
 pub fn set_totals_row_function(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     params: SetTotalsRowFunctionParams,
 ) -> TableResult {
@@ -1171,7 +1189,8 @@ pub fn set_totals_row_function(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
 
@@ -1232,6 +1251,7 @@ pub fn set_totals_row_function(
 /// When disabling, clears the totals row cells and shrinks the table.
 #[tauri::command]
 pub fn toggle_totals_row(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
     show: bool,
@@ -1242,7 +1262,8 @@ pub fn toggle_totals_row(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
 
@@ -1303,6 +1324,7 @@ pub fn toggle_totals_row(
 /// Resize a table
 #[tauri::command]
 pub fn resize_table(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     params: ResizeTableParams,
 ) -> TableResult {
@@ -1312,7 +1334,8 @@ pub fn resize_table(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1634,6 +1657,7 @@ fn clear_table_auto_filter(
 /// Cell data and formatting are preserved.
 #[tauri::command]
 pub fn convert_to_range(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
 ) -> TableResult {
@@ -1643,8 +1667,9 @@ pub fn convert_to_range(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
-    let mut table_names = state.table_names.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
 
@@ -1689,11 +1714,17 @@ pub fn convert_to_range(
 #[tauri::command]
 pub fn check_table_auto_expand(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     row: u32,
     col: u32,
 ) -> Option<Table> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut tables = state.tables.lock().unwrap();
+    // CONDITIONAL MUTATION. This is the tail of a cell edit the user just made:
+    // `update_cell` has already marked the document dirty, so the token here adds no
+    // dirtiness the edit did not already imply -- but the paths below DO rewrite the
+    // persisted table, so the write must still be authorised rather than skipped.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut tables = state.tables.write(&effect).unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
 
@@ -1807,12 +1838,18 @@ pub fn check_table_auto_expand(
 #[tauri::command]
 pub fn enforce_table_header(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     table_id: identity::EntityId,
     column_index: u32,
     new_value: String,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut tables = state.tables.lock().unwrap();
+    // CONDITIONAL MUTATION. This is the tail of a cell edit the user just made:
+    // `update_cell` has already marked the document dirty, so the token here adds no
+    // dirtiness the edit did not already imply -- but the paths below DO rewrite the
+    // persisted table, so the write must still be authorised rather than skipped.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -1849,7 +1886,7 @@ pub fn get_table(
     table_id: identity::EntityId,
 ) -> Option<Table> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
 
     tables
         .get(&active_sheet)
@@ -1864,7 +1901,7 @@ pub fn get_table_by_id(
     state: State<AppState>,
     table_id: identity::EntityId,
 ) -> Option<Table> {
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
     for sheet_tables in tables.values() {
         if let Some(table) = sheet_tables.get(&table_id) {
             return Some(table.clone());
@@ -1878,10 +1915,12 @@ pub fn get_table_by_id(
 /// and emits the dataChanged event; this command only grows the table bounds.
 #[tauri::command]
 pub fn add_table_row(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     table_id: identity::EntityId,
 ) -> Result<(), String> {
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
     for sheet_tables in tables.values_mut() {
         if let Some(table) = sheet_tables.get_mut(&table_id) {
             table.end_row += 1;
@@ -1912,8 +1951,8 @@ pub fn get_table_by_name(
     state: State<AppState>,
     name: String,
 ) -> Option<Table> {
-    let tables = state.tables.lock().unwrap();
-    let table_names = state.table_names.lock().unwrap();
+    let tables = state.tables.read().unwrap();
+    let table_names = state.table_names.read().unwrap();
 
     let (sheet_index, table_id) = table_names.get(&name.to_uppercase())?;
     tables
@@ -1929,7 +1968,7 @@ pub fn get_table_at_cell(
     col: u32,
 ) -> Option<Table> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
 
     tables.get(&active_sheet).and_then(|sheet_tables| {
         sheet_tables
@@ -1945,7 +1984,7 @@ pub fn get_all_tables(
     state: State<AppState>,
 ) -> Vec<Table> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
 
     tables
         .get(&active_sheet)
@@ -1963,7 +2002,7 @@ pub fn get_tables_for_sheet(
     state: State<AppState>,
     sheet_index: usize,
 ) -> Vec<Table> {
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
     let mut out: Vec<Table> = tables
         .get(&sheet_index)
         .map(|sheet_tables| sheet_tables.values().cloned().collect())
@@ -1980,7 +2019,7 @@ pub fn get_tables_for_sheet(
 pub fn get_tables_all_sheets(
     state: State<AppState>,
 ) -> Vec<Table> {
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
     let mut out: Vec<Table> = tables
         .values()
         .flat_map(|sheet_tables| sheet_tables.values().cloned())
@@ -1999,8 +2038,8 @@ pub fn resolve_structured_reference(
     state: State<AppState>,
     reference: String,
 ) -> StructuredRefResult {
-    let tables = state.tables.lock().unwrap();
-    let table_names = state.table_names.lock().unwrap();
+    let tables = state.tables.read().unwrap();
+    let table_names = state.table_names.read().unwrap();
 
     // Parse reference: TableName[ColumnName] or TableName[[#Specifier],[Column]]
     let (table_name, specifier) = match parse_structured_ref(&reference) {
@@ -2033,6 +2072,7 @@ pub fn resolve_structured_reference(
 /// and the computed value is written to each data cell.
 #[tauri::command]
 pub fn set_calculated_column(
+    file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
@@ -2059,7 +2099,8 @@ pub fn set_calculated_column(
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let mut tables = state.tables.lock().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut tables = state.tables.write(&effect).unwrap();
 
     let table = match tables.get_mut(&active_sheet).and_then(|t| t.get_mut(&table_id)) {
         Some(t) => t,
@@ -2100,7 +2141,7 @@ pub fn set_calculated_column(
         let mut grid = state.grid.lock().unwrap();
         let mut grids = state.grids.lock().unwrap();
         let sheet_names = state.sheet_names.lock().unwrap();
-        let table_names = state.table_names.lock().unwrap();
+        let table_names = state.table_names.read().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let styles = state.style_registry.lock().unwrap();
         let locale = state.locale.lock().unwrap();
@@ -2191,7 +2232,7 @@ pub fn convert_formula_to_table_refs(
     formula_row: u32,
 ) -> String {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let tables = state.tables.lock().unwrap();
+    let tables = state.tables.read().unwrap();
 
     let table = match tables
         .get(&active_sheet)

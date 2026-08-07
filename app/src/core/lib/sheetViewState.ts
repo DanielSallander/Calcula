@@ -12,6 +12,8 @@ import {
   setSheetZoom,
   getSplitWindow,
   getFreezePanes,
+  getSheetDisplayFlags,
+  setSheetDisplayFlags,
 } from "./tauri-api";
 import { ZOOM_MIN, ZOOM_MAX } from "../types";
 
@@ -90,5 +92,64 @@ export async function loadSheetViewState(): Promise<SheetViewState> {
 export async function persistSheetZoom(zoomFactor: number): Promise<void> {
   await setSheetZoom(zoomFactorToPercent(zoomFactor)).catch(() => {
     /* a failed persist must not break interactive zooming */
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Per-sheet DISPLAY FLAGS
+// ---------------------------------------------------------------------------
+
+/**
+ * The sheet's display mode, mirroring Rust `api_types::SheetDisplayFlags`
+ * (camelCase over IPC, per the golden rule).
+ *
+ * These four had the same disease zoom and split had, only worse: they had no
+ * backend authority AT ALL, so they never reached the file and reset on every
+ * reload and every sheet switch. They are one unit here for the same reason they
+ * are one unit in Rust — a partial landing reproduces the original bug for
+ * whichever flag was left out.
+ */
+export interface SheetDisplayFlags {
+  displayZeros: boolean;
+  showFormulas: boolean;
+  viewMode: string;
+  displayHeadings: boolean;
+}
+
+/** The values a sheet has when it has never been touched. */
+export const DEFAULT_SHEET_DISPLAY_FLAGS: SheetDisplayFlags = {
+  displayZeros: true,
+  showFormulas: false,
+  viewMode: "normal",
+  displayHeadings: true,
+};
+
+/**
+ * Read the active sheet's display flags.
+ *
+ * Never throws, for the same reason `loadSheetViewState` does not: losing a
+ * display flag is bad, refusing to draw the sheet is worse.
+ */
+export async function loadSheetDisplayFlags(): Promise<SheetDisplayFlags> {
+  const flags = await getSheetDisplayFlags().catch(() => null);
+  return {
+    displayZeros: flags?.displayZeros ?? DEFAULT_SHEET_DISPLAY_FLAGS.displayZeros,
+    showFormulas: flags?.showFormulas ?? DEFAULT_SHEET_DISPLAY_FLAGS.showFormulas,
+    viewMode: flags?.viewMode ?? DEFAULT_SHEET_DISPLAY_FLAGS.viewMode,
+    displayHeadings: flags?.displayHeadings ?? DEFAULT_SHEET_DISPLAY_FLAGS.displayHeadings,
+  };
+}
+
+/**
+ * Write one or more display flags back to the authority.
+ *
+ * A PARTIAL patch on purpose: a caller toggling "show formulas" must not have to
+ * know the other three, and must not be able to clobber them with stale values.
+ */
+export async function persistSheetDisplayFlags(
+  patch: Partial<SheetDisplayFlags>
+): Promise<void> {
+  await setSheetDisplayFlags(patch).catch(() => {
+    /* a failed persist must not break the interactive toggle */
   });
 }

@@ -2,15 +2,31 @@
 // PURPOSE: Tauri commands for page setup and print functionality.
 
 use crate::api_types::{PageSetup, PrintData, CellData, MergedRegion, StyleData};
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{AppState, format_cell_value};
 use tauri::State;
 use std::fs;
+
+// PAGE SETUP IS PERSISTED, SO EVERY WRITE HERE DIRTIES THE DOCUMENT.
+//
+// `enrich_workbook_metadata` copies `AppState::page_setups` into `Sheet::page_setup`
+// at save time (margins, orientation, scaling, print area, print titles and both
+// manual break lists), so changing any of it changes what a save writes. All 13
+// mutating commands in this file previously took no `FileState` at all and could not
+// mark dirty: setting a print area and closing lost it with no prompt, and AutoRecover
+// declined to snapshot it either.
+//
+// ORDERING (see `commands::dimensions`, the template): `DocumentEffect::mutates` sets
+// the flag in its constructor, so it must be built only AFTER every validation that can
+// still refuse -- otherwise a rejected call leaves a spuriously dirty document. That is
+// why `move_page_break` validates `direction` up front rather than in the match arm.
 
 /// Get the page setup for the active sheet.
 #[tauri::command]
 pub fn get_page_setup(state: State<AppState>) -> PageSetup {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let page_setups = state.page_setups.lock().unwrap();
+    let page_setups = state.page_setups.read().unwrap();
     page_setups
         .get(active_sheet)
         .cloned()
@@ -21,10 +37,12 @@ pub fn get_page_setup(state: State<AppState>) -> PageSetup {
 #[tauri::command]
 pub fn set_page_setup(
     state: State<AppState>,
+    file_state: State<FileState>,
     setup: PageSetup,
 ) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     // Extend the vector if needed
     while page_setups.len() <= active_sheet {
@@ -45,7 +63,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
-    let page_setups = state.page_setups.lock().unwrap();
+    let page_setups = state.page_setups.read().unwrap();
     let col_widths_map = state.column_widths.lock().unwrap();
     let row_heights_map = state.row_heights.lock().unwrap();
 
@@ -113,7 +131,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     }
 
     // Collect all styles resolved against the active theme
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     let style_count = styles.len();
     let mut style_list = Vec::with_capacity(style_count);
     for i in 0..style_count {
@@ -168,9 +186,10 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
 
 /// Insert a manual row page break before the specified row.
 #[tauri::command]
-pub fn insert_row_page_break(state: State<AppState>, row: u32) -> Result<(), String> {
+pub fn insert_row_page_break(state: State<AppState>, file_state: State<FileState>, row: u32) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -186,9 +205,10 @@ pub fn insert_row_page_break(state: State<AppState>, row: u32) -> Result<(), Str
 
 /// Remove a manual row page break at the specified row.
 #[tauri::command]
-pub fn remove_row_page_break(state: State<AppState>, row: u32) -> Result<(), String> {
+pub fn remove_row_page_break(state: State<AppState>, file_state: State<FileState>, row: u32) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -201,9 +221,10 @@ pub fn remove_row_page_break(state: State<AppState>, row: u32) -> Result<(), Str
 
 /// Insert a manual column page break before the specified column.
 #[tauri::command]
-pub fn insert_col_page_break(state: State<AppState>, col: u32) -> Result<(), String> {
+pub fn insert_col_page_break(state: State<AppState>, file_state: State<FileState>, col: u32) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -219,9 +240,10 @@ pub fn insert_col_page_break(state: State<AppState>, col: u32) -> Result<(), Str
 
 /// Remove a manual column page break at the specified column.
 #[tauri::command]
-pub fn remove_col_page_break(state: State<AppState>, col: u32) -> Result<(), String> {
+pub fn remove_col_page_break(state: State<AppState>, file_state: State<FileState>, col: u32) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -234,9 +256,10 @@ pub fn remove_col_page_break(state: State<AppState>, col: u32) -> Result<(), Str
 
 /// Remove all manual page breaks for the active sheet.
 #[tauri::command]
-pub fn reset_all_page_breaks(state: State<AppState>) -> Result<(), String> {
+pub fn reset_all_page_breaks(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -253,11 +276,29 @@ pub fn reset_all_page_breaks(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn set_print_area(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
     end_col: u32,
 ) -> Result<String, String> {
+    set_print_area_impl(&state, &file_state, start_row, start_col, end_row, end_col)
+}
+
+/// Command body over plain references, so the dirty-flag contract for this file is
+/// unit-testable without a Tauri `State` (mirrors
+/// `conditional_formatting::add_conditional_format_impl`). This command is the
+/// representative for print.rs because it is one of the three here that can still
+/// REFUSE after being called, which is where the eager-flag ordering can go wrong.
+pub(crate) fn set_print_area_impl(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<String, String> {
+    // Refuse BEFORE constructing the effect: `mutates` sets the dirty flag eagerly.
     if start_row > end_row || start_col > end_col {
         return Err("Invalid range: start must be <= end".to_string());
     }
@@ -271,7 +312,8 @@ pub fn set_print_area(
     );
 
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -283,9 +325,10 @@ pub fn set_print_area(
 
 /// Clear the print area for the active sheet.
 #[tauri::command]
-pub fn clear_print_area(state: State<AppState>) -> Result<(), String> {
+pub fn clear_print_area(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -300,9 +343,11 @@ pub fn clear_print_area(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn set_print_title_rows(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     end_row: u32,
 ) -> Result<String, String> {
+    // Refuse BEFORE constructing the effect: `mutates` sets the dirty flag eagerly.
     if start_row > end_row {
         return Err("Invalid range: start_row must be <= end_row".to_string());
     }
@@ -310,7 +355,8 @@ pub fn set_print_title_rows(
     let title_str = format!("{}:{}", start_row + 1, end_row + 1);
 
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -322,9 +368,10 @@ pub fn set_print_title_rows(
 
 /// Clear print title rows for the active sheet.
 #[tauri::command]
-pub fn clear_print_title_rows(state: State<AppState>) -> Result<(), String> {
+pub fn clear_print_title_rows(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -339,9 +386,11 @@ pub fn clear_print_title_rows(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn set_print_title_cols(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_col: u32,
     end_col: u32,
 ) -> Result<String, String> {
+    // Refuse BEFORE constructing the effect: `mutates` sets the dirty flag eagerly.
     if start_col > end_col {
         return Err("Invalid range: start_col must be <= end_col".to_string());
     }
@@ -353,7 +402,8 @@ pub fn set_print_title_cols(
     );
 
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -365,9 +415,10 @@ pub fn set_print_title_cols(
 
 /// Clear print title columns for the active sheet.
 #[tauri::command]
-pub fn clear_print_title_cols(state: State<AppState>) -> Result<(), String> {
+pub fn clear_print_title_cols(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -382,6 +433,7 @@ pub fn clear_print_title_cols(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn move_page_break(
     state: State<AppState>,
+    file_state: State<FileState>,
     direction: String,
     from_index: u32,
     to_index: u32,
@@ -390,8 +442,19 @@ pub fn move_page_break(
         return Err("Cannot move page break to position 0".to_string());
     }
 
+    // BOTH validations run before the effect is constructed. `direction` used to be
+    // validated inside the match, i.e. after the mutation had begun; with an eagerly
+    // set dirty flag that ordering would leave a rejected call holding a dirty
+    // document. Refusals must leave the document exactly as they found it.
+    let move_rows = match direction.as_str() {
+        "row" => true,
+        "col" => false,
+        _ => return Err(format!("Invalid direction '{}': must be 'row' or 'col'", direction)),
+    };
+
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut page_setups = state.page_setups.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     while page_setups.len() <= active_sheet {
         page_setups.push(PageSetup::default());
@@ -399,22 +462,15 @@ pub fn move_page_break(
 
     let setup = &mut page_setups[active_sheet];
 
-    match direction.as_str() {
-        "row" => {
-            setup.manual_row_breaks.retain(|&r| r != from_index);
-            if !setup.manual_row_breaks.contains(&to_index) {
-                setup.manual_row_breaks.push(to_index);
-                setup.manual_row_breaks.sort();
-            }
-        }
-        "col" => {
-            setup.manual_col_breaks.retain(|&c| c != from_index);
-            if !setup.manual_col_breaks.contains(&to_index) {
-                setup.manual_col_breaks.push(to_index);
-                setup.manual_col_breaks.sort();
-            }
-        }
-        _ => return Err(format!("Invalid direction '{}': must be 'row' or 'col'", direction)),
+    let breaks = if move_rows {
+        &mut setup.manual_row_breaks
+    } else {
+        &mut setup.manual_col_breaks
+    };
+    breaks.retain(|&i| i != from_index);
+    if !breaks.contains(&to_index) {
+        breaks.push(to_index);
+        breaks.sort();
     }
 
     Ok(())

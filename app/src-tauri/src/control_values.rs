@@ -56,12 +56,12 @@ pub fn build_control_values(
     };
     // 2. Ribbon filters: lock, extract, DROP.
     let filter_entries = {
-        let filters = filter_state.filters.lock().unwrap();
+        let filters = filter_state.filters.read().unwrap();
         ribbon_filter_named_values(&filters)
     };
     // 3. On-grid controls: CLONE the storage under its own lock, DROP.
     let storage = {
-        let controls = state.controls.lock().unwrap();
+        let controls = state.controls.read().unwrap();
         controls.clone()
     };
     // 4. Only now touch grids (brief lock, dropped at block end).
@@ -95,11 +95,11 @@ pub fn build_control_values_with_grids(
         pane_control_named_values(&controls)
     };
     let filter_entries = {
-        let filters = filter_state.filters.lock().unwrap();
+        let filters = filter_state.filters.read().unwrap();
         ribbon_filter_named_values(&filters)
     };
     let storage = {
-        let controls = state.controls.lock().unwrap();
+        let controls = state.controls.read().unwrap();
         controls.clone()
     };
     let on_grid_entries = on_grid_named_values(&storage, grids);
@@ -552,9 +552,9 @@ pub(crate) fn recalc_control_dependents_core(
         let cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
         let merged_regions = state.merged_regions.lock().unwrap();
         let locale = state.locale.lock().unwrap();
-        let cascade_tables = state.tables.lock().unwrap();
-        let cascade_table_names = state.table_names.lock().unwrap();
-        let cascade_named_ranges = state.named_ranges.lock().unwrap();
+        let cascade_tables = state.tables.read().unwrap();
+        let cascade_table_names = state.table_names.read().unwrap();
+        let cascade_named_ranges = state.named_ranges.read().unwrap();
 
         // Scan the active sheet: string prefilter, then AST walk. Sorted for a
         // deterministic seed order (HashMap iteration is not).

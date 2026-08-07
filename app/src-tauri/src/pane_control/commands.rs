@@ -41,7 +41,7 @@ fn find_name_conflict(
     {
         return Some(format!("pane control \"{}\"", c.name));
     }
-    let filters = ribbon_filter_state.filters.lock().unwrap();
+    let filters = ribbon_filter_state.filters.read().unwrap();
     if let Some(f) = filters
         .values()
         .find(|f| name_key(&f.name) == candidate_key)
@@ -60,7 +60,7 @@ fn next_order(
 ) -> u32 {
     let pane_max = controls.values().map(|c| c.order).max();
     let filter_max = {
-        let filters = ribbon_filter_state.filters.lock().unwrap();
+        let filters = ribbon_filter_state.filters.read().unwrap();
         filters.values().map(|f| f.order).max()
     };
     match (pane_max, filter_max) {
@@ -359,12 +359,12 @@ pub fn get_all_control_values(
         crate::pane_control::values::pane_control_named_values(&controls)
     };
     {
-        let filters = ribbon_filter_state.filters.lock().unwrap();
+        let filters = ribbon_filter_state.filters.read().unwrap();
         result.extend(crate::pane_control::values::ribbon_filter_named_values(&filters));
     }
     {
         let on_grid = {
-            let controls = state.controls.lock().unwrap();
+            let controls = state.controls.read().unwrap();
             controls.clone()
         };
         let grids = state.grids.lock().unwrap();

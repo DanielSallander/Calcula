@@ -377,6 +377,31 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     // rather than asserted from the documentation: compare this thread id
     // against a UI-thread command's and they must differ.
     log_info!("CALC", "calculate_now on thread {:?}", std::thread::current().id());
+    // CENSUS "UNCLEAR" -> DELIBERATELY CLEAN (DerivedCache). Recalculation rewrites
+    // cell VALUES, and values are persisted, so this looks like a document mutation.
+    // It is not one, for two reasons.
+    //
+    // 1. The values are DERIVED. They are a pure function of state that is itself
+    //    persisted (formulas, inputs, locale, the model), so a recalc result can never
+    //    be "lost" at close -- reopening the workbook reproduces it. Dirtying here
+    //    would offer to save work that was never at risk.
+    // 2. It would make the prompt lie in the expensive direction. A workbook holding
+    //    NOW(), TODAY() or RAND() recalculates on open and on all sorts of ambient
+    //    events; marking dirty would make merely LOOKING at such a file prompt to save
+    //    on close. That is precisely the unpredictable prompt this whole effort exists
+    //    to prevent -- a prompt users learn to dismiss protects nothing.
+    //
+    // The commands that make a recalc's results meaningful DO mark: the edit that
+    // caused the staleness (update_cell / update_cells_batch), and `clear_pending_recalc`
+    // when a human discards the marker. Note also that `save_file` calls this command
+    // itself when calculate-before-save is on (persistence.rs) and then assigns
+    // is_modified = false; a dirty mark here would be both wrong and immediately undone.
+    //
+    // `calculate_sheet` delegates straight to this function and inherits the decision.
+    // Recorded rather than omitted: `rg deliberately_clean` must list every such call.
+    let _effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::DerivedCache,
+    );
     // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
     // on the frontend before calling). Shared via Arc so each formula's eval gets
     // it cheaply; None => cube cells preserve their last value (see eval_cube).
@@ -409,7 +434,7 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     let max_change = *state.max_change.lock().unwrap();
 
     // Build pivot data lookup closure for GETPIVOTDATA
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
@@ -442,9 +467,9 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
         .collect();
 
     // Lock table state once for all formula evaluations
-    let tables_map = state.tables.lock().unwrap();
-    let table_names_map = state.table_names.lock().unwrap();
-    let named_ranges_map = state.named_ranges.lock().unwrap();
+    let tables_map = state.tables.read().unwrap();
+    let table_names_map = state.table_names.read().unwrap();
+    let named_ranges_map = state.named_ranges.read().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let dependencies_map = state.dependencies.lock().unwrap();
@@ -701,7 +726,11 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     // partial state into row heights and column widths — where, unlike a cell
     // value, the user has no indicator telling them it is stale.
     if !cancelled {
-        let mut cp_storage = state.computed_properties.lock().unwrap();
+        // Refreshes each property's CACHED VALUE from formulas that are themselves
+        // persisted -- the same derived-state argument as the recalc pass this sits in
+        // (see the `_effect` at the top of this command). The property definitions are
+        // untouched here; add/update/remove_computed_property own the dirty flag.
+        let mut cp_storage = state.computed_properties.write(&_effect).unwrap();
         let (_dim_changes, _style_refresh) =
             crate::computed_properties::re_evaluate_all_properties(
                 &mut cp_storage,
@@ -805,7 +834,7 @@ pub(crate) fn recalculate_sheet_values(
     let max_iterations = *state.max_iterations.lock().unwrap();
     let max_change = *state.max_change.lock().unwrap();
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
@@ -834,9 +863,9 @@ pub(crate) fn recalculate_sheet_values(
         return;
     }
 
-    let tables_map = state.tables.lock().unwrap();
-    let table_names_map = state.table_names.lock().unwrap();
-    let named_ranges_map = state.named_ranges.lock().unwrap();
+    let tables_map = state.tables.read().unwrap();
+    let table_names_map = state.table_names.read().unwrap();
+    let named_ranges_map = state.named_ranges.read().unwrap();
     let (column_widths, row_heights) = {
         let all_cw = state.all_column_widths.lock().unwrap();
         let all_rh = state.all_row_heights.lock().unwrap();
@@ -1036,11 +1065,30 @@ pub fn get_pending_recalc(state: State<AppState>) -> Option<PendingRecalc> {
 /// Deliberately explicit and deliberately not called from any save or publish
 /// path: dropping the marker is a claim that the stale cells no longer matter,
 /// and only a human gets to make that claim.
+///
+/// CENSUS "UNCLEAR" -> MUTATES-DOCUMENT. `AppState::pending_recalc` really is
+/// persisted (`attach_pending_recalc_for_save` / `restore_pending_recalc_on_load`),
+/// so dropping the staleness marker changes what a save writes -- and it is a
+/// human's explicit claim, which is exactly the kind of decision the close prompt
+/// exists to protect. Conditional on `had`: clearing an already-empty marker
+/// changes nothing and must not dirty.
 #[tauri::command]
-pub fn clear_pending_recalc(state: State<AppState>) -> bool {
+pub fn clear_pending_recalc(state: State<AppState>, file_state: State<crate::persistence::FileState>) -> bool {
+    clear_pending_recalc_impl(&state, &file_state)
+}
+
+/// Command body over plain references, so the "unclear -> mutates-document" decision
+/// above is unit-testable without a Tauri `State`.
+pub(crate) fn clear_pending_recalc_impl(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+) -> bool {
     if let Ok(mut pending) = state.pending_recalc.lock() {
         let had = pending.is_some();
         *pending = None;
+        if had {
+            let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        }
         return had;
     }
     false
@@ -1249,9 +1297,9 @@ pub(crate) fn recalc_visibility_dependents_core(
         let cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
         let merged_regions = state.merged_regions.lock().unwrap();
         let locale = state.locale.lock().unwrap();
-        let cascade_tables = state.tables.lock().unwrap();
-        let cascade_table_names = state.table_names.lock().unwrap();
-        let cascade_named_ranges = state.named_ranges.lock().unwrap();
+        let cascade_tables = state.tables.read().unwrap();
+        let cascade_table_names = state.table_names.read().unwrap();
+        let cascade_named_ranges = state.named_ranges.read().unwrap();
 
         let mut seeds: Vec<(u32, u32)> = grid
             .cells

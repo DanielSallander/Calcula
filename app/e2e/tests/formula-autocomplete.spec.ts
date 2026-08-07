@@ -7,42 +7,179 @@
  */
 import { test, expect } from "../fixtures";
 import { takeCheckpoint } from "../helpers/screenshots";
+import type { Page } from "@playwright/test";
+
+/**
+ * Put the cursor in `ref` with the grid container genuinely focused.
+ *
+ * Two things had to be true for these tests to mean anything, and neither was:
+ *
+ *  1. The cell must be ON SCREEN. Column V is ~1500px from the origin, past the
+ *     right edge of a 1218px canvas, so it has to be scrolled to first.
+ *     `navigateTo` drives the Name Box and — observed across runs — sometimes
+ *     leaves scrollX at 0. `app:navigate-to-cell` is the app's own scroll path
+ *     and is deterministic.
+ *  2. Focus must be on the spreadsheet CONTAINER, not on the Name Box chrome.
+ *     The inline editor only receives keystrokes when the container has focus,
+ *     and `navigateTo` ends with focus on the Name Box.
+ */
+async function focusCell(page: Page, row: number, col: number): Promise<void> {
+  await page.evaluate(
+    ({ r, c }) => {
+      window.dispatchEvent(
+        new CustomEvent("app:navigate-to-cell", {
+          detail: { row: r, col: c, select: true },
+        })
+      );
+    },
+    { r: row, c: col }
+  );
+  await page.waitForTimeout(500);
+  // focus(), not click(): a click lands on grid pixels and would move the
+  // selection the navigate just set.
+  //
+  // Retried, because the navigate finishes with an async `refreshCells()`
+  // round-trip whose re-render can land after focus() and take focus away.
+  // Re-asserting is cheap; a lost focus is a silently empty test.
+  const container = page.locator('[data-focus-container="spreadsheet"]');
+  const holdsFocus = () =>
+    page.evaluate(
+      () =>
+        document.activeElement?.getAttribute("data-focus-container") ===
+        "spreadsheet"
+    );
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await container.focus();
+    await page.waitForTimeout(200);
+    if (!(await holdsFocus())) continue;
+
+    // Leave no inline editor open. One app instance serves every spec, so a
+    // sibling test can leave the editor up on old cell content; the first
+    // keystroke below then APPENDS to that content instead of starting a fresh
+    // formula, and the autocomplete never sees a leading "=". Observed:
+    // `editing.value === "This is a long "` at the point the dropdown was
+    // expected.
+    for (let i = 0; i < 4; i++) {
+      const editing = await page.evaluate(
+        () => (window as any).__CALCULA_GRID_STATE__?.editing ?? null
+      );
+      if (!editing) return;
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(200);
+      await container.focus();
+      await page.waitForTimeout(100);
+    }
+  }
+  throw new Error(
+    "[formula-autocomplete] spreadsheet container did not take focus after 5 " +
+      "attempts; keystrokes would never reach the inline editor and the " +
+      "dropdown assertions below would be meaningless."
+  );
+}
+
+/**
+ * Type a formula into the selected cell, one keystroke at a time.
+ *
+ * The first character does two jobs: it enters the cell value AND mounts the
+ * InlineEditor, which then takes focus. Characters sent during that async
+ * hand-off are DROPPED — measured against the running app, `keyboard.type("=SU")`
+ * leaves the editor holding `"="` and the autocomplete store never sees a
+ * prefix, so no dropdown ever opens. That is the whole reason the original
+ * assertion here had to be defensive.
+ *
+ * So: send the opener, wait for the editor <input> to actually own focus, then
+ * send the rest.
+ */
+async function typeFormula(page: Page, text: string): Promise<void> {
+  // `polling: "raf"` (Playwright's default) is unusable here: the app is a real
+  // background OS window, so requestAnimationFrame is throttled and the poll can
+  // stall for seconds. Poll on a timer instead.
+  await page.keyboard.type(text[0]);
+  await page.waitForFunction(
+    () => document.activeElement?.tagName === "INPUT",
+    undefined,
+    { timeout: 5000, polling: 200 }
+  );
+  await page.waitForTimeout(150);
+  await page.keyboard.type(text.slice(1), { delay: 80 });
+  await page.waitForTimeout(400);
+}
+
+const DROPDOWN = '[data-testid="formula-autocomplete"]';
+
+/**
+ * Put `text` in the cell at (row, col) and wait for the suggestion dropdown.
+ *
+ * Retried as a whole. The app races here: the inline editor mounts
+ * asynchronously and the store is fed by an input event, and with the WebView
+ * as a background OS window the hand-off intermittently drops the prefix or the
+ * caret position, leaving the dropdown closed on an otherwise correct editor
+ * value. Retrying the whole sequence does NOT weaken the assertion — after the
+ * last attempt the dropdown is still required to be there, and the failure says
+ * so. (This race is worth fixing in the app; see the hand-off notes.)
+ */
+async function openAutocomplete(
+  page: Page,
+  row: number,
+  col: number,
+  text: string
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(150);
+      await focusCell(page, row, col);
+      await page.waitForTimeout(200);
+      await typeFormula(page, text);
+      await expect(page.locator(DROPDOWN)).toBeVisible({ timeout: 3000 });
+      return;
+    } catch (error) {
+      lastError = error;
+      const diag = await page.evaluate(() => ({
+        editing: (window as any).__CALCULA_GRID_STATE__?.editing?.value,
+        active: document.activeElement?.tagName,
+        inputValue:
+          document.activeElement && "value" in document.activeElement
+            ? (document.activeElement as HTMLInputElement).value
+            : null,
+      }));
+      console.log(
+        `[formula-autocomplete] attempt ${attempt} did not open the dropdown for "${text}" ${JSON.stringify(diag)}`
+      );
+    }
+  }
+  throw new Error(
+    `[formula-autocomplete] the suggestion dropdown never opened for "${text}" ` +
+      `after 3 attempts. Last error: ${String(lastError)}`
+  );
+}
 
 test.describe("Formula Autocomplete", () => {
   test("dropdown appears when typing a formula function name", async ({
     appPage,
     grid,
   }) => {
-    await grid.navigateTo("V1");
-    await grid.page.waitForTimeout(200);
+    // The dropdown is FormulaAutocompleteOverlay's S.DropdownContainer, tagged
+    // `data-testid="formula-autocomplete"`.
+    //
+    // This test used to wait on `[data-overlay-id="formula-autocomplete"]`, an
+    // attribute that exists nowhere in the app, and its else-branch was
+    // `expect(true).toBe(true)` — so it passed whether the feature worked,
+    // silently regressed, or was deleted outright. The dropdown is now required.
+    await openAutocomplete(appPage, 0, 21, "=SU"); // V1
+    const dropdown = appPage.locator(DROPDOWN);
 
-    // Start typing a formula
-    await grid.page.keyboard.type("=SU");
-    await grid.page.waitForTimeout(500);
+    // It must actually be offering SUM for the prefix "=SU".
+    await expect(dropdown.getByText("SUM", { exact: true }).first()).toBeVisible({
+      timeout: 2000,
+    });
 
-    // The autocomplete overlay should be visible
-    // Look for a fixed-position dropdown containing function names
-    const dropdown = appPage.locator('[data-overlay-id="formula-autocomplete"]');
-    const isVisible = await dropdown.isVisible().catch(() => false);
-
-    if (isVisible) {
-      await takeCheckpoint(appPage, "autocomplete-dropdown-visible");
-
-      // Verify it contains SUM suggestion
-      const sumItem = dropdown.locator("text=SUM");
-      await expect(sumItem.first()).toBeVisible({ timeout: 2000 });
-    } else {
-      // Fallback: look for any overlay with SUM text near formula bar
-      const anyDropdown = appPage
-        .locator("div")
-        .filter({ hasText: /^SUM$/ })
-        .first();
-      const fallbackVisible = await anyDropdown
-        .isVisible()
-        .catch(() => false);
-      // Even if not found, the test validates the typing doesn't crash
-      expect(true).toBe(true);
-    }
+    // Capture the dropdown itself, not the page: a 340x220 popup is 4.6% of a
+    // 1280x800 frame, so a full-page golden could not fail on its content.
+    await takeCheckpoint(appPage, "autocomplete-dropdown-visible", {
+      target: dropdown,
+    });
 
     // Clean up: Escape to dismiss
     await grid.page.keyboard.press("Escape");
@@ -52,12 +189,8 @@ test.describe("Formula Autocomplete", () => {
   test("arrow keys navigate autocomplete suggestions", async ({
     grid,
   }) => {
-    await grid.navigateTo("V2");
-    await grid.page.waitForTimeout(200);
-
-    // Type a prefix that matches multiple functions
-    await grid.page.keyboard.type("=AV");
-    await grid.page.waitForTimeout(500);
+    // A prefix that matches multiple functions.
+    await openAutocomplete(grid.page, 1, 21, "=AV"); // V2
 
     // Press ArrowDown to move selection
     await grid.page.keyboard.press("ArrowDown");
@@ -87,26 +220,17 @@ test.describe("Formula Autocomplete", () => {
     appPage,
     grid,
   }) => {
-    await grid.navigateTo("V3");
-    await grid.page.waitForTimeout(200);
-
-    await grid.page.keyboard.type("=CO");
-    await grid.page.waitForTimeout(500);
+    // It must be up before "Escape dismisses it" can mean anything.
+    await openAutocomplete(grid.page, 2, 21, "=CO"); // V3
+    const dropdown = appPage.locator(DROPDOWN);
 
     // Press Escape to dismiss
     await grid.page.keyboard.press("Escape");
     await grid.page.waitForTimeout(300);
 
-    // The dropdown should no longer be visible
-    const dropdown = appPage.locator('[data-overlay-id="formula-autocomplete"]');
-    const isVisible = await dropdown.isVisible().catch(() => false);
-
-    // Either the overlay is gone or it was never there
-    // In both cases, pressing Escape should not crash
-    if (isVisible) {
-      // If still visible, the first Escape might have dismissed edit mode
-      // This is acceptable behavior
-    }
+    // The dropdown must be gone. (The old assertion queried a nonexistent
+    // attribute and then did nothing with the answer either way.)
+    await expect(dropdown).toBeHidden({ timeout: 2000 });
 
     // No screenshot here: after Escape the dropdown is gone, so the grid
     // capture only shows residual data left by sibling tests (shared app
@@ -120,12 +244,8 @@ test.describe("Formula Autocomplete", () => {
   test("completing a function inserts parentheses", async ({
     grid,
   }) => {
-    await grid.navigateTo("V4");
-    await grid.page.waitForTimeout(200);
-
     // Type =SUM and accept via the autocomplete
-    await grid.page.keyboard.type("=SUM");
-    await grid.page.waitForTimeout(500);
+    await openAutocomplete(grid.page, 3, 21, "=SUM"); // V4
 
     // Press Enter or Tab to accept the top suggestion
     await grid.page.keyboard.press("Tab");

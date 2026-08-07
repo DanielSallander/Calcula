@@ -325,7 +325,7 @@ pub(crate) fn collect_distributed_writeback_entries(
     state: &AppState,
 ) -> HashMap<String, Vec<ModelWritebackEntry>> {
     let mut result: HashMap<String, Vec<ModelWritebackEntry>> = HashMap::new();
-    let Ok(subs) = state.subscriptions.lock() else {
+    let Ok(subs) = state.subscriptions.read() else {
         return result;
     };
 

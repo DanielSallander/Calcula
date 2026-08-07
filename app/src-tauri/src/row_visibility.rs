@@ -103,7 +103,7 @@ fn nothing_is_hidden(state: &AppState) -> bool {
         .unwrap_or(false);
     let outlines_empty = state
         .outlines
-        .lock()
+        .read()
         .map(|m| m.values().all(|o| o.get_hidden_rows().is_empty()))
         .unwrap_or(false);
 

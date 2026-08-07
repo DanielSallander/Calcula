@@ -58,6 +58,10 @@ use engine::UndoStack;
 pub use identity;
 
 pub mod persistence;
+/// The dirty-flag forcing function: `DocumentEffect` + `Persisted<T>`.
+/// A write to persisted state cannot be expressed without deciding whether it
+/// dirties the document. See the module docs for the design rationale.
+pub mod document_effect;
 pub mod api_types;
 pub mod calculation;
 pub mod eval_budget;
@@ -189,6 +193,15 @@ mod tests;
 #[cfg(test)]
 mod eval_budget_tests;
 
+#[cfg(test)]
+mod document_effect_pilot_tests;
+
+#[cfg(test)]
+mod document_effect_wave2_tests;
+
+#[cfg(test)]
+mod document_effect_objects_tests;
+
 // ============================================================================
 // APPLICATION STATE
 // ============================================================================
@@ -274,7 +287,7 @@ pub struct AppState {
     pub cross_sheet_dependencies: Mutex<CrossSheetDependenciesMap>,
     pub undo_stack: Mutex<UndoStack>,
     /// Freeze pane configurations per sheet
-    pub freeze_configs: Mutex<Vec<FreezeConfig>>,
+    pub freeze_configs: document_effect::Persisted<Vec<FreezeConfig>>,
     /// Split window configurations per sheet
     pub split_configs: Mutex<Vec<SplitConfig>>,
     /// Per-sheet zoom as a REAL PERCENT (100 = 100%) — Excel's `zoomScale`.
@@ -293,7 +306,13 @@ pub struct AppState {
     /// had to heal.
     pub sheet_zooms: Mutex<Vec<f64>>,
     /// Per-sheet gridlines visibility (default true)
-    pub show_gridlines: Mutex<Vec<bool>>,
+    pub show_gridlines: document_effect::Persisted<Vec<bool>>,
+    /// Per-sheet DISPLAY FLAGS (display-zeros, show-formulas, view mode, headings).
+    ///
+    /// PERSISTED (`Sheet::display_zeros` et al, .cala v6) -> `Persisted<T>`. Landed as
+    /// ONE store rather than four parallel `Vec`s because they are one user-facing unit
+    /// and four vectors would be four chances to forget to resize on sheet insert.
+    pub sheet_display_flags: document_effect::Persisted<Vec<api_types::SheetDisplayFlags>>,
     /// Merged cell regions for the current (active) sheet
     pub merged_regions: Mutex<HashSet<MergedRegion>>,
     /// Merged cell regions for ALL sheets (swapped on sheet switch)
@@ -301,34 +320,40 @@ pub struct AppState {
     /// Protected regions - cells in these regions cannot be edited directly.
     /// Registered by extensions (e.g., pivot tables, charts).
     pub protected_regions: Mutex<Vec<ProtectedRegion>>,
-    /// Named ranges for formula references (key is uppercase name)
-    pub named_ranges: Mutex<HashMap<String, named_ranges::NamedRange>>,
+    /// Named ranges for formula references (key is uppercase name).
+    /// PERSISTED (`workbook.named_ranges`) -> `Persisted<T>`: writes need a
+    /// `DocumentEffect`. See `document_effect`.
+    pub named_ranges: document_effect::Persisted<HashMap<String, named_ranges::NamedRange>>,
     /// Data validation rules per sheet
-    pub data_validations: Mutex<data_validation::ValidationStorage>,
+    pub data_validations: document_effect::Persisted<data_validation::ValidationStorage>,
     /// Comments per sheet: sheet_index -> (row, col) -> Comment
-    pub comments: Mutex<comments::CommentStorage>,
+    pub comments: document_effect::Persisted<comments::CommentStorage>,
     /// Notes per sheet: sheet_index -> (row, col) -> Note
-    pub notes: Mutex<notes::NoteStorage>,
+    pub notes: document_effect::Persisted<notes::NoteStorage>,
     /// AutoFilters per sheet: sheet_index -> AutoFilter
     pub auto_filters: Mutex<autofilter::AutoFilterStorage>,
     /// Hyperlinks per sheet: sheet_index -> (row, col) -> Hyperlink
-    pub hyperlinks: Mutex<hyperlinks::HyperlinkStorage>,
+    pub hyperlinks: document_effect::Persisted<hyperlinks::HyperlinkStorage>,
     /// Sheet protection settings per sheet
     pub sheet_protection: Mutex<protection::ProtectionStorage>,
     /// Workbook-level structural protection (prevents add/delete/rename/move sheets)
     pub workbook_protection: Mutex<protection::WorkbookProtection>,
     /// Row/column grouping (outlines) per sheet
-    pub outlines: Mutex<grouping::OutlineStorage>,
-    /// Conditional formatting rules per sheet
-    pub conditional_formats: Mutex<conditional_formatting::ConditionalFormatStorage>,
+    pub outlines: document_effect::Persisted<grouping::OutlineStorage>,
+    /// Conditional formatting rules per sheet.
+    /// PERSISTED (`workbook.conditional_formats`) -> `Persisted<T>`: writes need a
+    /// `DocumentEffect`. See `document_effect`.
+    pub conditional_formats: document_effect::Persisted<conditional_formatting::ConditionalFormatStorage>,
     /// Next conditional format rule ID
     pub next_cf_rule_id: Mutex<u64>,
     /// Tables per sheet: sheet_index -> table_id -> Table
-    pub tables: Mutex<tables::TableStorage>,
+    /// PERSISTED (`workbook.tables` via `collect_tables_for_save`) -> `Persisted<T>`.
+    pub tables: crate::document_effect::Persisted<tables::TableStorage>,
     /// Table name registry: table_name (uppercase) -> (sheet_index, table_id)
-    pub table_names: Mutex<tables::TableNameRegistry>,
+    /// PERSISTED alongside `tables` (the name registry is rebuilt from it on load).
+    pub table_names: crate::document_effect::Persisted<tables::TableNameRegistry>,
     /// Computed properties per sheet: sheet_index -> SheetComputedProperties
-    pub computed_properties: Mutex<computed_properties::ComputedPropertiesStorage>,
+    pub computed_properties: document_effect::Persisted<computed_properties::ComputedPropertiesStorage>,
     /// Next computed property ID (auto-incremented)
     pub next_computed_prop_id: Mutex<u64>,
     /// Computed property dependencies: prop_id -> set of cells the formula references
@@ -336,17 +361,17 @@ pub struct AppState {
     /// Reverse map: cell -> set of prop_ids that depend on it (for re-evaluation triggers)
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
     /// Control metadata: (sheet_index, row, col) -> ControlMetadata
-    pub controls: Mutex<controls::ControlStorage>,
+    pub controls: document_effect::Persisted<controls::ControlStorage>,
     /// Cell-type assignments: (sheet_index, row, col) -> { typeId, params }
-    pub cell_types: Mutex<cell_types::CellTypeStorage>,
+    pub cell_types: document_effect::Persisted<cell_types::CellTypeStorage>,
     /// Cell-behavior bindings: binding id -> { range target, scriptId, dispatch metadata }
-    pub cell_behaviors: Mutex<cell_behaviors::CellBehaviorStorage>,
+    pub cell_behaviors: document_effect::Persisted<cell_behaviors::CellBehaviorStorage>,
     /// Page setup settings per sheet (indexed by sheet index)
-    pub page_setups: Mutex<Vec<crate::api_types::PageSetup>>,
+    pub page_setups: document_effect::Persisted<Vec<crate::api_types::PageSetup>>,
     /// Tab colors per sheet (CSS hex string, empty = no color)
-    pub tab_colors: Mutex<Vec<String>>,
+    pub tab_colors: document_effect::Persisted<Vec<String>>,
     /// Visibility state per sheet: "visible", "hidden", or "veryHidden"
-    pub sheet_visibility: Mutex<Vec<String>>,
+    pub sheet_visibility: document_effect::Persisted<Vec<String>>,
     /// Spill tracking: maps (sheet_index, origin_row, origin_col) to list of (row, col) spill cells
     /// Used by dynamic array functions (FILTER, SORT, UNIQUE, SEQUENCE)
     pub spill_ranges: Mutex<HashMap<(usize, u32, u32), Vec<(u32, u32)>>>,
@@ -356,9 +381,11 @@ pub struct AppState {
     /// Hidden rows set by the Advanced Filter extension (per sheet)
     pub advanced_filter_hidden_rows: Mutex<HashMap<usize, Vec<u32>>>,
     /// Document theme (colors + fonts). Defaults to Office theme.
-    pub theme: Mutex<engine::ThemeDefinition>,
+    /// PERSISTED (`workbook.theme`) -> `Persisted<T>`: the document theme restyles the
+    /// whole workbook and is written into the .cala.
+    pub theme: crate::document_effect::Persisted<engine::ThemeDefinition>,
     /// Scenario Manager: per-sheet list of scenarios
-    pub scenarios: Mutex<HashMap<usize, Vec<api_types::Scenario>>>,
+    pub scenarios: document_effect::Persisted<HashMap<usize, Vec<api_types::Scenario>>>,
     /// Animation playback transient snapshots: token -> saved (cell coord, prior
     /// Cell). Used by the anim_* commands to apply transient frame writes and
     /// restore the model on stop WITHOUT touching the undo stack. Never serialized.
@@ -371,41 +398,55 @@ pub struct AppState {
     /// Auto-recover interval in milliseconds (default: 300000 = 5 minutes)
     pub auto_recover_interval_ms: Mutex<u64>,
     /// Named cell styles: name -> NamedCellStyle
-    pub named_styles: Mutex<HashMap<String, api_types::NamedCellStyle>>,
+    pub named_styles: document_effect::Persisted<HashMap<String, api_types::NamedCellStyle>>,
     /// Workbook document properties (author, title, subject, etc.)
-    pub workbook_properties: Mutex<api_types::WorkbookProperties>,
+    pub workbook_properties: document_effect::Persisted<api_types::WorkbookProperties>,
     /// Use displayed precision for calculations (default: false)
     pub precision_as_displayed: Mutex<bool>,
     /// Recalculate before saving (default: true)
     pub calculate_before_save: Mutex<bool>,
     /// Chart entries: persisted chart definitions (opaque JSON)
-    pub charts: Mutex<Vec<api_types::ChartEntry>>,
+    pub charts: document_effect::Persisted<Vec<api_types::ChartEntry>>,
     /// Sparkline entries: persisted sparkline groups per sheet (opaque JSON)
-    pub sparklines: Mutex<Vec<api_types::SparklineEntry>>,
-    /// Scroll area restriction per sheet (A1-style range like "A1:Z100", or None for unrestricted)
+    pub sparklines: document_effect::Persisted<Vec<api_types::SparklineEntry>>,
+    /// Scroll area restriction per sheet (A1-style range like "A1:Z100", or None for unrestricted).
+    ///
+    /// SESSION-ONLY, and deliberately a plain `Mutex` rather than a `Persisted<T>`:
+    /// `assemble_workbook_for_save` never reads this and `persistence::Sheet` has no
+    /// `scroll_area` field, so the value is cleared on every open/new and never reaches
+    /// the .cala. `set_scroll_area` must therefore NOT dirty the document -- a dirty
+    /// flag on state that is not saved makes the close prompt lie in the other
+    /// direction ("save to keep this", then it is gone anyway).
+    ///
+    /// The missing PERSISTENCE is a real, separate gap (Excel stores ScrollArea per
+    /// sheet). Fix that first, then move this to `Persisted<T>` -- not the reverse.
     pub scroll_areas: Mutex<Vec<Option<String>>>,
     /// Reference style: "A1" (default) or "R1C1"
     pub reference_style: Mutex<String>,
     /// Saved pivot layout configurations (persisted in .cala)
-    pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
+    pub pivot_layouts: document_effect::Persisted<Vec<::persistence::SavedPivotLayout>>,
     /// Grid report definitions (design-query materialized into cells). Persisted
     /// via extension_data["calcula.reports"]; see src/report.rs.
     pub report_definitions: Mutex<Vec<crate::report::SavedReport>>,
     /// Object scripts for scriptable objects (primitive + component scripts)
-    pub object_scripts: Mutex<Vec<::persistence::SavedObjectScript>>,
+    pub object_scripts: document_effect::Persisted<Vec<::persistence::SavedObjectScript>>,
     /// Generic per-extension persisted state (extension id -> arbitrary JSON).
     /// Round-trips through the .cala extension-data part. Any extension
     /// (built-in or third-party) can persist workbook state here without a new
     /// typed file-format field — see persistence::Workbook::extension_data.
-    pub extension_data: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    pub extension_data: document_effect::Persisted<std::collections::HashMap<String, serde_json::Value>>,
     /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
     pub sheet_ids: Mutex<Vec<identity::SheetId>>,
     /// Subscription metadata for .calp packages linked to this workbook
-    pub subscriptions: Mutex<calp::manifest::SubscriptionManifest>,
+    /// PERSISTED (user_files/subscriptions.json) -> `Persisted<T>`.
+    pub subscriptions: crate::document_effect::Persisted<calp::manifest::SubscriptionManifest>,
     /// Override layer: consumer-side edits to subscribed (.calp) cells
-    pub override_layer: Mutex<calp::OverrideLayer>,
+    /// PERSISTED (user_files/overrides.json) -> `Persisted<T>`.
+    pub override_layer: crate::document_effect::Persisted<calp::OverrideLayer>,
     /// Audit log for subscription events (opt-in, stored in .cala as audit_log.json)
-    pub audit_log: Mutex<calp::audit::AuditLog>,
+    /// PERSISTED (user_files/audit_log.json) -> `Persisted<T>`. The transparency trail:
+    /// losing it at close would silently discard recorded capability use.
+    pub audit_log: crate::document_effect::Persisted<calp::audit::AuditLog>,
     /// Writeback index: positional lookup for cells in publisher-designated
     /// writeback regions. Rebuilt on subscription pull/refresh/removal.
     pub writeback_index: Mutex<calp::WritebackIndex>,
@@ -430,9 +471,11 @@ pub struct AppState {
     pub id_registry: Mutex<identity::IdRegistry>,
     /// Author-side draft writeback regions (not yet published).
     /// Persisted only when the author publishes a new package version.
-    pub writeback_draft_regions: Mutex<Vec<calp::WritebackRegionDeclaration>>,
+    /// PERSISTED draft regions -> `Persisted<T>`.
+    pub writeback_draft_regions: crate::document_effect::Persisted<Vec<calp::WritebackRegionDeclaration>>,
     /// Writeback layer: local drafts for writeback cells (stored in .cala).
-    pub writeback_layer: Mutex<calp::writeback::WritebackLayer>,
+    /// PERSISTED (writeback layer rides in user_files) -> `Persisted<T>`.
+    pub writeback_layer: crate::document_effect::Persisted<calp::writeback::WritebackLayer>,
     /// THE GATHER pre-fetch map, and the only thing `build_gather_data` ever
     /// reads. That function runs on every edit/recalc pass, so it must never do
     /// registry I/O: it serves whatever is here (even past the TTL) and queues a
@@ -524,41 +567,42 @@ pub fn create_app_state() -> AppState {
         cross_sheet_dependents: Mutex::new(CrossSheetDependentsMap::default()),
         cross_sheet_dependencies: Mutex::new(CrossSheetDependenciesMap::default()),
         undo_stack: Mutex::new(UndoStack::new()),
-        freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
+        freeze_configs: document_effect::Persisted::new(vec![FreezeConfig::default()]),
         split_configs: Mutex::new(vec![SplitConfig::default()]),
         sheet_zooms: Mutex::new(vec![::persistence::DEFAULT_SHEET_ZOOM_PERCENT]),
-        show_gridlines: Mutex::new(vec![true]),
+        show_gridlines: document_effect::Persisted::new(vec![true]),
+        sheet_display_flags: document_effect::Persisted::new(vec![api_types::SheetDisplayFlags::default()]),
         merged_regions: Mutex::new(HashSet::new()),
         all_merged_regions: Mutex::new(Vec::new()),
         protected_regions: Mutex::new(Vec::new()),
-        named_ranges: Mutex::new(HashMap::new()),
-        data_validations: Mutex::new(HashMap::new()),
-        comments: Mutex::new(HashMap::new()),
-        notes: Mutex::new(HashMap::new()),
+        named_ranges: document_effect::Persisted::new(HashMap::new()),
+        data_validations: document_effect::Persisted::new(HashMap::new()),
+        comments: document_effect::Persisted::new(HashMap::new()),
+        notes: document_effect::Persisted::new(HashMap::new()),
         auto_filters: Mutex::new(HashMap::new()),
-        hyperlinks: Mutex::new(HashMap::new()),
+        hyperlinks: document_effect::Persisted::new(HashMap::new()),
         sheet_protection: Mutex::new(HashMap::new()),
         workbook_protection: Mutex::new(protection::WorkbookProtection::default()),
-        outlines: Mutex::new(HashMap::new()),
-        conditional_formats: Mutex::new(HashMap::new()),
+        outlines: document_effect::Persisted::new(HashMap::new()),
+        conditional_formats: document_effect::Persisted::new(HashMap::new()),
         next_cf_rule_id: Mutex::new(1),
-        tables: Mutex::new(HashMap::new()),
-        table_names: Mutex::new(HashMap::new()),
-        computed_properties: Mutex::new(HashMap::new()),
+        tables: crate::document_effect::Persisted::new(HashMap::new()),
+        table_names: crate::document_effect::Persisted::new(HashMap::new()),
+        computed_properties: document_effect::Persisted::new(HashMap::new()),
         next_computed_prop_id: Mutex::new(1),
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
-        controls: Mutex::new(HashMap::new()),
-        cell_types: Mutex::new(HashMap::new()),
-        cell_behaviors: Mutex::new(HashMap::new()),
-        page_setups: Mutex::new(vec![crate::api_types::PageSetup::default()]),
-        tab_colors: Mutex::new(vec![String::new()]),
-        sheet_visibility: Mutex::new(vec!["visible".to_string()]),
+        controls: document_effect::Persisted::new(HashMap::new()),
+        cell_types: document_effect::Persisted::new(HashMap::new()),
+        cell_behaviors: document_effect::Persisted::new(HashMap::new()),
+        page_setups: document_effect::Persisted::new(vec![crate::api_types::PageSetup::default()]),
+        tab_colors: document_effect::Persisted::new(vec![String::new()]),
+        sheet_visibility: document_effect::Persisted::new(vec!["visible".to_string()]),
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
-        theme: Mutex::new(engine::ThemeDefinition::default()),
-        scenarios: Mutex::new(HashMap::new()),
+        theme: crate::document_effect::Persisted::new(engine::ThemeDefinition::default()),
+        scenarios: document_effect::Persisted::new(HashMap::new()),
         animation_snapshots: Mutex::new(HashMap::new()),
         // linked_sheets removed
         locale: Mutex::new({
@@ -569,8 +613,8 @@ pub fn create_app_state() -> AppState {
         }),
         auto_recover_enabled: Mutex::new(true),
         auto_recover_interval_ms: Mutex::new(300_000), // 5 minutes
-        named_styles: Mutex::new(HashMap::new()),
-        workbook_properties: Mutex::new({
+        named_styles: document_effect::Persisted::new(HashMap::new()),
+        workbook_properties: document_effect::Persisted::new({
             let author = std::env::var("USERNAME")
                 .or_else(|_| std::env::var("USER"))
                 .unwrap_or_default();
@@ -584,18 +628,18 @@ pub fn create_app_state() -> AppState {
         }),
         precision_as_displayed: Mutex::new(false),
         calculate_before_save: Mutex::new(true),
-        charts: Mutex::new(Vec::new()),
-        sparklines: Mutex::new(Vec::new()),
+        charts: document_effect::Persisted::new(Vec::new()),
+        sparklines: document_effect::Persisted::new(Vec::new()),
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
-        pivot_layouts: Mutex::new(Vec::new()),
+        pivot_layouts: document_effect::Persisted::new(Vec::new()),
         report_definitions: Mutex::new(Vec::new()),
-        object_scripts: Mutex::new(Vec::new()),
-        extension_data: Mutex::new(std::collections::HashMap::new()),
+        object_scripts: document_effect::Persisted::new(Vec::new()),
+        extension_data: document_effect::Persisted::new(std::collections::HashMap::new()),
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
-        subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
-        override_layer: Mutex::new(calp::OverrideLayer::new()),
-        audit_log: Mutex::new(calp::audit::AuditLog::new()),
+        subscriptions: crate::document_effect::Persisted::new(calp::manifest::SubscriptionManifest::default()),
+        override_layer: crate::document_effect::Persisted::new(calp::OverrideLayer::new()),
+        audit_log: crate::document_effect::Persisted::new(calp::audit::AuditLog::new()),
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
         writeback_declarations: Mutex::new(Vec::new()),
         model_writeback_declarations: Mutex::new(Vec::new()),
@@ -603,8 +647,8 @@ pub fn create_app_state() -> AppState {
         gather_cache: Mutex::new(None),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
-        writeback_draft_regions: Mutex::new(Vec::new()),
-        writeback_layer: Mutex::new(calp::writeback::WritebackLayer::new()),
+        writeback_draft_regions: crate::document_effect::Persisted::new(Vec::new()),
+        writeback_layer: crate::document_effect::Persisted::new(calp::writeback::WritebackLayer::new()),
         model_writeback: Mutex::new(crate::bi::writeback::ModelWritebackStore::default()),
         model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
         calc_cancel: engine::CancelToken::new(),
@@ -4523,6 +4567,8 @@ pub fn run() {
             sheets::get_sheet_ids,
             sheets::get_show_gridlines,
             sheets::set_show_gridlines,
+            sheets::get_sheet_display_flags,
+            sheets::set_sheet_display_flags,
             sheets::set_active_sheet,
             sheets::add_sheet,
             sheets::delete_sheet,

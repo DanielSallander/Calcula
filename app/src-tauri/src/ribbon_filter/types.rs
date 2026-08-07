@@ -6,7 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 // ============================================================================
 // ENUMS
@@ -268,13 +267,16 @@ pub struct UpdateRibbonFilterParams {
 /// Ribbon filter state managed by Tauri.
 pub struct RibbonFilterState {
     /// All ribbon filters: id -> RibbonFilter
-    pub filters: Mutex<HashMap<identity::EntityId, RibbonFilter>>,
+    /// PERSISTED (`workbook.ribbon_filters`) -> `Persisted<T>`: writes need a
+    /// `DocumentEffect`. The near-identical `PaneControlState` family has always
+    /// dirtied; this one never did, for no reason anyone recorded.
+    pub filters: crate::document_effect::Persisted<HashMap<identity::EntityId, RibbonFilter>>,
 }
 
 impl RibbonFilterState {
     pub fn new() -> Self {
         Self {
-            filters: Mutex::new(HashMap::new()),
+            filters: crate::document_effect::Persisted::new(HashMap::new()),
         }
     }
 }

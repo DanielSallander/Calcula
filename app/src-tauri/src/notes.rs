@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -197,6 +199,17 @@ pub struct NoteIndicator {
 #[tauri::command]
 pub fn add_note(
     state: State<AppState>,
+    file_state: State<FileState>,
+    params: AddNoteParams,
+) -> NoteResult {
+    add_note_impl(&state, &file_state, params)
+}
+
+/// Command body over plain references, so the dirty-flag contract is unit-testable
+/// without a Tauri `State` (see `document_effect_wave2_tests`).
+pub(crate) fn add_note_impl(
+    state: &AppState,
+    file_state: &FileState,
     params: AddNoteParams,
 ) -> NoteResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -204,7 +217,7 @@ pub fn add_note(
 
     // Mutual exclusivity: check if cell has a comment
     {
-        let comments = state.comments.lock().unwrap();
+        let comments = state.comments.read().unwrap();
         if let Some(sheet_comments) = comments.get(&active_sheet) {
             if sheet_comments.contains_key(&key) {
                 return NoteResult {
@@ -216,7 +229,10 @@ pub fn add_note(
         }
     }
 
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
     let sheet_notes = notes.entry(active_sheet).or_insert_with(HashMap::new);
 
     // Check if a note already exists at this cell
@@ -274,10 +290,35 @@ pub fn add_note(
 #[tauri::command]
 pub fn update_note(
     state: State<AppState>,
+    file_state: State<FileState>,
+    params: UpdateNoteParams,
+) -> NoteResult {
+    update_note_impl(&state, &file_state, params)
+}
+
+/// Command body over plain references, so the refusal contract is unit-testable
+/// without a Tauri `State` (see `document_effect_objects_tests`).
+pub(crate) fn update_note_impl(
+    state: &AppState,
+    file_state: &FileState,
     params: UpdateNoteParams,
 ) -> NoteResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.notes.read().unwrap().contains_key(&active_sheet) {
+        return NoteResult {
+            success: false,
+            note: None,
+            error: Some("No notes found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -321,10 +362,25 @@ pub fn update_note(
 #[tauri::command]
 pub fn delete_note(
     state: State<AppState>,
+    file_state: State<FileState>,
     note_id: String,
 ) -> NoteResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.notes.read().unwrap().contains_key(&active_sheet) {
+        return NoteResult {
+            success: false,
+            note: None,
+            error: Some("No notes found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -373,7 +429,7 @@ pub fn get_note(
     col: u32,
 ) -> Option<Note> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let notes = state.notes.lock().unwrap();
+    let notes = state.notes.read().unwrap();
 
     notes
         .get(&active_sheet)
@@ -388,7 +444,7 @@ pub fn get_note_by_id(
     note_id: String,
 ) -> Option<Note> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let notes = state.notes.lock().unwrap();
+    let notes = state.notes.read().unwrap();
 
     notes
         .get(&active_sheet)
@@ -403,7 +459,7 @@ pub fn get_all_notes(
     state: State<AppState>,
 ) -> Vec<Note> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let notes = state.notes.lock().unwrap();
+    let notes = state.notes.read().unwrap();
 
     notes
         .get(&active_sheet)
@@ -417,7 +473,7 @@ pub fn get_note_indicators(
     state: State<AppState>,
 ) -> Vec<NoteIndicator> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let notes = state.notes.lock().unwrap();
+    let notes = state.notes.read().unwrap();
 
     notes
         .get(&active_sheet)
@@ -444,7 +500,7 @@ pub fn get_note_indicators_in_range(
     end_col: u32,
 ) -> Vec<NoteIndicator> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let notes = state.notes.lock().unwrap();
+    let notes = state.notes.read().unwrap();
 
     notes
         .get(&active_sheet)
@@ -469,10 +525,25 @@ pub fn get_note_indicators_in_range(
 #[tauri::command]
 pub fn resize_note(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: ResizeNoteParams,
 ) -> NoteResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.notes.read().unwrap().contains_key(&active_sheet) {
+        return NoteResult {
+            success: false,
+            note: None,
+            error: Some("No notes found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -507,11 +578,26 @@ pub fn resize_note(
 #[tauri::command]
 pub fn toggle_note_visibility(
     state: State<AppState>,
+    file_state: State<FileState>,
     note_id: String,
     visible: bool,
 ) -> NoteResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.notes.read().unwrap().contains_key(&active_sheet) {
+        return NoteResult {
+            success: false,
+            note: None,
+            error: Some("No notes found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -548,10 +634,14 @@ pub fn toggle_note_visibility(
 #[tauri::command]
 pub fn show_all_notes(
     state: State<AppState>,
+    file_state: State<FileState>,
     visible: bool,
 ) -> usize {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -573,12 +663,27 @@ pub fn show_all_notes(
 #[tauri::command]
 pub fn move_note(
     state: State<AppState>,
+    file_state: State<FileState>,
     note_id: String,
     new_row: u32,
     new_col: u32,
 ) -> NoteResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
+    // constructor, so the "is there anything on this sheet at all?" question is
+    // answered under a READ guard: a command that returns an error must leave the
+    // document exactly as clean as it was.
+    if !state.notes.read().unwrap().contains_key(&active_sheet) {
+        return NoteResult {
+            success: false,
+            note: None,
+            error: Some("No notes found on this sheet.".to_string()),
+        };
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -650,7 +755,7 @@ pub fn has_note(
     col: u32,
 ) -> bool {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let notes = state.notes.lock().unwrap();
+    let notes = state.notes.read().unwrap();
 
     notes
         .get(&active_sheet)
@@ -662,9 +767,13 @@ pub fn has_note(
 #[tauri::command]
 pub fn clear_all_notes(
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> usize {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     notes
         .get_mut(&active_sheet)
@@ -680,13 +789,17 @@ pub fn clear_all_notes(
 #[tauri::command]
 pub fn clear_notes_in_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
     end_col: u32,
 ) -> usize {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut notes = state.notes.lock().unwrap();
+    // Notes live in `sheet.notes` and are written only by the save path, so
+    // changing one changes what a save would write. See `document_effect`.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut notes = state.notes.write(&effect).unwrap();
 
     let sheet_notes = match notes.get_mut(&active_sheet) {
         Some(sn) => sn,
@@ -715,14 +828,20 @@ pub fn clear_notes_in_range(
 #[tauri::command]
 pub fn convert_note_to_comment(
     state: State<AppState>,
+    file_state: State<FileState>,
     note_id: String,
     author_email: String,
 ) -> crate::comments::CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
 
+    // Deletes a Note AND creates a Comment: two persisted stores, both written
+    // only by the save path. The census flagged this as a miss on both counts.
+    // ONE effect authorises both writes.
+    let effect = DocumentEffect::mutates(&file_state);
+
     // Find and remove the note
     let removed_note = {
-        let mut notes = state.notes.lock().unwrap();
+        let mut notes = state.notes.write(&effect).unwrap();
         let sheet_notes = match notes.get_mut(&active_sheet) {
             Some(sn) => sn,
             None => {
@@ -777,7 +896,7 @@ pub fn convert_note_to_comment(
 
     let result = comment.clone();
 
-    let mut comments = state.comments.lock().unwrap();
+    let mut comments = state.comments.write(&effect).unwrap();
     let sheet_comments = comments.entry(active_sheet).or_insert_with(HashMap::new);
     sheet_comments.insert((note.row, note.col), comment);
 

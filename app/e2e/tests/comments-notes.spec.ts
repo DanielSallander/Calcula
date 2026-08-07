@@ -5,10 +5,33 @@
  * Uses cells in columns W-X, rows 1-10.
  */
 import { test, expect } from "../fixtures";
-import {
-  takeGridScreenshot,
-  takeCheckpoint,
-} from "../helpers/screenshots";
+import { takeGridRegionScreenshot } from "../helpers/screenshots";
+import type { Page } from "@playwright/test";
+
+/**
+ * Tell the frontend that annotations changed.
+ *
+ * These tests create comments/notes by invoking the RUST command directly,
+ * which is a backend-only mutation: nothing on the TypeScript side hears about
+ * it. Review/index.ts keeps its indicator cache (annotationStore) in sync by
+ * listening for AppEvents.ANNOTATIONS_CHANGED — the documented path for
+ * "annotations created OUTSIDE this extension's own UI", which is exactly the
+ * script/api.setNote case and exactly this case.
+ *
+ * Without it the store stays empty, no triangle is ever painted, and the
+ * goldens named `...-cell-with-indicator` contain no indicator. VERIFIED: the
+ * previously committed goldens hold zero #FF0000 and zero #7B68EE pixels.
+ */
+async function announceAnnotationsChanged(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent("app:annotations-changed", { detail: {} })
+    );
+  });
+  // refreshAnnotationState() is an async round-trip; the repaint it triggers
+  // only lands after it resolves.
+  await page.waitForTimeout(700);
+}
 
 test.describe("Comments", () => {
   test("add a comment to a cell", async ({ appPage, grid }) => {
@@ -44,7 +67,14 @@ test.describe("Comments", () => {
     expect(comment.content).toBe("This is a test comment");
 
     await grid.navigateTo("W1");
-    await takeGridScreenshot(appPage, "comments-cell-with-indicator");
+    await announceAnnotationsChanged(grid.page);
+    // Clipped to the single annotated cell. Measured: the indicator triangle is
+    // 66 device pixels — 0.0096% of a whole-grid shot (invisible to any ratio
+    // gate) but 0.82% of this one. See takeGridRegionScreenshot.
+    await takeGridRegionScreenshot(appPage, "comments-cell-with-indicator", {
+      from: "W1",
+      to: "W1",
+    });
   });
 
   test("add a reply to a comment", async ({ grid }) => {
@@ -225,7 +255,11 @@ test.describe("Notes", () => {
     expect(note.content).toBe("This is a sticky note");
 
     await grid.navigateTo("X1");
-    await takeGridScreenshot(appPage, "notes-cell-with-indicator");
+    await announceAnnotationsChanged(grid.page);
+    await takeGridRegionScreenshot(appPage, "notes-cell-with-indicator", {
+      from: "X1",
+      to: "X1",
+    });
   });
 
   test("delete a note", async ({ grid }) => {
@@ -298,6 +332,10 @@ test.describe("Notes", () => {
     expect(found).toBeDefined();
 
     await grid.navigateTo("W6");
-    await takeGridScreenshot(appPage, "comments-indicators-visible");
+    await announceAnnotationsChanged(grid.page);
+    await takeGridRegionScreenshot(appPage, "comments-indicators-visible", {
+      from: "W6",
+      to: "W6",
+    });
   });
 });

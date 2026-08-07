@@ -7,8 +7,19 @@
 use tauri::State;
 use serde::{Deserialize, Serialize};
 
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::AppState;
 use persistence::{SavedObjectScript, ScriptableObjectType, ScriptAccessLevel, ScriptProvenance};
+
+// OBJECT SCRIPTS ARE PERSISTED (`workbook.object_scripts`), so every mutator dirties.
+//
+// Note the contrast with WORKBOOK scripts (`scripting::commands::save_script`): those
+// looked safe in manual testing only because `app/src/api/workbookScripts.ts` calls
+// markFileModified() right after -- the single place in the whole frontend that
+// compensated for a backend gap. Nothing compensated for object scripts, and any
+// non-UI caller (a script, an MCP tool, the scheduler, a .calp install) bypassed the
+// frontend anyway. The mark belongs here, in the backend, for both.
 
 // ============================================================================
 // API Types (serialized to/from frontend)
@@ -196,7 +207,7 @@ pub fn list_object_scripts(
     window: tauri::Window,
 ) -> Result<Vec<ObjectScriptSummary>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
-    let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+    let scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
     let mut summaries: Vec<ObjectScriptSummary> = scripts.iter().map(to_summary).collect();
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(summaries)
@@ -210,7 +221,7 @@ pub fn get_object_script(
     window: tauri::Window,
 ) -> Result<ObjectScriptData, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
-    let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+    let scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
     scripts
         .iter()
         .find(|s| s.id == id)
@@ -228,7 +239,7 @@ pub fn get_object_script_by_target(
 ) -> Result<Option<ObjectScriptData>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let obj_type = string_to_object_type(&object_type)?;
-    let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+    let scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
     let found = scripts.iter().find(|s| {
         s.object_type == obj_type && s.instance_id == instance_id
     });
@@ -242,12 +253,15 @@ pub fn get_object_script_by_target(
 #[tauri::command]
 pub fn save_object_script(
     state: State<AppState>,
+    file_state: State<FileState>,
     script: ObjectScriptData,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
+    // Past the window guard and `from_data` validation, both of which can still refuse.
     let mut saved = from_data(&script)?;
-    let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
 
     // Update if exists, otherwise push new
     if let Some(existing) = scripts.iter_mut().find(|s| s.id == saved.id) {
@@ -290,16 +304,24 @@ pub fn save_object_script(
 #[tauri::command]
 pub fn delete_object_script(
     state: State<AppState>,
+    file_state: State<FileState>,
     id: String,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
-    let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
-    let len_before = scripts.len();
-    scripts.retain(|s| s.id != id);
-    if scripts.len() == len_before {
+    // Resolve the not-found refusal under a READ guard first, so it stays clean.
+    if !state
+        .object_scripts
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|s| s.id == id)
+    {
         return Err(format!("Object script '{}' not found", id));
     }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
+    scripts.retain(|s| s.id != id);
     drop(scripts);
     // The script is gone, so its schedule is meaningless. It could not have
     // fired anyway (a deleted script never mounts) nor survived a save (export
@@ -316,9 +338,19 @@ pub fn delete_object_script(
 /// behind. instance_id is an EntityId UUID and therefore globally unique across object
 /// types, so matching by id alone is sufficient. Lock-poison is swallowed: cleanup must
 /// never turn a successful delete into an error.
-pub(crate) fn prune_scripts_for_instance(state: &AppState, instance_id: &str) {
+///
+/// Takes the caller's `DocumentEffect`: pruning removes entries from
+/// `workbook.object_scripts`, which is persisted, and every caller is itself a delete
+/// that already changes the document. Threading the effect (rather than minting one
+/// here) is what forces each of those delete paths -- chart, table, named range, pivot,
+/// slicer, timeline -- to have made the dirty-flag decision for its own mutation too.
+pub(crate) fn prune_scripts_for_instance(
+    state: &AppState,
+    effect: &DocumentEffect,
+    instance_id: &str,
+) {
     let mut removed: Vec<String> = Vec::new();
-    if let Ok(mut scripts) = state.object_scripts.lock() {
+    if let Ok(mut scripts) = state.object_scripts.write(effect) {
         scripts.retain(|s| {
             let keep = s.instance_id.as_deref() != Some(instance_id);
             if !keep {
@@ -338,10 +370,12 @@ pub(crate) fn prune_scripts_for_instance(state: &AppState, instance_id: &str) {
 #[tauri::command]
 pub fn delete_object_scripts_for_instance(
     state: State<AppState>,
+    file_state: State<FileState>,
     instance_id: String,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
-    prune_scripts_for_instance(&state, &instance_id);
+    let effect = DocumentEffect::mutates(&file_state);
+    prune_scripts_for_instance(&state, &effect, &instance_id);
     Ok(())
 }

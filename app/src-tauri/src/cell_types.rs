@@ -11,6 +11,8 @@
 //          inside the same undo transaction as the grid change.
 
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
@@ -300,13 +302,18 @@ pub fn materialize_saved_cell_types(
 #[tauri::command]
 pub fn set_cell_type(
     state: State<AppState>,
+    file_state: State<FileState>,
     row: u32,
     col: u32,
     type_id: String,
     params: Option<serde_json::Value>,
 ) -> CellTypeEntry {
     let sheet_index = *state.active_sheet.lock().unwrap();
-    let mut cell_types = state.cell_types.lock().unwrap();
+    // Cell-type assignments are persisted (`workbook.cell_types`) and written
+    // only by the save path. These commands already record undo -- recording
+    // undo is a declaration that the change is user-meaningful and persistent.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cell_types = state.cell_types.write(&effect).unwrap();
     let previous = entries_for_sheet(&cell_types, sheet_index);
     let assignment = CellTypeAssignment {
         type_id,
@@ -331,6 +338,7 @@ pub fn set_cell_type(
 #[tauri::command]
 pub fn set_cell_type_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -353,7 +361,11 @@ pub fn set_cell_type_range(
 
     let sheet_index = *state.active_sheet.lock().unwrap();
     let params = params.unwrap_or_else(|| serde_json::json!({}));
-    let mut cell_types = state.cell_types.lock().unwrap();
+    // Cell-type assignments are persisted (`workbook.cell_types`) and written
+    // only by the save path. These commands already record undo -- recording
+    // undo is a declaration that the change is user-meaningful and persistent.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cell_types = state.cell_types.write(&effect).unwrap();
     let previous = entries_for_sheet(&cell_types, sheet_index);
     let mut count = 0u32;
     for row in min_row..=max_row {
@@ -374,9 +386,18 @@ pub fn set_cell_type_range(
 /// Remove the cell-type assignment from a single cell on the active sheet
 /// (undoable). Returns whether an assignment existed.
 #[tauri::command]
-pub fn clear_cell_type(state: State<AppState>, row: u32, col: u32) -> bool {
+pub fn clear_cell_type(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    row: u32,
+    col: u32,
+) -> bool {
     let sheet_index = *state.active_sheet.lock().unwrap();
-    let mut cell_types = state.cell_types.lock().unwrap();
+    // Cell-type assignments are persisted (`workbook.cell_types`) and written
+    // only by the save path. These commands already record undo -- recording
+    // undo is a declaration that the change is user-meaningful and persistent.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cell_types = state.cell_types.write(&effect).unwrap();
     if !cell_types.contains_key(&(sheet_index, row, col)) {
         return false;
     }
@@ -393,6 +414,7 @@ pub fn clear_cell_type(state: State<AppState>, row: u32, col: u32) -> bool {
 #[tauri::command]
 pub fn clear_cell_type_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -404,7 +426,11 @@ pub fn clear_cell_type_range(
     let max_col = start_col.max(end_col);
 
     let sheet_index = *state.active_sheet.lock().unwrap();
-    let mut cell_types = state.cell_types.lock().unwrap();
+    // Cell-type assignments are persisted (`workbook.cell_types`) and written
+    // only by the save path. These commands already record undo -- recording
+    // undo is a declaration that the change is user-meaningful and persistent.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut cell_types = state.cell_types.write(&effect).unwrap();
     let has_any = cell_types.keys().any(|(si, r, c)| {
         *si == sheet_index && *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col
     });
@@ -427,7 +453,7 @@ pub fn clear_cell_type_range(
 #[tauri::command]
 pub fn get_cell_type(state: State<AppState>, row: u32, col: u32) -> Option<CellTypeAssignment> {
     let sheet_index = *state.active_sheet.lock().unwrap();
-    let cell_types = state.cell_types.lock().unwrap();
+    let cell_types = state.cell_types.read().unwrap();
     cell_types.get(&(sheet_index, row, col)).cloned()
 }
 
@@ -440,7 +466,7 @@ pub fn get_all_cell_types(
 ) -> Vec<CellTypeEntry> {
     let sheet_index =
         sheet_index.unwrap_or_else(|| *state.active_sheet.lock().unwrap());
-    let cell_types = state.cell_types.lock().unwrap();
+    let cell_types = state.cell_types.read().unwrap();
     entries_for_sheet(&cell_types, sheet_index)
 }
 

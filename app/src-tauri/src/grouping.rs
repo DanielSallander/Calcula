@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use crate::AppState;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 
 // ============================================================================
 // CONSTANTS
@@ -365,10 +367,16 @@ pub struct GroupColumnsParams {
 #[tauri::command]
 pub fn group_rows(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: GroupRowsParams,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per
+    // sheet) and written only by the save path. Collapsed-ness rides inside
+    // that blob, so collapse/expand changes what a save would write too --
+    // persisted view state dirties (see `document_effect`).
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
 
@@ -403,21 +411,35 @@ pub fn group_rows(
 pub fn ungroup_rows(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     end_row: u32,
 ) -> GroupResult {
-    let result = ungroup_rows_inner(&state, start_row, end_row);
+    let result = ungroup_rows_inner(&state, &file_state, start_row, end_row);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn ungroup_rows_inner(
+pub(crate) fn ungroup_rows_inner(
     state: &AppState,
+    file_state: &FileState,
     start_row: u32,
     end_row: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -479,10 +501,16 @@ fn ungroup_rows_inner(
 #[tauri::command]
 pub fn group_columns(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: GroupColumnsParams,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per
+    // sheet) and written only by the save path. Collapsed-ness rides inside
+    // that blob, so collapse/expand changes what a save would write too --
+    // persisted view state dirties (see `document_effect`).
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
 
@@ -514,11 +542,24 @@ pub fn group_columns(
 #[tauri::command]
 pub fn ungroup_columns(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_col: u32,
     end_col: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -579,19 +620,33 @@ pub fn ungroup_columns(
 pub fn collapse_row_group(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     row: u32,
 ) -> GroupResult {
-    let result = collapse_row_group_inner(&state, row);
+    let result = collapse_row_group_inner(&state, &file_state, row);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn collapse_row_group_inner(
+pub(crate) fn collapse_row_group_inner(
     state: &AppState,
+    file_state: &FileState,
     row: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -630,19 +685,33 @@ fn collapse_row_group_inner(
 pub fn expand_row_group(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     row: u32,
 ) -> GroupResult {
-    let result = expand_row_group_inner(&state, row);
+    let result = expand_row_group_inner(&state, &file_state, row);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn expand_row_group_inner(
+pub(crate) fn expand_row_group_inner(
     state: &AppState,
+    file_state: &FileState,
     row: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -678,10 +747,23 @@ fn expand_row_group_inner(
 #[tauri::command]
 pub fn collapse_column_group(
     state: State<AppState>,
+    file_state: State<FileState>,
     col: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -717,10 +799,23 @@ pub fn collapse_column_group(
 #[tauri::command]
 pub fn expand_column_group(
     state: State<AppState>,
+    file_state: State<FileState>,
     col: u32,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -756,21 +851,35 @@ pub fn expand_column_group(
 pub fn show_outline_level(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     row_level: Option<u8>,
     col_level: Option<u8>,
 ) -> GroupResult {
-    let result = show_outline_level_inner(&state, row_level, col_level);
+    let result = show_outline_level_inner(&state, &file_state, row_level, col_level);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn show_outline_level_inner(
+pub(crate) fn show_outline_level_inner(
     state: &AppState,
+    file_state: &FileState,
     row_level: Option<u8>,
     col_level: Option<u8>,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+    // written only by the save path. Collapsed-ness rides inside that blob, so
+    // collapse/expand changes what a save would write too -- persisted view state
+    // dirties (see `document_effect`).
+    //
+    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+    // the "is there an outline here at all?" question is answered under a READ guard:
+    // a command that refuses must leave the document exactly as clean as it was.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::err("No outline exists for this sheet");
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
@@ -819,7 +928,7 @@ pub fn get_outline_info(
     end_col: u32,
 ) -> OutlineInfo {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
 
     let outline = match outlines.get(&active_sheet) {
         Some(o) => o,
@@ -894,7 +1003,7 @@ pub fn get_outline_info(
 #[tauri::command]
 pub fn get_outline_settings(state: State<AppState>) -> OutlineSettings {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
 
     outlines
         .get(&active_sheet)
@@ -906,10 +1015,31 @@ pub fn get_outline_settings(state: State<AppState>) -> OutlineSettings {
 #[tauri::command]
 pub fn set_outline_settings(
     state: State<AppState>,
+    file_state: State<FileState>,
     settings: OutlineSettings,
 ) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // `SheetOutline.settings` (summary-below / summary-right) IS serialized -- the
+    // whole SheetOutline is `serde_json::to_value`d into `workbook.outlines`. But
+    // `collect_comments_scenarios_outlines_for_save` SKIPS any outline with no row and
+    // no column groups, so a settings change on an ungrouped sheet never reaches the
+    // file. Dirty only when there is an outline that will actually be written; on an
+    // ungrouped sheet the settings are also invisible in the UI (there are no groups to
+    // summarise), so this branch is unreachable in practice and marking it would be a
+    // prompt the user could not satisfy.
+    let will_be_saved = state
+        .outlines
+        .read()
+        .unwrap()
+        .get(&active_sheet)
+        .map(|o| !o.row_groups.is_empty() || !o.column_groups.is_empty())
+        .unwrap_or(false);
+    let effect = if will_be_saved {
+        DocumentEffect::mutates(&file_state)
+    } else {
+        DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)
+    };
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
     outline.settings = settings;
@@ -919,15 +1049,26 @@ pub fn set_outline_settings(
 
 /// Clear all outline/grouping for the current sheet
 #[tauri::command]
-pub fn clear_outline(app: tauri::AppHandle, state: State<AppState>) -> GroupResult {
-    let result = clear_outline_inner(&state);
+pub fn clear_outline(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    file_state: State<FileState>,
+) -> GroupResult {
+    let result = clear_outline_inner(&state, &file_state);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn clear_outline_inner(state: &AppState) -> GroupResult {
+pub(crate) fn clear_outline_inner(state: &AppState, file_state: &FileState) -> GroupResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut outlines = state.outlines.lock().unwrap();
+    // Outlines are persisted (`workbook.outlines`). Clearing a sheet that has no
+    // outline removes nothing, so it must not dirty -- resolved under a READ guard
+    // before the decision, like every other refusal/no-op in this file.
+    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+        return GroupResult::ok_with_changes(SheetOutline::new(), Vec::new(), Vec::new());
+    }
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut outlines = state.outlines.write(&effect).unwrap();
 
     let old_outline = outlines.remove(&active_sheet);
 
@@ -950,7 +1091,7 @@ pub fn is_row_hidden_by_group(
     row: u32,
 ) -> bool {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
 
     outlines
         .get(&active_sheet)
@@ -965,7 +1106,7 @@ pub fn is_col_hidden_by_group(
     col: u32,
 ) -> bool {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
 
     outlines
         .get(&active_sheet)
@@ -977,7 +1118,7 @@ pub fn is_col_hidden_by_group(
 #[tauri::command]
 pub fn get_hidden_rows_by_group(state: State<AppState>) -> Vec<u32> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
 
     outlines
         .get(&active_sheet)
@@ -989,7 +1130,7 @@ pub fn get_hidden_rows_by_group(state: State<AppState>) -> Vec<u32> {
 #[tauri::command]
 pub fn get_hidden_cols_by_group(state: State<AppState>) -> Vec<u32> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let outlines = state.outlines.lock().unwrap();
+    let outlines = state.outlines.read().unwrap();
 
     outlines
         .get(&active_sheet)

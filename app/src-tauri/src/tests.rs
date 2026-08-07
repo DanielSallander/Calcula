@@ -509,7 +509,7 @@ fn run_go_to_special(
             }
         }
         "comments" => {
-            let comments = state.comments.lock().unwrap();
+            let comments = state.comments.read().unwrap();
             if let Some(sheet_comments) = comments.get(&active_sheet) {
                 for (&(row, col), _) in sheet_comments {
                     if row >= sr && row <= er && col >= sc && col <= ec {
@@ -519,7 +519,7 @@ fn run_go_to_special(
             }
         }
         "notes" => {
-            let notes = state.notes.lock().unwrap();
+            let notes = state.notes.read().unwrap();
             if let Some(sheet_notes) = notes.get(&active_sheet) {
                 for (&(row, col), _) in sheet_notes {
                     if row >= sr && row <= er && col >= sc && col <= ec {
@@ -529,7 +529,7 @@ fn run_go_to_special(
             }
         }
         "dataValidation" => {
-            let validations = state.data_validations.lock().unwrap();
+            let validations = state.data_validations.read().unwrap();
             if let Some(sheet_validations) = validations.get(&active_sheet) {
                 let mut cell_set = std::collections::HashSet::new();
                 for vr in sheet_validations {
@@ -636,7 +636,10 @@ fn test_go_to_special_comments() {
 
     // Insert comments for sheet 0
     {
-        let mut comments = state.comments.lock().unwrap();
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut comments = state.comments.write(&seed).unwrap();
         let mut sheet_comments = HashMap::new();
         sheet_comments.insert((0, 0), comments::Comment {
             id: "c1".to_string(),
@@ -685,7 +688,10 @@ fn test_go_to_special_notes() {
     let state = create_app_state();
 
     {
-        let mut notes = state.notes.lock().unwrap();
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut notes = state.notes.write(&seed).unwrap();
         let mut sheet_notes = HashMap::new();
         sheet_notes.insert((1, 1), notes::Note {
             id: "n1".to_string(),
@@ -713,7 +719,10 @@ fn test_go_to_special_data_validation() {
     let state = create_app_state();
 
     {
-        let mut validations = state.data_validations.lock().unwrap();
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut validations = state.data_validations.write(&seed).unwrap();
         validations.insert(0, vec![
             data_validation::ValidationRange {
                 start_row: 1,

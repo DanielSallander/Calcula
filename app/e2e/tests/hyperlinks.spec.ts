@@ -3,15 +3,26 @@
  *
  * Tests hyperlink CRUD operations via Tauri API commands.
  * Uses cells in columns Y-Z, rows 1-10 to avoid conflicts with other tests.
+ *
+ * WHY THERE ARE NO SCREENSHOTS IN THIS FILE ANY MORE
+ *
+ * `hyperlinks-url-added` and `hyperlinks-indicators-visible` were removed. They
+ * were named for hyperlink styling (the blue underlined display text) but could
+ * not fail if that styling never rendered. Measured against the running app:
+ * calling `add_hyperlink` on a populated cell and repainting changed 0 of the
+ * 2556 captured pixels — the cell renders exactly as it did as plain text.
+ *
+ * `add_hyperlink` is a backend-only mutation and, unlike annotations
+ * (ANNOTATIONS_CHANGED) or tables (TABLE_DEFINITIONS_UPDATED), there is no
+ * window event a test can dispatch to make the frontend adopt it. Restoring
+ * these goldens requires the hyperlink to be applied through the UI that owns
+ * it. Until then a screenshot here reports coverage that does not exist. The
+ * functional CRUD assertions below are untouched and do have teeth.
  */
 import { test, expect } from "../fixtures";
-import {
-  takeGridScreenshot,
-  softly,
-} from "../helpers/screenshots";
 
 test.describe("Hyperlinks", () => {
-  test("add a URL hyperlink to a cell", async ({ appPage, grid }) => {
+  test("add a URL hyperlink to a cell", async ({ grid }) => {
     await grid.setCellValueDirect("Y1", "Visit Site");
     await grid.page.waitForTimeout(200);
 
@@ -45,8 +56,6 @@ test.describe("Hyperlinks", () => {
     expect(hyperlink.linkType).toBe("url");
     expect(hyperlink.target).toBe("https://example.com");
 
-    await grid.navigateTo("Y1");
-    await softly(takeGridScreenshot(appPage, "hyperlinks-url-added"));
   });
 
   test("add an internal reference hyperlink", async ({ grid }) => {
@@ -202,7 +211,5 @@ test.describe("Hyperlinks", () => {
     expect(foundA).toBeDefined();
     expect(foundB).toBeDefined();
 
-    await grid.navigateTo("Y5");
-    await softly(takeGridScreenshot(appPage, "hyperlinks-indicators-visible"));
   });
 });

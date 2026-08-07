@@ -14,7 +14,7 @@ use tauri::State;
 #[tauri::command]
 pub fn get_style(state: State<AppState>, index: usize) -> StyleData {
     let styles = state.style_registry.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     StyleData::from_cell_style(styles.get(index), &theme)
 }
 
@@ -22,7 +22,7 @@ pub fn get_style(state: State<AppState>, index: usize) -> StyleData {
 #[tauri::command]
 pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData> {
     let styles = state.style_registry.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     styles.all_styles().iter().map(|s| StyleData::from_cell_style(s, &theme)).collect()
 }
 
@@ -456,7 +456,7 @@ pub fn apply_formatting(
     }
 
     // Collect only the styles that were used/created (not the entire registry)
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     for &index in &used_style_indices {
         if let Some(style) = styles.all_styles().get(index) {
             updated_styles.push(StyleEntry {
@@ -1293,7 +1293,7 @@ pub fn apply_border_preset(
     }
 
     let mut updated_styles = Vec::new();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
     for (index, style) in styles.all_styles().iter().enumerate() {
         updated_styles.push(StyleEntry {
             index,

@@ -152,7 +152,7 @@ export function RibbonContainer(): React.ReactElement {
     : [];
 
   return (
-    <S.RibbonFrame>
+    <S.RibbonFrame data-testid="ribbon">
       {/* Tab Headers - fixed height to prevent layout shift when contextual tabs appear */}
       <S.TabStrip>
         {tabs.map((tab) => {

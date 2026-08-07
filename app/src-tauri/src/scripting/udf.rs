@@ -281,7 +281,7 @@ pub fn collect_udf_calls(
 
     // Pivot data + gather closures, mirroring update_cell's eval setup so the
     // scratch evaluation sees the same external context.
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
@@ -329,7 +329,7 @@ pub fn collect_udf_calls(
             if let Ok(parsed) = parser::parse(&formula) {
                 // Resolve named references.
                 let resolved = if crate::ast_has_named_refs(&parsed) {
-                    let named_ranges_map = state.named_ranges.lock().unwrap();
+                    let named_ranges_map = state.named_ranges.read().unwrap();
                     let mut visited = HashSet::new();
                     crate::resolve_names_in_ast(
                         &parsed,
@@ -342,8 +342,8 @@ pub fn collect_udf_calls(
                 };
                 // Resolve structured table references.
                 let resolved = if crate::ast_has_table_refs(&resolved) {
-                    let tables_map = state.tables.lock().unwrap();
-                    let table_names_map = state.table_names.lock().unwrap();
+                    let tables_map = state.tables.read().unwrap();
+                    let table_names_map = state.table_names.read().unwrap();
                     let ctx = crate::TableRefContext {
                         tables: &tables_map,
                         table_names: &table_names_map,

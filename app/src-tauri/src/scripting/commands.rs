@@ -202,7 +202,7 @@ pub(crate) fn record_script_grid_mutation(
         cells_modified,
         sheet + 1
     );
-    if let Ok(mut audit) = state.audit_log.lock() {
+    if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
         audit.record_with_extra(
             calp::audit::AuditEvent::ScriptExecuted,
             &desc,
@@ -234,7 +234,7 @@ pub(crate) fn record_mcp_tool_action(
     for (k, v) in extra_fields {
         extra.insert(k.to_string(), v);
     }
-    if let Ok(mut audit) = state.audit_log.lock() {
+    if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
         audit.record_with_extra(
             calp::audit::AuditEvent::ScriptExecuted,
             desc,
@@ -340,7 +340,7 @@ fn require_distributed_module_consent(
     let scripts: Vec<(Option<String>, String, String)> = {
         let map = script_state
             .workbook_scripts
-            .lock()
+            .read()
             .map_err(|e| e.to_string())?;
         map.values()
             .map(|s| (s.source_package.clone(), s.id.clone(), s.source.clone()))
@@ -1391,7 +1391,7 @@ pub fn list_scripts(
 ) -> Result<Vec<ScriptSummary>, String> {
     let scripts = script_state
         .workbook_scripts
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?;
 
     let mut summaries: Vec<ScriptSummary> = scripts
@@ -1419,7 +1419,7 @@ pub fn get_script(
 ) -> Result<WorkbookScript, String> {
     let scripts = script_state
         .workbook_scripts
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?;
 
     scripts
@@ -1431,12 +1431,13 @@ pub fn get_script(
 /// Save (create or update) a script module.
 #[tauri::command]
 pub fn save_script(
+    file_state: State<'_, crate::persistence::FileState>,
     script_state: State<ScriptState>,
     script: WorkbookScript,
 ) -> Result<(), String> {
-    let mut scripts = script_state
-        .workbook_scripts
-        .lock()
+    // Scripts/notebooks are persisted in the .cala; this is a document change.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut scripts = script_state.workbook_scripts.write(&effect)
         .map_err(|e| e.to_string())?;
 
     scripts.insert(script.id.clone(), script);
@@ -1450,7 +1451,11 @@ pub fn save_script(
 /// but are not user code, they are hidden from `list_scripts`, and deleting one
 /// would silently destroy the owning feature's state.
 #[tauri::command]
-pub fn delete_script(script_state: State<ScriptState>, id: String) -> Result<(), String> {
+pub fn delete_script(
+    file_state: State<'_, crate::persistence::FileState>,
+    script_state: State<ScriptState>,
+    id: String,
+) -> Result<(), String> {
     if is_reserved_script_id(&id) {
         return Err(format!(
             "Script '{}' is an internal record and cannot be deleted",
@@ -1458,9 +1463,9 @@ pub fn delete_script(script_state: State<ScriptState>, id: String) -> Result<(),
         ));
     }
 
-    let mut scripts = script_state
-        .workbook_scripts
-        .lock()
+    // Scripts/notebooks are persisted in the .cala; this is a document change.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut scripts = script_state.workbook_scripts.write(&effect)
         .map_err(|e| e.to_string())?;
 
     if scripts.remove(&id).is_none() {
@@ -1719,10 +1724,14 @@ mod script_apply_tests {
             .unwrap()
             .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
         state.sheet_names.lock().unwrap().push("Sheet2".to_string());
-        state.sheet_visibility.lock().unwrap().push("visible".to_string());
+        // Test-harness seeding of per-sheet state; not a document edit.
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        state.sheet_visibility.write(&seed).unwrap().push("visible".to_string());
         state.all_column_widths.lock().unwrap().push(Default::default());
         state.all_row_heights.lock().unwrap().push(Default::default());
-        state.show_gridlines.lock().unwrap().push(true);
+        state.show_gridlines.write(&seed).unwrap().push(true);
         Harness {
             state,
             file_state: FileState {
@@ -2063,7 +2072,7 @@ mod script_apply_tests {
         let (result, _) = apply(&h, &grids, 999, "notebook", "nb-1:cell-1");
         assert!(result.is_ok(), "{:?}", result);
 
-        let audit = h.state.audit_log.lock().unwrap();
+        let audit = h.state.audit_log.read().unwrap();
         let entry = audit
             .entries
             .iter()
@@ -2212,7 +2221,7 @@ mod script_apply_tests {
             "no undo entry was recorded"
         );
         assert!(
-            h.state.audit_log.lock().unwrap().entries.is_empty(),
+            h.state.audit_log.read().unwrap().entries.is_empty(),
             "no grid-mutation audit entry was recorded"
         );
     }
@@ -2264,7 +2273,7 @@ mod script_apply_tests {
         claim_on_sheet1(&h, "region-1", 3, 3, 2, 2);
         h.state
             .writeback_layer
-            .lock()
+            .write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()))
             .unwrap()
             .drafts
             .push(draft_for("region-1", 3, 2));

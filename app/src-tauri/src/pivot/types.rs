@@ -1412,11 +1412,17 @@ impl CancellationToken {
 /// Registered separately from AppState to keep the kernel feature-agnostic.
 pub struct PivotState {
     /// Pivot table storage: id -> (definition, cache)
-    pub pivot_tables: Mutex<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
+    ///
+    /// PERSISTED (`persistence::collect_pivots_for_save`, persistence.rs:1462) ->
+    /// `Persisted<T>`: a write needs a `DocumentEffect`, so a pivot edit cannot
+    /// silently skip the dirty flag. This store alone gated 36 census defects.
+    pub pivot_tables: crate::document_effect::Persisted<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
     /// Currently active pivot table ID (for single-pivot operations)
     pub active_pivot_id: Mutex<Option<PivotId>>,
     /// BI metadata for BI-backed pivots (model tables, measures, last query)
-    pub bi_metadata: Mutex<HashMap<PivotId, BiPivotMetadata>>,
+    ///
+    /// PERSISTED alongside the pivot definitions -> `Persisted<T>`.
+    pub bi_metadata: crate::document_effect::Persisted<HashMap<PivotId, BiPivotMetadata>>,
     /// Cached PivotView for each pivot (used for windowed cell fetching)
     pub views: Mutex<HashMap<PivotId, PivotView>>,
     /// Active cancellation tokens per pivot (set when async operation starts)
@@ -1428,9 +1434,9 @@ pub struct PivotState {
 impl PivotState {
     pub fn new() -> Self {
         PivotState {
-            pivot_tables: Mutex::new(HashMap::new()),
+            pivot_tables: crate::document_effect::Persisted::new(HashMap::new()),
             active_pivot_id: Mutex::new(None),
-            bi_metadata: Mutex::new(HashMap::new()),
+            bi_metadata: crate::document_effect::Persisted::new(HashMap::new()),
             views: Mutex::new(HashMap::new()),
             cancellation_tokens: Mutex::new(HashMap::new()),
             previous_states: Mutex::new(HashMap::new()),

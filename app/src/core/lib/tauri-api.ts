@@ -1898,6 +1898,32 @@ export async function getSheetZoom(): Promise<number> {
   return await invoke<number>("get_sheet_zoom", {});
 }
 
+/**
+ * The ACTIVE sheet's DISPLAY FLAGS. Mirrors Rust `api_types::SheetDisplayFlags`.
+ */
+export async function getSheetDisplayFlags(): Promise<{
+  displayZeros: boolean;
+  showFormulas: boolean;
+  viewMode: string;
+  displayHeadings: boolean;
+}> {
+  return await invoke("get_sheet_display_flags", {});
+}
+
+/**
+ * Write a PARTIAL display-flags patch for the ACTIVE sheet. One command for all four
+ * (see `sheets::set_sheet_display_flags` for why), and partial so a caller cannot
+ * clobber the flags it does not know about.
+ */
+export async function setSheetDisplayFlags(patch: {
+  displayZeros?: boolean;
+  showFormulas?: boolean;
+  viewMode?: string;
+  displayHeadings?: boolean;
+}): Promise<void> {
+  await invoke<void>("set_sheet_display_flags", { patch });
+}
+
 // ============================================================================
 // SCROLL AREA API
 // ============================================================================

@@ -832,7 +832,7 @@ pub fn update_cell(
 /// common case — a single HashMap probe under a brief lock).
 fn named_control_anchor_name(state: &AppState, row: u32, col: u32) -> Option<String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let controls = state.controls.lock().unwrap();
+    let controls = state.controls.read().unwrap();
     controls
         .get(&(active_sheet, row, col))
         .and_then(crate::control_values::static_control_name)
@@ -967,7 +967,7 @@ fn update_cell_impl(
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
@@ -1081,6 +1081,7 @@ fn update_cell_impl(
         // Record subscriber override for the cleared cell (subscribed sheets only)
         crate::calp_commands::record_subscription_override_edits(
             &state,
+            &crate::document_effect::DocumentEffect::mutates(file_state),
             active_sheet,
             &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
         );
@@ -1109,7 +1110,7 @@ fn update_cell_impl(
             Ok(parsed) => {
                 // Resolve named references (AST splicing) before extracting refs or evaluating.
                 let resolved = if crate::ast_has_named_refs(&parsed) {
-                    let named_ranges_map = state.named_ranges.lock().unwrap();
+                    let named_ranges_map = state.named_ranges.read().unwrap();
                     let mut visited = HashSet::new();
                     let resolved = crate::resolve_names_in_ast(
                         &parsed,
@@ -1125,8 +1126,8 @@ fn update_cell_impl(
 
                 // Resolve structured table references (e.g., Table1[Revenue], [@Price])
                 let resolved = if crate::ast_has_table_refs(&resolved) {
-                    let tables_map = state.tables.lock().unwrap();
-                    let table_names_map = state.table_names.lock().unwrap();
+                    let tables_map = state.tables.read().unwrap();
+                    let table_names_map = state.table_names.read().unwrap();
                     let ctx = crate::TableRefContext {
                         tables: &tables_map,
                         table_names: &table_names_map,
@@ -1405,6 +1406,7 @@ fn update_cell_impl(
     // Record subscriber override for the edited cell (subscribed sheets only)
     crate::calp_commands::record_subscription_override_edits(
         &state,
+            &crate::document_effect::DocumentEffect::mutates(file_state),
         active_sheet,
         &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
     );
@@ -1421,9 +1423,9 @@ fn update_cell_impl(
             .collect();
 
         // Lock table state for cascade recalculation (needed to resolve table refs in slow path)
-        let cascade_tables = state.tables.lock().unwrap();
-        let cascade_table_names = state.table_names.lock().unwrap();
-        let cascade_named_ranges = state.named_ranges.lock().unwrap();
+        let cascade_tables = state.tables.read().unwrap();
+        let cascade_table_names = state.table_names.read().unwrap();
+        let cascade_named_ranges = state.named_ranges.read().unwrap();
 
         // Get direct cell dependents
         let mut recalc_order = get_recalculation_order((row, col), &dependents_map);
@@ -1563,7 +1565,12 @@ fn update_cell_impl(
                 .map(|c| (c.sheet_index.unwrap_or(active_sheet), c.row, c.col))
                 .collect();
 
-            let mut cp_storage = state.computed_properties.lock().unwrap();
+            // Computed properties are persisted (user_files/computed_properties.json)
+            // and re-evaluating them here can rewrite them. This runs inside
+            // `update_cell_impl`, which already marked the document dirty for the cell
+            // edit that triggered it; reuse that decision rather than making a second.
+            let cp_effect = crate::document_effect::DocumentEffect::mutates(file_state);
+            let mut cp_storage = state.computed_properties.write(&cp_effect).unwrap();
             let mut rh = state.row_heights.lock().unwrap();
             let mut cw = state.column_widths.lock().unwrap();
 
@@ -1601,7 +1608,12 @@ fn update_cell_impl(
             let rh = state.row_heights.lock().unwrap();
             let cw = state.column_widths.lock().unwrap();
 
+            // Slicer computed-property caches are persisted with the slicer. This runs
+            // inside `update_cell_impl`, which already dirtied for the triggering cell
+            // edit; this is the same user action, so it takes a mutates token too.
+            let slicer_cp_effect = crate::document_effect::DocumentEffect::mutates(file_state);
             let modified = crate::slicer::computed::re_evaluate_slicer_computed_properties(
+                &slicer_cp_effect,
                 &changed_cells,
                 &grids,
                 &sheet_names,
@@ -2227,7 +2239,7 @@ pub fn update_cells_batch(
     // runs; the targeted recalc runs AFTER it, once every core lock dropped.
     let anchor_names: Vec<String> = {
         let active_sheet = *state.active_sheet.lock().unwrap();
-        let controls = state.controls.lock().unwrap();
+        let controls = state.controls.read().unwrap();
         if controls.is_empty() {
             Vec::new()
         } else {
@@ -2440,7 +2452,7 @@ pub(crate) fn update_cells_batch_core(
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
@@ -2575,7 +2587,7 @@ pub(crate) fn update_cells_batch_core(
                 Ok(parsed) => {
                     // Resolve named references (AST splicing)
                     let resolved = if crate::ast_has_named_refs(&parsed) {
-                        let named_ranges_map = state.named_ranges.lock().unwrap();
+                        let named_ranges_map = state.named_ranges.read().unwrap();
                         let mut visited = HashSet::new();
                         let resolved = crate::resolve_names_in_ast(
                             &parsed,
@@ -2591,8 +2603,8 @@ pub(crate) fn update_cells_batch_core(
 
                     // Resolve structured table references
                     let resolved = if crate::ast_has_table_refs(&resolved) {
-                        let tables_map = state.tables.lock().unwrap();
-                        let table_names_map = state.table_names.lock().unwrap();
+                        let tables_map = state.tables.read().unwrap();
+                        let table_names_map = state.table_names.read().unwrap();
                         let ctx = crate::TableRefContext {
                             tables: &tables_map,
                             table_names: &table_names_map,
@@ -2854,7 +2866,7 @@ pub(crate) fn update_cells_batch_core(
     }
 
     // Record subscriber overrides for all edited cells (subscribed sheets only)
-    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(&state, &crate::document_effect::DocumentEffect::mutates(&file_state), active_sheet, &override_edits);
 
     let perf_t2_processed = Instant::now();
 
@@ -2894,9 +2906,9 @@ pub(crate) fn update_cells_batch_core(
         }
 
         // Lock table state for cascade recalculation
-        let batch_tables = state.tables.lock().unwrap();
-        let batch_table_names = state.table_names.lock().unwrap();
-        let batch_named_ranges = state.named_ranges.lock().unwrap();
+        let batch_tables = state.tables.read().unwrap();
+        let batch_table_names = state.table_names.read().unwrap();
+        let batch_named_ranges = state.named_ranges.read().unwrap();
 
         // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
         let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;
@@ -3240,6 +3252,7 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
     if previous_cell.is_some() {
         crate::calp_commands::record_subscription_override_edits(
             &state,
+            &crate::document_effect::DocumentEffect::mutates(&file_state),
             active_sheet,
             &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
         );
@@ -3370,7 +3383,7 @@ pub fn clear_range(
     }
 
     // Record subscriber overrides for all cleared cells (subscribed sheets only)
-    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(&state, &crate::document_effect::DocumentEffect::mutates(&file_state), active_sheet, &override_edits);
 
     // Commit undo transaction
     if count > 0 {
@@ -3531,7 +3544,7 @@ pub(crate) fn clear_range_with_options_off_sheet(
     };
 
     // Subscriber overrides for the TARGET sheet (no-op when not subscribed).
-    crate::calp_commands::record_subscription_override_edits(state, target, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(state, &crate::document_effect::DocumentEffect::mutates(file_state), target, &override_edits);
 
     // Dependents (anywhere) of the cleared cells recalculate now.
     if count > 0 && !matches!(apply_to, ClearApplyTo::Formats) {
@@ -3953,7 +3966,7 @@ pub fn clear_range_with_options(
     }
 
     // Record subscriber overrides for all cleared cells (subscribed sheets only)
-    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(&state, &crate::document_effect::DocumentEffect::mutates(&file_state), active_sheet, &override_edits);
 
     if count > 0 {
         undo_stack.commit_transaction();
@@ -5115,6 +5128,7 @@ pub fn has_content_in_range(
 #[tauri::command]
 pub fn remove_duplicates(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     params: RemoveDuplicatesParams,
 ) -> RemoveDuplicatesResult {
     // Sheet protection first, before any grid lock: removing duplicates rewrites
@@ -5140,6 +5154,8 @@ pub fn remove_duplicates(
         }
     }
 
+    // Past the protection gate: this deletes grid rows.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -5624,6 +5640,7 @@ pub fn update_cell_on_sheets(
 #[tauri::command]
 pub fn clear_range_on_sheets(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     sheet_indices: Vec<usize>,
     start_row: u32,
     start_col: u32,
@@ -5651,6 +5668,9 @@ pub fn clear_range_on_sheets(
         &state, "clear this range", &sheet_indices, start_row, start_col, end_row, end_col,
     )?;
 
+    // Past every per-sheet protection + writeback-claim refusal above. This writes
+    // USER CONTENT to non-active sheets, which the paired `clear_range` never covered.
+    let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -5788,7 +5808,7 @@ pub fn fill_range(
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
     let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
@@ -5888,7 +5908,7 @@ pub fn fill_range(
                         Ok(parsed) => {
                             // Resolve named references
                             let resolved = if crate::ast_has_named_refs(&parsed) {
-                                let named_ranges_map = state.named_ranges.lock().unwrap();
+                                let named_ranges_map = state.named_ranges.read().unwrap();
                                 let mut visited = HashSet::new();
                                 let resolved = crate::resolve_names_in_ast(
                                     &parsed,
@@ -5904,8 +5924,8 @@ pub fn fill_range(
 
                             // Resolve structured table references
                             let resolved = if crate::ast_has_table_refs(&resolved) {
-                                let tables_map = state.tables.lock().unwrap();
-                                let table_names_map = state.table_names.lock().unwrap();
+                                let tables_map = state.tables.read().unwrap();
+                                let table_names_map = state.table_names.read().unwrap();
                                 let ctx = crate::TableRefContext {
                                     tables: &tables_map,
                                     table_names: &table_names_map,
@@ -6108,7 +6128,7 @@ pub fn fill_range(
     }
 
     // Record subscriber overrides for all filled cells (subscribed sheets only)
-    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(&state, &crate::document_effect::DocumentEffect::mutates(&file_state), active_sheet, &override_edits);
 
     let perf_t2_processed = Instant::now();
 
@@ -6131,9 +6151,9 @@ pub fn fill_range(
         }
 
         // Lock table state for cascade recalculation
-        let batch_tables = state.tables.lock().unwrap();
-        let batch_table_names = state.table_names.lock().unwrap();
-        let batch_named_ranges = state.named_ranges.lock().unwrap();
+        let batch_tables = state.tables.read().unwrap();
+        let batch_table_names = state.table_names.read().unwrap();
+        let batch_named_ranges = state.named_ranges.read().unwrap();
 
         // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
         let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;

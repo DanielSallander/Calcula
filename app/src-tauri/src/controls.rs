@@ -13,6 +13,8 @@ use engine::{CellValue, Evaluator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 
 // ============================================================================
 // Types
@@ -211,7 +213,7 @@ pub fn get_control_metadata(
     row: u32,
     col: u32,
 ) -> Option<ControlMetadata> {
-    let controls = state.controls.lock().unwrap();
+    let controls = state.controls.read().unwrap();
     controls.get(&(sheet_index, row, col)).cloned()
 }
 
@@ -219,6 +221,7 @@ pub fn get_control_metadata(
 #[tauri::command]
 pub fn set_control_property(
     state: State<AppState>,
+    file_state: State<FileState>,
     sheet_index: usize,
     row: u32,
     col: u32,
@@ -227,7 +230,10 @@ pub fn set_control_property(
     value_type: String,
     value: String,
 ) -> ControlMetadata {
-    let mut controls = state.controls.lock().unwrap();
+    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
+    // formula-driven properties -- and written only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut controls = state.controls.write(&effect).unwrap();
     let key = (sheet_index, row, col);
 
     let metadata = controls.entry(key).or_insert_with(|| ControlMetadata {
@@ -252,12 +258,16 @@ pub fn set_control_property(
 #[tauri::command]
 pub fn set_control_metadata(
     state: State<AppState>,
+    file_state: State<FileState>,
     sheet_index: usize,
     row: u32,
     col: u32,
     metadata: ControlMetadata,
 ) -> ControlMetadata {
-    let mut controls = state.controls.lock().unwrap();
+    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
+    // formula-driven properties -- and written only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut controls = state.controls.write(&effect).unwrap();
     controls.insert((sheet_index, row, col), metadata.clone());
     metadata
 }
@@ -266,11 +276,15 @@ pub fn set_control_metadata(
 #[tauri::command]
 pub fn remove_control_metadata(
     state: State<AppState>,
+    file_state: State<FileState>,
     sheet_index: usize,
     row: u32,
     col: u32,
 ) -> bool {
-    let mut controls = state.controls.lock().unwrap();
+    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
+    // formula-driven properties -- and written only by the save path.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut controls = state.controls.write(&effect).unwrap();
     controls.remove(&(sheet_index, row, col)).is_some()
 }
 
@@ -302,7 +316,7 @@ pub fn list_controls_referencing_macro(
     state: State<AppState>,
     macro_id: String,
 ) -> Vec<MacroLinkingControl> {
-    let controls = state.controls.lock().unwrap();
+    let controls = state.controls.read().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let mut out: Vec<MacroLinkingControl> = controls
         .iter()
@@ -333,7 +347,7 @@ pub fn get_all_controls(
     state: State<AppState>,
     sheet_index: usize,
 ) -> Vec<ControlEntry> {
-    let controls = state.controls.lock().unwrap();
+    let controls = state.controls.read().unwrap();
     controls
         .iter()
         .filter(|((si, _, _), _)| *si == sheet_index)
@@ -417,7 +431,7 @@ pub fn resolve_control_properties(
     row: u32,
     col: u32,
 ) -> HashMap<String, String> {
-    let controls = state.controls.lock().unwrap();
+    let controls = state.controls.read().unwrap();
     let meta = match controls.get(&(sheet_index, row, col)) {
         Some(m) => m.clone(),
         None => return HashMap::new(),
@@ -449,7 +463,7 @@ pub fn resolve_control_properties(
                     Ok(parser_ast) => {
                         // Resolve named references (AST splicing)
                         let resolved = if ast_has_named_refs(&parser_ast) {
-                            let named_ranges_map = state.named_ranges.lock().unwrap();
+                            let named_ranges_map = state.named_ranges.read().unwrap();
                             let mut visited = HashSet::new();
                             let r = resolve_names_in_ast(
                                 &parser_ast,
@@ -465,8 +479,8 @@ pub fn resolve_control_properties(
 
                         // Resolve structured table references
                         let resolved = if ast_has_table_refs(&resolved) {
-                            let tables_map = state.tables.lock().unwrap();
-                            let table_names_map = state.table_names.lock().unwrap();
+                            let tables_map = state.tables.read().unwrap();
+                            let table_names_map = state.table_names.read().unwrap();
                             let ctx = TableRefContext {
                                 tables: &tables_map,
                                 table_names: &table_names_map,

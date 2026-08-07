@@ -876,7 +876,7 @@ fn record_protection_audit(state: &AppState, description: &str, sheet_index: Opt
         extra.insert("sheet".into(), json!(idx));
     }
     extra.insert("scope".into(), json!(if sheet_index.is_some() { "sheet" } else { "workbook" }));
-    if let Ok(mut audit) = state.audit_log.lock() {
+    if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
         audit.record_with_extra(
             calp::audit::AuditEvent::ProtectionChanged,
             description,

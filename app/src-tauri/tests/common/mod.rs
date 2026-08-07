@@ -44,7 +44,13 @@ impl TestHarness {
         {
             let mut names = harness.state.sheet_names.lock().unwrap();
             let mut grids = harness.state.grids.lock().unwrap();
-            let mut freeze_configs = harness.state.freeze_configs.lock().unwrap();
+            // Harness seeding of per-sheet view state; not a document edit, and no
+            // save follows. `freeze_configs` is a `Persisted<T>` because freeze panes
+            // ARE written into the .cala -- see `app_lib::document_effect`.
+            let seed = app_lib::document_effect::DocumentEffect::deliberately_clean(
+                app_lib::document_effect::CleanReason::LoadingFromDisk,
+            );
+            let mut freeze_configs = harness.state.freeze_configs.write(&seed).unwrap();
 
             for i in 1..sheet_count {
                 names.push(format!("Sheet{}", i + 1));

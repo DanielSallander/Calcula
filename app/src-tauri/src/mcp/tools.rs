@@ -220,7 +220,7 @@ pub fn get_sheet_summary(
     // list_charts renders them). Appended at the MCP host layer — the pure
     // calcula-format crate stays chart-blind. Guard the char budget: the crate's
     // budget stops at its boundary, so a host append must not blow past max_chars.
-    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    let charts = state.charts.read().map_err(|e| e.to_string())?;
     if !charts.is_empty() {
         let section = format!("\n\n## Charts\n{}", format_chart_inventory(&charts));
         let limit = max_chars as usize;
@@ -234,7 +234,7 @@ pub fn get_sheet_summary(
     // "TaxRate = 0.25" the AI would otherwise have to guess. Same host-layer
     // pattern + char-budget guard as charts; the pure calcula-format crate stays
     // subsystem-blind.
-    let named = state.named_ranges.lock().map_err(|e| e.to_string())?;
+    let named = state.named_ranges.read().map_err(|e| e.to_string())?;
     if !named.is_empty() {
         let list: Vec<NamedRange> = named.values().cloned().collect();
         let section = format!("\n\n## Named Ranges\n{}", format_named_range_inventory(&list));
@@ -246,7 +246,7 @@ pub fn get_sheet_summary(
     drop(named);
 
     // Tables (C1): another AppState subsystem the AI should see in context.
-    let tables_guard = state.tables.lock().map_err(|e| e.to_string())?;
+    let tables_guard = state.tables.read().map_err(|e| e.to_string())?;
     let all_tables: Vec<&Table> = tables_guard.values().flat_map(|m| m.values()).collect();
     if !all_tables.is_empty() {
         let section = format!("\n\n## Tables\n{}", format_table_inventory(&all_tables));
@@ -456,7 +456,7 @@ fn format_chart_inventory(charts: &[ChartEntry]) -> String {
 /// Read-only: no script-security gate (MCP transport auth already applies).
 pub fn list_charts(handle: &AppHandle) -> Result<String, String> {
     let state = handle.state::<AppState>();
-    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    let charts = state.charts.read().map_err(|e| e.to_string())?;
     if charts.is_empty() {
         return Ok("(no charts in this workbook)".to_string());
     }
@@ -492,7 +492,7 @@ fn format_named_range_inventory(ranges: &[NamedRange]) -> String {
 /// Read-only: no script-security gate (MCP transport auth already applies).
 pub fn list_named_ranges(handle: &AppHandle) -> Result<String, String> {
     let state = handle.state::<AppState>();
-    let ranges = state.named_ranges.lock().map_err(|e| e.to_string())?;
+    let ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
     if ranges.is_empty() {
         return Ok("(no named ranges in this workbook)".to_string());
     }
@@ -536,7 +536,7 @@ fn format_table_inventory(tables: &[&Table]) -> String {
 /// discover via tools/list before (C1). Read-only.
 pub fn list_tables(handle: &AppHandle) -> Result<String, String> {
     let state = handle.state::<AppState>();
-    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let tables = state.tables.read().map_err(|e| e.to_string())?;
     let all: Vec<&Table> = tables.values().flat_map(|m| m.values()).collect();
     if all.is_empty() {
         return Ok("(no tables in this workbook)".to_string());
@@ -605,7 +605,7 @@ fn pivot_field_suffixes(
     handle: &AppHandle,
 ) -> Result<std::collections::HashMap<identity::EntityId, String>, String> {
     let ps = handle.state::<crate::pivot::PivotState>();
-    let tables = ps.pivot_tables.lock().map_err(|e| e.to_string())?;
+    let tables = ps.pivot_tables.read().map_err(|e| e.to_string())?;
     Ok(tables
         .iter()
         .map(|(id, (def, _cache))| (*id, format_pivot_fields(def)))
@@ -636,7 +636,7 @@ pub fn list_pivots(handle: &AppHandle) -> Result<String, String> {
 /// it. Read-only.
 pub fn get_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String> {
     let state = handle.state::<AppState>();
-    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    let charts = state.charts.read().map_err(|e| e.to_string())?;
     let entry = charts
         .iter()
         .find(|c| c.id.to_string() == chart_id)
@@ -714,7 +714,10 @@ pub fn create_chart_from_spec(
     let entry = ChartEntry { id: chart_id, sheet_index: sheet, spec_json };
 
     {
-        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        // An AI-inserted chart is persisted like any other; the MCP path never runs the
+        // frontend, so the backend has to own the flag.
+        let effect = crate::mcp::objects::mcp_effect(handle);
+        let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         charts.push(entry);
     }
     // Undo snapshot (previous = None: this is a fresh insert), mirroring save_chart.
@@ -771,6 +774,7 @@ pub fn create_named_range(
     // The command validates the name + range, inserts, and records an undo entry.
     let result = crate::named_ranges::create_named_range(
         handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
         name.to_string(),
         sheet_index,
         refers_to.to_string(),
@@ -831,7 +835,7 @@ pub fn create_table(
         style_options: None,
         style_name: None,
     };
-    let result = crate::tables::create_table(handle.state::<AppState>(), params);
+    let result = crate::tables::create_table(handle.state::<crate::persistence::FileState>(), handle.state::<AppState>(), params);
     if !result.success {
         return Err(result
             .error
@@ -927,6 +931,7 @@ pub fn create_pivot(
 
     let response = crate::pivot::commands::create_pivot_inner(
         handle.state::<AppState>(),
+        handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::PivotState>(),
         request,
         row_fields,

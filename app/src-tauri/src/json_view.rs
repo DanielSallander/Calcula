@@ -4,6 +4,8 @@
 //!          any workbook object as JSON. Used by the JsonView extension.
 
 use crate::api_types;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -38,14 +40,14 @@ pub fn get_object_json(
     match object_type.as_str() {
         "chart" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid chart id".to_string())?;
-            let charts = state.charts.lock().unwrap();
+            let charts = state.charts.read().unwrap();
             let entry = charts.iter().find(|c| c.id == id)
                 .ok_or_else(|| format!("Chart {} not found", id))?;
             serde_json::to_string_pretty(entry).map_err(|e| e.to_string())
         }
         "table" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid table id".to_string())?;
-            let tables = state.tables.lock().unwrap();
+            let tables = state.tables.read().unwrap();
             for sheet_tables in tables.values() {
                 if let Some(table) = sheet_tables.get(&id) {
                     return serde_json::to_string_pretty(table).map_err(|e| e.to_string());
@@ -55,14 +57,14 @@ pub fn get_object_json(
         }
         "slicer" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid slicer id".to_string())?;
-            let slicers = slicer_state.slicers.lock().unwrap();
+            let slicers = slicer_state.slicers.read().unwrap();
             let slicer = slicers.get(&id)
                 .ok_or_else(|| format!("Slicer {} not found", id))?;
             serde_json::to_string_pretty(slicer).map_err(|e| e.to_string())
         }
         "ribbon_filter" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid ribbon filter id".to_string())?;
-            let filters = ribbon_filter_state.filters.lock().unwrap();
+            let filters = ribbon_filter_state.filters.read().unwrap();
             let filter = filters.get(&id)
                 .ok_or_else(|| format!("Ribbon filter {} not found", id))?;
             serde_json::to_string_pretty(filter).map_err(|e| e.to_string())
@@ -76,19 +78,19 @@ pub fn get_object_json(
         }
         "sparkline" => {
             let idx: usize = object_id.parse().map_err(|_| "Invalid sparkline index".to_string())?;
-            let sparklines = state.sparklines.lock().unwrap();
+            let sparklines = state.sparklines.read().unwrap();
             let entry = sparklines.get(idx)
                 .ok_or_else(|| format!("Sparkline entry {} not found", idx))?;
             serde_json::to_string_pretty(entry).map_err(|e| e.to_string())
         }
         "script" => {
-            let scripts = script_state.workbook_scripts.lock().unwrap();
+            let scripts = script_state.workbook_scripts.read().unwrap();
             let script = scripts.get(&object_id)
                 .ok_or_else(|| format!("Script '{}' not found", object_id))?;
             serde_json::to_string_pretty(script).map_err(|e| e.to_string())
         }
         "notebook" => {
-            let notebooks = script_state.workbook_notebooks.lock().unwrap();
+            let notebooks = script_state.workbook_notebooks.read().unwrap();
             let notebook = notebooks.get(&object_id)
                 .ok_or_else(|| format!("Notebook '{}' not found", object_id))?;
             serde_json::to_string_pretty(notebook).map_err(|e| e.to_string())
@@ -97,24 +99,24 @@ pub fn get_object_json(
             let id: pivot_engine::PivotId = serde_json::from_value(
                 serde_json::Value::String(object_id.clone())
             ).map_err(|_| "Invalid pivot id".to_string())?;
-            let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let pivot_tables = pivot_state.pivot_tables.read().unwrap();
             let (definition, _cache) = pivot_tables.get(&id)
                 .ok_or_else(|| format!("Pivot {} not found", object_id))?;
             serde_json::to_string_pretty(definition).map_err(|e| e.to_string())
         }
         "pivot_layout" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
-            let layouts = state.pivot_layouts.lock().unwrap();
+            let layouts = state.pivot_layouts.read().unwrap();
             let layout = layouts.iter().find(|l| l.id == id)
                 .ok_or_else(|| format!("Pivot layout {} not found", id))?;
             serde_json::to_string_pretty(layout).map_err(|e| e.to_string())
         }
         "theme" => {
-            let theme = state.theme.lock().unwrap();
+            let theme = state.theme.read().unwrap();
             serde_json::to_string_pretty(&*theme).map_err(|e| e.to_string())
         }
         "properties" => {
-            let props = state.workbook_properties.lock().unwrap();
+            let props = state.workbook_properties.read().unwrap();
             serde_json::to_string_pretty(&*props).map_err(|e| e.to_string())
         }
         "sheet_layout" => {
@@ -174,9 +176,29 @@ pub fn get_object_json(
 // set_object_json — Deserialize JSON and replace the workbook object
 // ============================================================================
 
+/// Replace a workbook object with the JSON the user edited.
+///
+/// DIRTY FLAG. This is the widest single mutation surface in the app: one command
+/// rewrites charts, tables, slicers, ribbon filters, timeline slicers, sparklines,
+/// scripts, notebooks, pivots, pivot layouts, the document theme, workbook properties
+/// and sheet layouts -- almost all of which are persisted. It marked nothing dirty.
+///
+/// The decision is taken on the RESULT rather than per arm, for a reason: several arms
+/// (`table`, `sheet_layout`) `return` early from the middle of the match, so a mark
+/// placed per arm is exactly the kind of thing that gets missed when a new object type
+/// is added. Every arm's error path is a refusal that mutated nothing -- an unparseable
+/// blob or an id that does not resolve -- so "Ok implies committed" holds uniformly and
+/// keeps refusals clean.
+///
+/// KNOWN OVER-APPROXIMATION: the `timeline_slicer` arm now dirties, but
+/// `TimelineSlicerState` is never collected by `assemble_workbook_for_save`, so
+/// timeline slicers are lost on save/reload regardless. That is a separate pre-existing
+/// persistence gap (census edge case 9); dirtying is the harmless direction of the error
+/// (a spurious prompt, not lost work) and must be revisited when timelines are persisted.
 #[tauri::command]
 pub fn set_object_json(
     state: State<AppState>,
+    file_state: State<FileState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::ScriptState>,
@@ -186,29 +208,39 @@ pub fn set_object_json(
     object_id: String,
     json: String,
 ) -> Result<(), String> {
+    // A borrowed handle the `move` closure can capture by value (`&FileState` is Copy)
+    // without moving `file_state` itself, which is still needed after the call.
+    let fs: &FileState = &file_state;
+    let result = (move || -> Result<(), String> {
     match object_type.as_str() {
         "chart" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid chart id".to_string())?;
             let new_entry: api_types::ChartEntry = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid chart JSON: {}", e))?;
-            let mut charts = state.charts.lock().unwrap();
+            // Resolve under a read guard, then decide, then write -- so an id that
+            // does not resolve leaves the document clean.
+            if !state.charts.read().unwrap().iter().any(|c| c.id == id) {
+                return Err(format!("Chart {} not found", id));
+            }
+            let effect = DocumentEffect::mutates(fs);
+            let mut charts = state.charts.write(&effect).unwrap();
             if let Some(existing) = charts.iter_mut().find(|c| c.id == id) {
                 *existing = new_entry;
-                Ok(())
-            } else {
-                Err(format!("Chart {} not found", id))
             }
+            Ok(())
         }
         "table" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid table id".to_string())?;
             let new_table: crate::tables::Table = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid table JSON: {}", e))?;
-            let mut tables = state.tables.lock().unwrap();
+            // Both parse refusals are above.
+            let effect = DocumentEffect::mutates(fs);
+            let mut tables = state.tables.write(&effect).unwrap();
             for sheet_tables in tables.values_mut() {
                 if let Some(existing) = sheet_tables.get_mut(&id) {
                     // Update the table name registry if name changed
                     if existing.name != new_table.name {
-                        let mut names = state.table_names.lock().unwrap();
+                        let mut names = state.table_names.write(&effect).unwrap();
                         names.remove(&existing.name.to_uppercase());
                         names.insert(new_table.name.to_uppercase(), (new_table.sheet_index, new_table.id));
                     }
@@ -222,7 +254,8 @@ pub fn set_object_json(
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid slicer id".to_string())?;
             let new_slicer: crate::slicer::Slicer = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid slicer JSON: {}", e))?;
-            let mut slicers = slicer_state.slicers.lock().unwrap();
+            let effect = DocumentEffect::mutates(fs);
+            let mut slicers = slicer_state.slicers.write(&effect).unwrap();
             if let Some(existing) = slicers.get_mut(&id) {
                 *existing = new_slicer;
                 Ok(())
@@ -234,7 +267,13 @@ pub fn set_object_json(
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid ribbon filter id".to_string())?;
             let new_filter: crate::ribbon_filter::RibbonFilter = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid ribbon filter JSON: {}", e))?;
-            let mut filters = ribbon_filter_state.filters.lock().unwrap();
+            // Resolve under a read guard, then decide, then write -- so an id that
+            // does not resolve leaves the document clean.
+            if !ribbon_filter_state.filters.read().unwrap().contains_key(&id) {
+                return Err(format!("Ribbon filter {} not found", id));
+            }
+            let effect = DocumentEffect::mutates(fs);
+            let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
             if let Some(existing) = filters.get_mut(&id) {
                 *existing = new_filter;
                 Ok(())
@@ -258,18 +297,18 @@ pub fn set_object_json(
             let idx: usize = object_id.parse().map_err(|_| "Invalid sparkline index".to_string())?;
             let new_entry: api_types::SparklineEntry = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid sparkline JSON: {}", e))?;
-            let mut sparklines = state.sparklines.lock().unwrap();
-            if idx < sparklines.len() {
-                sparklines[idx] = new_entry;
-                Ok(())
-            } else {
-                Err(format!("Sparkline entry {} not found", idx))
+            if idx >= state.sparklines.read().unwrap().len() {
+                return Err(format!("Sparkline entry {} not found", idx));
             }
+            let effect = DocumentEffect::mutates(fs);
+            state.sparklines.write(&effect).unwrap()[idx] = new_entry;
+            Ok(())
         }
         "script" => {
             let new_script: crate::scripting::WorkbookScript = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid script JSON: {}", e))?;
-            let mut scripts = script_state.workbook_scripts.lock().unwrap();
+            let effect = DocumentEffect::mutates(fs);
+            let mut scripts = script_state.workbook_scripts.write(&effect).unwrap();
             if scripts.contains_key(&object_id) {
                 scripts.insert(object_id, new_script);
                 Ok(())
@@ -280,7 +319,8 @@ pub fn set_object_json(
         "notebook" => {
             let new_notebook: crate::scripting::NotebookDocument = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid notebook JSON: {}", e))?;
-            let mut notebooks = script_state.workbook_notebooks.lock().unwrap();
+            let effect = DocumentEffect::mutates(fs);
+            let mut notebooks = script_state.workbook_notebooks.write(&effect).unwrap();
             if notebooks.contains_key(&object_id) {
                 notebooks.insert(object_id, new_notebook);
                 Ok(())
@@ -294,7 +334,9 @@ pub fn set_object_json(
             ).map_err(|_| "Invalid pivot id".to_string())?;
             let new_definition: pivot_engine::PivotDefinition = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid pivot JSON: {}", e))?;
-            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            // Both refusals (bad id, bad JSON) are above, so the eager token is safe here.
+            let effect = DocumentEffect::mutates(fs);
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((definition, _cache)) = pivot_tables.get_mut(&id) {
                 *definition = new_definition;
                 Ok(())
@@ -306,25 +348,29 @@ pub fn set_object_json(
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
             let new_layout: ::persistence::SavedPivotLayout = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid pivot layout JSON: {}", e))?;
-            let mut layouts = state.pivot_layouts.lock().unwrap();
+            if !state.pivot_layouts.read().unwrap().iter().any(|l| l.id == id) {
+                return Err(format!("Pivot layout {} not found", id));
+            }
+            let effect = DocumentEffect::mutates(fs);
+            let mut layouts = state.pivot_layouts.write(&effect).unwrap();
             if let Some(existing) = layouts.iter_mut().find(|l| l.id == id) {
                 *existing = new_layout;
-                Ok(())
-            } else {
-                Err(format!("Pivot layout {} not found", id))
             }
+            Ok(())
         }
         "theme" => {
             let new_theme: engine::ThemeDefinition = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid theme JSON: {}", e))?;
-            let mut theme = state.theme.lock().unwrap();
+            let effect = DocumentEffect::mutates(fs);
+            let mut theme = state.theme.write(&effect).unwrap();
             *theme = new_theme;
             Ok(())
         }
         "properties" => {
             let new_props: api_types::WorkbookProperties = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid properties JSON: {}", e))?;
-            let mut props = state.workbook_properties.lock().unwrap();
+            let effect = DocumentEffect::mutates(fs);
+            let mut props = state.workbook_properties.write(&effect).unwrap();
             *props = new_props;
             Ok(())
         }
@@ -353,6 +399,12 @@ pub fn set_object_json(
         }
         _ => Err(format!("Unknown object type: {}", object_type)),
     }
+    })();
+    if result.is_ok() {
+        // Committed: the object was replaced.
+        let _effect = DocumentEffect::mutates(&file_state);
+    }
+    result
 }
 
 // ============================================================================
@@ -384,7 +436,7 @@ pub fn list_objects(
 
     // Charts
     {
-        let charts = state.charts.lock().unwrap();
+        let charts = state.charts.read().unwrap();
         for chart in charts.iter() {
             entries.push(ObjectEntry {
                 object_type: "chart".to_string(),
@@ -396,7 +448,7 @@ pub fn list_objects(
 
     // Tables
     {
-        let tables = state.tables.lock().unwrap();
+        let tables = state.tables.read().unwrap();
         for sheet_tables in tables.values() {
             for table in sheet_tables.values() {
                 entries.push(ObjectEntry {
@@ -410,7 +462,7 @@ pub fn list_objects(
 
     // Slicers
     {
-        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicers = slicer_state.slicers.read().unwrap();
         for slicer in slicers.values() {
             entries.push(ObjectEntry {
                 object_type: "slicer".to_string(),
@@ -422,7 +474,7 @@ pub fn list_objects(
 
     // Ribbon filters
     {
-        let filters = ribbon_filter_state.filters.lock().unwrap();
+        let filters = ribbon_filter_state.filters.read().unwrap();
         for filter in filters.values() {
             entries.push(ObjectEntry {
                 object_type: "ribbon_filter".to_string(),
@@ -446,7 +498,7 @@ pub fn list_objects(
 
     // Sparklines
     {
-        let sparklines = state.sparklines.lock().unwrap();
+        let sparklines = state.sparklines.read().unwrap();
         for (idx, entry) in sparklines.iter().enumerate() {
             entries.push(ObjectEntry {
                 object_type: "sparkline".to_string(),
@@ -458,7 +510,7 @@ pub fn list_objects(
 
     // Scripts
     {
-        let scripts = script_state.workbook_scripts.lock().unwrap();
+        let scripts = script_state.workbook_scripts.read().unwrap();
         for script in scripts.values() {
             entries.push(ObjectEntry {
                 object_type: "script".to_string(),
@@ -470,7 +522,7 @@ pub fn list_objects(
 
     // Notebooks
     {
-        let notebooks = script_state.workbook_notebooks.lock().unwrap();
+        let notebooks = script_state.workbook_notebooks.read().unwrap();
         for notebook in notebooks.values() {
             entries.push(ObjectEntry {
                 object_type: "notebook".to_string(),
@@ -482,7 +534,7 @@ pub fn list_objects(
 
     // Pivot tables
     {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
         for (id, (definition, _cache)) in pivot_tables.iter() {
             entries.push(ObjectEntry {
                 object_type: "pivot".to_string(),
@@ -494,7 +546,7 @@ pub fn list_objects(
 
     // Pivot layouts
     {
-        let layouts = state.pivot_layouts.lock().unwrap();
+        let layouts = state.pivot_layouts.read().unwrap();
         for layout in layouts.iter() {
             entries.push(ObjectEntry {
                 object_type: "pivot_layout".to_string(),
@@ -598,7 +650,7 @@ pub fn get_workbook_tree(
 
     // Tables
     {
-        let tables = state.tables.lock().unwrap();
+        let tables = state.tables.read().unwrap();
         let all_tables: Vec<_> = tables.values()
             .flat_map(|sheet_tables| sheet_tables.values())
             .collect();
@@ -623,7 +675,7 @@ pub fn get_workbook_tree(
 
     // Charts
     {
-        let charts = state.charts.lock().unwrap();
+        let charts = state.charts.read().unwrap();
         if !charts.is_empty() {
             let mut node = TreeNode {
                 label: format!("Charts ({})", charts.len()),
@@ -645,7 +697,7 @@ pub fn get_workbook_tree(
 
     // Slicers
     {
-        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicers = slicer_state.slicers.read().unwrap();
         if !slicers.is_empty() {
             let mut node = TreeNode {
                 label: format!("Slicers ({})", slicers.len()),
@@ -667,7 +719,7 @@ pub fn get_workbook_tree(
 
     // Ribbon Filters
     {
-        let filters = ribbon_filter_state.filters.lock().unwrap();
+        let filters = ribbon_filter_state.filters.read().unwrap();
         if !filters.is_empty() {
             let mut node = TreeNode {
                 label: format!("Ribbon Filters ({})", filters.len()),
@@ -711,7 +763,7 @@ pub fn get_workbook_tree(
 
     // Sparklines
     {
-        let sparklines = state.sparklines.lock().unwrap();
+        let sparklines = state.sparklines.read().unwrap();
         if !sparklines.is_empty() {
             let mut node = TreeNode {
                 label: format!("Sparklines ({})", sparklines.len()),
@@ -733,7 +785,7 @@ pub fn get_workbook_tree(
 
     // Scripts
     {
-        let scripts = script_state.workbook_scripts.lock().unwrap();
+        let scripts = script_state.workbook_scripts.read().unwrap();
         if !scripts.is_empty() {
             let mut node = TreeNode {
                 label: format!("Scripts ({})", scripts.len()),
@@ -755,7 +807,7 @@ pub fn get_workbook_tree(
 
     // Notebooks
     {
-        let notebooks = script_state.workbook_notebooks.lock().unwrap();
+        let notebooks = script_state.workbook_notebooks.read().unwrap();
         if !notebooks.is_empty() {
             let mut node = TreeNode {
                 label: format!("Notebooks ({})", notebooks.len()),
@@ -777,7 +829,7 @@ pub fn get_workbook_tree(
 
     // Pivot Tables
     {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
         if !pivot_tables.is_empty() {
             let mut node = TreeNode {
                 label: format!("Pivot Tables ({})", pivot_tables.len()),
@@ -799,7 +851,7 @@ pub fn get_workbook_tree(
 
     // Pivot Layouts
     {
-        let layouts = state.pivot_layouts.lock().unwrap();
+        let layouts = state.pivot_layouts.read().unwrap();
         if !layouts.is_empty() {
             let mut node = TreeNode {
                 label: format!("Pivot Layouts ({})", layouts.len()),

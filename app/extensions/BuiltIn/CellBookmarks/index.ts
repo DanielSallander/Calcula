@@ -78,7 +78,7 @@ import {
 } from "./lib/viewBookmarkStore";
 
 // Internal modules — Persistence
-import { saveBookmarks, loadBookmarks } from "./lib/bookmarkPersistence";
+import { loadBookmarks, startBookmarkWriteThrough } from "./lib/bookmarkPersistence";
 
 // Internal modules — Script integration
 import { processBookmarkMutations } from "./lib/scriptMutationHandler";
@@ -362,15 +362,13 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("keydown", handleKeyDown);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown));
 
-  // ---- 12b. Persistence: save/load bookmarks with workbook ----
-  const unregBeforeSave = onAppEvent(AppEvents.BEFORE_SAVE, async () => {
-    try {
-      await saveBookmarks();
-    } catch (error) {
-      console.error("[CellBookmarks] Failed to save bookmarks:", error);
-    }
-  });
-  cleanupFns.push(unregBeforeSave);
+  // ---- 12b. Persistence: write-through on every mutation ----
+  //      NOT a BEFORE_SAVE listener. AppEvents handlers are not awaited by the
+  //      dispatcher, so an async save-time flush raced `save_file` and could archive
+  //      the previous bookmark state -- or lose the newest edit entirely if the user
+  //      never saved again. Writing through on each mutation removes the window: the
+  //      virtual file is already current whenever a save runs.
+  cleanupFns.push(startBookmarkWriteThrough());
 
   const unregAfterOpen = onAppEvent(AppEvents.AFTER_OPEN, async () => {
     try {

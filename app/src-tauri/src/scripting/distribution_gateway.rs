@@ -415,7 +415,7 @@ fn configured_registries(state: &AppState) -> Result<Vec<String>, String> {
         .into_iter()
         .map(|r| r.location)
         .collect();
-    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     for sub in &subs.subscriptions {
         if calp::dev_mode::is_dev_subscription(sub) {
             continue;
@@ -595,6 +595,7 @@ fn reject_forbidden_publish_fields(p: &serde_json::Map<String, Value>) -> Result
 #[tauri::command]
 pub fn script_distribution(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     bi_state: State<crate::bi::types::BiState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
@@ -724,6 +725,7 @@ pub fn script_distribution(
     let result = dispatch(
         act,
         &state,
+        &file_state,
         &bi_state,
         &pivot_state,
         &script_state,
@@ -806,7 +808,7 @@ fn audit_detail(
 /// nothing at all.
 fn subscribed_packages_summary(state: &AppState) -> String {
     const MAX_NAMED: usize = 8;
-    let Ok(subs) = state.subscriptions.lock() else {
+    let Ok(subs) = state.subscriptions.read() else {
         return "(subscriptions unavailable)".to_string();
     };
     let names: Vec<String> = subs
@@ -862,6 +864,7 @@ fn scripted_pull_params(
 fn dispatch(
     act: Action,
     state: &State<AppState>,
+    file_state: &State<crate::persistence::FileState>,
     bi_state: &State<crate::bi::types::BiState>,
     pivot_state: &State<crate::pivot::types::PivotState>,
     script_state: &State<crate::scripting::types::ScriptState>,
@@ -922,7 +925,8 @@ fn dispatch(
             // its way here; Pull gets the same answer.
             let params = scripted_pull_params(&registry_path, &package_name, &version_pin)?;
             let response = calp_cmds::calp_pull(
-                state.clone(),
+                (*state).clone(),
+                (*file_state).clone(),
                 pivot_state.clone(),
                 bi_state.clone(),
                 script_state.clone(),
@@ -962,7 +966,8 @@ fn dispatch(
             // this machine never pinned fails too, rather than acquiring the pin
             // from an action a script labelled "refresh".
             let result = calp_cmds::calp_refresh_apply(
-                state.clone(),
+                (*state).clone(),
+                (*file_state).clone(),
                 user_files_state.clone(),
                 pivot_state.clone(),
                 script_state.clone(),
@@ -1589,7 +1594,7 @@ mod tests {
 
     #[test]
     fn both_outcomes_write_an_audit_row_naming_the_capability() {
-        let log = std::sync::Mutex::new(calp::audit::AuditLog::default());
+        let log = crate::document_effect::Persisted::new(calp::audit::AuditLog::default());
         crate::net_commands::record_capability_call(
             &log,
             SUBSCRIBE_CAPABILITY,
@@ -1606,7 +1611,7 @@ mod tests {
             Some("publish — sales-report v2.1.0 -> C:/reg"),
             None,
         );
-        let entries = log.lock().unwrap().entries.clone();
+        let entries = log.read().unwrap().entries.clone();
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].extra.get("capability").and_then(|v| v.as_str()),

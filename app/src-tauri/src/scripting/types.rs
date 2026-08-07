@@ -21,7 +21,9 @@ pub struct ScriptState {
     /// Stored permission grants per script: script_id -> granted permission names
     pub permission_grants: Mutex<HashMap<String, Vec<String>>>,
     /// Workbook-embedded scripts: script_id -> source code
-    pub workbook_scripts: Mutex<HashMap<String, WorkbookScript>>,
+    /// PERSISTED (`workbook.scripts`) -> `Persisted<T>`. The frontend used to compensate
+    /// for this in workbookScripts.ts; the backend now owns the decision.
+    pub workbook_scripts: crate::document_effect::Persisted<HashMap<String, WorkbookScript>>,
     /// Global security level: "disabled", "prompt", "enabled"
     pub security_level: Mutex<String>,
     /// Access ceiling for the AI tool surface (MCP server + in-app AI chat):
@@ -30,7 +32,8 @@ pub struct ScriptState {
     /// Security consent gate — consent authorizes, the ceiling caps.
     pub mcp_access_level: Mutex<String>,
     /// Workbook-embedded notebooks: notebook_id -> NotebookDocument
-    pub workbook_notebooks: Mutex<HashMap<String, NotebookDocument>>,
+    /// PERSISTED (`workbook.notebooks`) -> `Persisted<T>`.
+    pub workbook_notebooks: crate::document_effect::Persisted<HashMap<String, NotebookDocument>>,
     /// Active notebook runtime bookkeeping (checkpoints, counters). Only one
     /// notebook can have an active runtime at a time. The QuickJS session
     /// itself lives on the executor thread (see notebook_executor).
@@ -47,10 +50,10 @@ impl ScriptState {
     pub fn new() -> Self {
         ScriptState {
             permission_grants: Mutex::new(HashMap::new()),
-            workbook_scripts: Mutex::new(HashMap::new()),
+            workbook_scripts: crate::document_effect::Persisted::new(HashMap::new()),
             security_level: Mutex::new("prompt".to_string()),
             mcp_access_level: Mutex::new("script".to_string()),
-            workbook_notebooks: Mutex::new(HashMap::new()),
+            workbook_notebooks: crate::document_effect::Persisted::new(HashMap::new()),
             notebook_runtime: Mutex::new(NotebookRuntime::new()),
             notebook_executor: super::notebook_executor::NotebookExecutor::new(),
             notebook_exec_lock: tokio::sync::Mutex::new(()),
@@ -138,10 +141,10 @@ pub fn build_host_state(
     if let Ok(style) = state.reference_style.lock() {
         host.reference_style = style.clone();
     }
-    if let Ok(visibility) = state.sheet_visibility.lock() {
+    if let Ok(visibility) = state.sheet_visibility.read() {
         host.sheet_visibility = visibility.clone();
     }
-    if let Ok(props) = state.workbook_properties.lock() {
+    if let Ok(props) = state.workbook_properties.read() {
         // The typed document-properties struct flattened to the string map the
         // engine exposes; keys match the camelCase IPC field names.
         host.workbook_properties = HashMap::from([
@@ -155,7 +158,7 @@ pub fn build_host_state(
             ("lastModified".to_string(), props.last_modified.clone()),
         ]);
     }
-    if let Ok(named) = state.named_styles.lock() {
+    if let Ok(named) = state.named_styles.read() {
         // Sorted so `getNamedStyles()` is deterministic across runs (the
         // registry is a HashMap).
         let mut names: Vec<String> = named.values().map(|s| s.name.clone()).collect();
@@ -174,7 +177,7 @@ pub fn build_host_state(
     if let Ok(areas) = state.scroll_areas.lock() {
         host.scroll_area = areas.get(active_sheet).cloned().flatten();
     }
-    if let Ok(gridlines) = state.show_gridlines.lock() {
+    if let Ok(gridlines) = state.show_gridlines.read() {
         host.display_gridlines = gridlines.get(active_sheet).copied().unwrap_or(true);
     }
 
@@ -231,12 +234,22 @@ pub fn apply_workbook_property_changes(
     if changes.is_empty() {
         return Ok(0);
     }
-    let applied = {
-        let mut props = state.workbook_properties.lock().map_err(|e| e.to_string())?;
-        apply_workbook_property_map(&mut props, changes)
-    };
+    // CONDITIONAL MUTATION. `changes` may name properties that do not exist, in which
+    // case nothing is applied and nothing should dirty. Apply to a clone under a READ
+    // guard first and commit only if it actually changed: `DocumentEffect::mutates`
+    // sets the flag in its own constructor, so it must not be reached on the no-op path.
+    let mut candidate = state
+        .workbook_properties
+        .read()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let applied = apply_workbook_property_map(&mut candidate, changes);
     if applied > 0 {
-        crate::persistence::mark_workbook_modified(file_state);
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        *state
+            .workbook_properties
+            .write(&effect)
+            .map_err(|e| e.to_string())? = candidate;
     }
     Ok(applied)
 }

@@ -20,6 +20,7 @@ use crate::api_types::{
     AnimApplyFrameParams, AnimRerollParams, AnimRerollResult, AnimRestoreParams, AnimSnapshotParams,
     AnimSnapshotResult, AnimationFrameResult, CellData, GifExportRequest, GifFrame, MergedRegion,
 };
+use crate::document_effect::{DocumentEffect, TransientScope};
 use crate::{
     evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
     get_recalculation_order, AppState,
@@ -101,6 +102,11 @@ enum SetOp {
 /// Mirrors scenario_manager::scenario_show's recalc loop.
 #[allow(clippy::too_many_arguments)]
 fn apply_set_ops_and_recalc(
+    // The gate. Every caller must have decided what this write does to the saved
+    // document; animation is the one surface that legitimately answers "transient",
+    // and it can only say so by presenting a TransientScope, i.e. by proving the
+    // matching anim_restore snapshot is already filed. See `document_effect`.
+    _effect: &DocumentEffect,
     grids: &mut Vec<Grid>,
     active_grid: &mut Grid,
     active_sheet: usize,
@@ -206,6 +212,23 @@ fn apply_set_ops_and_recalc(
     updated_cells
 }
 
+/// The transient gate for the anim_* trio, and the only place any of them can obtain
+/// permission to write the grid.
+///
+/// Succeeds only while the run's `anim_snapshot` restore buffer is on file. That is the
+/// operational definition of "transient": a write that is guaranteed to be undone. It is
+/// checkable here, which is why animation gets a first-class exemption from the dirty
+/// flag and `scenario_show` -- which applies values permanently and has no restore
+/// command at all -- cannot obtain one.
+pub(crate) fn frame_effect(state: &AppState, token: &str) -> Result<DocumentEffect, String> {
+    let snapshots = state
+        .animation_snapshots
+        .lock()
+        .map_err(|_| "animation snapshot registry poisoned".to_string())?;
+    let scope = TransientScope::prove_restore_registered(&snapshots, token)?;
+    Ok(DocumentEffect::transient(&scope))
+}
+
 // ============================================================================
 // Tauri Commands
 // ============================================================================
@@ -258,6 +281,20 @@ pub fn anim_apply_frame(
     );
     let sheet_idx = params.sheet_index;
 
+    // A frame may only be applied while the matching anim_snapshot is on file. This is
+    // what makes "transient" checkable rather than remembered: no snapshot, no restore,
+    // no exemption -- so the write is refused instead of silently escaping the dirty
+    // flag. (scenario_show cannot satisfy this, which is correct: it has no restore.)
+    let effect = match frame_effect(&state, &params.token) {
+        Ok(e) => e,
+        Err(e) => {
+            return AnimationFrameResult {
+                updated_cells: Vec::new(),
+                error: Some(e),
+            }
+        }
+    };
+
     // Lock order matches scenario_show to avoid cross-path deadlocks.
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -293,6 +330,7 @@ pub fn anim_apply_frame(
     }
 
     let updated_cells = apply_set_ops_and_recalc(
+        &effect,
         &mut grids,
         &mut grid,
         active_sheet,
@@ -322,6 +360,9 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
         crate::eval_budget::EvalSurface::Background,
         &state.calc_cancel,
     );
+    // Proof BEFORE the take: the restore is the thing being performed, so the snapshot
+    // is on file at this instant by definition.
+    let effect = frame_effect(&state, &params.token).ok();
     let saved = state
         .animation_snapshots
         .lock()
@@ -357,6 +398,18 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
         };
     }
 
+    // Unreachable unless the snapshot vanished between the two locks above; the
+    // early return for an unknown token has already fired.
+    let effect = match effect {
+        Some(e) => e,
+        None => {
+            return AnimationFrameResult {
+                updated_cells: Vec::new(),
+                error: None,
+            }
+        }
+    };
+
     let ops: Vec<((u32, u32), SetOp)> = saved
         .into_iter()
         .map(|((r, c), prior)| {
@@ -369,6 +422,7 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
         .collect();
 
     let updated_cells = apply_set_ops_and_recalc(
+        &effect,
         &mut grids,
         &mut grid,
         active_sheet,
@@ -491,6 +545,17 @@ pub fn export_gif(req: GifExportRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// A transient effect for the pure-helper tests: they exercise the recalc mechanics
+    /// directly, so they stand in for a live animation run with its snapshot on file.
+    fn test_transient_effect() -> DocumentEffect {
+        let mut registry: HashMap<String, ()> = HashMap::new();
+        registry.insert("test-run".to_string(), ());
+        let scope = TransientScope::prove_restore_registered(&registry, "test-run")
+            .expect("registered token");
+        DocumentEffect::transient(&scope)
+    }
 
     #[test]
     fn encode_gif_produces_a_valid_header() {
@@ -552,6 +617,7 @@ mod tests {
         a1.style_index = 0;
         let apply_ops = vec![((0, 0), SetOp::Set(a1))];
         apply_set_ops_and_recalc(
+            &test_transient_effect(),
             &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
             &merged, &locale(), &apply_ops,
         );
@@ -567,6 +633,7 @@ mod tests {
             ))
             .collect();
         apply_set_ops_and_recalc(
+            &test_transient_effect(),
             &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
             &merged, &locale(), &restore_ops,
         );
@@ -597,6 +664,7 @@ mod tests {
 
         let apply_ops = vec![((0, 2), SetOp::Set(Cell::new_number(5.0)))];
         apply_set_ops_and_recalc(
+            &test_transient_effect(),
             &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
             &merged, &locale(), &apply_ops,
         );
@@ -610,6 +678,7 @@ mod tests {
             ))
             .collect();
         let updated = apply_set_ops_and_recalc(
+            &test_transient_effect(),
             &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
             &merged, &locale(), &restore_ops,
         );

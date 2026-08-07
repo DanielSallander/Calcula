@@ -3,12 +3,31 @@
 //! CONTEXT: Implements FilterOn types, FilterCriteria, DynamicFilterCriteria,
 //! and AutoFilter management with full Excel API compatibility.
 
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{format_cell_value, AppState};
 use chrono::{Datelike, Local, NaiveDate};
 use engine::{CellValue, Grid};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
+
+// AUTOFILTER STATE IS PERSISTED, SO EVERY WRITE HERE DIRTIES THE DOCUMENT.
+//
+// Two persisted authorities live in this file. `AppState::auto_filters` round-trips as
+// `user_files/autofilters.json`, and BOTH it and `advanced_filter_hidden_rows` feed
+// `Sheet::hidden_rows` at save time (persistence.rs, "Advanced-filter hidden rows" /
+// "AutoFilter hidden rows"). Filtering a column therefore changes what a save writes.
+// None of these 12 commands took a `FileState` before, so applying a filter and closing
+// lost it silently.
+//
+// PLACEMENT. Every command here is a thin `#[tauri::command]` wrapper over an `_inner`
+// that owns the mutation, so the effect is constructed in the `_inner` -- the lowest
+// point that owns the committed change (the rule that keeps `bi/model_editor` correct
+// across ~45 commands). It goes AFTER `check_sheet_action` and, where the command can
+// still bail ("No AutoFilter exists for this sheet"), inside the branch that actually
+// mutates: `DocumentEffect::mutates` sets the flag eagerly, so a refusal must never
+// reach it.
 
 // ============================================================================
 // FILTER ON ENUM
@@ -971,15 +990,17 @@ fn recompute_hidden_rows(
 pub fn apply_auto_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
-    let result = apply_auto_filter_inner(&state, params);
+    let result = apply_auto_filter_inner(&state, &file_state, params);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn apply_auto_filter_inner(
+pub(crate) fn apply_auto_filter_inner(
     state: &AppState,
+    file_state: &FileState,
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -989,11 +1010,13 @@ fn apply_auto_filter_inner(
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
+    // Gate passed, so this call will commit an AutoFilter.
+    let effect = DocumentEffect::mutates(file_state);
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003: autofilter changes bypassed
     // the undo system).
@@ -1056,7 +1079,7 @@ fn apply_auto_filter_inner(
     // (fresh id — the Data ▸ Filter re-apply case) and RELOCATES an existing
     // one (same id, new range, so a stale claim would otherwise survive a
     // move). Recomputing here covers both.
-    if let Ok(mut tables) = state.tables.lock() {
+    if let Ok(mut tables) = state.tables.write(&effect) {
         if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
             crate::tables::relink_autofilter_owner(sheet_tables, Some(&af_snapshot));
         }
@@ -1071,15 +1094,17 @@ fn apply_auto_filter_inner(
 pub fn clear_column_criteria(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     column_index: u32,
 ) -> AutoFilterResult {
-    let result = clear_column_criteria_inner(&state, column_index);
+    let result = clear_column_criteria_inner(&state, &file_state, column_index);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn clear_column_criteria_inner(
     state: &AppState,
+    file_state: &FileState,
     column_index: u32,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -1093,10 +1118,13 @@ fn clear_column_criteria_inner(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // Inside the mutating branch only: the `else` below is a refusal
+        // ("No AutoFilter exists for this sheet") and must leave the document clean.
+        let _effect = DocumentEffect::mutates(file_state);
         auto_filter.column_filters.remove(&column_index);
 
         // Recompute hidden rows
@@ -1135,20 +1163,24 @@ fn clear_column_criteria_inner(
 pub fn clear_auto_filter_criteria(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> AutoFilterResult {
-    let result = clear_auto_filter_criteria_inner(&state);
+    let result = clear_auto_filter_criteria_inner(&state, &file_state);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn clear_auto_filter_criteria_inner(
     state: &AppState,
+    file_state: &FileState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut auto_filters = state.auto_filters.lock().unwrap();
 
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // Mutating branch only; the `else` is a refusal.
+        let _effect = DocumentEffect::mutates(file_state);
         auto_filter.column_filters.clear();
         auto_filter.hidden_rows.clear();
 
@@ -1180,14 +1212,16 @@ fn clear_auto_filter_criteria_inner(
 pub fn reapply_auto_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> AutoFilterResult {
-    let result = reapply_auto_filter_inner(&state);
+    let result = reapply_auto_filter_inner(&state, &file_state);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
-fn reapply_auto_filter_inner(
+pub(crate) fn reapply_auto_filter_inner(
     state: &AppState,
+    file_state: &FileState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     // allowAutoFilter option gate.
@@ -1200,11 +1234,14 @@ fn reapply_auto_filter_inner(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // Mutating branch only; the `else` is a refusal. Re-applying recomputes
+        // `hidden_rows`, which is folded into the persisted `Sheet::hidden_rows`.
+        let _effect = DocumentEffect::mutates(file_state);
         // Recompute hidden rows
         if active_sheet < grids.len() {
             recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
@@ -1241,19 +1278,24 @@ fn reapply_auto_filter_inner(
 pub fn remove_auto_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
 ) -> AutoFilterResult {
-    let result = remove_auto_filter_inner(&state);
+    let result = remove_auto_filter_inner(&state, &file_state);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn remove_auto_filter_inner(
     state: &AppState,
+    file_state: &FileState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut auto_filters = state.auto_filters.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.remove(&active_sheet) {
+        // Conditional mutation: the `else` arm reports success for "there was no
+        // filter to remove", which changes nothing and must not dirty.
+        let effect = DocumentEffect::mutates(file_state);
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
 
         drop(auto_filters);
@@ -1263,7 +1305,7 @@ fn remove_auto_filter_inner(
         // table's link: the re-apply mints a NEW id that matches nothing.
         // Done AFTER releasing auto_filters — `create_table` locks tables then
         // auto_filters, so the reverse order here would risk a deadlock.
-        if let Ok(mut tables) = state.tables.lock() {
+        if let Ok(mut tables) = state.tables.write(&effect) {
             if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
                 crate::tables::relink_autofilter_owner(sheet_tables, None);
             }
@@ -1343,21 +1385,29 @@ pub fn get_hidden_rows(
 pub fn set_advanced_filter_hidden_rows(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     rows: Vec<u32>,
 ) {
-    set_advanced_filter_hidden_rows_inner(&state, rows);
+    set_advanced_filter_hidden_rows_inner(&state, &file_state, rows);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
 }
 
-fn set_advanced_filter_hidden_rows_inner(
+pub(crate) fn set_advanced_filter_hidden_rows_inner(
     state: &AppState,
+    file_state: &FileState,
     rows: Vec<u32>,
 ) {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
+    // These rows are unioned into the persisted `Sheet::hidden_rows` at save time,
+    // so both arms change what a save writes -- unless the "clear" arm finds nothing
+    // to clear, which is a genuine no-op.
     if rows.is_empty() {
-        adv_hidden.remove(&active_sheet);
+        if adv_hidden.remove(&active_sheet).is_some() {
+            let _effect = DocumentEffect::mutates(file_state);
+        }
     } else {
+        let _effect = DocumentEffect::mutates(file_state);
         adv_hidden.insert(active_sheet, rows);
     }
 }
@@ -1367,17 +1417,23 @@ fn set_advanced_filter_hidden_rows_inner(
 pub fn clear_advanced_filter_hidden_rows(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
 ) {
-    clear_advanced_filter_hidden_rows_inner(&state);
+    clear_advanced_filter_hidden_rows_inner(&state, &file_state);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
 }
 
-fn clear_advanced_filter_hidden_rows_inner(
+pub(crate) fn clear_advanced_filter_hidden_rows_inner(
     state: &AppState,
+    file_state: &FileState,
 ) {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
-    adv_hidden.remove(&active_sheet);
+    // Only dirty if there was something to clear: this runs on every advanced-filter
+    // teardown, including ones where no rows were ever hidden.
+    if adv_hidden.remove(&active_sheet).is_some() {
+        let _effect = DocumentEffect::mutates(file_state);
+    }
 }
 
 /// Check if a specific row is hidden by the AutoFilter.
@@ -1405,7 +1461,7 @@ pub fn get_filter_unique_values(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let _theme = state.theme.lock().unwrap();
+    let _theme = state.theme.read().unwrap();
 
     let auto_filter = match auto_filters.get(&active_sheet) {
         Some(af) => af,
@@ -1473,17 +1529,20 @@ pub fn get_filter_unique_values(
 pub fn set_column_filter_values(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     column_index: u32,
     values: Vec<String>,
     include_blanks: bool,
 ) -> AutoFilterResult {
-    let result = set_column_filter_values_inner(&state, column_index, values, include_blanks);
+    let result =
+        set_column_filter_values_inner(&state, &file_state, column_index, values, include_blanks);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn set_column_filter_values_inner(
     state: &AppState,
+    file_state: &FileState,
     column_index: u32,
     values: Vec<String>,
     include_blanks: bool,
@@ -1499,11 +1558,13 @@ fn set_column_filter_values_inner(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // Mutating branch only; the `else` is a refusal.
+        let _effect = DocumentEffect::mutates(file_state);
         let mut filter_values = values;
         if include_blanks {
             filter_values.push("(Blanks)".to_string());
@@ -1557,19 +1618,22 @@ fn set_column_filter_values_inner(
 pub fn set_column_custom_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     column_index: u32,
     criterion1: String,
     criterion2: Option<String>,
     operator: Option<FilterOperator>,
 ) -> AutoFilterResult {
-    let result =
-        set_column_custom_filter_inner(&state, column_index, criterion1, criterion2, operator);
+    let result = set_column_custom_filter_inner(
+        &state, &file_state, column_index, criterion1, criterion2, operator,
+    );
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn set_column_custom_filter_inner(
     state: &AppState,
+    file_state: &FileState,
     column_index: u32,
     criterion1: String,
     criterion2: Option<String>,
@@ -1586,11 +1650,13 @@ fn set_column_custom_filter_inner(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // Mutating branch only; the `else` is a refusal.
+        let _effect = DocumentEffect::mutates(file_state);
         let criteria = FilterCriteria {
             filter_on: FilterOn::Custom,
             criterion1: Some(criterion1),
@@ -1640,17 +1706,20 @@ fn set_column_custom_filter_inner(
 pub fn set_column_top_bottom_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     column_index: u32,
     filter_on: FilterOn,
     value: u32,
 ) -> AutoFilterResult {
-    let result = set_column_top_bottom_filter_inner(&state, column_index, filter_on, value);
+    let result =
+        set_column_top_bottom_filter_inner(&state, &file_state, column_index, filter_on, value);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn set_column_top_bottom_filter_inner(
     state: &AppState,
+    file_state: &FileState,
     column_index: u32,
     filter_on: FilterOn,
     value: u32,
@@ -1666,7 +1735,7 @@ fn set_column_top_bottom_filter_inner(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     // Validate filter_on
     let valid_filter = matches!(
@@ -1686,6 +1755,9 @@ fn set_column_top_bottom_filter_inner(
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // After BOTH the protection gate and the filter_on validation, and inside the
+        // mutating branch only.
+        let _effect = DocumentEffect::mutates(file_state);
         let criteria = FilterCriteria {
             filter_on,
             criterion1: Some(value.to_string()),
@@ -1929,15 +2001,17 @@ fn row_matches_any(values: &[String], criteria_rows: &[HashMap<u32, AdvParsedCri
 pub fn run_advanced_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     params: AdvancedFilterParams,
 ) -> AdvancedFilterResult {
-    let result = run_advanced_filter_inner(&state, params);
+    let result = run_advanced_filter_inner(&state, &file_state, params);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn run_advanced_filter_inner(
     state: &AppState,
+    file_state: &FileState,
     params: AdvancedFilterParams,
 ) -> AdvancedFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -2055,10 +2129,17 @@ fn run_advanced_filter_inner(
                 .filter(|r| !matched_set.contains(r))
                 .collect();
             {
+                // ONLY this arm mutates. `copyToLocation` returns matched rows and the
+                // TS layer performs the cell writes through the undoable batch path,
+                // which dirties on its own; the error arm changes nothing. Marking at
+                // the top of the command would dirty on a rejected criteria range.
                 let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
                 if hidden_rows.is_empty() {
-                    adv_hidden.remove(&active_sheet);
+                    if adv_hidden.remove(&active_sheet).is_some() {
+                        let _effect = DocumentEffect::mutates(file_state);
+                    }
                 } else {
+                    let _effect = DocumentEffect::mutates(file_state);
                     adv_hidden.insert(active_sheet, hidden_rows.clone());
                 }
             }
@@ -2294,16 +2375,19 @@ mod advanced_filter_tests {
 pub fn set_column_dynamic_filter(
     app: tauri::AppHandle,
     state: State<AppState>,
+    file_state: State<FileState>,
     column_index: u32,
     dynamic_criteria: DynamicFilterCriteria,
 ) -> AutoFilterResult {
-    let result = set_column_dynamic_filter_inner(&state, column_index, dynamic_criteria);
+    let result =
+        set_column_dynamic_filter_inner(&state, &file_state, column_index, dynamic_criteria);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 fn set_column_dynamic_filter_inner(
     state: &AppState,
+    file_state: &FileState,
     column_index: u32,
     dynamic_criteria: DynamicFilterCriteria,
 ) -> AutoFilterResult {
@@ -2318,11 +2402,13 @@ fn set_column_dynamic_filter_inner(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let theme = state.theme.lock().unwrap();
+    let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+        // Mutating branch only; the `else` is a refusal.
+        let _effect = DocumentEffect::mutates(file_state);
         let criteria = FilterCriteria {
             filter_on: FilterOn::Dynamic,
             dynamic_criteria: Some(dynamic_criteria),

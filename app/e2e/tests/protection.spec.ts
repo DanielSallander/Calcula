@@ -9,6 +9,23 @@ import { test, expect } from "../fixtures";
 import { takeGridScreenshot, softly } from "../helpers/screenshots";
 
 test.describe("Sheet Protection", () => {
+  // Every test here protects the sheet, and each unprotects it only on the happy
+  // path. An assertion that fails mid-test (a screenshot mismatch, say) therefore
+  // aborts BEFORE unprotect_sheet and leaves the whole shared app instance with a
+  // protected sheet, which cascades into unrelated later tests as
+  // "Cannot change cell AE3: it is locked on a protected sheet".
+  // Unprotect unconditionally so one failure stays one failure.
+  test.afterEach(async ({ sharedPage }) => {
+    await sharedPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      try {
+        await tauri.core.invoke("unprotect_sheet", {});
+      } catch {
+        /* already unprotected — nothing to undo */
+      }
+    });
+  });
+
   test("protect and unprotect a sheet", async ({ appPage, grid }) => {
     // Set up some data
     await grid.setCellValueDirect("AE1", "Protected Data");

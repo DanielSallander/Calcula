@@ -2,9 +2,22 @@
 // PURPOSE: Find and replace functionality.
 
 use crate::api_types::CellData;
+use crate::document_effect::DocumentEffect;
+use crate::persistence::FileState;
 use crate::{format_cell_value, AppState};
 use engine::CellValue;
 use tauri::State;
+
+// FIND AND REPLACE REWRITES GRID CELLS, which are persisted, so both replace commands
+// dirty the document. Neither took a `FileState`: Replace All could rewrite hundreds of
+// cells, open an undo transaction for them, and still leave the workbook looking clean
+// at close. Both have an off-sheet twin that writes to a NON-ACTIVE sheet, and those
+// twins need the flag just as much -- the write is invisible on the current canvas, so
+// nothing else would ever set it.
+//
+// All four mark only once the gates (writeback claim, sheet protection) have passed AND
+// a replacement has actually been committed: "no match here" and "formula cell, skipped"
+// are no-ops that must leave the document clean.
 
 /// Search result containing match coordinates and total count.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -173,6 +186,7 @@ fn compute_replacement_value(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn replace_all_off_sheet(
     state: &AppState,
+    file_state: &FileState,
     user_files_state: &crate::persistence::UserFilesState,
     pivot_state: &crate::pivot::types::PivotState,
     pane_control_state: &crate::pane_control::PaneControlState,
@@ -222,6 +236,10 @@ pub(crate) fn replace_all_off_sheet(
             replacement_count: 0,
         });
     }
+
+    // Both gates passed and there is at least one match: cells on the target sheet are
+    // about to be rewritten. Off-sheet writes are exactly the ones nothing else marks.
+    let _effect = DocumentEffect::mutates(file_state);
 
     let search_normalized = if case_sensitive {
         search.clone()
@@ -301,6 +319,7 @@ pub(crate) fn replace_all_off_sheet(
 #[tauri::command]
 pub fn replace_all(
     state: State<AppState>,
+    file_state: State<FileState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
@@ -317,6 +336,7 @@ pub fn replace_all(
         if target != active {
             return replace_all_off_sheet(
                 &state,
+                &file_state,
                 &user_files_state,
                 &pivot_state,
                 &pane_control_state,
@@ -384,6 +404,9 @@ pub fn replace_all(
             replacement_count: 0,
         });
     }
+
+    // Both gates passed and there is at least one match: the loop below rewrites cells.
+    let _effect = DocumentEffect::mutates(&file_state);
 
     // Begin atomic transaction for undo
     undo_stack.begin_transaction(format!(
@@ -505,6 +528,7 @@ fn replace_case_insensitive(text: &str, search: &str, replacement: &str) -> Stri
 /// "script_grid_cells" entry.
 pub(crate) fn replace_single_off_sheet(
     state: &AppState,
+    file_state: &FileState,
     user_files_state: &crate::persistence::UserFilesState,
     pivot_state: &crate::pivot::types::PivotState,
     pane_control_state: &crate::pane_control::PaneControlState,
@@ -581,6 +605,10 @@ pub(crate) fn replace_single_off_sheet(
         let mut new_cell = cell.clone();
         new_cell.value = new_val;
 
+        // A replacement really is being committed (the `return Ok(None)` paths above
+        // cover "no cell", "formula cell" and "text unchanged").
+        let _effect = DocumentEffect::mutates(file_state);
+
         undo_stack.begin_transaction("Replace".to_string());
         undo_stack.record_custom_restore(
             "script_grid_cells".to_string(),
@@ -631,6 +659,7 @@ pub(crate) fn replace_single_off_sheet(
 #[tauri::command]
 pub fn replace_single(
     state: State<AppState>,
+    file_state: State<FileState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
@@ -648,6 +677,7 @@ pub fn replace_single(
         if target != active {
             return replace_single_off_sheet(
                 &state,
+                &file_state,
                 &user_files_state,
                 &pivot_state,
                 &pane_control_state,
@@ -737,7 +767,10 @@ pub fn replace_single(
         if let Some(new_val) = new_value {
             let mut new_cell = cell.clone();
             new_cell.value = new_val;
-            
+
+            // Only here: a formula cell or an unchanged value returns without writing.
+            let _effect = DocumentEffect::mutates(&file_state);
+
             // Record undo
             undo_stack.record_cell_change(row, col, previous_cell);
             

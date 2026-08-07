@@ -246,7 +246,11 @@ fn effective_hidden_is_the_union_of_user_filter_and_outline() {
         .insert(0, vec![2]);
     // A collapsed outline group hides rows 4..=5.
     {
-        let mut outlines = state.outlines.lock().unwrap();
+        // Test fixture seeding persisted state directly; no save follows.
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut outlines = state.outlines.write(&seed).unwrap();
         let outline = outlines.entry(0).or_default();
         outline.row_groups.push(crate::grouping::RowGroup {
             start_row: 4,
@@ -316,7 +320,11 @@ fn expanding_an_outline_group_does_not_clear_a_user_hide() {
     let file_state = FileState::default();
     set_rows_hidden_inner(&state, &file_state, &[4], true).unwrap();
     {
-        let mut outlines = state.outlines.lock().unwrap();
+        // Test fixture seeding persisted state directly; no save follows.
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut outlines = state.outlines.write(&seed).unwrap();
         let outline = outlines.entry(0).or_default();
         outline.row_groups.push(crate::grouping::RowGroup {
             start_row: 4,
@@ -329,7 +337,11 @@ fn expanding_an_outline_group_does_not_clear_a_user_hide() {
 
     // Expand the group.
     {
-        let mut outlines = state.outlines.lock().unwrap();
+        // Test fixture seeding persisted state directly; no save follows.
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut outlines = state.outlines.write(&seed).unwrap();
         outlines.get_mut(&0).unwrap().row_groups[0].collapsed = false;
     }
 
@@ -347,7 +359,11 @@ fn hidden_columns_compose_the_same_way() {
     let file_state = FileState::default();
     set_cols_hidden_inner(&state, &file_state, &[2], true).unwrap();
     {
-        let mut outlines = state.outlines.lock().unwrap();
+        // Test fixture seeding persisted state directly; no save follows.
+        let seed = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        let mut outlines = state.outlines.write(&seed).unwrap();
         let outline = outlines.entry(0).or_default();
         outline.column_groups.push(crate::grouping::ColumnGroup {
             start_col: 5,
@@ -374,8 +390,10 @@ fn inserting_a_row_above_a_hidden_row_shifts_the_hide_down() {
     set_rows_hidden_inner(&state, &file_state, &[10], true).unwrap();
 
     let mut undo_stack = engine::UndoStack::new();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::commands::structure::shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         0,
         calp::writeback::StructuralEdit::RowInsert { at: 5, count: 1 },
@@ -393,8 +411,10 @@ fn deleting_the_hidden_row_removes_the_hide_and_pulls_later_ones_up() {
     set_rows_hidden_inner(&state, &file_state, &[3, 10], true).unwrap();
 
     let mut undo_stack = engine::UndoStack::new();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::commands::structure::shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         0,
         calp::writeback::StructuralEdit::RowDelete { at: 3, count: 1 },
@@ -413,8 +433,10 @@ fn inserting_a_column_shifts_hidden_columns_and_leaves_rows_alone() {
     set_cols_hidden_inner(&state, &file_state, &[7], true).unwrap();
 
     let mut undo_stack = engine::UndoStack::new();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::commands::structure::shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         0,
         calp::writeback::StructuralEdit::ColInsert { at: 2, count: 3 },
@@ -436,8 +458,10 @@ fn the_shift_is_undoable() {
 
     let mut undo_stack = engine::UndoStack::new();
     undo_stack.begin_transaction("Insert row");
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::commands::structure::shift_misc_coordinate_stores(
         &state,
+        &effect,
         &mut undo_stack,
         0,
         calp::writeback::StructuralEdit::RowInsert { at: 5, count: 1 },

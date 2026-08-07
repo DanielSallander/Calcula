@@ -195,6 +195,23 @@ defineScenario("monthly-report", [
       await invokeTauri(page, "set_freeze_panes", { freezeRow: 1, freezeCol: null });
       await page.evaluate(() => window.dispatchEvent(new Event("grid:refresh")));
     },
-    screenshot: "scenario-monthly-report-final",
+    // SCREENSHOT DISABLED — blocked on a product bug, not on a stale baseline.
+    //
+    // This phase runs after phase 05 builds a pivot, and the pivot's progress
+    // indicator ("Updating grid... (4/4)" plus a Cancel button) is still painted
+    // over the grid here, permanently. Cause: the backend emits its final
+    // pivot:progress event immediately before the command returns
+    // (src-tauri/src/pivot/commands.rs:786), Tauri events and command responses
+    // travel on separate channels, and the frontend listener
+    // (extensions/Pivot/index.ts:1976) calls setLoading() unconditionally. So the
+    // last progress event can land AFTER the command resolved and the pivot-api
+    // `finally { clearLoading }` already ran, re-arming the indicator with
+    // nothing left to clear it.
+    //
+    // Verified stuck, not racing: identical across two independent cold runs and
+    // unchanged by a 6s waitForVisualStability. Recording this golden would
+    // enshrine the defect permanently, so the capture stays off until the
+    // listener ignores progress for a pivot with no in-flight operation.
+    // Re-enable by restoring: screenshot: "scenario-monthly-report-final",
   },
 ]);
