@@ -4,8 +4,46 @@
 //          cross-sheet references -> data validation -> title formatting
 //          (merge + bold) -> annotations (comment/note/hyperlink).
 
+import type { Page } from "@playwright/test";
 import { expect } from "../fixtures";
 import { defineScenario, loadBlock, invokeTauri } from "./lib/scenario";
+
+/**
+ * Read one cell of a NAMED sheet without making it active.
+ *
+ * `grid.getCellDisplayValue` calls `get_cell`, which only ever answers for the
+ * ACTIVE sheet — so it cannot express "Sheet2!B3" at all while Sheet1 is in
+ * front (it silently returns Sheet1!B3, the "Budget" header). And switching to
+ * Sheet2 to read it would be a MASKING read: `set_active_sheet` syncs the grid
+ * mirror and rebuilds the dependency maps (the BUG-0016 fix), which is exactly
+ * the machinery whose absence BUG-0019 is about.
+ *
+ * `get_workbook_state_digest` is a pure read of the stored per-sheet grids —
+ * no active-sheet mirror, no recalculation, no dependency rebuild — so it sees
+ * precisely the value the incremental cascade left in memory. That is the
+ * oracle BUG-0019 needs.
+ */
+async function storedCellOnSheet(
+  page: Page,
+  sheetName: string,
+  row: number,
+  col: number,
+): Promise<string> {
+  const digest = (await invokeTauri(page, "get_workbook_state_digest", {
+    options: { cellsOnly: true },
+  })) as {
+    sheets: Array<{ name: string; cells: Record<string, { v: string }> }>;
+  };
+  const sheet = digest.sheets.find((s) => s.name === sheetName);
+  if (!sheet) {
+    throw new Error(
+      `sheet "${sheetName}" not in the digest (have: ${digest.sheets
+        .map((s) => s.name)
+        .join(", ")})`,
+    );
+  }
+  return sheet.cells[`${row}:${col}`]?.v ?? "";
+}
 
 const BUDGET_DATA = [
   ["Category", "Budget", "Actual"],
@@ -111,11 +149,19 @@ defineScenario("budget-model", [
       expect(await grid.getCellDisplayValue("C5")).toBe("6950");
       // Same-sheet propagation after a sheet switch (BUG-0016, fixed):
       expect(await grid.getCellDisplayValue("C9")).toBe("27800");
-      // The summary sheet must reflect the change too. BUG-0019:
-      // second-order cross-sheet propagation (C5 -> C9 -> Sheet2!B3) does
-      // not cascade yet — restore these when fixed:
-      //   expect(await grid.getCellDisplayValue("B3")).toBe("27800");
-      //   expect(await grid.getCellDisplayValue("B4")).toBe("-500");
+      // The summary sheet must reflect the change too (BUG-0019, fixed
+      // 2026-08-07): second-order cross-sheet propagation, C5 -> C9 ->
+      // Sheet2!B3 -> Sheet2!B4. Two hops, two independent causes — the walk
+      // rooted only on the EDITED cell and never on the RECALCULATED ones,
+      // and it expanded Sheet2's own dependents through Sheet1's dependency
+      // map. See cascade_cross_sheet_dependents in commands/data.rs.
+      //
+      // Read Sheet2 WITHOUT activating it — see storedCellOnSheet. Sheet1 is
+      // the active sheet here, so a plain `getCellDisplayValue("B3")` would
+      // read Sheet1!B3 ("Budget") and a sheet switch would rebuild the very
+      // dependency state under test.
+      expect(await storedCellOnSheet(page, "Sheet2", 2, 1), "Sheet2!B3").toBe("27800");
+      expect(await storedCellOnSheet(page, "Sheet2", 3, 1), "Sheet2!B4").toBe("-500");
     },
   },
   {

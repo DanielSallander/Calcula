@@ -691,7 +691,6 @@ pub(crate) fn recalc_control_dependents_core(
             &sheet_names,
             active_sheet,
             &cross_sheet_dependents_map,
-            &dependents_map,
             &user_files,
             &control_values,
             &styles,

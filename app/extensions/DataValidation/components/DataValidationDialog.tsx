@@ -27,7 +27,7 @@ import {
   createDateRule,
   createTimeRule,
 } from "@api";
-import { refreshValidationState, getCurrentSelection } from "../lib/validationStore";
+import { joinValidationRefresh, getCurrentSelection } from "../lib/validationStore";
 import type { ValidationDialogData } from "../types";
 import { SettingsTab } from "./tabs/SettingsTab";
 import { InputMessageTab } from "./tabs/InputMessageTab";
@@ -382,7 +382,7 @@ export function DataValidationDialog(props: DialogProps) {
       };
 
       await setDataValidation(startRow, startCol, endRow, endCol, validation);
-      await refreshValidationState();
+      await joinValidationRefresh();
       onClose();
     } catch (error) {
       console.error("[DataValidation] Failed to set validation:", error);
@@ -398,7 +398,7 @@ export function DataValidationDialog(props: DialogProps) {
   const handleClearAll = useCallback(async () => {
     try {
       await clearDataValidation(startRow, startCol, endRow, endCol);
-      await refreshValidationState();
+      await joinValidationRefresh();
       onClose();
     } catch (error) {
       console.error("[DataValidation] Failed to clear validation:", error);

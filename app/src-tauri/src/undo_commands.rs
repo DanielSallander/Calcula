@@ -104,16 +104,29 @@ fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
 /// them stale across switches made edits on the new sheet recalc against the
 /// previous sheet's edges (BUG-0016).
 pub(crate) fn rebuild_all_dependencies(state: &AppState) {
+    // Cloned BEFORE the dependency locks: `rebuild_all_dependencies_from_grid`
+    // needs the official sheet names to canonicalise cross-sheet keys, and
+    // taking that lock inside would add a fourth lock to a function some
+    // callers already reach while holding the grid.
+    let sheet_names = state.sheet_names.lock().unwrap().clone();
     let grid = state.grid.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
-    rebuild_all_dependencies_from_grid(&grid, active_sheet, state);
+    rebuild_all_dependencies_from_grid(&grid, active_sheet, &sheet_names, state);
 }
 
 /// Same as rebuild_all_dependencies but for callers that already hold the
 /// grid lock (passing it avoids a deadlock). Locks only the dependency maps.
+///
+/// `sheet_names` is the workbook's official name list, passed rather than
+/// locked so this stays safe for callers holding other AppState locks. It is
+/// NOT optional: cross-sheet dependents are keyed by sheet NAME and the cascade
+/// looks them up under the official spelling, so rebuilding straight from the
+/// AST's spelling registers keys nothing will ever find. See
+/// `normalize_cross_sheet_refs`.
 pub(crate) fn rebuild_all_dependencies_from_grid(
     grid: &engine::Grid,
     active_sheet: usize,
+    sheet_names: &[String],
     state: &AppState,
 ) {
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -190,7 +203,7 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
             if !refs.cross_sheet_cells.is_empty() {
                 update_cross_sheet_dependencies(
                     (active_sheet, row, col),
-                    refs.cross_sheet_cells,
+                    crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, sheet_names),
                     &mut cross_sheet_dependencies,
                     &mut cross_sheet_dependents,
                 );
@@ -237,7 +250,10 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
 
 /// Apply undo/redo changes and return the result.
 /// Shared logic used by both `undo` and `redo` commands.
-fn apply_changes(
+///
+/// `pub(crate)` so tests can drive the real restore without a Tauri runtime:
+/// `undo`/`redo` themselves take an `AppHandle`, this takes plain references.
+pub(crate) fn apply_changes(
     state: &AppState,
     file_state: &FileState,
     user_files_state: &UserFilesState,

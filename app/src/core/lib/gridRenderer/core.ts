@@ -24,7 +24,7 @@ import { DEFAULT_THEME } from "./types";
 import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
-import { drawCellText } from "./rendering/cells";
+import { drawCellText, drawDeferredCellDecorations } from "./rendering/cells";
 import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
 import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
 import { drawSpillBorders } from "./rendering/spillBorder";
@@ -43,6 +43,7 @@ import { cellKey } from "../../../core/types";
 import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
 import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/cellTypes";
 import { hasGridLayers, paintGridLayers, type GridLayerAnchor, type GridLayerContext } from "../../../api/gridLayers";
+import type { CellDecorationContext } from "../../../api/cellDecorations";
 
 // ============================================================================
 // Post-Header Overlay Types
@@ -708,6 +709,11 @@ export function renderGrid(
 
   paintLayers("under-cells");
 
+  // Cell decorations that declared the "over-selection" anchor, captured by the
+  // cell pass for the cells the selection/clipboard chrome covers. Empty in
+  // split/freeze mode, where the zone cell painter runs no decorations at all.
+  let deferredCellDecorations: CellDecorationContext[] = [];
+
   // Split window rendering
   const hasSplitRows = splitConfig && splitConfig.splitRow !== null && splitConfig.splitRow > 0;
   const hasSplitCols = splitConfig && splitConfig.splitCol !== null && splitConfig.splitCol > 0;
@@ -855,7 +861,10 @@ export function renderGrid(
     if (displayGridlines !== false) {
       drawGridLines(state);
     }
-    drawCellText(state);
+    // Cell decorations anchored "over-selection" (note/error triangles,
+    // bookmark dots) are captured here with the geometry the cell pass already
+    // computed, and replayed below once the selection chrome is down.
+    deferredCellDecorations = drawCellText(state);
   }
 
   if (formulaReferences.length > 0) {
@@ -939,6 +948,17 @@ export function renderGrid(
 
   if (clipboardSelection && clipboardMode && clipboardMode !== "none") {
     drawClipboardSelection(state);
+  }
+
+  // Indicator chrome ABOVE the selection chrome. Excel keeps a cell's note
+  // indicator visible when the cell is selected; before this the 2px active-cell
+  // border covered 18 of the triangle's 21 pixels and the selection tint took
+  // the rest, so selecting a commented cell hid the very mark that said it was
+  // commented. Placed before the above-selection OVERLAYS on purpose: a chart or
+  // pivot floating over the cell should still cover it — the decoration belongs
+  // to the cell, not to the frame.
+  if (deferredCellDecorations.length > 0) {
+    drawDeferredCellDecorations(deferredCellDecorations);
   }
 
   // Render above-selection overlays (e.g., charts)

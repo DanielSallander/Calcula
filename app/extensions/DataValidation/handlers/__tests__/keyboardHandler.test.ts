@@ -8,7 +8,12 @@ const mockShowOverlay = vi.fn();
 const mockHideOverlay = vi.fn();
 const mockHasInCellDropdown = vi.fn();
 
+import { createCoalescedRefresh as actualCoalescedRefresh } from "../../../../src/api/coalescedRefresh";
+
 vi.mock("@api", () => ({
+  // The refresh coalescer is @api's own primitive, not a backend
+  // boundary — the real one, so these tests exercise real coalescing.
+  createCoalescedRefresh: actualCoalescedRefresh,
   showOverlay: (...args: unknown[]) => mockShowOverlay(...args),
   hideOverlay: (...args: unknown[]) => mockHideOverlay(...args),
   hasInCellDropdown: (...args: unknown[]) => mockHasInCellDropdown(...args),

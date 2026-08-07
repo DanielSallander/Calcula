@@ -20,6 +20,7 @@ import {
 import {
   hasCellDecorations,
   applyCellDecorations,
+  type CellDecorationContext,
 } from "../../../../api/cellDecorations";
 import {
   hasCellTypes,
@@ -29,6 +30,77 @@ import {
 import { drawCellFill } from "../styles/fillRenderer";
 import { buildMergeSlaveIndex } from "./mergeIndex";
 import { pointsToPixels, buildCellFont } from "../fonts";
+
+// ============================================================================
+// Over-selection cell decorations
+// ============================================================================
+
+/** An inclusive cell rectangle covered by selection chrome. */
+interface ChromeRect {
+  minRow: number;
+  maxRow: number;
+  minCol: number;
+  maxCol: number;
+}
+
+/**
+ * The cell rectangles that selection chrome paints over this frame: the main
+ * selection, every Ctrl+click additional range, and the clipboard (marching
+ * ants) range.
+ *
+ * Only decorations on THESE cells need replaying above the chrome — everywhere
+ * else nothing paints between the cell pass and the replay point, so the output
+ * is identical and the work is skipped.
+ */
+function collectChromeRects(state: RenderState): ChromeRect[] {
+  const rects: ChromeRect[] = [];
+  const push = (r: { startRow: number; endRow: number; startCol: number; endCol: number }) => {
+    rects.push({
+      minRow: Math.min(r.startRow, r.endRow),
+      maxRow: Math.max(r.startRow, r.endRow),
+      minCol: Math.min(r.startCol, r.endCol),
+      maxCol: Math.max(r.startCol, r.endCol),
+    });
+  };
+
+  const { selection, clipboardSelection, clipboardMode } = state;
+  if (selection) {
+    push(selection);
+    if (selection.additionalRanges) {
+      for (const range of selection.additionalRanges) push(range);
+    }
+  }
+  if (clipboardSelection && clipboardMode && clipboardMode !== "none") {
+    push(clipboardSelection);
+  }
+  return rects;
+}
+
+function isCoveredByChrome(rects: ChromeRect[], row: number, col: number): boolean {
+  for (const r of rects) {
+    if (row >= r.minRow && row <= r.maxRow && col >= r.minCol && col <= r.maxCol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Replay the decorations captured by {@link drawCellText} above the selection
+ * chrome.
+ *
+ * WHY REPLAY RATHER THAN A SECOND LOOP. The cell pass already owns the
+ * geometry — visible range, merge masters, insertion-animation offsets, header
+ * clipping. A second loop would have to reproduce all of it and would drift
+ * from it on the first change to either. Capturing the already-computed
+ * contexts costs one object per chrome-covered cell (one, for the usual
+ * single-cell selection) and cannot disagree with the pass that produced it.
+ */
+export function drawDeferredCellDecorations(deferred: CellDecorationContext[]): void {
+  for (const context of deferred) {
+    applyCellDecorations(context, "over-selection");
+  }
+}
 
 /**
  * Draw text with ellipsis truncation if it exceeds the available width.
@@ -467,7 +539,7 @@ function drawBorderLine(
  * Handles merged cells by drawing master cells with expanded dimensions.
  * Applies style interceptors for features like conditional formatting.
  */
-export function drawCellText(state: RenderState): void {
+export function drawCellText(state: RenderState): CellDecorationContext[] {
   const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -483,6 +555,22 @@ export function drawCellText(state: RenderState): void {
 
   // Check if we need to run style interceptors
   const useInterceptors = hasStyleInterceptors();
+
+  // Decorations. Hoisted out of the per-cell loop: nothing can register or
+  // unregister mid-frame, so the answers are constant for this pass.
+  const useDecorations = hasCellDecorations();
+  // Indicator chrome (note/error triangles, bookmark dots) declares the
+  // "over-selection" anchor so the active-cell border and tint stop hiding a
+  // cell's own indicator.
+  //
+  // Only the cells the chrome actually COVERS are deferred to the replay; on
+  // every other cell the decoration is drawn here, in the normal pass. Nothing
+  // paints between this point and the replay on an uncovered cell, so the frame
+  // is identical either way — and deferring the whole viewport would allocate a
+  // context per visible cell per frame to no effect.
+  const useOverSelection = hasCellDecorations("over-selection");
+  const chromeRects = useOverSelection ? collectChromeRects(state) : [];
+  const deferred: CellDecorationContext[] = [];
 
   // Cell types render as their own content (suppressed in Show Formulas mode,
   // where the raw value/formula must stay visible).
@@ -589,15 +677,20 @@ export function drawCellText(state: RenderState): void {
               drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, { style: effective.borderRightStyle || "solid", color: effective.borderRightColor, width: 1 });
             }
           }
-          if (hasCellDecorations()) {
-            applyCellDecorations({
+          if (useDecorations || useOverSelection) {
+            const decorationContext: CellDecorationContext = {
               ctx, row, col,
               cellLeft, cellTop, cellRight, cellBottom,
               config, viewport, dimensions,
               display: "",
               styleIndex: 0,
               styleCache,
-            });
+            };
+            if (useDecorations) applyCellDecorations(decorationContext);
+            if (useOverSelection) {
+              if (isCoveredByChrome(chromeRects, row, col)) deferred.push(decorationContext);
+              else applyCellDecorations(decorationContext, "over-selection");
+            }
           }
           if (cellTypeHere) {
             renderCellTypeCell({
@@ -944,8 +1037,13 @@ export function drawCellText(state: RenderState): void {
       }
 
       // Draw cell decorations (e.g., sparklines, checkboxes) between background/borders and text
-      if (hasCellDecorations()) {
-        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: displayValue, styleIndex, styleCache });
+      if (useDecorations || useOverSelection) {
+        const decorationContext: CellDecorationContext = { ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: displayValue, styleIndex, styleCache };
+        if (useDecorations) applyCellDecorations(decorationContext);
+        if (useOverSelection) {
+          if (isCoveredByChrome(chromeRects, row, col)) deferred.push(decorationContext);
+          else applyCellDecorations(decorationContext, "over-selection");
+        }
       }
 
       // Cell-type renderer: a typed cell can take over content rendering
@@ -1240,4 +1338,7 @@ export function drawCellText(state: RenderState): void {
 
     baseY += rowHeight;
   }
+
+  // Handed to drawDeferredCellDecorations() once the selection chrome is down.
+  return deferred;
 }

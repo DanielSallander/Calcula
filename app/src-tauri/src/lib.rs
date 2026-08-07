@@ -3515,6 +3515,47 @@ pub fn update_row_dependencies(
     }
 }
 
+/// Canonicalise the sheet names in a set of parsed cross-sheet references.
+///
+/// `CrossSheetDependentsMap` is keyed by sheet NAME, and the cascade
+/// (`cascade_cross_sheet_dependents`) looks a cell up under the workbook's
+/// OFFICIAL name — `sheet_names[index]`. The AST, by contrast, NEVER holds that
+/// spelling for an unquoted reference: the lexer uppercases every bare
+/// identifier (`parser/src/lexer.rs`), so `=Sheet1!A2` is stored as `SHEET1!A2`
+/// and keys as `("SHEET1", ..)` while the cascade asks for `("Sheet1", ..)`.
+/// An un-canonicalised key is therefore not an edge case, it is a dependent
+/// that will never be found — and registering references straight from the AST
+/// on a sheet switch silently stopped ALL cross-sheet recalculation for the rest
+/// of the session (proved live 2026-08-07 — see the sheet-revisit test in
+/// commands/cross_sheet_recalc_tests.rs). Quoted references (`='Sheet1'!A2`)
+/// lex as `QuotedIdentifier` and keep their case, which is why the failure
+/// looked arbitrary from the outside.
+///
+/// A name with no match in `sheet_names` is passed through unchanged, so a
+/// reference to a sheet that does not exist stays exactly as written rather
+/// than being silently retargeted.
+///
+/// THIS IS THE ONE COPY. Every site that registers cross-sheet dependencies
+/// must call it — `update_cell`, the batch/paste path, fill, the structural
+/// reference shift, and the dependency rebuild. There used to be four
+/// hand-copied inline versions and one place that simply forgot.
+pub fn normalize_cross_sheet_refs(
+    parsed_refs: &FxHashSet<(String, u32, u32)>,
+    sheet_names: &[String],
+) -> FxHashSet<(String, u32, u32)> {
+    parsed_refs
+        .iter()
+        .map(|(parsed_sheet_name, r, c)| {
+            let canonical = sheet_names
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(parsed_sheet_name))
+                .cloned()
+                .unwrap_or_else(|| parsed_sheet_name.clone());
+            (canonical, *r, *c)
+        })
+        .collect()
+}
+
 pub fn update_cross_sheet_dependencies(
     formula_cell: (usize, u32, u32),
     new_refs: FxHashSet<(String, u32, u32)>,
@@ -5256,6 +5297,13 @@ pub fn run() {
     // writeback mutation paths (which only see &AppState) can re-provision the
     // BI writeback source without threading an AppHandle everywhere.
     bi::writeback_source::set_app_handle(app.handle().clone());
+
+    // Install the handle the workbook dirty flag announces transitions through.
+    // Without it `DirtyFlag` still tracks the flag correctly but emits nothing,
+    // and the title-bar asterisk goes back to lagging every backend-only
+    // mutation -- the defect this closes. Must be installed BEFORE `app.run`,
+    // since a package pull or a script can dirty the document during startup.
+    document_effect::install_dirty_announcer(app.handle().clone());
 
     app.run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {

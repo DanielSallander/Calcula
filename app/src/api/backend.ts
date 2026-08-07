@@ -14,6 +14,11 @@ import type { CellData, DimensionData, FormattingResult } from "../core/types";
 // hook is what keeps a recording complete: an omitted sort produces a macro that
 // runs cleanly and leaves the data in the wrong order.
 import { recordGridEvent } from "../core/lib/tauri-api";
+// Refresh announcements are emitted from the WRAPPERS in this file, never from
+// their call sites, so every route (ribbon, dialog, context menu, outline bar,
+// script broker) announces the change. See the block comment on OUTLINE_CHANGED
+// in ./events for why that placement is the whole point.
+import { AppEvents, emitAppEvent } from "./events";
 
 // ============================================================================
 // Types
@@ -1185,6 +1190,19 @@ export interface UpdateHyperlinkParams {
 }
 
 /**
+ * Announce a hyperlink add/update/remove.
+ *
+ * `sheetIndex` is carried so a subscriber can ignore an off-sheet change; it is
+ * omitted (undefined) for the active sheet, which is what every non-Wave-3
+ * caller passes. The event is emitted for EVERY sheet — the Hyperlinks
+ * extension caches only the active sheet and re-reads that, so an off-sheet
+ * announcement costs one no-op refresh and never a missed one.
+ */
+function announceHyperlinksChanged(sheetIndex?: number): void {
+  emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: sheetIndex ?? null });
+}
+
+/**
  * Add a hyperlink to a cell.
  * @param params - Hyperlink parameters
  * @returns Result with the created hyperlink
@@ -1192,7 +1210,9 @@ export interface UpdateHyperlinkParams {
 export async function addHyperlink(
   params: AddHyperlinkParams
 ): Promise<HyperlinkResult> {
-  return invoke<HyperlinkResult>("add_hyperlink", { params });
+  const result = await invoke<HyperlinkResult>("add_hyperlink", { params });
+  if (result.success) announceHyperlinksChanged(params.sheetIndex);
+  return result;
 }
 
 /**
@@ -1203,7 +1223,9 @@ export async function addHyperlink(
 export async function updateHyperlink(
   params: UpdateHyperlinkParams
 ): Promise<HyperlinkResult> {
-  return invoke<HyperlinkResult>("update_hyperlink", { params });
+  const result = await invoke<HyperlinkResult>("update_hyperlink", { params });
+  if (result.success) announceHyperlinksChanged(undefined);
+  return result;
 }
 
 /**
@@ -1218,11 +1240,13 @@ export async function removeHyperlink(
   col: number,
   sheetIndex?: number
 ): Promise<HyperlinkResult> {
-  return invoke<HyperlinkResult>("remove_hyperlink", {
+  const result = await invoke<HyperlinkResult>("remove_hyperlink", {
     row,
     col,
     sheetIndex: sheetIndex ?? null,
   });
+  if (result.success) announceHyperlinksChanged(sheetIndex);
+  return result;
 }
 
 /**
@@ -1330,12 +1354,14 @@ export async function moveHyperlink(
   toRow: number,
   toCol: number
 ): Promise<HyperlinkResult> {
-  return invoke<HyperlinkResult>("move_hyperlink", {
+  const result = await invoke<HyperlinkResult>("move_hyperlink", {
     fromRow,
     fromCol,
     toRow,
     toCol,
   });
+  if (result.success) announceHyperlinksChanged(undefined);
+  return result;
 }
 
 // ============================================================================
@@ -1791,114 +1817,32 @@ export interface OutlineInfo {
 }
 
 /**
- * Parameters for grouping rows.
+ * Run an outline-mutating command and announce the result.
+ *
+ * EVERY outline mutator goes through a wrapper like this one. The Grouping
+ * extension is the only thing that pushes group-hidden rows/cols into grid
+ * state and sizes the outline bar, so an outline change it never hears about
+ * leaves the grid showing rows the backend now hides, with no outline bar to
+ * expand them again. Announcing from the wrapper means the Data menu, the grid
+ * context menu, the outline bar's own +/- buttons, the keyboard shortcuts, the
+ * Group Settings dialog and the script broker's api.groupRows family all
+ * announce identically, without any of them remembering to.
+ *
+ * SCOPE: this copy serves `setOutlineSettings` only. The group/ungroup/
+ * collapse/expand/level/clear mutators that `@api` actually exports live in
+ * `core/lib/tauri-api.ts` and have their own `invokeOutlineMutation`. This file
+ * used to carry a second, UNREACHABLE set of them — exported, instrumented and
+ * imported by nobody, because `api/lib.ts` re-exports those names from
+ * `tauri-api`. They were deleted rather than kept in sync: two copies of an
+ * event-emitting wrapper drift, and the dead one drifts silently.
  */
-export interface GroupRowsParams {
-  startRow: number;
-  endRow: number;
-}
-
-/**
- * Parameters for grouping columns.
- */
-export interface GroupColumnsParams {
-  startCol: number;
-  endCol: number;
-}
-
-/**
- * Group rows (create or increment outline level).
- * @param params - Row range parameters
- * @returns Result with the updated outline
- */
-export async function groupRows(params: GroupRowsParams): Promise<GroupResult> {
-  return invoke<GroupResult>("group_rows", { params });
-}
-
-/**
- * Ungroup rows (remove or decrement outline level).
- * @param startRow - Start row (0-based)
- * @param endRow - End row (0-based)
- * @returns Result with the updated outline
- */
-export async function ungroupRows(
-  startRow: number,
-  endRow: number
+async function invokeOutlineMutation(
+  cmd: string,
+  args: InvokeArgs,
 ): Promise<GroupResult> {
-  return invoke<GroupResult>("ungroup_rows", { startRow, endRow });
-}
-
-/**
- * Group columns (create or increment outline level).
- * @param params - Column range parameters
- * @returns Result with the updated outline
- */
-export async function groupColumns(
-  params: GroupColumnsParams
-): Promise<GroupResult> {
-  return invoke<GroupResult>("group_columns", { params });
-}
-
-/**
- * Ungroup columns (remove or decrement outline level).
- * @param startCol - Start column (0-based)
- * @param endCol - End column (0-based)
- * @returns Result with the updated outline
- */
-export async function ungroupColumns(
-  startCol: number,
-  endCol: number
-): Promise<GroupResult> {
-  return invoke<GroupResult>("ungroup_columns", { startCol, endCol });
-}
-
-/**
- * Collapse a row group.
- * @param row - Row within the group to collapse
- * @returns Result with hidden rows
- */
-export async function collapseRowGroup(row: number): Promise<GroupResult> {
-  return invoke<GroupResult>("collapse_row_group", { row });
-}
-
-/**
- * Expand a row group.
- * @param row - Row within the group to expand
- * @returns Result with visible rows
- */
-export async function expandRowGroup(row: number): Promise<GroupResult> {
-  return invoke<GroupResult>("expand_row_group", { row });
-}
-
-/**
- * Collapse a column group.
- * @param col - Column within the group to collapse
- * @returns Result with hidden columns
- */
-export async function collapseColumnGroup(col: number): Promise<GroupResult> {
-  return invoke<GroupResult>("collapse_column_group", { col });
-}
-
-/**
- * Expand a column group.
- * @param col - Column within the group to expand
- * @returns Result with visible columns
- */
-export async function expandColumnGroup(col: number): Promise<GroupResult> {
-  return invoke<GroupResult>("expand_column_group", { col });
-}
-
-/**
- * Show/hide rows and columns up to a specific outline level.
- * @param rowLevel - Row level to show (undefined = don't change)
- * @param colLevel - Column level to show (undefined = don't change)
- * @returns Result with hidden rows/columns changes
- */
-export async function showOutlineLevel(
-  rowLevel?: number,
-  colLevel?: number
-): Promise<GroupResult> {
-  return invoke<GroupResult>("show_outline_level", { rowLevel, colLevel });
+  const result = await invoke<GroupResult>(cmd, args);
+  if (result.success) emitAppEvent(AppEvents.OUTLINE_CHANGED, { command: cmd });
+  return result;
 }
 
 /**
@@ -1939,15 +1883,7 @@ export async function getOutlineSettings(): Promise<OutlineSettings> {
 export async function setOutlineSettings(
   settings: OutlineSettings
 ): Promise<GroupResult> {
-  return invoke<GroupResult>("set_outline_settings", { settings });
-}
-
-/**
- * Clear all outline/grouping for the current sheet.
- * @returns Result with previously hidden rows/columns
- */
-export async function clearOutline(): Promise<GroupResult> {
-  return invoke<GroupResult>("clear_outline", {});
+  return invokeOutlineMutation("set_outline_settings", { settings });
 }
 
 /**

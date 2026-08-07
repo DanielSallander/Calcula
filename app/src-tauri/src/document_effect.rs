@@ -57,9 +57,184 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::persistence::FileState;
+
+// ============================================================================
+// The dirty ANNOUNCEMENT -- how the title bar learns the flag moved
+// ============================================================================
+
+/// The Tauri event the backend emits when the workbook's dirty state CHANGES.
+///
+/// Bridged onto the `@api` event bus (`AppEvents.DIRTY_STATE_CHANGED`) by
+/// `app/src/shell/bootstrap.ts`, which is what `Layout.tsx` already re-titles on.
+pub const DIRTY_STATE_EVENT: &str = "document:dirty-changed";
+
+/// Payload of [`DIRTY_STATE_EVENT`].
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirtyStatePayload {
+    pub is_dirty: bool,
+}
+
+/// The app handle used to announce dirty transitions. Installed once from
+/// `run()`; absent in unit tests, where announcing is a no-op.
+static DIRTY_ANNOUNCER: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Install the handle that [`DirtyFlag`] announces transitions through. Called
+/// once from `run()` right after the Tauri app is built, alongside the writeback
+/// BI handle.
+pub fn install_dirty_announcer(app: tauri::AppHandle) {
+    let _ = DIRTY_ANNOUNCER.set(app);
+}
+
+/// Emit the transition to every window. No-op before the handle is installed.
+fn announce_globally(is_dirty: bool) {
+    if let Some(app) = DIRTY_ANNOUNCER.get() {
+        use tauri::Emitter;
+        let _ = app.emit(DIRTY_STATE_EVENT, DirtyStatePayload { is_dirty });
+    }
+}
+
+// ============================================================================
+// DirtyFlag -- the flag that announces its own transitions
+// ============================================================================
+
+/// Observer invoked with the NEW value whenever the flag actually changes.
+type DirtyObserver = Box<dyn Fn(bool) + Send + Sync>;
+
+/// `FileState::is_modified`: a `Mutex<bool>` that announces every transition.
+///
+/// WHY THE ANNOUNCEMENT LIVES ON THE FLAG AND NOT AT THE CALL SITES
+/// ----------------------------------------------------------------
+/// The dirty INDICATOR (the `*` in the title bar) lagged the dirty FLAG: after a
+/// backend-only mutation `is_file_modified` was true but nothing told the
+/// frontend, which only re-titled on six frontend-originated events. The obvious
+/// repair -- "make every mutating command emit an event" -- is exactly the
+/// failure mode the dirty-flag census existed to end: 256 of 746 commands had
+/// already forgotten the far more consequential `is_modified` write itself.
+///
+/// So the announcement sits on the one thing every writer must already touch.
+/// `DocumentEffect::mutates`, the legacy `mark_workbook_modified`, the ~60
+/// remaining direct `*is_modified.lock() = true` sites and the three save/load
+/// `= false` sites all go through `DirtyFlag::lock()`, and the guard's `Drop`
+/// compares the value it was locked at against the value at release. Nothing has
+/// to remember anything, and a future writer cannot bypass it without replacing
+/// the field's type.
+///
+/// ONLY TRANSITIONS ARE ANNOUNCED. A bulk operation that dirties an
+/// already-dirty document emits nothing; a 10,000-cell paste produces at most
+/// one event. That is the difference between an ambient signal and a flood.
+///
+/// READS ARE FREE. `lock()` for a read releases with the value unchanged, so no
+/// event fires -- including `is_file_modified`, which the frontend polls from
+/// inside the very listener this feeds. Without the transition test that would
+/// be an infinite loop.
+pub struct DirtyFlag {
+    inner: Mutex<bool>,
+    /// Test-only redirection of the announcement, scoped to ONE instance.
+    ///
+    /// A global test sink would be polluted by every other test in the binary
+    /// that flips a `FileState` -- and there are dozens. Binding the observer to
+    /// the flag under test makes the assertion independent of test ordering and
+    /// of `cargo test`'s thread pool.
+    observer: Mutex<Option<DirtyObserver>>,
+}
+
+impl DirtyFlag {
+    pub fn new(value: bool) -> Self {
+        DirtyFlag { inner: Mutex::new(value), observer: Mutex::new(None) }
+    }
+
+    /// Lock the flag. Reading through the guard is free; writing a DIFFERENT
+    /// value announces the transition when the guard is released.
+    ///
+    /// Mirrors `Mutex::lock`'s shape (`Result` whose error is `Debug + Display`)
+    /// so the existing `.unwrap()` and `.map_err(|e| e.to_string())?` call sites
+    /// are unchanged.
+    pub fn lock(&self) -> Result<DirtyGuard<'_>, LockPoisoned> {
+        match self.inner.lock() {
+            Ok(guard) => {
+                let was = *guard;
+                Ok(DirtyGuard { flag: self, guard: Some(guard), was })
+            }
+            Err(_) => Err(LockPoisoned),
+        }
+    }
+
+    /// Announce a transition: to the instance observer if a test installed one,
+    /// otherwise to every window through the installed app handle.
+    fn announce(&self, is_dirty: bool) {
+        if let Ok(observer) = self.observer.lock() {
+            if let Some(f) = observer.as_ref() {
+                f(is_dirty);
+                return;
+            }
+        }
+        announce_globally(is_dirty);
+    }
+
+    /// Redirect this flag's announcements. Tests only -- production code has
+    /// exactly one announcer, installed at startup.
+    #[cfg(test)]
+    pub fn set_observer(&self, f: impl Fn(bool) + Send + Sync + 'static) {
+        if let Ok(mut observer) = self.observer.lock() {
+            *observer = Some(Box::new(f));
+        }
+    }
+}
+
+impl Default for DirtyFlag {
+    fn default() -> Self {
+        DirtyFlag::new(false)
+    }
+}
+
+impl fmt::Debug for DirtyFlag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.inner.lock() {
+            Ok(v) => write!(f, "DirtyFlag({})", *v),
+            Err(_) => write!(f, "DirtyFlag(poisoned)"),
+        }
+    }
+}
+
+/// Guard over [`DirtyFlag`]. Derefs to `bool` in both directions; announces on
+/// release if the value changed.
+pub struct DirtyGuard<'a> {
+    flag: &'a DirtyFlag,
+    /// `Option` so `Drop` can RELEASE the mutex before announcing. Emitting
+    /// while still holding it would publish the transition to every window from
+    /// inside the critical section, and the listener's first act is to call back
+    /// into `is_file_modified` -- which locks this very mutex.
+    guard: Option<MutexGuard<'a, bool>>,
+    was: bool,
+}
+
+impl<'a> Deref for DirtyGuard<'a> {
+    type Target = bool;
+    fn deref(&self) -> &bool {
+        self.guard.as_ref().expect("DirtyGuard used after drop")
+    }
+}
+
+impl<'a> DerefMut for DirtyGuard<'a> {
+    fn deref_mut(&mut self) -> &mut bool {
+        self.guard.as_mut().expect("DirtyGuard used after drop")
+    }
+}
+
+impl<'a> Drop for DirtyGuard<'a> {
+    fn drop(&mut self) {
+        let Some(guard) = self.guard.take() else { return };
+        let now = *guard;
+        drop(guard);
+        if now != self.was {
+            self.flag.announce(now);
+        }
+    }
+}
 
 // ============================================================================
 // CleanReason -- the closed set of audited reasons NOT to dirty
@@ -208,6 +383,12 @@ pub struct DocumentEffect {
 impl DocumentEffect {
     /// This write changes what a save would write to disk. **Marks the workbook dirty
     /// immediately**, so holding this value is proof the flag is set.
+    ///
+    /// ANNOUNCEMENT. Setting the flag here is also what makes the title-bar asterisk
+    /// appear: [`DirtyFlag`] emits `document:dirty-changed` on the clean->dirty
+    /// TRANSITION, so a backend-only mutation is visible without asking the command to
+    /// remember to emit anything. A mutation of an already-dirty document announces
+    /// nothing.
     ///
     /// ORDERING. Construct it AFTER any protection/permission gate and at the point the
     /// mutation is actually committed, never at the top of a command that might still
@@ -390,6 +571,129 @@ mod tests {
         let effect = DocumentEffect::transient(&scope);
         assert!(!effect.marks_dirty());
         assert!(!is_dirty(&fs));
+    }
+
+    // ------------------------------------------------------------------
+    // DirtyFlag: the announcement that keeps the title bar in step
+    // ------------------------------------------------------------------
+
+    use std::sync::Arc;
+
+    /// Record every announcement THIS flag makes. Instance-scoped, so the log is
+    /// unaffected by the dozens of other tests in this binary that flip a
+    /// FileState on other threads.
+    fn recorder(flag: &DirtyFlag) -> Arc<Mutex<Vec<bool>>> {
+        let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        flag.set_observer(move |is_dirty| sink.lock().unwrap().push(is_dirty));
+        log
+    }
+
+    fn seen(log: &Arc<Mutex<Vec<bool>>>) -> Vec<bool> {
+        log.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn dirty_flag_announces_the_clean_to_dirty_transition() {
+        let fs = FileState::default();
+        let log = recorder(&fs.is_modified);
+
+        let _effect = DocumentEffect::mutates(&fs);
+
+        // The defect: the flag moved but nothing told the frontend. It now does.
+        assert_eq!(seen(&log), vec![true]);
+        assert!(is_dirty(&fs));
+    }
+
+    #[test]
+    fn dirty_flag_announces_only_transitions_not_every_mutation() {
+        let fs = FileState::default();
+        let log = recorder(&fs.is_modified);
+
+        // A bulk operation: many mutating writes over one already-dirty document.
+        for _ in 0..500 {
+            let _effect = DocumentEffect::mutates(&fs);
+        }
+
+        // One event, not 500. Announcing per mutation would flood the bus on a
+        // large paste and buy nothing -- the indicator is already showing `*`.
+        assert_eq!(seen(&log), vec![true]);
+    }
+
+    #[test]
+    fn dirty_flag_announces_the_dirty_to_clean_direction_too() {
+        let fs = FileState::default();
+        let log = recorder(&fs.is_modified);
+
+        let _effect = DocumentEffect::mutates(&fs);
+        // What save / new_file / open_file do as their last act.
+        *fs.is_modified.lock().unwrap() = false;
+
+        // Without the second announcement the asterisk would never CLEAR after a
+        // backend-driven save.
+        assert_eq!(seen(&log), vec![true, false]);
+        assert!(!is_dirty(&fs));
+    }
+
+    #[test]
+    fn dirty_flag_reads_announce_nothing() {
+        let fs = FileState::default();
+        let log = recorder(&fs.is_modified);
+
+        // `is_file_modified` is called by the frontend from INSIDE the listener
+        // this event feeds. If a read announced, that would be an infinite loop.
+        for _ in 0..10 {
+            let _ = *fs.is_modified.lock().unwrap();
+        }
+        assert_eq!(seen(&log), Vec::<bool>::new());
+
+        let _effect = DocumentEffect::mutates(&fs);
+        for _ in 0..10 {
+            let _ = *fs.is_modified.lock().unwrap();
+        }
+        assert_eq!(seen(&log), vec![true]);
+    }
+
+    #[test]
+    fn dirty_flag_announces_for_the_legacy_and_direct_write_paths_too() {
+        // `DocumentEffect::mutates` is the sanctioned path, but ~60 sites still
+        // write the flag directly and 15 more go through `mark_workbook_modified`.
+        // The announcement is on the FLAG precisely so those are covered without
+        // each one having to remember.
+        let fs = FileState::default();
+        let log = recorder(&fs.is_modified);
+        crate::persistence::mark_workbook_modified(&fs);
+        assert_eq!(seen(&log), vec![true]);
+
+        let fs2 = FileState::default();
+        let log2 = recorder(&fs2.is_modified);
+        if let Ok(mut modified) = fs2.is_modified.lock() {
+            *modified = true;
+        }
+        assert_eq!(seen(&log2), vec![true]);
+    }
+
+    #[test]
+    fn deliberately_clean_and_transient_announce_nothing() {
+        let fs = FileState::default();
+        let log = recorder(&fs.is_modified);
+
+        let _clean = DocumentEffect::deliberately_clean(CleanReason::Navigation);
+        let mut registry: HashMap<String, Vec<u8>> = HashMap::new();
+        registry.insert("tok".to_string(), vec![1]);
+        let scope = TransientScope::prove_restore_registered(&registry, "tok").unwrap();
+        let _transient = DocumentEffect::transient(&scope);
+
+        // Merely LOOKING at a workbook must not raise the asterisk.
+        assert_eq!(seen(&log), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn dirty_flag_payload_is_camel_case() {
+        // Golden rule: Rust snake_case field, camelCase on the wire, so the
+        // bridge in bootstrap.ts can read `payload.isDirty`.
+        let json = serde_json::to_string(&DirtyStatePayload { is_dirty: true }).unwrap();
+        assert_eq!(json, r#"{"isDirty":true}"#);
     }
 
     #[test]

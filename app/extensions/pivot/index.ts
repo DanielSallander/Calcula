@@ -103,6 +103,7 @@ import {
   getLoadingState,
   setLoading,
   clearLoading,
+  applyBackendProgress,
   restorePreviousView,
   markUserCancelled,
 } from "./lib/pivotViewStore";
@@ -1971,9 +1972,15 @@ function activate(context: ExtensionContext): void {
     )
   );
 
-  // Listen for backend progress events (Tauri events emitted during async pivot operations)
+  // Listen for backend progress events (Tauri events emitted during async pivot
+  // operations). applyBackendProgress — NOT setLoading — because the LAST event
+  // of an operation is emitted just before the command returns and arrives after
+  // pivot-api has already cleared the indicator; starting a new loading state
+  // from it arms a spinner nothing will ever clear. See its doc comment.
   listenTauriEvent<PivotProgressEvent>(PivotEvents.PIVOT_PROGRESS, (payload) => {
-    setLoading(payload.pivotId, payload.stage, payload.stageIndex, payload.totalStages);
+    if (!applyBackendProgress(payload.pivotId, payload.stage, payload.stageIndex, payload.totalStages)) {
+      return;
+    }
     requestOverlayRedraw();
   }).then((unlisten) => {
     cleanupFunctions.push(unlisten);

@@ -12,7 +12,15 @@ import type { OverlayRegistration } from "@api";
 import { renderTraceArrows } from "./rendering/traceArrowRenderer";
 import { hitTestTraceArrow } from "./rendering/traceArrowHitTest";
 import { registerFormulasMenu } from "./handlers/formulasMenuBuilder";
-import { clearTraces, setCurrentSelection } from "./lib/tracingStore";
+import { registerTracingController } from "@api/tracingService";
+import {
+  clearTraces,
+  setCurrentSelection,
+  removeAllArrows,
+  getArrowCount,
+  controllerTracePrecedents,
+  controllerTraceDependents,
+} from "./lib/tracingStore";
 import { GoToDialog } from "./components/GoToDialog";
 
 // ============================================================================
@@ -81,6 +89,21 @@ function activate(context: ExtensionContext): void {
     );
   });
   cleanupFns.push(unsubSelection);
+
+  // 7. Publish the tracing driver through the feature-neutral seam
+  //    (@api/tracingService), so anything outside this extension can DRAW
+  //    arrows instead of calling the Rust trace query behind its back. That
+  //    query mutates nothing — the arrows are this extension's own state — so a
+  //    caller that invokes it directly gets a correct dependency graph back and
+  //    changes zero pixels.
+  cleanupFns.push(
+    registerTracingController({
+      tracePrecedents: controllerTracePrecedents,
+      traceDependents: controllerTraceDependents,
+      removeAllArrows,
+      getArrowCount,
+    }),
+  );
 
   isActivated = true;
   console.log("[Tracing] Activated successfully.");

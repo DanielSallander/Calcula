@@ -16,7 +16,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: (...a: unknown[]) => dialogSave(...a),
 }));
 
-import { saveFile, saveFileAs } from "../file-api";
+import { newFile, saveFile, saveFileAs } from "../file-api";
 import { addSheet, calculateSheet, copySheet, deleteSheet, renameSheet } from "../tauri-api";
 import { AppEvents, onAppEvent } from "../events";
 import {
@@ -231,5 +231,61 @@ describe("sheet CRUD announcements", () => {
     await expect(deleteSheet(3)).resolves.toBeDefined();
     expect(deleted.events).toEqual([{ sheetIndex: 3, sheetName: "" }]);
     deleted.off();
+  });
+});
+
+// ============================================================================
+// newFile: the caches that describe the PREVIOUS document are told
+// ============================================================================
+
+describe("newFile announces the backend state it replaced", () => {
+  beforeEach(() => {
+    tracedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_current_file_path") return null;
+      if (cmd === "is_file_modified") return false;
+      return undefined;
+    });
+  });
+
+  it("announces outline, hyperlinks, validations, annotations AND the sheet list", async () => {
+    // Every one of these is a frontend cache that only re-reads when its own
+    // event fires. `new_file` replaces all of them at once without going
+    // through any per-mutation wrapper, so nothing announced and they kept
+    // describing the previous workbook. Measured live 2026-08-07: a 36 px
+    // outline gutter and a clickable phantom "Sheet2" tab survived File > New.
+    const captured = [
+      AppEvents.OUTLINE_CHANGED,
+      AppEvents.HYPERLINKS_CHANGED,
+      AppEvents.VALIDATIONS_CHANGED,
+      AppEvents.ANNOTATIONS_CHANGED,
+      AppEvents.SHEET_CHANGED,
+    ].map((name) => ({ name, cap: capture(name) }));
+
+    await newFile();
+
+    for (const { name, cap } of captured) {
+      expect(cap.events, `${name} must be announced by newFile`).toHaveLength(1);
+      cap.off();
+    }
+  });
+
+  it("announces them AFTER the backend has actually cleared the document", async () => {
+    // Announcing early would have every listener re-read the OLD state and
+    // cache it again — the failure mode is indistinguishable from not
+    // announcing at all.
+    const order: string[] = [];
+    tracedInvoke.mockImplementation(async (cmd: string) => {
+      order.push(`invoke:${cmd}`);
+      if (cmd === "get_current_file_path") return null;
+      if (cmd === "is_file_modified") return false;
+      return undefined;
+    });
+    const off = onAppEvent(AppEvents.OUTLINE_CHANGED, () => order.push("announce"));
+
+    await newFile();
+    off();
+
+    expect(order.indexOf("invoke:new_file")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("announce")).toBeGreaterThan(order.indexOf("invoke:new_file"));
   });
 });

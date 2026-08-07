@@ -29,6 +29,7 @@ import {
   controllerGroupColumns,
   controllerUngroupColumns,
   controllerShowOutlineLevel,
+  resyncOutlineFromBackend,
   getCurrentOutlineInfo,
   getLastRenderedState,
 } from "./lib/groupingStore";
@@ -323,11 +324,48 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // 8. Reset state on sheet change
+  // 8. Sheet change: forget this sheet's outline, then READ THE NEXT ONE'S.
+  //
+  // The reset alone was a one-way door. It zeroes the outline bar, and
+  // renderOutlineBar returns immediately while the bar is zero-sized, so the
+  // renderer's own refresh never ran again — switching to a sheet that already
+  // had groups (or opening a workbook that has them) showed no outline bar and
+  // no collapsed rows at all, for the rest of the session.
   const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     resetGroupingState();
+    void resyncOutlineFromBackend();
   });
   cleanupFns.push(unsubSheet);
+
+  // 8b. Outline changed anywhere. OUTLINE_CHANGED is announced by the IPC
+  //     wrapper, so it covers every mutation route (Data menu, context menu,
+  //     outline bar buttons, keyboard, Group Settings, the script broker's
+  //     api.groupRows family) and can also be dispatched by an out-of-band
+  //     mutator that had no wrapper to go through. Operations performed through
+  //     this extension JOIN the resync this schedules rather than adding a
+  //     second one, so a mutation still costs exactly one backend round-trip.
+  //
+  //     AFTER_OPEN: a newly opened workbook brings a whole new outline.
+  //     The structural events: the backend shifts groups through row/column
+  //     insert & delete, and a pure structural UNDO carries no coordinates, so
+  //     re-reading is the only correct response.
+  const onOutlineStale = () => { void resyncOutlineFromBackend(); };
+  for (const evt of [
+    AppEvents.OUTLINE_CHANGED,
+    AppEvents.AFTER_OPEN,
+    AppEvents.ROWS_INSERTED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    cleanupFns.push(context.events.on(evt, onOutlineStale));
+  }
+
+  // 8c. Adopt the outline the workbook was opened with. Nothing else does:
+  //     SHEET_CHANGED does not fire for the sheet that is already active when
+  //     this extension activates.
+  void resyncOutlineFromBackend();
 
   // 9. Publish the grouping driver through the feature-neutral seam
   //    (@api/groupingService), so the script broker's api.groupRows family can

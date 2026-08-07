@@ -67,12 +67,23 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/commands/data.rs",
+          "app/src-tauri/src/calculation.rs",
+          "app/src-tauri/src/control_values.rs",
+          "app/src-tauri/src/commands/cross_sheet_recalc_tests.rs",
+          "app/e2e/scenarios/budget-model.scenario.ts"
+        ],
+        "diffSummary": "Two independent causes, one per hop, both in cascade_cross_sheet_dependents. (1) The walk was rooted ONLY on the cells the caller edited; the cells the caller RECALCULATED were marked processed but never queued, so C9's cross-sheet dependents were never looked up (hop 1, exactly the triage hypothesis). Both sets are now walk roots. (2) The walk expanded a NON-ACTIVE sheet's same-sheet dependents through the ACTIVE sheet's dependents map — a map with no sheet dimension — so Sheet2!B4 = B2-B3 was invisible (hop 2). A per-sheet SheetDependencyIndex is now derived on demand from that sheet's own formula ASTs (cell + whole-column + whole-row edges) and expanded in topological order. Both hand-copied duplicates of the walk in update_cells_batch_core (paste) and fill_range were deleted in favour of the shared function, and a wiring test fails if a third copy appears.",
+        "validatedBy": [
+          "unit-cross_sheet_recalc_tests",
+          "ab-revert-each-cause",
+          "app-lib-suite",
+          "core-cargo-suite"
+        ]
       },
-      "status": "triaged"
+      "status": "fixed"
     },
     {
       "id": "BUG-0018",

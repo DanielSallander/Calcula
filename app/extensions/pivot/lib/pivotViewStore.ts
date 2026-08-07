@@ -213,6 +213,42 @@ export function getLoadingState(pivotId: string): PivotLoadingState | undefined 
   return loadingPivots.get(pivotId);
 }
 
+/**
+ * Apply a backend `pivot:progress` event to the loading indicator.
+ *
+ * WHY THIS IS NOT JUST `setLoading`. A Tauri event and the response to the
+ * command that emitted it travel SEPARATE channels, and the pivot commands emit
+ * their last progress ("Updating grid...", stage 4 of 4) immediately before
+ * returning — so that final event routinely lands AFTER pivot-api's
+ * `finally { clearLoading }` has already run. `setLoading` would then re-create
+ * the entry, arming a spinner that nothing will ever clear (reproduced
+ * deterministically: byte-identical across two cold runs, unchanged by a 6 s
+ * wait).
+ *
+ * The rule is therefore: a backend progress event may UPDATE an operation the
+ * frontend knows is running; it may never START one. That cannot drop a
+ * legitimate event, because every route that reaches a progress-emitting
+ * command (update_pivot_fields / refresh_pivot_cache / change_pivot_data_source)
+ * goes through pivot-api, which calls setLoading BEFORE the invoke — including
+ * the script broker, which drives the same pivot-api through @api/pivot's
+ * registered implementation. Two refreshes in quick succession both set loading
+ * (the second updates the existing entry) and only the CURRENT operation clears
+ * it, so the second refresh's own progress still shows.
+ *
+ * @returns true when the event was applied, false when it was a trailing event
+ *          for an operation that has already finished.
+ */
+export function applyBackendProgress(
+  pivotId: string,
+  stage: string,
+  stageIndex = 0,
+  totalStages = 0,
+): boolean {
+  if (!loadingPivots.has(pivotId)) return false;
+  setLoading(pivotId, stage, stageIndex, totalStages);
+  return true;
+}
+
 // ============================================================================
 // PREVIOUS VIEW PRESERVATION (for cancellation reversion)
 // ============================================================================

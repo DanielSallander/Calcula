@@ -50,12 +50,38 @@ export interface CellDecorationContext {
  */
 export type CellDecorationFn = (context: CellDecorationContext) => void;
 
+/**
+ * Where a decoration sits relative to the SELECTION chrome. The mirror, at
+ * cell scale, of {@link GridLayerAnchor} for full-viewport layers.
+ *
+ * - `"under-selection"` (default) — decoration is CONTENT. Data bars,
+ *   sparklines, checkboxes: they belong to the cell's body and the selection
+ *   tint reading over them is correct, exactly as it reads over the text.
+ *
+ * - `"over-selection"` — decoration is INDICATOR CHROME. A note triangle, an
+ *   error triangle, a bookmark dot: it tells the user something about the cell
+ *   that must not disappear when the cell is selected.
+ *
+ * WHY THIS ANCHOR EXISTS. The active-cell highlight fills the cell and then
+ * strokes a 2px border inset 1px from its edge. The note indicator is a 6px
+ * triangle in the cell's top-right corner, so the border covered 18 of its 21
+ * pixels and the 15% selection tint took most of the rest: selecting a
+ * commented cell hid its own indicator (measured 15 indicator pixels with the
+ * selection elsewhere, 0 with the cell selected). Excel keeps the indicator
+ * visible. The fix is a z-order the decoration DECLARES, not a special case for
+ * notes inside the selection painter — which would have to be repeated for the
+ * error triangle and the bookmark dot, and would put feature knowledge in Core.
+ */
+export type CellDecorationAnchor = "under-selection" | "over-selection";
+
 /** Decoration registration with metadata */
 export interface CellDecorationRegistration {
   id: string;
   decorator: CellDecorationFn;
   /** Priority for rendering order (lower = draws first/underneath). Default: 0 */
   priority: number;
+  /** Z-position relative to the selection chrome. Default: "under-selection". */
+  anchor: CellDecorationAnchor;
 }
 
 // ============================================================================
@@ -63,7 +89,11 @@ export interface CellDecorationRegistration {
 // ============================================================================
 
 const decorationRegistry = new Map<string, CellDecorationRegistration>();
-let sortedDecorations: CellDecorationRegistration[] = [];
+/** Sorted, split by anchor — the renderer walks each anchor at its own point. */
+const sortedByAnchor: Record<CellDecorationAnchor, CellDecorationRegistration[]> = {
+  "under-selection": [],
+  "over-selection": [],
+};
 let isDirty = true;
 
 // ============================================================================
@@ -77,29 +107,31 @@ let isDirty = true;
  * @param id - Unique identifier for this decoration
  * @param decorator - The decoration rendering function
  * @param priority - Rendering priority (lower = underneath). Default: 0
+ * @param anchor - Z-position relative to the selection chrome. Default:
+ *   `"under-selection"`. Pass `"over-selection"` for INDICATOR chrome that must
+ *   stay visible when the cell is selected — see {@link CellDecorationAnchor}.
  * @returns Cleanup function to unregister the decoration
  *
  * @example
  * ```ts
- * const cleanup = registerCellDecoration(
- *   "sparklines",
- *   (context) => {
- *     // Draw sparkline graphics in the cell
- *     drawSparkline(context);
- *   },
- *   0
- * );
+ * // Content: the selection tint reading over it is correct.
+ * registerCellDecoration("sparklines", drawSparkline, 0);
+ *
+ * // Indicator: must survive the active-cell highlight.
+ * registerCellDecoration("annotation-triangles", drawTriangle, 5, "over-selection");
  * ```
  */
 export function registerCellDecoration(
   id: string,
   decorator: CellDecorationFn,
-  priority: number = 0
+  priority: number = 0,
+  anchor: CellDecorationAnchor = "under-selection"
 ): () => void {
   const registration: CellDecorationRegistration = {
     id,
     decorator,
     priority,
+    anchor,
   };
 
   decorationRegistry.set(id, registration);
@@ -120,36 +152,51 @@ export function unregisterCellDecoration(id: string): void {
 }
 
 /**
- * Get all registered decorations, sorted by priority.
+ * Get the registered decorations for an anchor, sorted by priority.
  * Uses internal caching for performance (hot path in render loop).
  */
-function getSortedDecorations(): CellDecorationRegistration[] {
+function getSortedDecorations(anchor: CellDecorationAnchor): CellDecorationRegistration[] {
   if (isDirty) {
-    sortedDecorations = Array.from(decorationRegistry.values()).sort(
+    const all = Array.from(decorationRegistry.values()).sort(
       (a, b) => a.priority - b.priority
     );
+    sortedByAnchor["under-selection"] = all.filter((d) => d.anchor === "under-selection");
+    sortedByAnchor["over-selection"] = all.filter((d) => d.anchor === "over-selection");
     isDirty = false;
   }
-  return sortedDecorations;
+  return sortedByAnchor[anchor];
 }
 
 /**
- * Check if any decorations are registered.
+ * Check if any decorations are registered at an anchor.
  * Used by the renderer to skip the decoration pipeline entirely when empty.
+ *
+ * @param anchor - Which anchor to test. Default: `"under-selection"`, the pass
+ *   that runs inside the normal cell paint.
  */
-export function hasCellDecorations(): boolean {
-  return decorationRegistry.size > 0;
+export function hasCellDecorations(
+  anchor: CellDecorationAnchor = "under-selection"
+): boolean {
+  if (decorationRegistry.size === 0) return false;
+  return getSortedDecorations(anchor).length > 0;
 }
 
 /**
- * Apply all registered decorations to a cell.
- * Called by the Core renderer for each visible cell between
- * background/border rendering and text rendering.
+ * Apply the registered decorations at one anchor to a cell.
+ *
+ * `"under-selection"` runs inside the Core renderer's per-cell paint, between
+ * background/borders and text. `"over-selection"` is REPLAYED after the
+ * selection chrome, from the contexts the cell pass captured — see
+ * `gridRenderer/rendering/cells.ts`.
  *
  * @param context - The cell decoration context with canvas and bounds
+ * @param anchor - Which anchor to run. Default: `"under-selection"`.
  */
-export function applyCellDecorations(context: CellDecorationContext): void {
-  const decorations = getSortedDecorations();
+export function applyCellDecorations(
+  context: CellDecorationContext,
+  anchor: CellDecorationAnchor = "under-selection"
+): void {
+  const decorations = getSortedDecorations(anchor);
 
   if (decorations.length === 0) {
     return;

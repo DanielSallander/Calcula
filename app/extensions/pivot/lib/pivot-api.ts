@@ -531,17 +531,34 @@ export async function updatePivotProperties(
 
 /**
  * Changes the pivot table's source data range.
+ *
+ * SEQUENCED, like its two progress-emitting siblings (`updatePivotFields`,
+ * `refreshPivotCache`). `change_pivot_data_source` is the third command that
+ * emits `pivot:progress` (pivot/commands.rs:2469, :2476), and this `finally`
+ * used to clear the loading entry UNCONDITIONALLY — including one that a newer
+ * operation on the same pivot had already installed. Because
+ * `applyBackendProgress` may only update an operation the frontend knows is
+ * running and may never start one, that newer operation's progress events were
+ * then dropped and its indicator never came back. (Before the trailing-event
+ * guard existed an unconditional `setLoading` re-created the entry, so this
+ * leak accidentally healed itself; the guard removed that safety net, so the
+ * sequencing has to be real.)
  */
 export async function changePivotDataSource(
   request: ChangePivotDataSourceRequest
 ): Promise<PivotViewResponse> {
+  const seq = startOperation(request.pivotId);
   setLoading(request.pivotId, "Changing data source...");
   try {
     const result = await apiChangePivotDataSource<ChangePivotDataSourceRequest, PivotViewResponse>(request);
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
-    clearLoading(request.pivotId);
+    // Only the CURRENT operation may clear: a superseded one must leave the
+    // newer operation's indicator (and its progress events) alone.
+    if (isCurrentOperation(request.pivotId, seq)) {
+      clearLoading(request.pivotId);
+    }
   }
 }
 

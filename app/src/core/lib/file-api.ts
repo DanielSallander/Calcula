@@ -227,6 +227,7 @@ export async function openFileAtPath(path: string): Promise<CellData[] | null> {
         await keychainSet(path, password);
       }
       emitAppEvent(AppEvents.AFTER_OPEN, { path });
+      announceBackendStateReplaced();
       emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
       emitAppEvent(ENCRYPTION_STATE_CHANGED);
       updateWindowTitle();
@@ -273,11 +274,45 @@ export async function openFileAtPath(path: string): Promise<CellData[] | null> {
 // New
 // ============================================================================
 
+/**
+ * Announce that the WHOLE document was replaced, to the four backend-state
+ * caches that no per-mutation wrapper can speak for.
+ *
+ * Outline, hyperlinks, validations and annotations each live in an extension's
+ * frontend cache, refreshed when the matching IPC wrapper announces a change.
+ * `new_file` and `open_file` change all four at once without going through any
+ * of those wrappers, so nothing announced and the caches kept describing the
+ * PREVIOUS document.
+ *
+ * Measured on the running app (2026-08-07): after grouping rows and then
+ * File > New, the grid still reserved a 36 px outline gutter for a workbook
+ * whose backend reported `maxRowLevel: 0` — a bar for groups that no longer
+ * existed, for the rest of the session. `AFTER_NEW` / `AFTER_OPEN` do not
+ * cover it: those are workbook-lifecycle events with their own subscribers
+ * (script hosts, cell types, custom functions), and the four caches
+ * deliberately listen for the state they own rather than for "something
+ * happened".
+ */
+function announceBackendStateReplaced(): void {
+  emitAppEvent(AppEvents.OUTLINE_CHANGED, { command: 'document_replaced' });
+  emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: null });
+  emitAppEvent(AppEvents.VALIDATIONS_CHANGED, {});
+  emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+  // The SHEET LIST is replaced too, and it is the one stale cache the user can
+  // click: measured on the running app, a workbook with two sheets followed by
+  // File > New left a phantom "Sheet2" tab whose backend index no longer
+  // exists, so activating it errors with "Sheet index 1 out of range".
+  // `SheetTabs` re-reads on SHEET_CHANGED, which is also literally true here —
+  // the active sheet is now the new document's first one.
+  emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: 0, sheetName: '' });
+}
+
 export async function newFile(): Promise<void> {
   try {
     emitAppEvent(AppEvents.BEFORE_NEW);
     await tracedInvoke('new_file', {});
     emitAppEvent(AppEvents.AFTER_NEW);
+    announceBackendStateReplaced();
     emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
     emitAppEvent(ENCRYPTION_STATE_CHANGED);
     updateWindowTitle();

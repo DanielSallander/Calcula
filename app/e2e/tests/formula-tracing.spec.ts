@@ -16,9 +16,25 @@
  * captured pixels.
  *
  * The functional assertions below — that the returned graph names the right
- * precedents/dependents — are the real test here and are untouched. Restoring
- * an arrow golden means driving the Tracing extension (it registers
- * `calcula.tracing`) rather than the backend command.
+ * precedents/dependents — are the real test here and are untouched.
+ *
+ * WHAT CHANGED SINCE. Tracing deliberately did NOT get a refresh event, because
+ * it is not that kind of defect: `trace_precedents` mutates nothing, so there
+ * is no backend change for an event to announce. What it got instead is a door
+ * — @api/tracingService, the same Inversion-of-Control seam grouping uses — so
+ * a caller outside the extension can ask for arrows to be DRAWN:
+ *
+ *     const ts = await window.__calcImport(
+ *       new URL("/src/api/tracingService.ts", document.baseURI).href);
+ *     const t = ts.requireTracingController();
+ *     await t.tracePrecedents(2, 32);   // one level, like the ribbon button
+ *     expect(t.getArrowCount()).toBeGreaterThan(0);
+ *
+ * It resolves with the arrows painted, so restoring `tracing-precedents` and
+ * `tracing-range-precedents` is now a matter of re-recording them against that
+ * call instead of the raw command. Remember `t.removeAllArrows()` afterwards —
+ * these specs share one workbook, and a leftover arrow is a golden's worst
+ * neighbour.
  */
 import { test, expect } from "../fixtures";
 

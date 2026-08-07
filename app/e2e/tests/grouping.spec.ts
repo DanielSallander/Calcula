@@ -22,15 +22,29 @@
  * outline bar that never appears)". Measured against the running app:
  * `group_rows` on a freshly populated span changed 0 of 42k captured pixels.
  *
- * Unlike the annotations and tables cases, there is no event to fix this with:
- * the Grouping extension listens only for mousedown/keydown, and its
- * controller (registerGroupingController) is module-private to @api, so
- * nothing a test can dispatch will re-sync the store. Restoring these goldens
- * means driving the real UI (Data > Outline > Group, or the outline bar's own
- * +/- buttons) so the extension performs the operation itself. Until then the
- * screenshots are decoration, and decoration that reports coverage it does not
- * have is worse than no test. The functional assertions below are untouched
- * and do have teeth — they check the backend's own return values.
+ * WHAT CHANGED SINCE. There IS now an event: `app:outline-changed`
+ * (AppEvents.OUTLINE_CHANGED), announced by the IPC wrapper for every outline
+ * mutation so that no route can forget, and dispatchable by an out-of-band
+ * mutator — which is exactly what these tests are. On it the Grouping
+ * extension re-reads the outline, the group-hidden row/col sets and the outline
+ * bar size from the backend, which is the sync the header above says only it
+ * can do. So after an `invoke("group_rows")` a test can either dispatch
+ *
+ *     window.dispatchEvent(new CustomEvent("app:outline-changed"))
+ *
+ * or, better, drive the operation through the seam the extension publishes:
+ *
+ *     const gs = await window.__calcImport(
+ *       new URL("/src/api/groupingService.ts", document.baseURI).href);
+ *     await gs.requireGroupingController().groupRows(0, 2);
+ *
+ * — which resolves only once the grid, the outline bar and the backend agree,
+ * so no arbitrary wait is needed. Restoring the four goldens is a follow-on:
+ * re-record them against one of those paths, and note that
+ * `grouping-rows-collapsed` and `grouping-rows-expanded` must now DIFFER (they
+ * were byte-identical before, which is what exposed this). The functional
+ * assertions below are untouched and do have teeth — they check the backend's
+ * own return values.
  */
 import { test, expect } from "../fixtures";
 

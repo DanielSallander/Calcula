@@ -12,12 +12,21 @@
  * calling `add_hyperlink` on a populated cell and repainting changed 0 of the
  * 2556 captured pixels — the cell renders exactly as it did as plain text.
  *
- * `add_hyperlink` is a backend-only mutation and, unlike annotations
- * (ANNOTATIONS_CHANGED) or tables (TABLE_DEFINITIONS_UPDATED), there is no
- * window event a test can dispatch to make the frontend adopt it. Restoring
- * these goldens requires the hyperlink to be applied through the UI that owns
- * it. Until then a screenshot here reports coverage that does not exist. The
- * functional CRUD assertions below are untouched and do have teeth.
+ * WHAT CHANGED SINCE (and what did not). There IS now a window event a test can
+ * dispatch: `app:hyperlinks-changed` (AppEvents.HYPERLINKS_CHANGED), announced
+ * by the IPC wrapper for every add/update/move/remove/clear so that no route
+ * can forget, and dispatchable by an out-of-band mutator — which is exactly
+ * what these tests are when they call `invoke("add_hyperlink")` directly. The
+ * Hyperlinks extension adopts the link on it: the pointer cursor, Ctrl+click
+ * and the context-menu items become correct for that cell.
+ *
+ * That is NOT enough to restore these two goldens, and the difference matters.
+ * They were named for hyperlink STYLING — blue underlined display text — and
+ * nothing paints it: the extension registers a click interceptor and a cursor
+ * interceptor, not a cell decoration. Restoring `hyperlinks-url-added` needs
+ * that rendering to exist first; a screenshot before then would still assert
+ * nothing. `hyperlinks-indicators-visible` is the same question. The functional
+ * CRUD assertions below are untouched and do have teeth.
  */
 import { test, expect } from "../fixtures";
 

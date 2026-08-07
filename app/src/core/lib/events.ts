@@ -95,6 +95,20 @@ export const AppEvents = {
 
   // Dirty state events
   DIRTY_STATE_CHANGED: "app:dirty-state-changed",
+
+  // Backend-state refresh announcements (full documentation in api/events.ts).
+  // Emitted by the tauri-api wrappers below, so EVERY caller announces the
+  // change — a per-call-site emit is what let the ribbon path refresh while the
+  // script path silently left the cache (and the painted grid) stale.
+  //   ANNOTATIONS_CHANGED  notes/comments added, edited, deleted
+  //   VALIDATIONS_CHANGED  data-validation rules set or cleared
+  //   OUTLINE_CHANGED      row/column groups created, removed, collapsed,
+  //                        expanded, levelled or cleared
+  //   HYPERLINKS_CHANGED   cell hyperlinks added, updated, moved or removed
+  ANNOTATIONS_CHANGED: "app:annotations-changed",
+  VALIDATIONS_CHANGED: "app:validations-changed",
+  OUTLINE_CHANGED: "app:outline-changed",
+  HYPERLINKS_CHANGED: "app:hyperlinks-changed",
 } as const;
 
 export type AppEventType = (typeof AppEvents)[keyof typeof AppEvents];

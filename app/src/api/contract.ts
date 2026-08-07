@@ -20,6 +20,7 @@ import type {
 } from "./uiTypes";
 import type {
   CellDecorationFn,
+  CellDecorationAnchor,
 } from "./cellDecorations";
 import type {
   StyleInterceptorFn,
@@ -139,7 +140,17 @@ export interface IEventAPI {
 
 /** Cell decoration registration */
 export interface ICellDecorationAPI {
-  register(id: string, renderFn: CellDecorationFn, priority?: number): () => void;
+  /**
+   * @param anchor Z-position relative to the selection chrome. Omit (or
+   * `"under-selection"`) for cell CONTENT; pass `"over-selection"` for
+   * INDICATOR chrome that must stay visible when the cell is selected.
+   */
+  register(
+    id: string,
+    renderFn: CellDecorationFn,
+    priority?: number,
+    anchor?: CellDecorationAnchor,
+  ): () => void;
   unregister(id: string): void;
 }
 

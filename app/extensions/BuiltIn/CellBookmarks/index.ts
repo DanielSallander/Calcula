@@ -121,7 +121,11 @@ function activate(context: ExtensionContext): void {
   bookmarksBackend.set(context.invokeBackend);
 
   // ---- 1. Cell Decoration (colored dot in bookmarked cells) ----
-  const unregDecoration = registerCellDecoration(DECORATION_ID, drawBookmarkDot, 20);
+  // Anchor "over-selection": the dot is indicator chrome, not cell content. It
+  // sits in the bottom-left corner, under the active-cell border and the fill
+  // handle, and a bookmark you cannot see on the cell you just navigated to is
+  // the one case that matters — navigation is how bookmarks are used.
+  const unregDecoration = registerCellDecoration(DECORATION_ID, drawBookmarkDot, 20, "over-selection");
   cleanupFns.push(unregDecoration);
 
   // ---- 2. Style Interceptor (background tint when highlight enabled) ----

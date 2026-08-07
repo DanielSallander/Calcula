@@ -122,6 +122,48 @@ export const AppEvents = {
   TABLE_CREATED: "app:table-created",
   TABLE_DEFINITIONS_UPDATED: "app:table-definitions-updated",
 
+  // ---------------------------------------------------------------------
+  // Backend-state refresh announcements.
+  //
+  // These three exist for the same reason TABLE_DEFINITIONS_UPDATED does: the
+  // owning extension caches backend state in the frontend, and a mutation that
+  // does not announce itself leaves that cache — and therefore the painted
+  // grid — describing a document that no longer exists. Measured on the live
+  // app before they existed: group_rows and add_hyperlink changed 0 pixels
+  // until something unrelated forced a refresh.
+  //
+  // WHERE THEY ARE EMITTED. At the IPC WRAPPER, never at the call site — the
+  // ROWS_INSERTED / SHEET_ADDED convention. A refresh event wired to one
+  // caller is exactly how this class of bug survives: the ribbon path
+  // announces, the script broker path does not, and the difference only shows
+  // up as "sometimes the screen is wrong". Emitting from the one function
+  // every route funnels through makes "every route announces" a property of
+  // the code rather than a checklist. Consumers must also treat them as
+  // dispatchable by an OUT-OF-BAND mutator (an .calp pull, an E2E test that
+  // invoked the Rust command directly, a future MCP tool) that has no wrapper
+  // to go through.
+  //
+  // Handlers must be idempotent and coalescing: several of these can arrive
+  // for one logical change (a dialog that also emits DATA_CHANGED, a script
+  // that writes cells and a rule in the same call).
+
+  // Row/column outline (grouping) structure changed: groups created or removed,
+  // collapsed or expanded, outline level shown, outline cleared, or settings
+  // changed. The Grouping extension re-reads the outline, the group-hidden
+  // row/col sets and the outline-bar size from the backend on this.
+  OUTLINE_CHANGED: "app:outline-changed",
+
+  // A cell hyperlink was added or removed. The Hyperlinks extension's indicator
+  // cache decides where the pointer cursor shows, where Ctrl+click follows and
+  // which context-menu items appear, so a stale cache offers "Open Hyperlink"
+  // on a cell that has none.
+  HYPERLINKS_CHANGED: "app:hyperlinks-changed",
+
+  // Data-validation rules were set or cleared on a range. The DataValidation
+  // extension re-reads the rule set, which is what places the in-cell dropdown
+  // chevron regions (and, with circles on, the invalid-cell markers).
+  VALIDATIONS_CHANGED: "app:validations-changed",
+
   // Blur commit prevention
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
 
@@ -131,7 +173,9 @@ export const AppEvents = {
   // Fill handle events
   FILL_COMPLETED: "app:fill-completed",
 
-  // Annotation events (comments and notes)
+  // Annotation events (comments and notes). Emitted by the tauri-api
+  // note/comment wrappers themselves — see the refresh-announcement block
+  // below for why that placement, and not the call site, is the point.
   ANNOTATIONS_CHANGED: "app:annotations-changed",
 
   // Zoom events

@@ -8,7 +8,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // Mocks
 // ============================================================================
 
+import { createCoalescedRefresh as actualCoalescedRefresh } from "../../src/api/coalescedRefresh";
+
 vi.mock("@api", () => ({
+  // The refresh coalescer is @api's own primitive, not a backend
+  // boundary — the real one, so these tests exercise real coalescing.
+  createCoalescedRefresh: actualCoalescedRefresh,
   getAllDataValidations: vi.fn(),
   getInvalidCells: vi.fn(),
   addGridRegions: vi.fn(),

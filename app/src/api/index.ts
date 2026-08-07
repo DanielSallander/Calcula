@@ -1348,6 +1348,7 @@ export type {
   CellDecorationContext,
   CellDecorationFn,
   CellDecorationRegistration,
+  CellDecorationAnchor,
 } from "./cellDecorations";
 
 // Cell Types (granular bricks: per-cell render/edit/click/validate composition)
@@ -1454,6 +1455,12 @@ export type {
   GridLayerContext,
   GridLayerRegistration,
 } from "./gridLayers";
+
+// Coalesced refresh (an extension re-reading backend state that several
+// announcements can describe at once — see coalescedRefresh.ts for why the
+// "already running" case needs its own answer)
+export { createCoalescedRefresh } from "./coalescedRefresh";
+export type { CoalescedRefresh } from "./coalescedRefresh";
 
 // Auto-fit contributors (extensions report space needs of overlay-rendered
 // cell content / in-cell chrome to the double-click best-fit measurement)

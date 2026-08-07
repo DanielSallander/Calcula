@@ -3364,22 +3364,9 @@ pub fn relocate_cell_references(
             crate::update_column_dependencies((*r, *c), refs.columns, &mut column_dependencies_map, &mut column_dependents_map);
             crate::update_row_dependencies((*r, *c), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
 
-            // Normalize cross-sheet refs
-            let normalized_cross: rustc_hash::FxHashSet<(String, u32, u32)> = refs
-                .cross_sheet_cells
-                .iter()
-                .filter_map(|(parsed_name, cr, cc)| {
-                    let normalized = sheet_names
-                        .iter()
-                        .find(|name| name.eq_ignore_ascii_case(parsed_name))
-                        .cloned()
-                        .unwrap_or_else(|| parsed_name.clone());
-                    Some((normalized, *cr, *cc))
-                })
-                .collect();
             crate::update_cross_sheet_dependencies(
                 (active_sheet, *r, *c),
-                normalized_cross,
+                crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, &sheet_names),
                 &mut cross_sheet_dependencies_map,
                 &mut cross_sheet_dependents_map,
             );

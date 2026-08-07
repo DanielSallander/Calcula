@@ -1736,7 +1736,7 @@ mod script_apply_tests {
             state,
             file_state: FileState {
                 current_path: Mutex::new(None),
-                is_modified: Mutex::new(false),
+                is_modified: crate::document_effect::DirtyFlag::new(false),
                 session_password: Mutex::new(None),
                 is_encrypted: Mutex::new(false),
             },

@@ -16,6 +16,7 @@ import {
   gridExtensions,
   ExtensionRegistry,
   showDialog,
+  createCoalescedRefresh,
   IconHyperlink,
   IconFollowLink,
 } from "@api";
@@ -45,7 +46,7 @@ function cellKey(row: number, col: number): string {
   return `${row},${col}`;
 }
 
-async function refreshIndicators(): Promise<void> {
+async function readIndicators(): Promise<void> {
   try {
     cachedIndicators = await getHyperlinkIndicators();
     indicatorSet = new Set(cachedIndicators.map((h) => cellKey(h.row, h.col)));
@@ -53,6 +54,21 @@ async function refreshIndicators(): Promise<void> {
     cachedIndicators = [];
     indicatorSet.clear();
   }
+}
+
+/**
+ * Coalesced indicator refresh.
+ *
+ * Several announcements can describe one change — a structural edit both shifts
+ * links and fires its own event — and this cache costs an IPC round-trip to
+ * rebuild. Every route into it is a LISTENER reacting to something it did not
+ * do itself, so it always uses request(), never join(); see
+ * @api/coalescedRefresh for the difference.
+ */
+const indicatorRefresh = createCoalescedRefresh(() => readIndicators());
+
+function refreshIndicators(): Promise<void> {
+  return indicatorRefresh.request();
 }
 
 // ============================================================================
@@ -235,8 +251,11 @@ const contextMenuItems: GridContextMenuItem[] = [
       if (!ctx.clickedCell) return;
       const { row, col } = ctx.clickedCell;
       try {
+        // No explicit refreshIndicators() here: removeHyperlink announces
+        // HYPERLINKS_CHANGED from the IPC wrapper, which is what every other
+        // route relies on too. Refreshing here as well would just be this one
+        // caller doing the work twice.
         await removeHyperlink(row, col);
-        await refreshIndicators();
         emitAppEvent(AppEvents.DATA_CHANGED, {});
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       } catch (err) {
@@ -304,21 +323,28 @@ function activate(context: ExtensionContext): void {
   cleanups.push(registerCellCursorInterceptor(cursorInterceptor));
 
   // 3. Load initial indicators
-  refreshIndicators();
+  void refreshIndicators();
 
-  // 4. Refresh indicators whenever the cached coordinates could have moved.
+  // 4. Refresh indicators whenever the cache could have gone stale.
   //
-  // The backend now SHIFTS hyperlinks through row/column insert & delete, so a
-  // cache that only listened for SHEET_CHANGED/DATA_CHANGED went stale on every
-  // structural edit — and this cache decides where the pointer cursor shows,
-  // where Ctrl+click follows, and which cell the context menu edits. A stale
-  // entry therefore offers "Open Hyperlink" on a cell that has none.
-  // STRUCTURAL_UNDO is included because its payload carries no coordinates, so
-  // the only correct response is a re-fetch. Mirrors AutoFilter's event set.
-  const onIndicatorsStale = () => { refreshIndicators(); };
+  // HYPERLINKS_CHANGED is announced by the IPC wrapper itself (add / update /
+  // move / remove / clear-in-range), so it covers EVERY route that can create
+  // or destroy a link — the Insert dialog, the context menu, the script
+  // broker's api.addHyperlink family — and an out-of-band mutator that never
+  // went through a wrapper can dispatch it. It replaces DATA_CHANGED here:
+  // DATA_CHANGED is the generic "non-cell document state moved" announcement
+  // and fired this IPC read for changes that had nothing to do with hyperlinks.
+  //
+  // The backend also SHIFTS hyperlinks through row/column insert & delete, and
+  // this cache decides where the pointer cursor shows, where Ctrl+click follows
+  // and which cell the context menu edits — a stale entry offers "Open
+  // Hyperlink" on a cell that has none. STRUCTURAL_UNDO is included because its
+  // payload carries no coordinates, so the only correct response is a re-fetch.
+  const onIndicatorsStale = () => { void refreshIndicators(); };
   for (const evt of [
     AppEvents.SHEET_CHANGED,
-    AppEvents.DATA_CHANGED,
+    AppEvents.HYPERLINKS_CHANGED,
+    AppEvents.AFTER_OPEN,
     AppEvents.ROWS_INSERTED,
     AppEvents.COLUMNS_INSERTED,
     AppEvents.ROWS_DELETED,

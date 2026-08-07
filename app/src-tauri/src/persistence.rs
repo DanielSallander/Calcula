@@ -22,7 +22,14 @@ use tauri::{Emitter, State};
 #[derive(Default)]
 pub struct FileState {
     pub current_path: Mutex<Option<PathBuf>>,
-    pub is_modified: Mutex<bool>,
+    /// The workbook dirty flag. NOT a bare `Mutex<bool>`: `DirtyFlag` announces
+    /// every clean<->dirty TRANSITION on the `document:dirty-changed` Tauri
+    /// event, which is how the title-bar asterisk learns about a mutation that
+    /// did not originate in the frontend. See `document_effect::DirtyFlag` for
+    /// why the announcement lives on the flag rather than at the ~60 call sites.
+    /// The API is `Mutex`-shaped, so `.lock()` / `.unwrap()` / `.map_err(..)?`
+    /// read and write exactly as before.
+    pub is_modified: crate::document_effect::DirtyFlag,
     /// Session passphrase for the currently-open encrypted workbook.
     /// `None` = the document is plain (unencrypted). Held only in memory,
     /// zeroized when replaced/cleared; never persisted to disk, logged, or

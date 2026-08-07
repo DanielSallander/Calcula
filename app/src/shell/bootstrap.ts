@@ -25,6 +25,7 @@ import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
 import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
 import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/distribution";
+import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
 
 import {
   registerExtensionRegistryService,
@@ -458,6 +459,12 @@ export function bootstrapShell(): void {
   }).catch(() => {
     // No Tauri runtime (test context) — no deferred rebuild to bridge.
   });
+
+  // 2f: bridge the backend's workbook dirty-state announcement, so the
+  // title-bar asterisk tracks a mutation that never touched the frontend.
+  // Layout.tsx already re-titles on DIRTY_STATE_CHANGED; see
+  // shell/dirtyStateBridge.ts for why the backend side is ONE event.
+  void bridgeDirtyStateAnnouncement();
 
   // Model-extensibility Phase 1: bridge the Rust-emitted BI model lifecycle
   // events onto the @api event bus. The backend is the single emitter (its

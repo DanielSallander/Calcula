@@ -19,7 +19,12 @@ vi.mock("@api/backend", () => ({
   invokeBackend: vi.fn(),
 }));
 
+import { createCoalescedRefresh as actualCoalescedRefresh } from "../../src/api/coalescedRefresh";
+
 vi.mock("@api", () => ({
+  // The refresh coalescer is @api's own primitive, not a backend
+  // boundary — the real one, so these tests exercise real coalescing.
+  createCoalescedRefresh: actualCoalescedRefresh,
   removeGridRegionsByType: vi.fn(),
   addGridRegions: vi.fn(),
   requestOverlayRedraw: vi.fn(),

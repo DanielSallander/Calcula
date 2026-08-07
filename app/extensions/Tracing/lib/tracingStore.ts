@@ -77,8 +77,14 @@ export function setCurrentSelection(
  * - First call: traces the selected cell's direct precedents (level 1).
  * - Subsequent calls: traces precedents of the previous frontier (level N).
  */
-export async function addPrecedentLevel(): Promise<void> {
-  const sel = currentSelection;
+export async function addPrecedentLevel(
+  cell?: { row: number; col: number },
+): Promise<void> {
+  // The menu commands trace the current selection; the @api/tracingService
+  // controller names the cell explicitly, because a caller outside this
+  // extension has no business moving the user's selection to say which cell it
+  // means.
+  const sel = cell ?? currentSelection;
   if (!sel) return;
 
   // If the traced cell changed, clear everything first
@@ -176,8 +182,10 @@ export async function addPrecedentLevel(): Promise<void> {
  * - First call: traces the selected cell's direct dependents (level 1).
  * - Subsequent calls: traces dependents of the previous frontier (level N).
  */
-export async function addDependentLevel(): Promise<void> {
-  const sel = currentSelection;
+export async function addDependentLevel(
+  cell?: { row: number; col: number },
+): Promise<void> {
+  const sel = cell ?? currentSelection;
   if (!sel) return;
 
   // If the traced cell changed, clear everything first
@@ -269,6 +277,46 @@ export async function addDependentLevel(): Promise<void> {
 /** Remove all trace arrows and reset state. */
 export function removeAllArrows(): void {
   clearTraces();
+}
+
+// ============================================================================
+// Controller Operations (the @api/tracingService seam)
+// ============================================================================
+//
+// Same accumulate-and-paint as the Formulas-menu commands above — the
+// difference is the CONTRACT. A menu handler traces whatever is selected and
+// leaves the answer on screen for a human; a caller reaching through the seam
+// names the cell and needs to know what it got, because it is not looking at
+// the canvas.
+
+/** How many arrows are currently painted (all levels, both directions). */
+export function getArrowCount(): number {
+  return arrows.length;
+}
+
+/** A snapshot of what the arrows currently show. */
+function tracingSnapshot(): {
+  arrowCount: number;
+  precedentLevel: number;
+  dependentLevel: number;
+} {
+  return {
+    arrowCount: arrows.length,
+    precedentLevel,
+    dependentLevel,
+  };
+}
+
+/** Controller: expand precedent tracing one level for an explicit cell. */
+export async function controllerTracePrecedents(row: number, col: number) {
+  await addPrecedentLevel({ row, col });
+  return tracingSnapshot();
+}
+
+/** Controller: expand dependent tracing one level for an explicit cell. */
+export async function controllerTraceDependents(row: number, col: number) {
+  await addDependentLevel({ row, col });
+  return tracingSnapshot();
 }
 
 /** Clear all tracing state (called on sheet change, cell edits, etc.). */

@@ -34,7 +34,15 @@ describe('AppEvents', () => {
     // anything downstream — save, .calp publish, a script that just awaited
     // calculateNow — learns that a pass STOPPED rather than finished, which a
     // half-recalculated workbook cannot otherwise be distinguished from.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`68`);
+    //
+    // 71 since the backend-state refresh announcements: OUTLINE_CHANGED,
+    // HYPERLINKS_CHANGED and VALIDATIONS_CHANGED. Each is emitted by the IPC
+    // WRAPPER for its feature, not by call sites, so every mutation route
+    // announces identically; before them a backend-written group, hyperlink or
+    // validation rule changed zero pixels until something unrelated forced a
+    // refresh. They are also the signal an out-of-band mutator (a .calp pull,
+    // an MCP tool, a test that invoked the Rust command directly) can dispatch.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`71`);
   });
 
   it('all values use the app: prefix', () => {

@@ -11,7 +11,11 @@ import {
 import { drawAnnotationTriangle } from "./rendering/triangleRenderer";
 
 // Store
-import { refreshAnnotationState, resetAnnotationStore } from "./lib/annotationStore";
+import {
+  requestAnnotationRefresh,
+  invalidateAnnotationRefresh,
+  resetAnnotationStore,
+} from "./lib/annotationStore";
 
 // Handlers
 import { handleAnnotationClick } from "./handlers/clickHandler";
@@ -57,11 +61,17 @@ function activate(context: ExtensionContext): void {
   _context = context;
   console.log("[Review] Activating...");
 
-  // 1. Register cell decoration for triangle indicators
+  // 1. Register cell decoration for triangle indicators.
+  //    Anchor "over-selection": the triangle sits in the cell's top-right
+  //    corner, which is exactly where the active-cell border and the selection
+  //    tint land — selecting a commented cell used to hide its own indicator.
+  //    Excel keeps it visible; the anchor is how this decoration says so
+  //    without the selection painter having to know what a note is.
   const unregDecoration = context.grid.decorations.register(
     "annotation-triangles",
     drawAnnotationTriangle,
-    5
+    5,
+    "over-selection"
   );
   cleanupFns.push(unregDecoration);
 
@@ -119,7 +129,9 @@ function activate(context: ExtensionContext): void {
     // is cleared too — hiding the overlay behind its back would leave it
     // convinced the tooltip is still up for that cell.
     hidePreview();
-    refreshAnnotationState().then(() => {
+    // The pass in flight (if any) is reading the sheet we are leaving.
+    invalidateAnnotationRefresh();
+    void requestAnnotationRefresh().then(() => {
       context.events.emit(AppEvents.GRID_REFRESH);
     });
   });
@@ -139,13 +151,20 @@ function activate(context: ExtensionContext): void {
     // The cached preview content (and the cell it belongs to) is about to move
     // or change; drop it rather than show a stale note over a shifted cell.
     hidePreview();
-    void refreshAnnotationState().then(() => {
+    // request(), not the join() flavour: this reacts to a change SOMETHING ELSE
+    // made, so a pass that was already running may have started reading before
+    // that change was committed.
+    void requestAnnotationRefresh().then(() => {
       context.events.emit(AppEvents.GRID_REFRESH);
     });
   };
-  // ANNOTATIONS_CHANGED is in the set for annotations created OUTSIDE this
-  // extension's own UI — today the script rows (api.setNote / api.addComment
-  // / ...), whose triangles must appear without waiting for a sheet switch.
+  // ANNOTATIONS_CHANGED is announced by the IPC wrapper itself, so it covers
+  // EVERY route that writes an annotation — this extension's own overlays and
+  // context menu, the script rows (api.setNote / api.addComment / ...), and an
+  // out-of-band mutator that never went through a wrapper and dispatches the
+  // event instead. Triangles appear without waiting for a sheet switch.
+  // AFTER_OPEN: a newly opened workbook brings a whole new annotation set, and
+  // the active sheet index may not change, so SHEET_CHANGED cannot be relied on.
   for (const evt of [
     AppEvents.ROWS_INSERTED,
     AppEvents.COLUMNS_INSERTED,
@@ -153,6 +172,7 @@ function activate(context: ExtensionContext): void {
     AppEvents.COLUMNS_DELETED,
     AppEvents.STRUCTURAL_UNDO,
     AppEvents.ANNOTATIONS_CHANGED,
+    AppEvents.AFTER_OPEN,
   ]) {
     cleanupFns.push(context.events.on(evt, onAnnotationsStale));
   }
@@ -168,7 +188,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregisterKeyboardShortcuts);
 
   // 11. Initial state load
-  refreshAnnotationState();
+  void requestAnnotationRefresh();
 
   console.log("[Review] Activated successfully.");
 }

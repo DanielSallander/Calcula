@@ -217,10 +217,18 @@ function activate(context: ExtensionContext): void {
   // structural UNDO carries no updated cells, so the cellEvents path above
   // never fires for it — hence STRUCTURAL_UNDO here.
   //
-  // DATA_CHANGED is the announce non-dialog writers make for NON-cell document
-  // state (script api.setDataValidation, paste-special of validation, the
-  // hyperlink dialog's convention): no cell value moved, so the cellEvents
-  // path stays silent, yet the rule set this extension caches just changed.
+  // VALIDATIONS_CHANGED is announced by the IPC wrapper itself, so it covers
+  // EVERY route that writes a rule — this extension's dialog, Paste Special's
+  // validation arm, the script broker's api.setDataValidation /
+  // api.clearDataValidation — and an out-of-band mutator that never went
+  // through a wrapper can dispatch it. It replaces DATA_CHANGED, which was the
+  // generic "non-cell document state moved" announcement and re-read the whole
+  // rule set for changes that had nothing to do with validation. Without it a
+  // backend-written rule has no chevron painted — and, because nothing
+  // suppresses the fill handle over a chevron that was never placed, a fill
+  // handle sitting exactly where the chevron belongs.
+  //
+  // AFTER_OPEN: a newly opened workbook brings a whole new rule set.
   //
   // Any open dropdown or prompt is anchored to a pre-shift cell, so close it.
   const onValidationStale = () => {
@@ -231,7 +239,8 @@ function activate(context: ExtensionContext): void {
     refreshValidationState();
   };
   for (const evt of [
-    AppEvents.DATA_CHANGED,
+    AppEvents.VALIDATIONS_CHANGED,
+    AppEvents.AFTER_OPEN,
     AppEvents.ROWS_INSERTED,
     AppEvents.COLUMNS_INSERTED,
     AppEvents.ROWS_DELETED,

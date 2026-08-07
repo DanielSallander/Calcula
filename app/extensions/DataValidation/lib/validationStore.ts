@@ -9,6 +9,7 @@ import {
   removeGridRegionsByType,
   requestOverlayRedraw,
   emitAppEvent,
+  createCoalescedRefresh,
   type GridRegion,
   type ValidationRange,
 } from "@api";
@@ -95,10 +96,10 @@ export function setPromptState(visible: boolean, cell: { row: number; col: numbe
 // ============================================================================
 
 /**
- * Refresh the cached validation ranges from the backend
- * and sync grid overlay regions for dropdown chevrons.
+ * Re-read the cached validation ranges from the backend and sync the grid
+ * overlay regions the dropdown chevrons are painted from.
  */
-export async function refreshValidationState(): Promise<void> {
+async function readValidationState(): Promise<void> {
   try {
     const ranges = await getAllDataValidations();
     state.validationRanges = ranges;
@@ -114,6 +115,37 @@ export async function refreshValidationState(): Promise<void> {
   } catch (error) {
     console.error("[DataValidation] Failed to refresh validation state:", error);
   }
+}
+
+/**
+ * Coalesced rule-set refresh.
+ *
+ * This is requested from the cell-change subscription — i.e. potentially on
+ * every commit — as well as from the VALIDATIONS_CHANGED announcement and the
+ * dialog that caused it, and each pass is an IPC round-trip that rebuilds one
+ * grid region per validated cell.
+ */
+const validationRefresh = createCoalescedRefresh(() => readValidationState());
+
+/**
+ * Ask for a rule-set refresh. This is what LISTENERS call: the
+ * VALIDATIONS_CHANGED announcement, sheet change, structural edits, cell
+ * commits.
+ */
+export function refreshValidationState(): Promise<void> {
+  return validationRefresh.request();
+}
+
+/**
+ * Await the refresh already answering for a rule the CALLER just wrote.
+ *
+ * The IPC wrapper announces VALIDATIONS_CHANGED before setDataValidation
+ * resolves, so a pass has normally already started by the time the dialog gets
+ * to re-read; requesting a second one would cost a whole extra rebuild for one
+ * rule change. See @api/coalescedRefresh for why request() and join() differ.
+ */
+export function joinValidationRefresh(): Promise<void> {
+  return validationRefresh.join();
 }
 
 /**

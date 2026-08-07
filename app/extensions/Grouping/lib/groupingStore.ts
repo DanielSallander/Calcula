@@ -23,6 +23,7 @@ import {
   updateConfig,
   dispatchGridAction,
   requestOverlayRedraw,
+  createCoalescedRefresh,
 } from "@api";
 
 import type {
@@ -150,37 +151,79 @@ export function updateOutlineBarHeight(maxColLevel: number): void {
 // ============================================================================
 
 /**
- * After any grouping operation, apply the result to grid state:
- * - Update group-hidden rows/cols
- * - Update the outline bar width
- * - Refresh the outline info for rendering
+ * Re-read the whole outline from the backend and put the grid in step with it:
+ * the group-hidden row/col sets, the outline bar size, and the cached symbols
+ * the renderer paints.
+ *
+ * THIS IS THE ONLY PLACE THAT SYNCS, and it is deliberately usable with no
+ * local knowledge of what changed — that is what lets an out-of-band mutation
+ * (a sheet switch onto a sheet that already has an outline, a freshly opened
+ * workbook, an AppEvents.OUTLINE_CHANGED dispatched by something that never
+ * called through here) recover the same state a local group/ungroup does.
+ *
+ * The max row/column levels are SHEET-level in the backend, not viewport-level,
+ * so a probe range is enough when nothing has been rendered yet. That matters:
+ * `renderOutlineBar` returns immediately while the bar has zero width AND zero
+ * height, so a state where the bar is 0 and only the renderer would re-fetch is
+ * a state the outline can never come back from. Sizing the bar here is what
+ * restarts that loop; the renderer's own refreshOutlineState then fills in the
+ * symbols for the real viewport.
+ *
+ * Never rejects — a failed resync logs and leaves the previous state, exactly
+ * as refreshOutlineState does.
+ */
+const outlineRefresh = createCoalescedRefresh(async (stillCurrent) => {
+  try {
+    const hiddenRows = await getHiddenRowsByGroup();
+    if (!stillCurrent()) return;
+    dispatchGridAction(setGroupHiddenRows(hiddenRows));
+
+    const hiddenCols = await getHiddenColsByGroup();
+    if (!stillCurrent()) return;
+    dispatchGridAction(setGroupHiddenCols(hiddenCols));
+
+    const vp = lastViewport;
+    const info = await apiGetOutlineInfo(
+      vp ? vp.startRow : 0,
+      vp ? vp.startRow + vp.rowCount + 5 : 0,
+      vp ? vp.startCol : 0,
+      vp ? vp.startCol + vp.colCount + 5 : 0,
+    );
+    if (!stillCurrent()) return;
+
+    updateOutlineBarWidth(info.maxRowLevel);
+    updateOutlineBarHeight(info.maxColLevel);
+
+    // Only adopt the symbols when they were fetched for the viewport actually
+    // on screen. With no viewport yet, leaving the cache empty makes the very
+    // next render pass fetch the right range instead of painting a probe.
+    currentOutlineInfo = vp ? info : null;
+  } catch (err) {
+    console.error("[Grouping] outline resync failed:", err);
+  }
+  requestOverlayRedraw();
+});
+
+/**
+ * Request an outline resync. This is what an ANNOUNCEMENT listener calls
+ * (AppEvents.OUTLINE_CHANGED), and what a sheet change / workbook open calls.
+ */
+export function resyncOutlineFromBackend(): Promise<void> {
+  return outlineRefresh.request();
+}
+
+/**
+ * After any grouping operation, put the grid back in step with the backend.
+ *
+ * Awaiting the resync here is what keeps the GroupingController contract: the
+ * grid, the outline bar and the backend agree before the operation resolves.
  */
 async function applyGroupResult(result: GroupResult): Promise<void> {
   if (!result.success) {
     if (result.error) console.warn("[Grouping]", result.error);
     return;
   }
-
-  // Sync group-hidden rows with grid state
-  const hiddenRows = await getHiddenRowsByGroup();
-  dispatchGridAction(setGroupHiddenRows(hiddenRows));
-
-  const hiddenCols = await getHiddenColsByGroup();
-  dispatchGridAction(setGroupHiddenCols(hiddenCols));
-
-  // Update outline bar dimensions based on max levels
-  const maxRowLevel = result.outline?.maxRowLevel ?? 0;
-  updateOutlineBarWidth(maxRowLevel);
-  const maxColLevel = result.outline?.maxColLevel ?? 0;
-  updateOutlineBarHeight(maxColLevel);
-
-  // Invalidate cached outline info so refreshOutlineState() re-fetches
-  // even when the viewport hasn't changed (collapse/expand changes symbols,
-  // not the viewport).
-  currentOutlineInfo = null;
-
-  // Refresh outline info for the renderer
-  await refreshOutlineState();
+  await outlineRefresh.join();
 }
 
 // ============================================================================
@@ -308,16 +351,11 @@ export async function performSetOutlineSettings(settings: OutlineSettings): Prom
 
 /** Remove all grouping from the current sheet. */
 export async function performClearOutline(): Promise<void> {
-  const result = await apiClearOutline();
-  if (result.success) {
-    // No groups remain - clear hidden rows from grouping
-    dispatchGridAction(setGroupHiddenRows([]));
-    dispatchGridAction(setGroupHiddenCols([]));
-    updateOutlineBarWidth(0);
-    updateOutlineBarHeight(0);
-    currentOutlineInfo = null;
-    requestOverlayRedraw();
-  }
+  // Through the same resync as every other operation rather than zeroing the
+  // local state by hand: "the backend says there is no outline" and "we assume
+  // there is no outline" are different claims, and only the first one survives
+  // a clear that the backend partially refused.
+  await applyGroupResult(await apiClearOutline());
 }
 
 // ============================================================================
@@ -379,8 +417,19 @@ export async function controllerShowOutlineLevel(
   );
 }
 
-/** Reset all local state (called on sheet change). */
+/**
+ * Reset all local state.
+ *
+ * Used on DEACTIVATION, and by the sheet-change handler as the first half of
+ * "forget this sheet's outline, then read the next one's" — on its own it makes
+ * the outline unrecoverable, because it zeroes the bar and `renderOutlineBar`
+ * bails while the bar is zero-sized, so nothing ever re-fetches. Callers that
+ * are not tearing down MUST follow it with resyncOutlineFromBackend().
+ */
 export function resetGroupingState(): void {
+  // Abandon any in-flight resync: it is reading the sheet we are leaving, and
+  // its hidden-row set would hide the wrong rows on the sheet we arrive at.
+  outlineRefresh.invalidate();
   currentOutlineInfo = null;
   lastViewport = null;
   lastRenderedRowYMap = new Map();

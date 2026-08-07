@@ -614,12 +614,16 @@ export async function clearHyperlinksInRange(
   endRow: number,
   endCol: number
 ): Promise<number> {
-  return invoke<number>("clear_hyperlinks_in_range", {
+  const cleared = await invoke<number>("clear_hyperlinks_in_range", {
     startRow,
     startCol,
     endRow,
     endCol,
   });
+  if (cleared > 0) {
+    emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: null });
+  }
+  return cleared;
 }
 
 export async function getGridBounds(): Promise<[number, number]> {
@@ -2285,6 +2289,21 @@ export async function applyNamesToFormulas(
 // ============================================================================
 
 /**
+ * Announce that the data-validation rule set changed.
+ *
+ * Emitted HERE rather than at the call site, for the same reason
+ * emitStructuralEvent is: the DataValidation extension caches the rule set and
+ * builds the in-cell dropdown-chevron grid regions from that cache, so a rule
+ * written by a route that forgot to announce is a rule with no chevron — and,
+ * because nothing suppresses the fill handle over a chevron that was never
+ * placed, a fill handle sitting exactly where the chevron belongs. The dialog
+ * path announced; the script path and any direct caller did not.
+ */
+function emitValidationsChanged(sheetIndex?: number): void {
+  emitAppEvent(AppEvents.VALIDATIONS_CHANGED, { sheetIndex: sheetIndex ?? null });
+}
+
+/**
  * Set data validation on a range.
  *
  * `sheetIndex` (Wave 3): target a NON-ACTIVE sheet's validation store; omit
@@ -2302,7 +2321,7 @@ export async function setDataValidation(
     `[tauri-api] setDataValidation(${startRow}, ${startCol}, ${endRow}, ${endCol})`,
     validation
   );
-  return invoke<DataValidationResult>("set_data_validation", {
+  const result = await invoke<DataValidationResult>("set_data_validation", {
     startRow,
     startCol,
     endRow,
@@ -2310,6 +2329,8 @@ export async function setDataValidation(
     validation,
     sheetIndex: sheetIndex ?? null,
   });
+  if (result.success) emitValidationsChanged(sheetIndex);
+  return result;
 }
 
 /**
@@ -2327,13 +2348,15 @@ export async function clearDataValidation(
   console.log(
     `[tauri-api] clearDataValidation(${startRow}, ${startCol}, ${endRow}, ${endCol})`
   );
-  return invoke<DataValidationResult>("clear_data_validation", {
+  const result = await invoke<DataValidationResult>("clear_data_validation", {
     startRow,
     startCol,
     endRow,
     endCol,
     sheetIndex: sheetIndex ?? null,
   });
+  if (result.success) emitValidationsChanged(sheetIndex);
+  return result;
 }
 
 /**
@@ -2448,11 +2471,31 @@ import type {
 } from "../types";
 
 /**
+ * Announce that the annotation set (notes + threaded comments) changed.
+ *
+ * Emitted HERE rather than at the call site, for the same reason
+ * emitStructuralEvent is. The Review extension paints its note/comment
+ * triangles from a frontend cache, and the Comments sidebar re-reads on this
+ * event; an annotation written by a route that forgot to announce is an
+ * annotation with no indicator until an unrelated refresh happens to run. The
+ * script rows used to emit this by hand — three of the five did.
+ *
+ * OUT-OF-BAND MUTATORS (a .calp pull, a future MCP tool, a test that invoked
+ * the Rust command directly) have no wrapper to go through and must dispatch
+ * AppEvents.ANNOTATIONS_CHANGED themselves.
+ */
+function emitAnnotationsChanged(): void {
+  emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+}
+
+/**
  * Add a comment to a cell.
  */
 export async function addComment(params: AddCommentParams): Promise<CommentResult> {
   console.log(`[tauri-api] addComment(${params.row}, ${params.col})`);
-  return invoke<CommentResult>("add_comment", { params });
+  const result = await invoke<CommentResult>("add_comment", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2460,7 +2503,9 @@ export async function addComment(params: AddCommentParams): Promise<CommentResul
  */
 export async function updateComment(params: UpdateCommentParams): Promise<CommentResult> {
   console.log(`[tauri-api] updateComment(${params.commentId})`);
-  return invoke<CommentResult>("update_comment", { params });
+  const result = await invoke<CommentResult>("update_comment", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2468,7 +2513,9 @@ export async function updateComment(params: UpdateCommentParams): Promise<Commen
  */
 export async function deleteComment(commentId: string): Promise<CommentResult> {
   console.log(`[tauri-api] deleteComment(${commentId})`);
-  return invoke<CommentResult>("delete_comment", { commentId });
+  const result = await invoke<CommentResult>("delete_comment", { commentId });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2531,7 +2578,9 @@ export async function resolveComment(
   resolved: boolean
 ): Promise<CommentResult> {
   console.log(`[tauri-api] resolveComment(${commentId}, ${resolved})`);
-  return invoke<CommentResult>("resolve_comment", { commentId, resolved });
+  const result = await invoke<CommentResult>("resolve_comment", { commentId, resolved });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2539,7 +2588,9 @@ export async function resolveComment(
  */
 export async function addReply(params: AddReplyParams): Promise<ReplyResult> {
   console.log(`[tauri-api] addReply(${params.commentId})`);
-  return invoke<ReplyResult>("add_reply", { params });
+  const result = await invoke<ReplyResult>("add_reply", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2547,7 +2598,9 @@ export async function addReply(params: AddReplyParams): Promise<ReplyResult> {
  */
 export async function updateReply(params: UpdateReplyParams): Promise<ReplyResult> {
   console.log(`[tauri-api] updateReply(${params.commentId}, ${params.replyId})`);
-  return invoke<ReplyResult>("update_reply", { params });
+  const result = await invoke<ReplyResult>("update_reply", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2558,7 +2611,9 @@ export async function deleteReply(
   replyId: string
 ): Promise<ReplyResult> {
   console.log(`[tauri-api] deleteReply(${commentId}, ${replyId})`);
-  return invoke<ReplyResult>("delete_reply", { commentId, replyId });
+  const result = await invoke<ReplyResult>("delete_reply", { commentId, replyId });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2570,7 +2625,9 @@ export async function moveComment(
   newCol: number
 ): Promise<CommentResult> {
   console.log(`[tauri-api] moveComment(${commentId}, ${newRow}, ${newCol})`);
-  return invoke<CommentResult>("move_comment", { commentId, newRow, newCol });
+  const result = await invoke<CommentResult>("move_comment", { commentId, newRow, newCol });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2592,7 +2649,9 @@ export async function hasComment(row: number, col: number): Promise<boolean> {
  */
 export async function clearAllComments(): Promise<number> {
   console.log("[tauri-api] clearAllComments");
-  return invoke<number>("clear_all_comments");
+  const changed = await invoke<number>("clear_all_comments");
+  if (changed > 0) emitAnnotationsChanged();
+  return changed;
 }
 
 /**
@@ -2607,12 +2666,14 @@ export async function clearCommentsInRange(
   console.log(
     `[tauri-api] clearCommentsInRange(${startRow}, ${startCol}, ${endRow}, ${endCol})`
   );
-  return invoke<number>("clear_comments_in_range", {
+  const changed = await invoke<number>("clear_comments_in_range", {
     startRow,
     startCol,
     endRow,
     endCol,
   });
+  if (changed > 0) emitAnnotationsChanged();
+  return changed;
 }
 
 // ============================================================================
@@ -2624,7 +2685,9 @@ export async function clearCommentsInRange(
  */
 export async function addNote(params: AddNoteParams): Promise<NoteResult> {
   console.log(`[tauri-api] addNote(${params.row}, ${params.col})`);
-  return invoke<NoteResult>("add_note", { params });
+  const result = await invoke<NoteResult>("add_note", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2632,7 +2695,9 @@ export async function addNote(params: AddNoteParams): Promise<NoteResult> {
  */
 export async function updateNote(params: UpdateNoteParams): Promise<NoteResult> {
   console.log(`[tauri-api] updateNote(${params.noteId})`);
-  return invoke<NoteResult>("update_note", { params });
+  const result = await invoke<NoteResult>("update_note", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2640,7 +2705,9 @@ export async function updateNote(params: UpdateNoteParams): Promise<NoteResult> 
  */
 export async function deleteNote(noteId: string): Promise<NoteResult> {
   console.log(`[tauri-api] deleteNote(${noteId})`);
-  return invoke<NoteResult>("delete_note", { noteId });
+  const result = await invoke<NoteResult>("delete_note", { noteId });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2693,7 +2760,9 @@ export async function getNoteIndicatorsInRange(
  */
 export async function resizeNote(params: ResizeNoteParams): Promise<NoteResult> {
   console.log(`[tauri-api] resizeNote(${params.noteId})`);
-  return invoke<NoteResult>("resize_note", { params });
+  const result = await invoke<NoteResult>("resize_note", { params });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2703,7 +2772,9 @@ export async function toggleNoteVisibility(
   noteId: string,
   visible: boolean
 ): Promise<NoteResult> {
-  return invoke<NoteResult>("toggle_note_visibility", { noteId, visible });
+  const result = await invoke<NoteResult>("toggle_note_visibility", { noteId, visible });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2711,7 +2782,9 @@ export async function toggleNoteVisibility(
  */
 export async function showAllNotes(visible: boolean): Promise<number> {
   console.log(`[tauri-api] showAllNotes(${visible})`);
-  return invoke<number>("show_all_notes", { visible });
+  const changed = await invoke<number>("show_all_notes", { visible });
+  if (changed > 0) emitAnnotationsChanged();
+  return changed;
 }
 
 /**
@@ -2723,7 +2796,9 @@ export async function moveNote(
   newCol: number
 ): Promise<NoteResult> {
   console.log(`[tauri-api] moveNote(${noteId}, ${newRow}, ${newCol})`);
-  return invoke<NoteResult>("move_note", { noteId, newRow, newCol });
+  const result = await invoke<NoteResult>("move_note", { noteId, newRow, newCol });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 /**
@@ -2738,7 +2813,9 @@ export async function hasNote(row: number, col: number): Promise<boolean> {
  */
 export async function clearAllNotes(): Promise<number> {
   console.log("[tauri-api] clearAllNotes");
-  return invoke<number>("clear_all_notes");
+  const changed = await invoke<number>("clear_all_notes");
+  if (changed > 0) emitAnnotationsChanged();
+  return changed;
 }
 
 /**
@@ -2753,12 +2830,14 @@ export async function clearNotesInRange(
   console.log(
     `[tauri-api] clearNotesInRange(${startRow}, ${startCol}, ${endRow}, ${endCol})`
   );
-  return invoke<number>("clear_notes_in_range", {
+  const changed = await invoke<number>("clear_notes_in_range", {
     startRow,
     startCol,
     endRow,
     endCol,
   });
+  if (changed > 0) emitAnnotationsChanged();
+  return changed;
 }
 
 /**
@@ -2769,7 +2848,9 @@ export async function convertNoteToComment(
   authorEmail: string
 ): Promise<CommentResult> {
   console.log(`[tauri-api] convertNoteToComment(${noteId})`);
-  return invoke<CommentResult>("convert_note_to_comment", { noteId, authorEmail });
+  const result = await invoke<CommentResult>("convert_note_to_comment", { noteId, authorEmail });
+  if (result.success) emitAnnotationsChanged();
+  return result;
 }
 
 // ============================================================================
@@ -2837,44 +2918,70 @@ export interface GroupResult {
   hiddenColsChanged: number[];
 }
 
+/**
+ * Run an outline-mutating command and announce the result.
+ *
+ * EVERY outline mutator goes through here, for the same reason
+ * emitStructuralEvent exists. The Grouping extension is the only thing that
+ * pushes group-hidden rows/cols into grid state and sizes the outline bar, so
+ * an outline change it never hears about leaves the grid showing rows the
+ * backend now hides, with no outline bar to expand them again. Announcing from
+ * the wrapper means the Data menu, the grid context menu, the outline bar's own
+ * +/- and level buttons, the keyboard shortcuts, the Group Settings dialog and
+ * the script broker's api.groupRows family all announce identically, without
+ * any of them remembering to.
+ *
+ * OUT-OF-BAND MUTATORS (a .calp pull, a future MCP tool, a test that invoked
+ * the Rust command directly) have no wrapper to go through and must dispatch
+ * AppEvents.OUTLINE_CHANGED themselves.
+ */
+async function invokeOutlineMutation(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<GroupResult> {
+  const result = await invoke<GroupResult>(cmd, args);
+  if (result.success) emitAppEvent(AppEvents.OUTLINE_CHANGED, { command: cmd });
+  return result;
+}
+
 /** Group rows (create or increment outline level). */
 export async function groupRows(startRow: number, endRow: number): Promise<GroupResult> {
-  return invoke<GroupResult>("group_rows", { params: { startRow, endRow } });
+  return invokeOutlineMutation("group_rows", { params: { startRow, endRow } });
 }
 
 /** Ungroup rows (remove or decrement outline level). */
 export async function ungroupRows(startRow: number, endRow: number): Promise<GroupResult> {
-  return invoke<GroupResult>("ungroup_rows", { startRow, endRow });
+  return invokeOutlineMutation("ungroup_rows", { startRow, endRow });
 }
 
 /** Group columns (create or increment outline level). */
 export async function groupColumns(startCol: number, endCol: number): Promise<GroupResult> {
-  return invoke<GroupResult>("group_columns", { params: { startCol, endCol } });
+  return invokeOutlineMutation("group_columns", { params: { startCol, endCol } });
 }
 
 /** Ungroup columns (remove or decrement outline level). */
 export async function ungroupColumns(startCol: number, endCol: number): Promise<GroupResult> {
-  return invoke<GroupResult>("ungroup_columns", { startCol, endCol });
+  return invokeOutlineMutation("ungroup_columns", { startCol, endCol });
 }
 
 /** Collapse the group(s) containing the given row (hides detail rows). */
 export async function collapseRowGroup(row: number): Promise<GroupResult> {
-  return invoke<GroupResult>("collapse_row_group", { row });
+  return invokeOutlineMutation("collapse_row_group", { row });
 }
 
 /** Expand the group(s) containing the given row (shows detail rows). */
 export async function expandRowGroup(row: number): Promise<GroupResult> {
-  return invoke<GroupResult>("expand_row_group", { row });
+  return invokeOutlineMutation("expand_row_group", { row });
 }
 
 /** Collapse the group(s) containing the given column. */
 export async function collapseColumnGroup(col: number): Promise<GroupResult> {
-  return invoke<GroupResult>("collapse_column_group", { col });
+  return invokeOutlineMutation("collapse_column_group", { col });
 }
 
 /** Expand the group(s) containing the given column. */
 export async function expandColumnGroup(col: number): Promise<GroupResult> {
-  return invoke<GroupResult>("expand_column_group", { col });
+  return invokeOutlineMutation("expand_column_group", { col });
 }
 
 /**
@@ -2885,7 +2992,7 @@ export async function showOutlineLevel(
   rowLevel?: number,
   colLevel?: number,
 ): Promise<GroupResult> {
-  return invoke<GroupResult>("show_outline_level", {
+  return invokeOutlineMutation("show_outline_level", {
     rowLevel: rowLevel ?? null,
     colLevel: colLevel ?? null,
   });
@@ -2913,7 +3020,7 @@ export async function getHiddenColsByGroup(): Promise<number[]> {
 
 /** Remove all outline/grouping for the current sheet. */
 export async function clearOutline(): Promise<GroupResult> {
-  return invoke<GroupResult>("clear_outline");
+  return invokeOutlineMutation("clear_outline");
 }
 
 // ============================================================================

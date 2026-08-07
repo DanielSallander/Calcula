@@ -4012,6 +4012,11 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         row: n.row, col: n.col, text: n.content, author: n.authorName,
       }));
     }
+    // ANNOTATION MUTATIONS DO NOT ANNOUNCE FROM HERE. The tauri-api
+    // note/comment wrappers emit AppEvents.ANNOTATIONS_CHANGED themselves, so
+    // every route announces identically — this file used to do it by hand and
+    // covered five of the mutators, which is exactly the failure mode
+    // per-call-site announcements produce.
     case "api.addComment": {
       const [row, col, text] = args as [number, number, string];
       const lib = await getLib();
@@ -4026,7 +4031,6 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       if (!result.success || !result.comment) {
         throw new BrokerError("ValidationError", result.error || "addComment failed");
       }
-      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
       return { id: result.comment.id };
     }
     case "api.replyToComment": {
@@ -4041,7 +4045,6 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       if (!result.success || !result.reply) {
         throw new BrokerError("ValidationError", result.error || `No comment "${commentId}"`);
       }
-      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
       return { id: result.reply.id };
     }
     case "api.resolveComment": {
@@ -4051,7 +4054,6 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       if (!result.success) {
         throw new BrokerError("ValidationError", result.error || `No comment "${commentId}"`);
       }
-      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
       return undefined;
     }
     case "api.deleteComment": {
@@ -4061,7 +4063,6 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       if (!result.success) {
         throw new BrokerError("ValidationError", result.error || `No comment "${commentId}"`);
       }
-      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
       return undefined;
     }
     case "api.listComments": {
@@ -5707,7 +5708,6 @@ export async function executeSetNote(
       if (!result.success) {
         throw new BrokerError("ValidationError", result.error || "deleteNote failed");
       }
-      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
     }
     // No note either way — the cell is in the state the script asked for.
     return null;
@@ -5720,7 +5720,6 @@ export async function executeSetNote(
     // thread, never both — the backend text already says so.
     throw new BrokerError("ValidationError", result.error || "setNote failed");
   }
-  emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
   return { id: result.note.id };
 }
 

@@ -7,6 +7,7 @@ import type { CommentIndicator, NoteIndicator } from "@api";
 import {
   getCommentIndicators,
   getNoteIndicators,
+  createCoalescedRefresh,
 } from "@api";
 
 // ============================================================================
@@ -38,10 +39,10 @@ function cellKey(row: number, col: number): string {
 // ============================================================================
 
 /**
- * Refresh the annotation indicator cache from the backend.
+ * Read the annotation indicator cache from the backend.
  * Called on initial load, sheet change, and after annotation mutations.
  */
-export async function refreshAnnotationState(): Promise<void> {
+async function readAnnotationState(): Promise<void> {
   try {
     const [comments, notes] = await Promise.all([
       getCommentIndicators(),
@@ -60,6 +61,44 @@ export async function refreshAnnotationState(): Promise<void> {
   } catch (error) {
     console.error("[Review] Failed to refresh annotation state:", error);
   }
+}
+
+/**
+ * Coalesced indicator refresh (two backend reads per pass: comments + notes).
+ *
+ * Every annotation mutation announces ANNOTATIONS_CHANGED from its IPC wrapper,
+ * and the UI paths that perform those mutations also await a refresh so the
+ * triangle is on screen before their overlay closes — two passes per comment
+ * without this.
+ */
+const annotationRefresh = createCoalescedRefresh(() => readAnnotationState());
+
+/**
+ * Await the refresh already answering for an annotation the CALLER just wrote.
+ *
+ * This is the shape almost every call site here has: mutate, then re-read
+ * before closing an overlay. The mutation's own wrapper announced, so a pass is
+ * normally already running. See @api/coalescedRefresh for why that case needs
+ * join() rather than request().
+ */
+export function refreshAnnotationState(): Promise<void> {
+  return annotationRefresh.join();
+}
+
+/**
+ * Ask for a refresh on behalf of a change this code did NOT make: the
+ * ANNOTATIONS_CHANGED announcement, a sheet change, a structural edit, the
+ * initial load. Unlike refreshAnnotationState this never attaches to a pass
+ * that was already running, because such a pass may have started reading
+ * before the change being announced was committed.
+ */
+export function requestAnnotationRefresh(): Promise<void> {
+  return annotationRefresh.request();
+}
+
+/** Abandon an in-flight pass (the sheet it is reading is being left). */
+export function invalidateAnnotationRefresh(): void {
+  annotationRefresh.invalidate();
 }
 
 /**

@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 20 | Open: 4 | Triaged: 2 | Fixed: 14 | Other: 0
+Total: 20 | Open: 4 | Triaged: 1 | Fixed: 15 | Other: 0
 
 ## BUG-0020 `[triaged]`
 
@@ -15,7 +15,7 @@ Conditional formatting rules are not registered in the undo system — a CF rule
 **Repro:** add_conditional_format, then Ctrl+Z — the rule remains. Caught by the undo round-trip oracle (seed 777, 80 actions).
 **Triage:** app-bug (confidence 0.9) — conditional_formatting.rs add/update/delete/reorder commands push no undo transactions. Fix with the obj_* swap pattern (snapshot the sheet's Vec<ConditionalFormatDefinition>, like obj_validation).
 
-## BUG-0019 `[triaged]`
+## BUG-0019 `[fixed]`
 
 **Found:** 2026-06-11 (scenario)
 **Oracle:** recalc-consistency
@@ -24,6 +24,11 @@ Second-order cross-sheet recalculation does not cascade: with Sheet2!B3 = Sheet1
 
 **Repro:** Scenario budget-model phase 04: the commented-out B3/B4 assertions reproduce it. Sheet1: C9==SUM(C4:C8); Sheet2: B3==Sheet1!C9; edit Sheet1!C5 — B3 stays stale.
 **Triage:** app-bug (confidence 0.9) — In commands/data.rs update_cell, the cross-sheet dependent propagation (the dep_sheet_idx block around line ~1240) runs only for the edited cell's direct cross-sheet dependents; cells recalculated in the local cascade (C9) never get their own cross_sheet_dependents looked up. Fix: after the local recalc loop, iterate the recalculated cells and propagate their cross-sheet dependents transitively.
+**Fix:** fixed — Two independent causes, one per hop, both in cascade_cross_sheet_dependents. (1) The walk was rooted ONLY on the cells the caller edited; the cells the caller RECALCULATED were marked processed but never queued, so C9's cross-sheet dependents were never looked up (hop 1, exactly the triage hypothesis). Both sets are now walk roots. (2) The walk expanded a NON-ACTIVE sheet's same-sheet dependents through the ACTIVE sheet's dependents map — a map with no sheet dimension — so Sheet2!B4 = B2-B3 was invisible (hop 2). A per-sheet SheetDependencyIndex is now derived on demand from that sheet's own formula ASTs (cell + whole-column + whole-row edges) and expanded in topological order. Both hand-copied duplicates of the walk in update_cells_batch_core (paste) and fill_range were deleted in favour of the shared function, and a wiring test fails if a third copy appears.
+  Files: app/src-tauri/src/commands/data.rs, app/src-tauri/src/calculation.rs, app/src-tauri/src/control_values.rs, app/src-tauri/src/commands/cross_sheet_recalc_tests.rs, app/e2e/scenarios/budget-model.scenario.ts
+**Fix (2026-08-07, second pass — found on the RUNNING app while proving the first):** a FOURTH cause, and the one that mattered most in practice. Every test above visits the referencing sheet exactly once (go there, type the formula, come back); a user opens the summary sheet again to look at it. That SECOND visit disabled cross-sheet recalculation for the rest of the session. `CrossSheetDependentsMap` is keyed by sheet NAME and the cascade looks a cell up under the workbook's official name, but `rebuild_all_dependencies_from_grid` — which runs on every sheet switch — registered straight from the AST's spelling instead of normalising it, so `=sheet1!A2` re-registered under a key nothing looks up. The four hand-copied inline normalisers are now one `normalize_cross_sheet_refs` in lib.rs that the rebuild also calls. Repro: Sheet1!A1=100, A2==A1*2, Sheet2!A1==Sheet1!A2, Sheet2!A2==A1+1; edit A1 to 250 after one Sheet1->Sheet2->Sheet1 round trip — Sheet2 stayed at 200/201. Pinned by `revisiting_a_sheet_does_not_lose_its_cross_sheet_dependents` and `a_cross_sheet_reference_registers_under_the_official_sheet_name`, both A/B-verified against the old code.
+**Oracle correction (2026-08-07):** the restored scenario assertions read `B3`/`B4` with `getCellDisplayValue`, which only ever answers for the ACTIVE sheet — while Sheet1 was active, so they read Sheet1!B3 = "Budget" and could never have passed. They now read Sheet2 through `get_workbook_state_digest` (a pure read of the stored per-sheet grids: no mirror, no recalculation, no dependency rebuild — a sheet switch would have masked the bug). The expected values 27800 / -500 are unchanged.
+  Files: app/src-tauri/src/lib.rs, app/src-tauri/src/undo_commands.rs, app/src-tauri/src/commands/data.rs, app/src-tauri/src/commands/structure.rs, app/src-tauri/src/commands/cross_sheet_recalc_tests.rs, app/e2e/scenarios/budget-model.scenario.ts, app/e2e/journeys/correctness-cluster.spec.ts
 
 ## BUG-0018 `[fixed]`
 

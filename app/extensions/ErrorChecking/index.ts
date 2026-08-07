@@ -56,10 +56,15 @@ function activate(context: ExtensionContext): void {
 
   // 1. Register cell decoration for green error indicator triangles
   //    Priority 10: draw underneath annotations (priority 5) but above most decorations
+  //    Anchor "over-selection": the triangle sits in the cell's top-LEFT corner,
+  //    under the active-cell border and the selection tint. Same class of
+  //    indicator chrome as the annotation triangle — an error mark that vanishes
+  //    the moment you select the cell to look at it is worse than useless.
   const unregDecoration = context.grid.decorations.register(
     "error-checking-triangles",
     drawErrorTriangle,
-    10
+    10,
+    "over-selection"
   );
   cleanupFns.push(unregDecoration);
 
