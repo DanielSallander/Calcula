@@ -94,9 +94,21 @@ async function typeFormula(page: Page, text: string): Promise<void> {
   // `polling: "raf"` (Playwright's default) is unusable here: the app is a real
   // background OS window, so requestAnimationFrame is throttled and the poll can
   // stall for seconds. Poll on a timer instead.
+  //
+  // WAIT ON THE ATTRIBUTE, NOT THE TAG. This used to read
+  // `activeElement?.tagName === "INPUT"`. The inline editor became a
+  // <textarea> (multi-line entry), so that condition could never be true
+  // again: the wait burned its full 5s timeout, threw, and the REST OF THE
+  // TEXT WAS NEVER SENT — leaving the editor holding just "=" and no dropdown.
+  // The spec's own diagnostic said so in every failure
+  // (`{"editing":"=","active":"TEXTAREA","inputValue":"="}`) and was read as
+  // the app dropping keystrokes rather than the wait being unsatisfiable.
+  // `data-inline-editor` is the editor's stable hook precisely so a tag swap
+  // moves nothing; this was the one place in e2e that hardcoded the tag.
   await page.keyboard.type(text[0]);
   await page.waitForFunction(
-    () => document.activeElement?.tagName === "INPUT",
+    () =>
+      document.activeElement?.getAttribute("data-inline-editor") === "true",
     undefined,
     { timeout: 5000, polling: 200 }
   );

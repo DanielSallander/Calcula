@@ -31,6 +31,7 @@ import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { fileURLToPath } from "url";
 
 const CASE = process.env.CLOSE_CASE ?? "dirty";
 
@@ -46,7 +47,14 @@ const CASE = process.env.CLOSE_CASE ?? "dirty";
  * VACUOUSLY, reporting that no prompt appeared when in truth nothing had
  * looked. Vendored so the file is version-controlled with its only caller.
  */
-const WINDOW_LISTER = path.join(__dirname, "..", "list-app-windows.ps1");
+// `__dirname` DOES NOT EXIST HERE. This suite is ESM (package.json has
+// "type": "module"), and referencing `__dirname` throws at MODULE LOAD, which
+// Playwright reports as a collection error for the whole PROJECT — every
+// journey spec, not just this one, runs zero tests. That is how the vendoring
+// change landed: the file was edited but the journey project was never re-run,
+// and a suite that collects nothing looks nothing like a suite that fails.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const WINDOW_LISTER = path.join(HERE, "..", "list-app-windows.ps1");
 const BASE_FILE = path.join(os.tmpdir(), "calcula-dirty-close.cala");
 
 interface AppWindow {

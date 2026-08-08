@@ -2968,6 +2968,139 @@ smuggled the global past review as a feature probe). Probe deleted.
 
 ---
 
+### 3am. Running the functional suite found the one thing contract (c) asserted instead of checking
+
+**CLOSED 2026-08-08, from a cold app.** §3al(c) closed the inline-editor swap with: "`data-inline-editor`
+is an attribute, not a tag, so no E2E selector moved." The first half is true and the conclusion is
+false, and the functional suite says so in four tests.
+
+**`formula-autocomplete` was never an app race.** Its four failures were read for weeks as the inline
+editor dropping keystrokes during the mount hand-off — the spec's own header says so, and the
+register's suggested-order entry repeated it while correctly warning that the editor had become a
+`<textarea>` *after* that measurement. It is simpler than that. `typeFormula` sent the opening
+character and then waited for
+
+    document.activeElement?.tagName === "INPUT"
+
+before sending the rest. A `<textarea>` never satisfies that condition, so the wait burned its full
+5s timeout, threw, and **the remaining characters were never sent**. Every failure printed the proof
+in its own diagnostic — `{"editing":"=","active":"TEXTAREA","inputValue":"="}` — where
+`active: TEXTAREA` is not evidence of a race but of the wait being unsatisfiable. Fixed by waiting on
+the attribute (`data-inline-editor`) rather than the tag; it was the ONLY tag-based assumption left
+in `app/e2e/**`, and every product-side `tagName === "INPUT"` guard already had a `TEXTAREA` arm
+beside it, which is why nothing in the app misbehaved.
+
+**Why this is worth a section.** The claim "no E2E selector moved" was reached by reasoning about the
+selector strategy, not by grepping for the tag — one `rg '"INPUT"' e2e/` would have found it. That
+is the register's own recorded pattern, and this is its **fifth** instance: *a verdict reached by
+reasoning about a symptom is a hypothesis.* It also lands on the two items the previous pass listed
+as open, and settles both: the `formula-autocomplete` four had a root, and it was not the app.
+
+**The other eleven failures are one class, and it is already D5.** Every remaining failure in the run
+is a `toHaveScreenshot` comparison (each has a `-diff.png`; the four autocomplete failures have
+none). They are residue plus chrome: leftovers from sibling specs sitting in the captured viewport
+(the `grid` fixture does NO per-test cleanup — `resetGrid` is opt-in, and `edge-cases` parks at
+AE:AH exactly where `evaluate-formula` shoots), the scrollbar thumbs D5 is about, and in
+`paste-special` the marching-ants copy border that `screenshotGates.ts` already names as the only
+non-deterministic thing in either suite. The gates are deliberately tight (200 px on a 685k-px
+capture), so any of these fails honestly. **Eleven is also exactly D5's count.** Nothing here is a
+product defect and nothing was re-recorded; D5 remains the decision that closes them.
+
+---
+
+### 3an. `worker-extension*` — DIAGNOSED AND CLOSED, and the lead in the register was wrong
+
+Six failures across three specs, carried as "a genuine root, still unowned and NOT diagnosed". Run
+against a live app, they are **one root, in the test fixtures, and it is not the `__calcImport`
+second-copy theory** the previous entry proposed.
+
+**What the app actually said.** Reproducing the spec's own evaluate block and dumping the WHOLE audit
+ring — rather than the single filtered entry the spec looks up — gave:
+
+    sameModuleAcrossTwoImports: true      <- no duplicate module; the lead's premise is absent
+    mountOk: true,  mountError: ""
+    commandRegistered: false
+    auditEntries: [ { method: "ext.contribute.command", ok: false, error: "PermissionDenied" } ]
+
+The proxy command was never created, so `CommandRegistry.execute` did nothing, so the handler never
+ran, so `net.fetch` was never attempted, so there was no `cap.fetch` entry — which is the assertion
+that failed (`fetchAudited`). Every downstream symptom follows from the first line.
+
+**The cause is the CONTRIBUTION CEILING** (`admitContribution` in `extensionWorkerHost.ts`): an
+extension may only register a command whose id is listed under `contributes.commands` in its
+AUTHORITATIVE manifest, fail-closed, so the pre-install disclosure cannot be widened by the code
+afterwards. The three fixtures predate that ceiling and declare commands only in code. The product
+is behaving exactly as the transparency model requires; the fixtures were never updated. Fixed by
+declaring `contributes` in all six fixtures — including the SIDECAR manifest for the signed-manifest
+test, since that is the manifest the ceiling is read from, which is the point of signing it.
+
+Confirmed by rebuilding the spec's exact fixture with `contributes` added and nothing else changed:
+all six assertions pass, and the ring reads `ext.contribute.command` (ok) then `cap.fetch`
+(PermissionDenied) — the sequence the spec was written to observe.
+
+**Why the old lead was wrong, and it is the same lesson again.** `__calcImport` was blamed because
+§3b had blamed it before for something else. Two imports of the same URL return the SAME module here;
+the theory was never checked against the running app. **This is the sixth verdict in this register
+reached by reasoning about a symptom, and the sixth to be wrong.** The diagnostic that settled it in
+one run was: stop filtering, print everything the ring holds.
+
+### 3ao. What the live re-run found that no static check could — three regressions in this batch's own work
+
+The functional suite was run in full from a cold app (**512 passed / 21 failed / 11 skipped**, from
+495/34/11), every remaining failure was classified root-vs-cascade by re-running it cold, the roots
+were fixed, and the whole suite was then re-run cold to confirm:
+
+> **526 passed / 13 failed / 11 skipped (41.4 min)** — from the 495 / 34 / 11 baseline.
+> **+31 passed, -21 failed.** (The pass count includes 6 new tests: `inline-editor-live.spec.ts`.)
+
+That exercise found three defects in work this program had already reported as done.
+
+**1. `formula-autocomplete` was never an app race — and contract (c) asserted the thing that was
+false.** §3al(c) closed the `<textarea>` swap with "`data-inline-editor` is an attribute, not a tag,
+so no E2E selector moved." True of selectors, false of the suite: `typeFormula` waited for
+`document.activeElement?.tagName === "INPUT"`, which a `<textarea>` can never satisfy, so the wait
+burned its 5s timeout, threw, and **the rest of the text was never sent**. The spec printed
+`{"editing":"=","active":"TEXTAREA","inputValue":"="}` on every failure — `active: TEXTAREA` is the
+answer, not a symptom of a race. One `rg '"INPUT"' e2e/` would have found it; it was the only
+tag-based assumption left, and every product-side `tagName === "INPUT"` guard already had a
+`TEXTAREA` arm beside it. Fixed by waiting on the attribute. Four failures, gone.
+
+**2. The `dirty-flag-close` vendoring fix broke the ENTIRE journey project, and it was never
+re-run.** §3ak's fix wrote `path.join(__dirname, "..", "list-app-windows.ps1")`. This suite is ESM,
+so `__dirname` throws at MODULE LOAD, which Playwright reports as a collection error for the whole
+PROJECT: **`--project=journey` ran ZERO tests.** `global-setup.ts` and `global-teardown.ts` in the
+same folder already use `path.dirname(fileURLToPath(import.meta.url))`, so the convention existed and
+was diverged from. The irony is exact: §3ak was written about a spec that could pass without looking
+at anything, and shipped a change that made an entire project look at nothing. **A suite that
+collects nothing does not resemble a suite that fails** — the run ends in seconds with no failure
+list. Fixed; journey is back to **54 passed / 1 skipped**.
+
+**3. A visual golden IS stale from the `<textarea>` swap, so `visual` is 17/1, not 18/18.**
+`core-visual.spec.ts` "editing mode - inline editor visible" **fails cold in isolation** (so: root,
+not cascade). Two differences from the golden: the capture carries an ambient `A1:H5` range selection
+(the documented `clickCell` drift — the test clicks, then screenshots), and the editor's text is no
+longer clipped the way an `<input>` scrolled it. Contract (d) reported "no golden was re-recorded" as
+a virtue, and it was — but nobody re-ran `visual` after the swap, so the one golden the swap actually
+moved was recorded as a clean baseline. **Not re-recorded here either**: it needs a stated reason and
+the `clickCell` drift should be fixed first (use `navigateTo` before the capture), or the re-record
+just freezes the drift into the baseline.
+
+**Classification of the 21, since a raw count invites the same misreading the register warned about:**
+
+| failures | verdict | evidence |
+|---|---|---|
+| 4 `formula-autocomplete` | ROOT — **fixed** | tag-based wait, above; 4/4 green cold after |
+| 6 `worker-extension*` | ROOT — **fixed** | contribution ceiling, §3an; 6/6 green cold after |
+| 2 `evaluate-formula`, 1 `go-to-special` | **CASCADE** | pass cold in isolation; their diffs carry sibling residue (`edge-cases` parks at AE:AH, exactly where `evaluate-formula` shoots) |
+| 2 `paste-special` | ROOT, but **no product defect** | still fails cold ALONE; on a clean workbook the entire diff is the marching-ants copy border (which `screenshotGates.ts` already names as the only non-deterministic thing in either suite) plus the scrollbar thumb — D5's class |
+| 2 `state-consistency` | **FLAKY, not a regression** | passed in run 1 (1.1 min), failed in run 2 on the SAME build. The invariant is named `page-crashed`, but the app did **not** crash: it was still running, still on CDP and still serving commands after the run, with **zero panics** in the whole log. It is Playwright's "Target page, context or browser has been closed" against a random 64-step monkey sequence (seed 1786220272147) |
+| 2 `protection`, 1 `ribbon-tabs`, 3 `scrolling` | **NOT individually isolated** | the per-spec cold loop hung on `protection` and was stopped to protect the remaining required runs. `scrolling`'s diff shows a whole selection block differing — the `clickCell` drift signature — but that is an inference, not a measurement, and is recorded as such |
+
+The last row is deliberate. Everything else here was measured; that one was not, and the register has
+now been wrong six times by reasoning where it could have run something.
+
+---
+
 ## 4. OWNER DECISIONS — not work, product calls
 
 **These are for the owner. Nothing in this section is a defect awaiting a fix; each is a choice
@@ -3195,29 +3328,23 @@ What remains, in order. **Note the shape of what is left: there is no correctnes
 Two test-signal items with owners to find, two pieces of structural debt, and the decisions in
 section 4.
 
-1. **`worker-extension*` — six failures, a genuine root, still unowned and NOT diagnosed.** The three
-   specs (`worker-extension`, `-followups`, `-biquery`) fail with plain `expect(...).toBe(true)` and
-   no residue shape, so they survived the §3a cascade work that fixed everything around them. **This
-   pass did not run them** — rooting them out needs the app built and launched, and the honest
-   statement is that nobody has yet looked at them with the app in front of them. One lead worth
-   starting from, not a diagnosis: all three reach into the app through `window.__calcImport`, and
-   §3b established that this yields a SECOND module instance for a stateful module once Vite has
-   invalidated the original (the `?t=` query). If the mounted worker registers its proxy command in
-   one `CommandRegistry` and the spec executes against another, every assertion after `mountOk` fails
-   exactly as observed. Cheap first move: assert `mount.error === ""` and then compare
-   `CommandRegistry` identity against a published handle, the way §3b's residue guard had to.
-
-2. **`formula-autocomplete` — four failures that are not the cascade's.** The spec's own header
-   documents an inline-editor race; the diagnostic shows `{"editing":"=","inputValue":"="}`, i.e. the
-   `AV` never reached the textarea. Named separately because attributing it to the cascade would be
-   wrong. Note that the inline editor became a `<textarea>` in §3ag *after* this was last measured,
-   so re-measure before diagnosing.
-
-3. **`report_definitions`, the one store §3ai deliberately did not fold in.** Its persisted form
+1. **`report_definitions`, the one store §3ai deliberately did not fold in.** Its persisted form
    (`extension_data`) IS gated, so nothing is lost by forgetting the dirty flag — but nothing forces
    `sync_reports_to_extension_data` to be called either, and a report mutation that skips it is
    silently dropped at save. Different defect, different fix: make the mirror unreachable except
    through the sync.
+
+2. **The `visual` golden the `<textarea>` swap moved, and the `clickCell` drift under it.** §3ao(3).
+   `visual` is **17/1**, not the 18/18 this register has been quoting: "editing mode - inline editor
+   visible" fails COLD IN ISOLATION. Fix the drift first (`navigateTo` before the capture, the
+   documented remedy) and only then re-record, with the reason written down — re-recording first
+   just freezes an ambient selection into the baseline.
+
+3. **The three screenshot specs that were never isolated: `protection` (2), `ribbon-tabs` (1),
+   `scrolling` (3).** Everything else in the 21 was classified by running it; these were not, because
+   the per-spec cold loop hung on `protection`. `scrolling`'s diff looks like the `clickCell`
+   selection drift, which would make it the same item as (2) — but that is a hypothesis, and this
+   register's record on hypotheses is now 0 for 6. Run them cold, one spec per app.
 
 4. **The successor to the `AppState` conversion: `BiState` / `PivotState` / `ScriptState` /
    `PaneControlState`.** `DocumentEffect` gates *stores*, and the app's stores are now covered; what

@@ -17,7 +17,12 @@ test.describe("Worker extension follow-ups (Wave 3)", () => {
   }) => {
     const source = `
       export default {
-        manifest: { id:"e2e.menu.ext", name:"Menu Ext", version:"1.0.0", workerSupport:true, capabilities:[] },
+        manifest: {
+          id:"e2e.menu.ext", name:"Menu Ext", version:"1.0.0", workerSupport:true, capabilities:[],
+          // Contribution ceiling: BOTH surfaces must be declared. A menu item
+          // is declared as "<menuId>/<itemId>".
+          contributes: { commands:["act"], menuItems:["data/myitem"] }
+        },
         activate(ctx){
           ctx.commands.register("act", async () => { ctx.ui.notifications.showToast("clicked", { type: "info" }); });
           ctx.ui.menus.registerMenuItem("data", { id:"myitem", label:"My Item", command:"act" });
@@ -84,6 +89,10 @@ test.describe("Worker extension follow-ups (Wave 3)", () => {
         version: "1.0.0",
         capabilities: ["bi.query"],
         workerSupport: true,
+        // The contribution ceiling is read from the AUTHORITATIVE manifest —
+        // this sidecar, not the bundle — which is the whole point of the
+        // signed-manifest path: a publisher cannot widen it after signing.
+        contributes: { commands: ["list"] },
       });
       recordCapabilityGrant("extension:e2e.auth.ext", "bi.query");
       try { await CommandRegistry.execute("ext:e2e.auth.ext:list"); } catch { /* ignore */ }
@@ -122,7 +131,10 @@ test.describe("Worker extension follow-ups (Wave 3)", () => {
   }) => {
     const source = `
       export default {
-        manifest: { id:"e2e.ret.ext", name:"Ret Ext", version:"1.0.0", workerSupport:true, capabilities:[] },
+        manifest: {
+          id:"e2e.ret.ext", name:"Ret Ext", version:"1.0.0", workerSupport:true, capabilities:[],
+          contributes: { commands:["echo"] }
+        },
         activate(ctx){
           ctx.commands.register("echo", (args) => ({ got: args, doubled: (args && args.n ? args.n * 2 : 0) }));
         }
@@ -149,7 +161,10 @@ test.describe("Worker extension follow-ups (Wave 3)", () => {
   }) => {
     const source = `
       export default {
-        manifest: { id:"e2e.bisql.ext", name:"SQL Ext", version:"1.0.0", workerSupport:true, capabilities:["bi.sql"] },
+        manifest: {
+          id:"e2e.bisql.ext", name:"SQL Ext", version:"1.0.0", workerSupport:true, capabilities:["bi.sql"],
+          contributes: { commands:["run"] }
+        },
         activate(ctx){
           ctx.commands.register("run", async () => {
             try { await ctx.capabilities.biSql("no-such-conn", "SELECT 1"); return "ok"; }

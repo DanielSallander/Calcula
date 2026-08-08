@@ -25,7 +25,14 @@ export default {
     name: "E2E Worker Ext",
     version: "1.0.0",
     workerSupport: true,
-    capabilities: ["storage"]
+    capabilities: ["storage"],
+    // THE CONTRIBUTION CEILING. Declaring a command in code is not enough:
+    // \`admitContribution\` refuses any registration whose id is not listed
+    // here, fail-closed, so the pre-install disclosure cannot be widened by
+    // the code afterwards. Without it the proxy command is never created, the
+    // handler never runs, net.fetch is never attempted, and \`fetchAudited\`
+    // is false — which is exactly how this spec used to fail.
+    contributes: { commands: ["probe"] }
   },
   activate(ctx) {
     ctx.commands.register("probe", async () => {

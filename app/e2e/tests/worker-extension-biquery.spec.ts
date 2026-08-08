@@ -20,7 +20,10 @@ export default {
     name: "BI Query Ext",
     version: "1.0.0",
     workerSupport: true,
-    capabilities: ["bi.query"]
+    capabilities: ["bi.query"],
+    // Contribution ceiling — see worker-extension.spec.ts. A command that is
+    // not declared here is refused before it ever becomes a proxy command.
+    contributes: { commands: ["list"] }
   },
   activate(ctx) {
     ctx.commands.register("list", async () => {
