@@ -164,10 +164,84 @@ integration fixes were proved the same way: un-seeding the queue fails *"puts th
 same queue as the two reloaders"*; deleting the cross-sheet branch fails two tests; re-spelling the
 embedded predicate inline fails *"is asked by both the loader and the delete path, never re-spelled"*.
 
-**One thing to watch that was NOT run here:** the E2E projects (journey / visual / scenario / macro)
-were out of scope for a frontend-only pass. The `name` row is now first in the shape Properties
-pane's "Shape" group; no committed golden creates a shape, so no visual impact is expected, but that
-is reasoned rather than measured.
+**E2E COVERAGE — CLOSED 2026-08-08.** `app/e2e/journeys/shapes-hometab.spec.ts`, 8 tests in the
+`journey` project (tests 6 and 8 wipe/reopen the document and reload the frontend, so it cannot live
+in `e2e/tests`). It covers both §1a and §2a and it drives the PRODUCT, not the seam: real macros run
+from the real Macro Library (Developer ▸ Macros ▸ Run), the real Insert ▸ Shapes gallery, the real
+View menu and Customize dialog, the real Insert ▸ Controls ▸ Button, a real Design-Mode click and
+Delete, and the app's own `newFile` / `openFileAtPath`.
+
+The decisive oracles are RENDERED ones. A shape's presence is a canvas patch sampled through the
+app's live geometry and asserted in BOTH directions (0 before the create, ~1.0 after, 0 after the
+delete). A macro's outcome is the library's own `[data-macro-error]` / `[data-macro-output]` panes —
+a run that neither errors nor prints `[OK]` is reported as a hang rather than passing. And a Home-tab
+row break is measured as the number of distinct `getBoundingClientRect().top` values the group's
+buttons occupy, which no stored setting can satisfy.
+
+Covered: (1) `api.createShape` paints, its backend properties carry `pinToGrid: "false"` and `text`
+(with no `label` key anywhere), the returned handle names the control that exists, and
+`api.deleteShape` removes it from canvas AND backend; (2) a gallery shape and a script shape agree on
+all **17** property keys and on every value except `x` (with the `x`-differs / `y`-matches pair
+asserted so the exclusion is not vacuous); (3) `createShape("rectangel")` is refused with a message
+naming the id and listing accepted ones, and no control is created anywhere on the sheet; (4) an
+occupied anchor is refused and the first shape keeps its type and caption; (5) a button with a bound
+object script, deleted with a real click + Delete, takes its script with it, and a NEW button at the
+same anchor inherits nothing; (6) a shape survives save → `newFile` → reopen, and the other
+workbook's control follows neither the canvas nor the inventory; (7) View ▸ "Customize Home Tab..."
+opens the dialog and the ribbon still shows the seven default sections in order; (8) "Row Break" is
+enabled, placeable, and the ribbon re-lays the Cells group into three rows — and Reset-then-Cancel
+leaves the saved layout unchanged across a reload.
+
+**The assertions were shown to have teeth by reinstating each defect one at a time**, running only
+the affected test, and confirming it goes red at the assertion that names it: dropping the explicit
+`pinToGrid` fails *"pinToGrid is written EXPLICITLY as \"false\""* with `undefined`; renaming `text`
+to `label` fails *"the caption lives in `text`"*; deleting the anchor-collision check fails *"the
+collision is REFUSED"*; restoring the `controlType === "shape"` gate on the script cleanup fails
+*"the object script went WITH it"* and prints the surviving script; making `resetLayout` call
+`localStorage.removeItem` again fails *"it is STILL the customised layout after a reload"* with 2
+where 3 is required.
+
+**THREE DEFECTS FOUND BY THE LIVE RUN, all fixed.**
+
+- **Saving a Home-tab customisation kicked the user off the Home tab.** The `homeTab:layoutChanged`
+  handler called `unregisterPanel(HOME_TAB_ID)` before re-registering, so the tab momentarily did not
+  exist — and `RibbonContainer`'s active-tab reconciliation falls back to the first non-contextual tab
+  when the current one disappears. The user pressed **Save** and landed on Page Layout with their
+  newly customised Home tab off screen. `registerPanel` already upserts by id (the panel registry
+  `set`s and `registerRibbonTab` overwrites), so the fix is to re-register IN PLACE and never
+  unregister. Pinned by *"Save did not kick the ribbon onto another tab"*, which fails when the
+  unregister is put back.
+- **Removing control metadata straight from the backend left PHANTOMS on the canvas.** Removing a control's backend
+  metadata does not touch the frontend floating store, and the store is only swapped when the sheet
+  actually CHANGES (`reloadForSheetChange` short-circuits on `nextSheet === loadedSheetIndex`), so
+  re-emitting SHEET_CHANGED for the current sheet is a no-op. A leftover shape kept painting into the
+  next test's probe. Test-side fix: deletion goes through the provider's own `deleteControl`.
+- **The canvas probe trusted `config.rowHeaderWidth` when the headings were hidden.** The renderer
+  substitutes 0/0 for `rowHeaderWidth`/`colHeaderHeight` when `displayHeadings === false`
+  (`gridRenderer/core.ts`) while `gs.config` keeps reporting 22/20, so the probe sampled 22px left and
+  20px above the truth and scored a perfectly painted shape at 0.80. `anchorOrigin` now applies the
+  renderer's own rule. `e2e/helpers/grid.ts`'s shared `readGridGeometry` has the SAME gap and is
+  **not** fixed here — every other spec runs with headings on, and changing a shared helper under a
+  baseline reproduction was not worth the blast radius. It is a real trap for the next spec.
+
+**TWO PRE-EXISTING DEFECTS OBSERVED, NOT FIXED (out of scope, recorded so they are not re-found).**
+
+- **`set_sheet_display_flags` does not drive the renderer, and `new_file` does not reset it.**
+  `dirty-flag.spec.ts` restores the view flags through that command and then calls `new_file`; the
+  frontend's Core state is fed by `DISPLAY_*_TOGGLED` events and never hears about either, so the
+  whole rest of the journey run renders with the row/column headings switched OFF while the backend
+  reports them ON. The new spec repairs the frontend flags itself before it measures anything.
+- **On that headings-off canvas, a floating control could not be selected by clicking it** — not at
+  its painted position and not at the config-offset position either. Measured, not characterised; it
+  belongs to the headings feature rather than to the controls seam, and the design-mode toast is
+  throttled, so "no toast" is suggestive rather than conclusive. Worth a look before anyone ships a
+  hide-headings workflow.
+
+**Live results (each suite from a COLD app launch, `E2E_MANUAL=1`).** journey **38 passed / 1
+skipped** (31 pre-existing = 30 passed / 1 skipped, unchanged, + this file's 8); visual **18/18**;
+scenario **24/24**; the 11 macro/VBA specs **55 passed / 1 failed** — `macro-live-edit` test 6, the
+known pre-existing HEAD failure, untouched. `scriptable-shapes` (40), `scriptable-objects` (26),
+`table-namedrange-script` (2) and `macro-recorder-journey` (1) were run alongside and are all green.
 
 ### 1b. Pictures — COMPLETE 2026-08-07 (backend, script host and frontend all shipped)
 
@@ -598,6 +672,30 @@ rather than the report: `DEFAULT_LAYOUT` is simultaneously what `loadLayout()` r
 miss, what `migrateLayout` falls back to when a saved layout has nothing renderable left, what
 `resetLayout()` clones, and — through `buildSections(loadLayout())` — what the ribbon renders;
 `resetLayout` touches no storage at all, and the only write in the dialog is `handleSave`'s.
+
+**LIVE E2E — CLOSED 2026-08-08, and it found a fourth bug.** Tests 7 and 8 of
+`app/e2e/journeys/shapes-hometab.spec.ts` (see §1a for the whole file) drive the real View menu, the
+real dialog and the real ribbon. Test 7 asserts the entry point is present, that clicking it OPENS
+the dialog, that the dialog holds one card per ribbon group, and that the seven default sections are
+still in their default order — the owner's constraint, measured rather than reasoned. Test 8 adds a
+Row Break to Cells, moves it one place left with the chip's own arrow, saves, and asserts the RIBBON
+re-lays that group from two rendered rows into three; then Reset-then-Cancel, then a reload, and the
+layout is still the customised one. The dialog gained `data-hometab-*` hooks for this (dialog root,
+group card, item chip + move-left, add-to select, available-command buttons, the three footer
+buttons) — it had no test hooks at all, and `[class*=…]` selectors do not work against
+styled-components hashes.
+
+Two assertions are pinned against vacuity from inside: "Row Break is enabled" is paired with "an
+already-placed single-instance command (`bold`) IS disabled", and the reset/cancel claim is checked
+after a real frontend reload rather than against in-memory state. Both were confirmed to fail when
+their defect is reinstated.
+
+**The fourth bug, found on the running app: pressing Save threw the user off the Home tab.**
+`layoutChangedHandler` unregistered the panel before re-registering it, so the tab momentarily did
+not exist and `RibbonContainer` fell back to the first non-contextual tab — Page Layout. The
+customised Home tab was off screen, and the re-register that followed could not take the selection
+back because "pageLayout" was by then a perfectly valid current tab. Fixed by re-registering IN PLACE
+(`registerPanel` upserts by id); pinned by *"Save did not kick the ribbon onto another tab"*.
 
 **STILL OPEN.** Two, both stated above and neither closed here: `cells: collapsePriority` is still
 the accidental **99** awaiting a product call (55 is the candidate), and the Home-tab-header

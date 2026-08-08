@@ -166,6 +166,36 @@ async function allowScripts(page: Page): Promise<void> {
 }
 
 /**
+ * Put the FRONTEND view flags back to normal before anything is measured.
+ *
+ * This is not defensive padding — it is repair. `dirty-flag.spec.ts` runs
+ * earlier in this project and restores the view flags with
+ * `set_sheet_display_flags`, which writes the BACKEND only: the renderer reads
+ * Core state, which is fed by `DISPLAY_*_TOGGLED` events, and neither that
+ * command nor the `new_file` that follows re-syncs it. So the rest of the
+ * journey run renders with the row/column headings switched OFF while the
+ * backend reports them ON — and a control clicked at its painted position on
+ * that canvas is not selected at all (measured, not inferred; the cause was not
+ * chased further here because it belongs to the headings feature, not to this
+ * one). Anything that clicks or samples the grid has to normalise first.
+ */
+async function normalizeViewState(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const api: any = await (window as any).__calcImport(
+      new URL("/src/api/index.ts", document.baseURI).href,
+    );
+    api.emitAppEvent(api.AppEvents.DISPLAY_HEADINGS_TOGGLED, { displayHeadings: true });
+    api.emitAppEvent(api.AppEvents.DISPLAY_GRIDLINES_TOGGLED, { displayGridlines: true });
+    const grid: any = await (window as any).__calcImport(
+      new URL("/src/api/grid.ts", document.baseURI).href,
+    );
+    try { grid.setZoomLevel(100); } catch { /* not available */ }
+    try { grid.changeViewMode("normal"); } catch { /* not available */ }
+  });
+  await page.waitForTimeout(400);
+}
+
+/**
  * Clear this spec's private patch and remove every control inside it.
  *
  * Deletion goes through the CONTROLS PROVIDER, not through
@@ -387,14 +417,31 @@ async function bringAnchorIntoView(grid: any, row: number, col: number): Promise
 
 type Pixel = [number, number, number];
 
-/** The anchor cell's top-left corner in CANVAS CSS pixels, from LIVE geometry:
- *  per-column widths, hidden lines, the scroll offset and the zoom factor. */
+/**
+ * The anchor cell's top-left corner in CANVAS CSS pixels, from LIVE geometry:
+ * per-column widths, hidden lines, the scroll offset, the zoom factor — and
+ * whether the ROW/COLUMN HEADINGS are being drawn at all.
+ *
+ * That last one is not hypothetical and it is not this spec's own doing: the
+ * headings are a persisted per-sheet view flag, so a document another journey
+ * spec saved with `displayHeadings: false` and this suite later reopens brings
+ * them back switched off. `gs.config` keeps reporting 22/20 when that happens —
+ * the renderer substitutes 0/0 itself (`gridRenderer/core.ts`) — so a probe that
+ * trusts the config samples 22px left and 20px above the truth and reports ~0.80
+ * for a shape that is painted perfectly. Same rule as the renderer, read from
+ * the same live state.
+ */
 async function anchorOrigin(
   page: Page,
   row: number,
   col: number,
 ): Promise<{ x: number; y: number; zoom: number }> {
   const geo = await readGridGeometry(page);
+  const headingsShown = await page.evaluate(
+    () => (window as any).__CALCULA_GRID_STATE__?.displayHeadings !== false,
+  );
+  const rowHeaderWidth = headingsShown ? geo.rowHeaderWidth : 0;
+  const colHeaderHeight = headingsShown ? geo.colHeaderHeight : 0;
   const hiddenCols = new Set(geo.hiddenCols);
   const hiddenRows = new Set(geo.hiddenRows);
   let xOffset = 0;
@@ -406,8 +453,8 @@ async function anchorOrigin(
     yOffset += hiddenRows.has(r) ? 0 : geo.rowHeights[r] ?? geo.defaultCellHeight;
   }
   return {
-    x: (geo.rowHeaderWidth + xOffset - geo.scrollX) * geo.zoom,
-    y: (geo.colHeaderHeight + yOffset - geo.scrollY) * geo.zoom,
+    x: (rowHeaderWidth + xOffset - geo.scrollX) * geo.zoom,
+    y: (colHeaderHeight + yOffset - geo.scrollY) * geo.zoom,
     zoom: geo.zoom,
   };
 }
@@ -634,6 +681,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     const idCell = refOf(A_RENDER.row, 63);
 
     await allowScripts(page);
+    await normalizeViewState(page);
     await clearPatch(page);
 
     try {
@@ -738,6 +786,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     const scriptId = `${ID_PREFIX}recipe-${stamp}`;
 
     await allowScripts(page);
+    await normalizeViewState(page);
     await clearPatch(page);
 
     try {
@@ -831,6 +880,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     const badId = `${ID_PREFIX}bad-${stamp}`;
 
     await allowScripts(page);
+    await normalizeViewState(page);
     await clearPatch(page);
 
     try {
@@ -892,6 +942,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     const secondId = `${ID_PREFIX}second-${stamp}`;
 
     await allowScripts(page);
+    await normalizeViewState(page);
     await clearPatch(page);
 
     try {
@@ -955,6 +1006,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     test.setTimeout(300_000);
 
     await allowScripts(page);
+    await normalizeViewState(page);
     await clearPatch(page);
 
     const sheet = await activeSheetIndex(page);
@@ -1104,6 +1156,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     test.setTimeout(900_000);
 
     await allowScripts(page);
+    await normalizeViewState(page);
     await clearPatch(page);
 
     try {

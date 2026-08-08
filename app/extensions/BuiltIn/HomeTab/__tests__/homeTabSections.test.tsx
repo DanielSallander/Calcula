@@ -168,14 +168,34 @@ describe("the Customize entry point", () => {
     extension.deactivate?.();
   });
 
-  it("re-registers the panel when the dialog announces a new layout", () => {
+  /**
+   * The panel is re-registered IN PLACE — it must never be unregistered first.
+   *
+   * `registerPanel` upserts by id (the panel registry `set`s, and
+   * `registerRibbonTab` overwrites), so a bare re-register replaces the tab
+   * without it ever being absent. Unregistering first made the Home tab
+   * momentarily NOT EXIST, and `RibbonContainer`'s active-tab reconciliation
+   * falls back to the first non-contextual tab when the current one disappears
+   * — so pressing Save in "Customize Home Tab..." dumped the user onto Page
+   * Layout with their newly customised Home tab off screen. Found on the
+   * running app (`e2e/journeys/shapes-hometab.spec.ts` test 8).
+   */
+  it("re-registers the panel IN PLACE on a layout change, never unregistering it first", () => {
     activate();
     registerPanel.mockClear();
+    unregisterPanel.mockClear();
 
     window.dispatchEvent(new Event("homeTab:layoutChanged"));
 
-    expect(unregisterPanel).toHaveBeenCalledWith("home");
     expect(registerPanel).toHaveBeenCalledTimes(1);
+    expect(unregisterPanel).not.toHaveBeenCalled();
     extension.deactivate?.();
+  });
+
+  it("still unregisters the panel on deactivate", () => {
+    activate();
+    unregisterPanel.mockClear();
+    extension.deactivate?.();
+    expect(unregisterPanel).toHaveBeenCalledWith("home");
   });
 });
