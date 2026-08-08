@@ -533,7 +533,7 @@ pub async fn refresh_model_writeback(state: &AppState, bi_state: &BiState) {
         return;
     }
     let (store, floor) = {
-        let store = match state.model_writeback.lock() {
+        let store = match state.model_writeback.read() {
             Ok(s) => s.clone(),
             Err(_) => return,
         };
@@ -629,7 +629,11 @@ pub async fn bi_writeback_set_value(
             submitted_at: chrono::Utc::now().to_rfc3339(),
             state: "approved".to_string(),
         };
-        let mut store = state.model_writeback.lock().map_err(|e| e.to_string())?;
+        // The append IS the document change; every gate above (writeback
+        // column resolved, key arity, value parse, editor allow-list) has
+        // already had its chance to refuse.
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut store = state.model_writeback.write(&effect).map_err(|e| e.to_string())?;
         store
             .entries
             .entry(wb.id().to_string())
@@ -640,7 +644,7 @@ pub async fn bi_writeback_set_value(
     // Re-feed this engine from the merged (local + distributed) history.
     let store = state
         .model_writeback
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .clone();
     let distributed = collect_distributed_writeback_entries(&state);
@@ -660,6 +664,11 @@ pub async fn bi_writeback_set_value(
         .map_err(|e| e.to_string())?;
     drop(engine);
 
+    // The SUBSCRIBED branch above submits to the package registry rather than
+    // to `state.model_writeback`, and it has no store write to hang an effect
+    // on -- so it keeps one here. The local branch already minted its own at
+    // the append; a second `mutates` on an already-dirty document announces
+    // nothing and sets nothing new.
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
@@ -734,7 +743,7 @@ pub fn bi_writeback_get_values(
     )?;
     Ok(state
         .model_writeback
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .entries
         .get(&writeback_id)

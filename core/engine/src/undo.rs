@@ -38,9 +38,18 @@ pub struct GridSnapshot {
 /// Represents a single atomic change that can be undone.
 #[derive(Debug, Clone)]
 pub enum CellChange {
-    /// A cell was modified: (row, col, previous_cell_state)
+    /// A cell was modified: (sheet, row, col, previous_cell_state)
     /// If previous_cell_state is None, the cell was empty before.
+    ///
+    /// `sheet` is the sheet index the change was recorded ON. It is not
+    /// decoration: without it an undo entry cannot say WHICH sheet it
+    /// restores, so a restore issued after a sheet switch landed on
+    /// whatever sheet happened to be active and silently overwrote it.
+    /// That is the same sheet-blindness that made cross-sheet
+    /// recalculation wrong (BUG-0019) and that left the restore -> recalc
+    /// seed channel unable to express an off-sheet seed at all.
     SetCell {
+        sheet: usize,
         row: u32,
         col: u32,
         previous: Option<Cell>,
@@ -160,8 +169,14 @@ impl UndoStack {
 
     /// Record a cell change. If a transaction is open, add to it.
     /// Otherwise, create a single-change transaction.
-    pub fn record_cell_change(&mut self, row: u32, col: u32, previous: Option<Cell>) {
-        let change = CellChange::SetCell { row, col, previous };
+    pub fn record_cell_change(
+        &mut self,
+        sheet: usize,
+        row: u32,
+        col: u32,
+        previous: Option<Cell>,
+    ) {
+        let change = CellChange::SetCell { sheet, row, col, previous };
         
         if let Some(ref mut transaction) = self.current_transaction {
             transaction.add_change(change);
@@ -392,7 +407,7 @@ mod tests {
     fn test_single_undo() {
         let mut stack = UndoStack::new();
         
-        stack.record_cell_change(0, 0, None);
+        stack.record_cell_change(0, 0, 0, None);
         assert!(stack.can_undo());
         assert!(!stack.can_redo());
         
@@ -406,9 +421,9 @@ mod tests {
         let mut stack = UndoStack::new();
         
         stack.begin_transaction("Paste 3 cells");
-        stack.record_cell_change(0, 0, None);
-        stack.record_cell_change(0, 1, Some(make_cell(1.0)));
-        stack.record_cell_change(0, 2, Some(make_cell(2.0)));
+        stack.record_cell_change(0, 0, 0, None);
+        stack.record_cell_change(0, 0, 1, Some(make_cell(1.0)));
+        stack.record_cell_change(0, 0, 2, Some(make_cell(2.0)));
         stack.commit_transaction();
         
         assert!(stack.can_undo());
@@ -421,7 +436,7 @@ mod tests {
     fn test_redo_after_undo() {
         let mut stack = UndoStack::new();
         
-        stack.record_cell_change(0, 0, None);
+        stack.record_cell_change(0, 0, 0, None);
         let transaction = stack.pop_undo().unwrap();
         stack.push_redo(transaction);
         
@@ -434,14 +449,14 @@ mod tests {
     fn test_redo_cleared_on_new_action() {
         let mut stack = UndoStack::new();
         
-        stack.record_cell_change(0, 0, None);
+        stack.record_cell_change(0, 0, 0, None);
         let transaction = stack.pop_undo().unwrap();
         stack.push_redo(transaction);
         
         assert!(stack.can_redo());
         
         // New action should clear redo
-        stack.record_cell_change(1, 1, None);
+        stack.record_cell_change(0, 1, 1, None);
         assert!(!stack.can_redo());
     }
 
@@ -449,10 +464,10 @@ mod tests {
     fn test_max_size_enforcement() {
         let mut stack = UndoStack::with_max_size(3);
         
-        stack.record_cell_change(0, 0, None);
-        stack.record_cell_change(1, 1, None);
-        stack.record_cell_change(2, 2, None);
-        stack.record_cell_change(3, 3, None); // Should evict oldest
+        stack.record_cell_change(0, 0, 0, None);
+        stack.record_cell_change(0, 1, 1, None);
+        stack.record_cell_change(0, 2, 2, None);
+        stack.record_cell_change(0, 3, 3, None); // Should evict oldest
         
         assert_eq!(stack.stack_sizes().0, 3);
     }
@@ -472,7 +487,7 @@ mod tests {
         let mut stack = UndoStack::new();
         
         // Set up some redo state
-        stack.record_cell_change(0, 0, None);
+        stack.record_cell_change(0, 0, 0, None);
         let txn = stack.pop_undo().unwrap();
         stack.push_redo(txn);
         

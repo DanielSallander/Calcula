@@ -6,6 +6,7 @@
 
 import type { GridConfig, DimensionOverrides, InsertionAnimation } from "../../../types";
 import { ensureDimensions } from "../styles/styleUtils";
+import { rowHeaderGutter, colHeaderGutter } from "./headerVisibility";
 
 /**
  * Get the width of a specific column, using custom width if set.
@@ -66,7 +67,7 @@ export function getColumnX(
   insertionAnimation?: InsertionAnimation
 ): number {
   const dims = ensureDimensions(dimensions);
-  let x = (config.rowHeaderWidth || 50) + offsetX;
+  let x = (rowHeaderGutter(config)) + offsetX;
   for (let c = startCol; c < col; c++) {
     x += getColumnWidth(c, config, dims);
   }
@@ -108,7 +109,7 @@ export function getRowY(
   insertionAnimation?: InsertionAnimation
 ): number {
   const dims = ensureDimensions(dimensions);
-  let y = (config.colHeaderHeight || 24) + offsetY;
+  let y = (colHeaderGutter(config)) + offsetY;
   for (let r = startRow; r < row; r++) {
     y += getRowHeight(r, config, dims);
   }

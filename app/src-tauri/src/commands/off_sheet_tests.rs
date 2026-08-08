@@ -48,22 +48,22 @@ fn two_sheet_state(seed_sheet2: impl FnOnce(&mut engine::Grid)) -> AppState {
         let mut grid2 = engine::Grid::new();
         seed_sheet2(&mut grid2);
         state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(grid2);
-        state.sheet_names.lock().unwrap().push("Sheet2".to_string());
-        state.all_column_widths.lock().unwrap().push(HashMap::new());
-        state.all_row_heights.lock().unwrap().push(HashMap::new());
+        state.sheet_names.write(&crate::document_effect::test_seed_effect()).unwrap().push("Sheet2".to_string());
+        state.all_column_widths.write(&crate::document_effect::test_seed_effect()).unwrap().push(HashMap::new());
+        state.all_row_heights.write(&crate::document_effect::test_seed_effect()).unwrap().push(HashMap::new());
         // create_app_state leaves all_merged_regions EMPTY (the mirror holds
         // the active sheet's set); size it for both sheets so tests can index.
         {
-            let mut all = state.all_merged_regions.lock().unwrap();
+            let mut all = state.all_merged_regions.write(&crate::document_effect::test_seed_effect()).unwrap();
             while all.len() < 2 {
                 all.push(HashSet::new());
             }
         }
         state
             .sheet_ids
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
-            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
     }
     // The active mirror gets a sentinel so cross-contamination is detectable.
     state
@@ -77,7 +77,7 @@ fn two_sheet_state(seed_sheet2: impl FnOnce(&mut engine::Grid)) -> AppState {
 
 /// Enable sheet protection with Excel-default options (everything disallowed).
 fn protect_sheet(state: &AppState, sheet: usize) {
-    state.sheet_protection.lock().unwrap().insert(
+    state.sheet_protection.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
         sheet,
         crate::protection::SheetProtection {
             protected: true,
@@ -239,7 +239,7 @@ fn off_sheet_delete_columns_shifts_left_on_the_target_only() {
 #[test]
 fn off_sheet_structural_edit_moves_the_target_sheets_row_heights() {
     let state = two_sheet_state(|_| {});
-    state.all_row_heights.lock().unwrap()[1].insert(5, 44.0);
+    state.all_row_heights.write(&crate::document_effect::test_seed_effect()).unwrap()[1].insert(5, 44.0);
     let a = aux();
 
     off_sheet_structural_edit(
@@ -249,7 +249,7 @@ fn off_sheet_structural_edit_moves_the_target_sheets_row_heights() {
     )
     .expect("insert succeeds");
 
-    let all_rh = state.all_row_heights.lock().unwrap();
+    let all_rh = state.all_row_heights.read().unwrap();
     assert_eq!(all_rh[1].get(&7), Some(&44.0), "height moved with its row");
     assert_eq!(all_rh[1].get(&5), None);
 }
@@ -310,8 +310,10 @@ fn off_sheet_merge_clears_slaves_and_tags_both_undo_payloads() {
     });
     let a = aux();
 
-    let result = crate::merge_commands::merge_cells_off_sheet(&state, &a.file, 1, 1, 1, 2, 2)
-        .expect("merge succeeds");
+    let result = crate::merge_commands::merge_cells_off_sheet(
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters, 1, 1, 1, 2, 2,
+    )
+    .expect("merge succeeds");
     assert!(result.success);
 
     assert_eq!(value_at(&state, 1, 1, 1), Some(CellValue::Number(1.0)), "master keeps content");
@@ -319,8 +321,8 @@ fn off_sheet_merge_clears_slaves_and_tags_both_undo_payloads() {
     mirror_untouched(&state);
 
     // Geometry landed in the SHEET-2 store, not the active mirror's set.
-    assert_eq!(state.all_merged_regions.lock().unwrap()[1].len(), 1);
-    assert!(state.merged_regions.lock().unwrap().is_empty(), "active mirror set untouched");
+    assert_eq!(state.all_merged_regions.read().unwrap()[1].len(), 1);
+    assert!(state.merged_regions.read().unwrap().is_empty(), "active mirror set untouched");
 
     let restores = undo_restores(&state);
     let cells = restores
@@ -341,6 +343,42 @@ fn off_sheet_merge_clears_slaves_and_tags_both_undo_payloads() {
 }
 
 #[test]
+fn off_sheet_merge_recalculates_the_formulas_that_read_its_slaves() {
+    // THE 12TH MEMBER of the §2m class, and the mirror of the asymmetry that
+    // hid `sort_range`: the ACTIVE merge path seeds the shared cascade, this
+    // twin recalculated nothing — so merging on the sheet you were NOT looking
+    // at left `=C3` showing the value of a cell the merge had just destroyed.
+    let state = two_sheet_state(|g| {
+        g.set_cell(1, 1, Cell::new_number(1.0)); // master
+        g.set_cell(2, 2, Cell::new_number(9.0)); // slave — the merge erases it
+        g.set_cell(5, 0, Cell::new_formula("C3".to_string())); // reads the slave
+    });
+    let a = aux();
+
+    // Precondition: the reader is showing the slave's value, so the assertion
+    // below cannot pass for a formula that was never evaluated at all.
+    crate::calculation::recalculate_sheet_values(&state, &a.files, &a.pivots, 1, None);
+    assert_eq!(
+        value_at(&state, 1, 5, 0),
+        Some(CellValue::Number(9.0)),
+        "precondition: the reader sees the slave before the merge"
+    );
+
+    crate::merge_commands::merge_cells_off_sheet(
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters, 1, 1, 1, 2, 2,
+    )
+    .expect("merge succeeds");
+
+    assert_eq!(value_at(&state, 1, 2, 2), None, "slave cleared");
+    assert_eq!(
+        value_at(&state, 1, 5, 0),
+        Some(CellValue::Number(0.0)),
+        "the formula reading the destroyed slave still reports its old value — \
+         `merge_cells_off_sheet` rewrote cells without recalculating anything"
+    );
+}
+
+#[test]
 fn off_sheet_merge_is_blocked_by_target_protection() {
     let state = two_sheet_state(|g| {
         g.set_cell(2, 2, Cell::new_number(9.0));
@@ -348,8 +386,10 @@ fn off_sheet_merge_is_blocked_by_target_protection() {
     protect_sheet(&state, 1);
     let a = aux();
 
-    let err = crate::merge_commands::merge_cells_off_sheet(&state, &a.file, 1, 1, 1, 2, 2)
-        .expect_err("protected target must refuse the merge");
+    let err = crate::merge_commands::merge_cells_off_sheet(
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters, 1, 1, 1, 2, 2,
+    )
+    .expect_err("protected target must refuse the merge");
     assert!(err.to_lowercase().contains("protect"), "{err}");
     assert_eq!(value_at(&state, 1, 2, 2), Some(CellValue::Number(9.0)), "slave survives");
 }
@@ -357,7 +397,7 @@ fn off_sheet_merge_is_blocked_by_target_protection() {
 #[test]
 fn off_sheet_unmerge_removes_the_region_and_tags_the_undo() {
     let state = two_sheet_state(|_| {});
-    state.all_merged_regions.lock().unwrap()[1].insert(crate::api_types::MergedRegion {
+    state.all_merged_regions.write(&crate::document_effect::test_seed_effect()).unwrap()[1].insert(crate::api_types::MergedRegion {
         start_row: 1,
         start_col: 1,
         end_row: 2,
@@ -368,7 +408,7 @@ fn off_sheet_unmerge_removes_the_region_and_tags_the_undo() {
     let result = crate::merge_commands::unmerge_cells_off_sheet(&state, &a.file, 1, 1, 1)
         .expect("unmerge succeeds");
     assert!(result.success);
-    assert!(state.all_merged_regions.lock().unwrap()[1].is_empty());
+    assert!(state.all_merged_regions.read().unwrap()[1].is_empty());
 
     let restores = undo_restores(&state);
     let (_, data) = restores

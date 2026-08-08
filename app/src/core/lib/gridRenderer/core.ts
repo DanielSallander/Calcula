@@ -38,6 +38,7 @@ import {
   calculateScrollableRange,
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
+import { effectiveGridConfig, resolveHeaderSizes, rowHeaderGutter, colHeaderGutter } from "./layout/headerVisibility";
 import { buildCellFont, pointsToPixels } from "./fonts";
 import { cellKey } from "../../../core/types";
 import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
@@ -614,13 +615,17 @@ export function renderGrid(
   // Reference style - "R1C1" renders formulas (and headers) in R1C1 notation
   referenceStyle?: "A1" | "R1C1",
 ): void {
-  // When headings are hidden, collapse header dimensions to 0
-  // so the cell area expands to fill the full canvas
-  const effectiveConfig = displayHeadings === false
-    ? { ...config, rowHeaderWidth: 0, colHeaderHeight: 0 }
-    : config;
-  const rowHeaderWidth = effectiveConfig.rowHeaderWidth || (displayHeadings === false ? 0 : 50);
-  const colHeaderHeight = effectiveConfig.colHeaderHeight || (displayHeadings === false ? 0 : 24);
+  // When headings are hidden, collapse header dimensions to 0 so the cell area
+  // expands to fill the full canvas.
+  //
+  // THE RULE LIVES IN `layout/headerVisibility.ts` AND NOWHERE ELSE. It used to
+  // live here, as a private local, while the hit-tester, the inline editor and
+  // the E2E geometry helper all read `config.rowHeaderWidth` straight -- which
+  // keeps reporting 22 when the headings are hidden. The painter and everything
+  // that answers "what is at this pixel" were then a header-size apart. See that
+  // module for the list of things that were wrong because of it.
+  const effectiveConfig = effectiveGridConfig(config, displayHeadings);
+  const { rowHeaderWidth, colHeaderHeight } = resolveHeaderSizes(config, displayHeadings);
 
   const dims = dimensions || {
     columnWidths: new Map(),
@@ -1003,8 +1008,8 @@ function drawPageLayoutOverlay(
   canvasHeight: number,
   pageSetup: { marginTop: number; marginBottom: number; marginLeft: number; marginRight: number; paperWidth: number; paperHeight: number; header: string; footer: string },
 ): void {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const scrollX = viewport.scrollX || 0;
   const scrollY = viewport.scrollY || 0;
 

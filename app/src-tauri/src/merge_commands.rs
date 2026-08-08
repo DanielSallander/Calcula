@@ -29,6 +29,10 @@ fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
 pub(crate) fn merge_cells_off_sheet(
     state: &AppState,
     file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     target: usize,
     start_row: u32,
     start_col: u32,
@@ -112,6 +116,11 @@ pub(crate) fn merge_cells_off_sheet(
         }
     }
 
+    // Whether anything a formula can READ was destroyed, captured before
+    // `previous_cells` is moved into the undo snapshot below. A merge over
+    // empty cells changes no value, so it must not pay for a recalculation.
+    let previous_cells_were_empty = previous_cells.is_empty();
+
     // ONE transaction: slave cells + merge geometry.
     {
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
@@ -137,13 +146,32 @@ pub(crate) fn merge_cells_off_sheet(
     }
 
     // Add the merged region to the target sheet's set.
+    // Past every gate; the insert below is the commit.
+    let merge_effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let merged_regions: Vec<MergedRegion> =
-        crate::report::with_sheet_merges(state, target, |merged| {
+        crate::report::with_sheet_merges_mut(state, &merge_effect, target, |merged| {
             merged.insert(new_region.clone());
             merged.iter().cloned().collect()
         });
 
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // PHASE B — dependents (§2m). A merge DESTROYS every slave cell, so any
+    // formula reading one is stale the moment this returns. The ACTIVE path
+    // seeds the shared cascade; this twin did not, which is the same
+    // active/off-sheet asymmetry that hid `sort_range` and `clear_range` —
+    // mirrored, so here it was the sheet you were NOT looking at that stayed
+    // wrong. Every guard taken above is scoped to its own block, so this runs
+    // as a second lock phase (`recalc_after_off_sheet_write` takes the same
+    // grid and dependency mutexes, and std mutexes are not reentrant).
+    if !previous_cells_were_empty {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &[target],
+        );
+    }
 
     // No updated_cells: the active canvas shows nothing from the target sheet,
     // and the sheet re-materializes from grids[target] on switch.
@@ -161,6 +189,10 @@ pub(crate) fn merge_cells_off_sheet(
 pub fn merge_cells(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -169,10 +201,10 @@ pub fn merge_cells(
 ) -> Result<MergeResult, String> {
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if let Some(target) = sheet_index {
             if target != active {
-                let count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+                let count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
                 if target >= count {
                     return Err(format!(
                         "Sheet index {} out of range: workbook has {} sheet(s)",
@@ -180,7 +212,17 @@ pub fn merge_cells(
                     ));
                 }
                 return merge_cells_off_sheet(
-                    &state, &file_state, target, start_row, start_col, end_row, end_col,
+                    &state,
+                    &file_state,
+                    &user_files_state,
+                    &pivot_state,
+                    &pane_control_state,
+                    &ribbon_filter_state,
+                    target,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
                 );
             }
         }
@@ -191,7 +233,7 @@ pub fn merge_cells(
     // any other write, plus the formatCells option (merge is an alignment
     // format operation in Excel's taxonomy).
     {
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_protection_range(
             &state,
             active_sheet,
@@ -219,9 +261,9 @@ pub fn merge_cells(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
     let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let mut merged_regions = state.merged_regions.write(&effect).map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
@@ -280,7 +322,7 @@ pub fn merge_cells(
             }
             let previous = grid.get_cell(row, col).cloned();
             if previous.is_some() {
-                undo_stack.record_cell_change(row, col, previous);
+                undo_stack.record_cell_change(active_sheet, row, col, previous);
             }
         }
     }
@@ -294,6 +336,10 @@ pub fn merge_cells(
 
     // Clear all cells in the range except the master
     let mut updated_cells = Vec::new();
+    // Slaves that actually HELD content — the recalc seeds for phase B (§2c).
+    // A merge destroys their values, so anything reading them is stale from
+    // here on; merging is a bulk cell rewrite like any other.
+    let mut cleared_slaves: Vec<(u32, u32)> = Vec::new();
     for row in min_row..=max_row {
         for col in min_col..=max_col {
             if row == min_row && col == min_col {
@@ -301,6 +347,9 @@ pub fn merge_cells(
                 continue;
             }
             // Clear slave cells
+            if grid.get_cell(row, col).is_some() {
+                cleared_slaves.push((row, col));
+            }
             grid.clear_cell(row, col);
             if active_sheet < grids.len() {
                 grids[active_sheet].clear_cell(row, col);
@@ -335,9 +384,34 @@ pub fn merge_cells(
     // Mark workbook as dirty
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
+    let regions_snapshot: Vec<MergedRegion> = merged_regions.iter().cloned().collect();
+
+    // PHASE B — dependents (§2c). Merging is a content-DESTROYING bulk rewrite:
+    // every slave cell's value is erased, so `=B1` beside a merge kept the
+    // pre-merge number exactly the way `=A1` beside a sort did. Locks released
+    // first — the recalc takes the same grid/styles/merged_regions/locale
+    // mutexes and std mutexes are not reentrant.
+    drop(locale);
+    drop(undo_stack);
+    drop(merged_regions);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+
+    if !cleared_slaves.is_empty() {
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &cleared_slaves,
+            &mut updated_cells,
+        );
+    }
+
     Ok(MergeResult {
         success: true,
-        merged_regions: merged_regions.iter().cloned().collect(),
+        merged_regions: regions_snapshot,
         updated_cells,
     })
 }
@@ -397,13 +471,12 @@ pub(crate) fn unmerge_cells_off_sheet(
         }
     }
 
+    let unmerge_effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let merged_regions: Vec<MergedRegion> =
-        crate::report::with_sheet_merges(state, target, |merged| {
+        crate::report::with_sheet_merges_mut(state, &unmerge_effect, target, |merged| {
             merged.remove(&region);
             merged.iter().cloned().collect()
         });
-
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(MergeResult {
         success: true,
@@ -424,10 +497,10 @@ pub fn unmerge_cells(
 ) -> Result<MergeResult, String> {
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if let Some(target) = sheet_index {
             if target != active {
-                let count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+                let count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
                 if target >= count {
                     return Err(format!(
                         "Sheet index {} out of range: workbook has {} sheet(s)",
@@ -441,7 +514,7 @@ pub fn unmerge_cells(
     // Same gate as merge_cells: merge structure is a format attribute, and
     // Excel refuses to change it on a protected sheet without formatCells.
     {
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "unmerge cells")?;
     }
 
@@ -451,7 +524,7 @@ pub fn unmerge_cells(
     // active_sheet, sheet_ids — and must never be reached with grid held, or
     // two commands could acquire the two sets in opposite orders).
     let region_to_remove = {
-        let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+        let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
         merged_regions
             .iter()
             .find(|r| {
@@ -479,12 +552,18 @@ pub fn unmerge_cells(
     }
 
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    // `lock_pending`: this command legitimately does nothing when the clicked
+    // cell is in no merge, and that branch must leave the document clean.
+    let merged_regions = state.merged_regions.lock_pending().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     if let Some(region) = region_to_remove {
+        // A region was found, so this call removes it: the flag is set here and
+        // the guard is upgraded in the same critical section.
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut merged_regions = merged_regions.authorize(&effect);
         // Record undo: the merge region being removed
         let opened_transaction = !undo_stack.has_open_transaction();
         if opened_transaction {
@@ -520,9 +599,6 @@ pub fn unmerge_cells(
                 accounting_layout: None,
         }];
 
-        // Mark workbook as dirty
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-
         Ok(MergeResult {
             success: true,
             merged_regions: merged_regions.iter().cloned().collect(),
@@ -540,7 +616,7 @@ pub fn unmerge_cells(
 /// Get all merged regions for the current sheet.
 #[tauri::command]
 pub fn get_merged_regions(state: State<AppState>) -> Result<Vec<MergedRegion>, String> {
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
     Ok(merged_regions.iter().cloned().collect())
 }
 
@@ -552,7 +628,7 @@ pub fn get_merge_info(
     row: u32,
     col: u32,
 ) -> Result<Option<MergedRegion>, String> {
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
 
     let region = merged_regions
         .iter()

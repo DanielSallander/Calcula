@@ -53,7 +53,7 @@ pub fn build_row_visibility(state: &AppState) -> Arc<engine::RowVisibility> {
 
     let sheet_names: Vec<String> = state
         .sheet_names
-        .lock()
+        .read()
         .map(|n| n.clone())
         .unwrap_or_default();
 
@@ -83,17 +83,17 @@ pub fn build_row_visibility(state: &AppState) -> Arc<engine::RowVisibility> {
 fn nothing_is_hidden(state: &AppState) -> bool {
     let user_rows_empty = state
         .user_hidden_rows
-        .lock()
+        .read()
         .map(|s| s.is_empty())
         .unwrap_or(false);
     let all_user_rows_empty = state
         .all_user_hidden_rows
-        .lock()
+        .read()
         .map(|v| v.iter().all(|s| s.is_empty()))
         .unwrap_or(false);
     let filters_empty = state
         .auto_filters
-        .lock()
+        .read()
         .map(|m| m.values().all(|af| af.hidden_rows.is_empty()))
         .unwrap_or(false);
     let advanced_empty = state
@@ -132,13 +132,13 @@ mod tests {
     fn two_sheet_state() -> AppState {
         let state = crate::create_app_state();
         state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
-        state.sheet_names.lock().unwrap().push("Sheet2".to_string());
+        state.sheet_names.write(&crate::document_effect::test_seed_effect()).unwrap().push("Sheet2".to_string());
         state
             .sheet_ids
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
-            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
-        ensure_user_hidden_len(&state, 2);
+        .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        ensure_user_hidden_len(&state, &crate::document_effect::test_seed_effect(), 2);
         state
     }
 
@@ -201,7 +201,7 @@ mod tests {
         // ...including on a NON-active sheet, whose user set lives in the
         // per-sheet vector rather than the active mirror.
         let other_sheet = two_sheet_state();
-        other_sheet.all_user_hidden_rows.lock().unwrap()[1].insert(2);
+        other_sheet.all_user_hidden_rows.write(&crate::document_effect::test_seed_effect()).unwrap()[1].insert(2);
         assert!(!nothing_is_hidden(&other_sheet));
         assert!(build_row_visibility(&other_sheet)
             .is_hidden("SHEET2", 2, HiddenScope::FilterAndManual));

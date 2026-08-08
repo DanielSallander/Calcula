@@ -389,19 +389,38 @@ export function loadLayout(): HomeTabLayout {
   if (!parsed || !Array.isArray(parsed.groups)) return cloneLayout(DEFAULT_LAYOUT);
 
   const migrated = migrateLayout(parsed, CURRENT_CATALOG);
-  if (parsed.version !== CURRENT_CATALOG.version) saveLayout(migrated);
+  // Best-effort version stamp. The return value is deliberately ignored HERE
+  // and only here: this write is not user-initiated, and a load that cannot
+  // re-stamp still returns a correct migrated layout. The cost of failure is
+  // that the migration runs again next launch, which is idempotent.
+  if (parsed.version !== CURRENT_CATALOG.version) void saveLayout(migrated);
   return migrated;
 }
 
-/** Save layout to localStorage, stamped with the current schema version. */
-export function saveLayout(layout: HomeTabLayout): void {
+/**
+ * Save layout to localStorage, stamped with the current schema version.
+ * Returns whether the write actually landed.
+ *
+ * WHY THIS RETURNS A BOOLEAN. It used to swallow the failure into a
+ * `console.warn`, and the only caller that matters — the Customize dialog's
+ * Save — then closed the dialog and fired `homeTab:layoutChanged` regardless.
+ * The ribbon repainted from the in-memory layout, so the customization looked
+ * saved, survived until the next reload, and was gone at the following launch
+ * with no message at any point. localStorage genuinely does throw here
+ * (QuotaExceededError, and Safari/WebView private modes reject every write), so
+ * this is a reachable path, not a defensive one. The caller must decide; it
+ * cannot decide from a console line the user never sees.
+ */
+export function saveLayout(layout: HomeTabLayout): boolean {
   try {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({ ...cloneLayout(layout), version: LAYOUT_VERSION })
     );
-  } catch {
-    console.warn("[HomeTab] Failed to save layout to localStorage");
+    return true;
+  } catch (error) {
+    console.warn("[HomeTab] Failed to save layout to localStorage", error);
+    return false;
   }
 }
 

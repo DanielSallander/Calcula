@@ -14,6 +14,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
+import { alertAsync } from "@api/dialogs";
 import {
   loadLayout,
   saveLayout,
@@ -434,8 +435,15 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
     setAddToGroupId(id);
   };
 
-  // Save and close
-  const handleSave = () => {
+  // Save and close.
+  //
+  // The dialog stays OPEN when the write fails. Closing it would destroy the
+  // only copy of the user's arrangement: `saveLayout` used to swallow the
+  // failure, and this handler then closed and fired `layoutChanged` anyway, so
+  // the ribbon repainted from memory and the customization vanished at the next
+  // launch with nothing said. Keeping the dialog up leaves the work on screen
+  // and recoverable.
+  const handleSave = async () => {
     // Drop groups with nothing to render. "Nothing" includes a group holding
     // only row breaks: a separator paints no button, so such a group would
     // survive as a labelled, empty section in the ribbon.
@@ -445,7 +453,14 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
         g.items.some((id) => !isMultiInstanceItem(ITEMS_BY_ID.get(id)))
       ),
     };
-    saveLayout(cleaned);
+    if (!saveLayout(cleaned)) {
+      await alertAsync(
+        "Could not save the ribbon layout — the browser storage rejected the write. " +
+          "Your arrangement is still here; close this message and try Save again.",
+        { title: "Customize Home Tab" }
+      );
+      return;
+    }
     window.dispatchEvent(new Event("homeTab:layoutChanged"));
     onClose();
   };
@@ -680,7 +695,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
             <button className={secondaryBtn} data-hometab-cancel="" onClick={onClose}>
               Cancel
             </button>
-            <button className={primaryBtn} data-hometab-save="" onClick={handleSave}>
+            <button className={primaryBtn} data-hometab-save="" onClick={() => void handleSave()}>
               Save
             </button>
           </div>

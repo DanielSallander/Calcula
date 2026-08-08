@@ -41,11 +41,11 @@ fn resolve_search_sheet(
     state: &AppState,
     sheet_index: Option<usize>,
 ) -> Result<(usize, usize), String> {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     match sheet_index {
         None => Ok((active, active)),
         Some(idx) => {
-            let count = state.sheet_names.lock().unwrap().len();
+            let count = state.sheet_names.read().unwrap().len();
             if idx < count {
                 Ok((idx, active))
             } else {
@@ -211,7 +211,7 @@ pub(crate) fn replace_all_off_sheet(
     )?;
 
     let grids = state.grids.lock_pending().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
     // Sheet protection over the cells this replace would touch, on the target
@@ -220,7 +220,7 @@ pub(crate) fn replace_all_off_sheet(
         let grid = grids
             .get(target)
             .ok_or_else(|| format!("Sheet index {} out of range", target))?;
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         crate::protection::check_sheet_protection_cells_in(
             &protection_storage,
             grid,
@@ -371,10 +371,10 @@ pub fn replace_all(
 
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Sheet protection over the cells this replace would actually touch. Whole
@@ -389,7 +389,7 @@ pub fn replace_all(
     // wrapper would deadlock here. `sheet_protection` is taken last, matching
     // the canonical grid -> style_registry -> sheet_protection order.
     {
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         crate::protection::check_sheet_protection_cells_in(
             &protection_storage,
             &grid,
@@ -425,6 +425,10 @@ pub fn replace_all(
 
     let mut updated_cells = Vec::new();
     let mut replacement_count = 0;
+    // Cells whose VALUE actually changed — the recalc seeds for phase B (§2c).
+    // Not the same as the match list: a match inside a formula cell is skipped,
+    // and a match whose transform yields no change writes nothing.
+    let mut replaced_cells: Vec<(u32, u32)> = Vec::new();
 
     // No per-cell writeback lookup in this loop: `ensure_cells_unclaimed` above
     // already answered for the whole match list, once, before any lock.
@@ -454,13 +458,14 @@ pub fn replace_all(
                 new_cell.value = new_val;
                 
                 // Record undo
-                undo_stack.record_cell_change(row, col, previous_cell);
-                
+                undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
+
                 // Update grid
                 grid.set_cell(row, col, new_cell.clone());
                 if active_sheet < grids.len() {
                     grids[active_sheet].set_cell(row, col, new_cell.clone());
                 }
+                replaced_cells.push((row, col));
 
                 // Get display value for frontend. Resolved against the active
                 // grid (the one just written) so row/column tiers apply; the
@@ -498,6 +503,32 @@ pub fn replace_all(
 
     // Commit the atomic transaction
     undo_stack.commit_transaction();
+
+    // PHASE B — dependents (§2c). The off-sheet twin `replace_all_off_sheet`
+    // has always recalculated through `recalc_after_off_sheet_write`; this
+    // active-sheet path recalculated nothing, so replacing on the sheet you
+    // were LOOKING at left every dependent stale while replacing on one you
+    // were not produced the right answer. Same asymmetry as `sort_range`.
+    //
+    // Locks released first — the recalc takes the same grid/style/merge/locale
+    // mutexes plus the dependency maps, and std mutexes are not reentrant.
+    drop(locale);
+    drop(merged_regions);
+    drop(undo_stack);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+
+    if !replaced_cells.is_empty() {
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &replaced_cells,
+            &mut updated_cells,
+        );
+    }
 
     Ok(ReplaceResult {
         updated_cells,
@@ -549,7 +580,7 @@ pub(crate) fn replace_single_off_sheet(
 
     let replaced = {
         let grids = state.grids.lock_pending().unwrap();
-        let styles = state.style_registry.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
 
         if target >= grids.len() {
@@ -561,7 +592,7 @@ pub(crate) fn replace_single_off_sheet(
         // it can still refuse -- so it runs under the PENDING guard, before any
         // dirty decision, without releasing the lock it was taken under.
         {
-            let protection_storage = state.sheet_protection.lock().unwrap();
+            let protection_storage = state.sheet_protection.read().unwrap();
             crate::protection::check_sheet_protection_range_in(
                 &protection_storage, grid, &styles, target, row, col, row, col,
             )?;
@@ -709,16 +740,16 @@ pub fn replace_single(
 
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Sheet protection (Replace on a locked cell). Borrowed form — `grid` and
     // `styles` are already held above; see the note in `replace_all`.
     {
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         crate::protection::check_sheet_protection_range_in(
             &protection_storage, &grid, &styles, active_sheet, row, col, row, col,
         )?;
@@ -782,7 +813,7 @@ pub fn replace_single(
     let mut grids = grids.authorize(&effect);
 
             // Record undo
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
             
             // Update grid
             grid.set_cell(row, col, new_cell.clone());
@@ -802,7 +833,7 @@ pub fn replace_single(
                 (1, 1)
             };
 
-            return Ok(Some(CellData {
+            let replaced = CellData {
                 row,
                 col,
                 display,
@@ -814,7 +845,32 @@ pub fn replace_single(
                 sheet_index: None,
                 rich_text: None,
                 accounting_layout: None,
-            }));
+            };
+
+            // PHASE B — dependents (§2c), matching `replace_single_off_sheet`,
+            // which has always recalculated. Locks released first: the recalc
+            // takes the same mutexes and std mutexes are not reentrant. The
+            // re-evaluated dependents are written to the grid but not returned
+            // — this command's contract is one `CellData` for the replaced
+            // cell, and the caller refreshes the viewport.
+            drop(locale);
+            drop(merged_regions);
+            drop(undo_stack);
+            drop(styles);
+            drop(grids);
+            drop(grid);
+
+            let mut recalculated = Vec::new();
+            crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                &state,
+                &user_files_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &[(row, col)],
+                &mut recalculated,
+            );
+
+            return Ok(Some(replaced));
         }
     }
 

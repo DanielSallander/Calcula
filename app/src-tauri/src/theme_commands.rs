@@ -32,7 +32,7 @@ pub fn set_document_theme(
     *state.theme.write(&effect).unwrap() = new_theme;
 
     // Re-resolve all styles against the new theme
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let theme = state.theme.read().unwrap();
     let updated_styles: Vec<StyleEntry> = styles
         .all_styles()

@@ -363,6 +363,42 @@ pub struct GroupColumnsParams {
 // COMMANDS
 // ============================================================================
 
+/// Run an outline mutation and record ONE undo entry for it.
+///
+/// GROUPING WAS NOT UNDOABLE AT ALL. Every command in this file wrote
+/// `state.outlines` and returned; the outline had a `CustomRestore` kind only as
+/// a passenger of a structural edit (`obj_coord_stores`). So Ctrl+Z after
+/// grouping a block of rows undid the user's PREVIOUS action instead, and the
+/// grouping stayed — which also meant there was nothing for undo to announce,
+/// so "the frontend is not told about a grouping undo" could not be fixed on its
+/// own.
+///
+/// Snapshot BEFORE, record AFTER, and only when the mutation reported success:
+/// these commands refuse in several places (no outline on this sheet, no group
+/// overlaps the selection, maximum level exceeded), and a refusal that pushed an
+/// undo entry would make Ctrl+Z a no-op the user has to press twice.
+///
+/// The snapshot is read under a READ guard, before the mutation constructs its
+/// `DocumentEffect::mutates` — recording undo must not be the thing that dirties
+/// the document.
+///
+/// The undo-stack lock is taken only after `f` has returned, so the outline
+/// write guard is already dropped: `apply_changes` holds the undo stack and then
+/// reaches the outline store through a deferred restore, and taking the two in
+/// the opposite order here would be a lock-order inversion.
+fn with_outline_undo<F>(state: &AppState, description: &str, f: F) -> GroupResult
+where
+    F: FnOnce() -> GroupResult,
+{
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let previous = state.outlines.read().unwrap().get(&active_sheet).cloned();
+    let result = f();
+    if result.success {
+        crate::undo_commands::record_outline_undo(state, active_sheet, previous, description);
+    }
+    result
+}
+
 /// Group rows (create or increment outline level)
 #[tauri::command]
 pub fn group_rows(
@@ -370,37 +406,39 @@ pub fn group_rows(
     file_state: State<FileState>,
     params: GroupRowsParams,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per
-    // sheet) and written only by the save path. Collapsed-ness rides inside
-    // that blob, so collapse/expand changes what a save would write too --
-    // persisted view state dirties (see `document_effect`).
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut outlines = state.outlines.write(&effect).unwrap();
+    with_outline_undo(&state, "Group rows", || {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per
+        // sheet) and written only by the save path. Collapsed-ness rides inside
+        // that blob, so collapse/expand changes what a save would write too --
+        // persisted view state dirties (see `document_effect`).
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut outlines = state.outlines.write(&effect).unwrap();
 
-    let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
+        let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
 
-    let start = params.start_row.min(params.end_row);
-    let end = params.start_row.max(params.end_row);
+        let start = params.start_row.min(params.end_row);
+        let end = params.start_row.max(params.end_row);
 
-    // Find existing group at the same range or calculate new level
-    let current_max_level = (start..=end)
-        .map(|row| outline.get_row_level(row))
-        .max()
-        .unwrap_or(0);
+        // Find existing group at the same range or calculate new level
+        let current_max_level = (start..=end)
+            .map(|row| outline.get_row_level(row))
+            .max()
+            .unwrap_or(0);
 
-    let new_level = (current_max_level + 1).min(MAX_OUTLINE_LEVEL);
+        let new_level = (current_max_level + 1).min(MAX_OUTLINE_LEVEL);
 
-    if new_level > MAX_OUTLINE_LEVEL {
-        return GroupResult::err(format!("Maximum outline level ({}) exceeded", MAX_OUTLINE_LEVEL));
-    }
+        if new_level > MAX_OUTLINE_LEVEL {
+            return GroupResult::err(format!("Maximum outline level ({}) exceeded", MAX_OUTLINE_LEVEL));
+        }
 
-    // Add new group
-    outline.row_groups.push(RowGroup::new(start, end, new_level));
-    outline.sort_groups();
-    outline.recalculate_max_levels();
+        // Add new group
+        outline.row_groups.push(RowGroup::new(start, end, new_level));
+        outline.sort_groups();
+        outline.recalculate_max_levels();
 
-    GroupResult::ok(outline.clone())
+        GroupResult::ok(outline.clone())
+    })
 }
 
 /// Ungroup rows – Excel-style partial ungroup.
@@ -415,7 +453,9 @@ pub fn ungroup_rows(
     start_row: u32,
     end_row: u32,
 ) -> GroupResult {
-    let result = ungroup_rows_inner(&state, &file_state, start_row, end_row);
+    let result = with_outline_undo(&state, "Ungroup rows", || {
+        ungroup_rows_inner(&state, &file_state, start_row, end_row)
+    });
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
@@ -426,7 +466,7 @@ pub(crate) fn ungroup_rows_inner(
     start_row: u32,
     end_row: u32,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
     // written only by the save path. Collapsed-ness rides inside that blob, so
     // collapse/expand changes what a save would write too -- persisted view state
@@ -504,37 +544,39 @@ pub fn group_columns(
     file_state: State<FileState>,
     params: GroupColumnsParams,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per
-    // sheet) and written only by the save path. Collapsed-ness rides inside
-    // that blob, so collapse/expand changes what a save would write too --
-    // persisted view state dirties (see `document_effect`).
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut outlines = state.outlines.write(&effect).unwrap();
+    with_outline_undo(&state, "Group columns", || {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per
+        // sheet) and written only by the save path. Collapsed-ness rides inside
+        // that blob, so collapse/expand changes what a save would write too --
+        // persisted view state dirties (see `document_effect`).
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut outlines = state.outlines.write(&effect).unwrap();
 
-    let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
+        let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
 
-    let start = params.start_col.min(params.end_col);
-    let end = params.start_col.max(params.end_col);
+        let start = params.start_col.min(params.end_col);
+        let end = params.start_col.max(params.end_col);
 
-    // Calculate new level
-    let current_max_level = (start..=end)
-        .map(|col| outline.get_col_level(col))
-        .max()
-        .unwrap_or(0);
+        // Calculate new level
+        let current_max_level = (start..=end)
+            .map(|col| outline.get_col_level(col))
+            .max()
+            .unwrap_or(0);
 
-    let new_level = (current_max_level + 1).min(MAX_OUTLINE_LEVEL);
+        let new_level = (current_max_level + 1).min(MAX_OUTLINE_LEVEL);
 
-    if new_level > MAX_OUTLINE_LEVEL {
-        return GroupResult::err(format!("Maximum outline level ({}) exceeded", MAX_OUTLINE_LEVEL));
-    }
+        if new_level > MAX_OUTLINE_LEVEL {
+            return GroupResult::err(format!("Maximum outline level ({}) exceeded", MAX_OUTLINE_LEVEL));
+        }
 
-    // Add new group
-    outline.column_groups.push(ColumnGroup::new(start, end, new_level));
-    outline.sort_groups();
-    outline.recalculate_max_levels();
+        // Add new group
+        outline.column_groups.push(ColumnGroup::new(start, end, new_level));
+        outline.sort_groups();
+        outline.recalculate_max_levels();
 
-    GroupResult::ok(outline.clone())
+        GroupResult::ok(outline.clone())
+    })
 }
 
 /// Ungroup columns – Excel-style partial ungroup.
@@ -546,71 +588,73 @@ pub fn ungroup_columns(
     start_col: u32,
     end_col: u32,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
-    // written only by the save path. Collapsed-ness rides inside that blob, so
-    // collapse/expand changes what a save would write too -- persisted view state
-    // dirties (see `document_effect`).
-    //
-    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
-    // the "is there an outline here at all?" question is answered under a READ guard:
-    // a command that refuses must leave the document exactly as clean as it was.
-    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
-        return GroupResult::err("No outline exists for this sheet");
-    }
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut outlines = state.outlines.write(&effect).unwrap();
+    with_outline_undo(&state, "Ungroup columns", || {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+        // written only by the save path. Collapsed-ness rides inside that blob, so
+        // collapse/expand changes what a save would write too -- persisted view state
+        // dirties (see `document_effect`).
+        //
+        // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+        // the "is there an outline here at all?" question is answered under a READ guard:
+        // a command that refuses must leave the document exactly as clean as it was.
+        if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+            return GroupResult::err("No outline exists for this sheet");
+        }
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut outlines = state.outlines.write(&effect).unwrap();
 
-    let outline = match outlines.get_mut(&active_sheet) {
-        Some(o) => o,
-        None => return GroupResult::err("No outline exists for this sheet"),
-    };
+        let outline = match outlines.get_mut(&active_sheet) {
+            Some(o) => o,
+            None => return GroupResult::err("No outline exists for this sheet"),
+        };
 
-    let sel_start = start_col.min(end_col);
-    let sel_end = start_col.max(end_col);
+        let sel_start = start_col.min(end_col);
+        let sel_end = start_col.max(end_col);
 
-    let target_level = outline
-        .column_groups
-        .iter()
-        .filter(|g| g.start_col <= sel_end && g.end_col >= sel_start)
-        .map(|g| g.level)
-        .max()
-        .unwrap_or(0);
+        let target_level = outline
+            .column_groups
+            .iter()
+            .filter(|g| g.start_col <= sel_end && g.end_col >= sel_start)
+            .map(|g| g.level)
+            .max()
+            .unwrap_or(0);
 
-    if target_level == 0 {
-        return GroupResult::err("No group overlaps the selected columns");
-    }
-
-    let mut new_groups: Vec<ColumnGroup> = Vec::new();
-    let mut modified = false;
-
-    outline.column_groups.retain(|g| {
-        if g.level != target_level || g.start_col > sel_end || g.end_col < sel_start {
-            return true;
+        if target_level == 0 {
+            return GroupResult::err("No group overlaps the selected columns");
         }
 
-        modified = true;
+        let mut new_groups: Vec<ColumnGroup> = Vec::new();
+        let mut modified = false;
 
-        if g.start_col < sel_start {
-            new_groups.push(ColumnGroup::new(g.start_col, sel_start - 1, g.level));
+        outline.column_groups.retain(|g| {
+            if g.level != target_level || g.start_col > sel_end || g.end_col < sel_start {
+                return true;
+            }
+
+            modified = true;
+
+            if g.start_col < sel_start {
+                new_groups.push(ColumnGroup::new(g.start_col, sel_start - 1, g.level));
+            }
+            if g.end_col > sel_end {
+                new_groups.push(ColumnGroup::new(sel_end + 1, g.end_col, g.level));
+            }
+
+            false
+        });
+
+        if !modified {
+            return GroupResult::err("No group at this level overlaps the selected columns");
         }
-        if g.end_col > sel_end {
-            new_groups.push(ColumnGroup::new(sel_end + 1, g.end_col, g.level));
-        }
 
-        false
-    });
+        outline.column_groups.extend(new_groups);
+        outline.sort_groups();
+        outline.recalculate_max_levels();
 
-    if !modified {
-        return GroupResult::err("No group at this level overlaps the selected columns");
-    }
-
-    outline.column_groups.extend(new_groups);
-    outline.sort_groups();
-    outline.recalculate_max_levels();
-
-    let hidden_cols: Vec<u32> = outline.get_hidden_cols().into_iter().collect();
-    GroupResult::ok_with_changes(outline.clone(), Vec::new(), hidden_cols)
+        let hidden_cols: Vec<u32> = outline.get_hidden_cols().into_iter().collect();
+        GroupResult::ok_with_changes(outline.clone(), Vec::new(), hidden_cols)
+    })
 }
 
 /// Collapse a row group.
@@ -623,7 +667,9 @@ pub fn collapse_row_group(
     file_state: State<FileState>,
     row: u32,
 ) -> GroupResult {
-    let result = collapse_row_group_inner(&state, &file_state, row);
+    let result = with_outline_undo(&state, "Collapse row group", || {
+        collapse_row_group_inner(&state, &file_state, row)
+    });
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
@@ -633,7 +679,7 @@ pub(crate) fn collapse_row_group_inner(
     file_state: &FileState,
     row: u32,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
     // written only by the save path. Collapsed-ness rides inside that blob, so
     // collapse/expand changes what a save would write too -- persisted view state
@@ -688,7 +734,9 @@ pub fn expand_row_group(
     file_state: State<FileState>,
     row: u32,
 ) -> GroupResult {
-    let result = expand_row_group_inner(&state, &file_state, row);
+    let result = with_outline_undo(&state, "Expand row group", || {
+        expand_row_group_inner(&state, &file_state, row)
+    });
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
@@ -698,7 +746,7 @@ pub(crate) fn expand_row_group_inner(
     file_state: &FileState,
     row: u32,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
     // written only by the save path. Collapsed-ness rides inside that blob, so
     // collapse/expand changes what a save would write too -- persisted view state
@@ -750,48 +798,50 @@ pub fn collapse_column_group(
     file_state: State<FileState>,
     col: u32,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
-    // written only by the save path. Collapsed-ness rides inside that blob, so
-    // collapse/expand changes what a save would write too -- persisted view state
-    // dirties (see `document_effect`).
-    //
-    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
-    // the "is there an outline here at all?" question is answered under a READ guard:
-    // a command that refuses must leave the document exactly as clean as it was.
-    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
-        return GroupResult::err("No outline exists for this sheet");
-    }
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut outlines = state.outlines.write(&effect).unwrap();
-
-    let outline = match outlines.get_mut(&active_sheet) {
-        Some(o) => o,
-        None => return GroupResult::err("No outline exists for this sheet"),
-    };
-
-    let before_hidden = outline.get_hidden_cols();
-
-    let mut found = false;
-    for group in &mut outline.column_groups {
-        let is_button = match outline.settings.summary_col_position {
-            SummaryPosition::BelowRight => group.end_col == col,
-            SummaryPosition::AboveLeft => group.start_col == col,
-        };
-        if is_button && !group.collapsed {
-            group.collapsed = true;
-            found = true;
+    with_outline_undo(&state, "Collapse column group", || {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+        // written only by the save path. Collapsed-ness rides inside that blob, so
+        // collapse/expand changes what a save would write too -- persisted view state
+        // dirties (see `document_effect`).
+        //
+        // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+        // the "is there an outline here at all?" question is answered under a READ guard:
+        // a command that refuses must leave the document exactly as clean as it was.
+        if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+            return GroupResult::err("No outline exists for this sheet");
         }
-    }
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut outlines = state.outlines.write(&effect).unwrap();
 
-    if !found {
-        return GroupResult::err("No expandable group at this column");
-    }
+        let outline = match outlines.get_mut(&active_sheet) {
+            Some(o) => o,
+            None => return GroupResult::err("No outline exists for this sheet"),
+        };
 
-    let after_hidden = outline.get_hidden_cols();
-    let newly_hidden: Vec<u32> = after_hidden.difference(&before_hidden).cloned().collect();
+        let before_hidden = outline.get_hidden_cols();
 
-    GroupResult::ok_with_changes(outline.clone(), Vec::new(), newly_hidden)
+        let mut found = false;
+        for group in &mut outline.column_groups {
+            let is_button = match outline.settings.summary_col_position {
+                SummaryPosition::BelowRight => group.end_col == col,
+                SummaryPosition::AboveLeft => group.start_col == col,
+            };
+            if is_button && !group.collapsed {
+                group.collapsed = true;
+                found = true;
+            }
+        }
+
+        if !found {
+            return GroupResult::err("No expandable group at this column");
+        }
+
+        let after_hidden = outline.get_hidden_cols();
+        let newly_hidden: Vec<u32> = after_hidden.difference(&before_hidden).cloned().collect();
+
+        GroupResult::ok_with_changes(outline.clone(), Vec::new(), newly_hidden)
+    })
 }
 
 /// Expand a column group.
@@ -802,48 +852,50 @@ pub fn expand_column_group(
     file_state: State<FileState>,
     col: u32,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
-    // written only by the save path. Collapsed-ness rides inside that blob, so
-    // collapse/expand changes what a save would write too -- persisted view state
-    // dirties (see `document_effect`).
-    //
-    // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
-    // the "is there an outline here at all?" question is answered under a READ guard:
-    // a command that refuses must leave the document exactly as clean as it was.
-    if !state.outlines.read().unwrap().contains_key(&active_sheet) {
-        return GroupResult::err("No outline exists for this sheet");
-    }
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut outlines = state.outlines.write(&effect).unwrap();
-
-    let outline = match outlines.get_mut(&active_sheet) {
-        Some(o) => o,
-        None => return GroupResult::err("No outline exists for this sheet"),
-    };
-
-    let before_hidden = outline.get_hidden_cols();
-
-    let mut found = false;
-    for group in &mut outline.column_groups {
-        let is_button = match outline.settings.summary_col_position {
-            SummaryPosition::BelowRight => group.end_col == col,
-            SummaryPosition::AboveLeft => group.start_col == col,
-        };
-        if is_button && group.collapsed {
-            group.collapsed = false;
-            found = true;
+    with_outline_undo(&state, "Expand column group", || {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
+        // written only by the save path. Collapsed-ness rides inside that blob, so
+        // collapse/expand changes what a save would write too -- persisted view state
+        // dirties (see `document_effect`).
+        //
+        // REFUSAL FIRST. `DocumentEffect::mutates` sets the flag in its own constructor, so
+        // the "is there an outline here at all?" question is answered under a READ guard:
+        // a command that refuses must leave the document exactly as clean as it was.
+        if !state.outlines.read().unwrap().contains_key(&active_sheet) {
+            return GroupResult::err("No outline exists for this sheet");
         }
-    }
+        let effect = DocumentEffect::mutates(&file_state);
+        let mut outlines = state.outlines.write(&effect).unwrap();
 
-    if !found {
-        return GroupResult::err("No collapsible group at this column");
-    }
+        let outline = match outlines.get_mut(&active_sheet) {
+            Some(o) => o,
+            None => return GroupResult::err("No outline exists for this sheet"),
+        };
 
-    let after_hidden = outline.get_hidden_cols();
-    let newly_visible: Vec<u32> = before_hidden.difference(&after_hidden).cloned().collect();
+        let before_hidden = outline.get_hidden_cols();
 
-    GroupResult::ok_with_changes(outline.clone(), Vec::new(), newly_visible)
+        let mut found = false;
+        for group in &mut outline.column_groups {
+            let is_button = match outline.settings.summary_col_position {
+                SummaryPosition::BelowRight => group.end_col == col,
+                SummaryPosition::AboveLeft => group.start_col == col,
+            };
+            if is_button && group.collapsed {
+                group.collapsed = false;
+                found = true;
+            }
+        }
+
+        if !found {
+            return GroupResult::err("No collapsible group at this column");
+        }
+
+        let after_hidden = outline.get_hidden_cols();
+        let newly_visible: Vec<u32> = before_hidden.difference(&after_hidden).cloned().collect();
+
+        GroupResult::ok_with_changes(outline.clone(), Vec::new(), newly_visible)
+    })
 }
 
 /// Show/hide rows and columns up to a specific outline level
@@ -855,7 +907,9 @@ pub fn show_outline_level(
     row_level: Option<u8>,
     col_level: Option<u8>,
 ) -> GroupResult {
-    let result = show_outline_level_inner(&state, &file_state, row_level, col_level);
+    let result = with_outline_undo(&state, "Show outline level", || {
+        show_outline_level_inner(&state, &file_state, row_level, col_level)
+    });
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
@@ -866,7 +920,7 @@ pub(crate) fn show_outline_level_inner(
     row_level: Option<u8>,
     col_level: Option<u8>,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
     // written only by the save path. Collapsed-ness rides inside that blob, so
     // collapse/expand changes what a save would write too -- persisted view state
@@ -927,7 +981,7 @@ pub fn get_outline_info(
     start_col: u32,
     end_col: u32,
 ) -> OutlineInfo {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let outlines = state.outlines.read().unwrap();
 
     let outline = match outlines.get(&active_sheet) {
@@ -1002,7 +1056,7 @@ pub fn get_outline_info(
 /// Get outline settings
 #[tauri::command]
 pub fn get_outline_settings(state: State<AppState>) -> OutlineSettings {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let outlines = state.outlines.read().unwrap();
 
     outlines
@@ -1018,33 +1072,35 @@ pub fn set_outline_settings(
     file_state: State<FileState>,
     settings: OutlineSettings,
 ) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // `SheetOutline.settings` (summary-below / summary-right) IS serialized -- the
-    // whole SheetOutline is `serde_json::to_value`d into `workbook.outlines`. But
-    // `collect_comments_scenarios_outlines_for_save` SKIPS any outline with no row and
-    // no column groups, so a settings change on an ungrouped sheet never reaches the
-    // file. Dirty only when there is an outline that will actually be written; on an
-    // ungrouped sheet the settings are also invisible in the UI (there are no groups to
-    // summarise), so this branch is unreachable in practice and marking it would be a
-    // prompt the user could not satisfy.
-    let will_be_saved = state
-        .outlines
-        .read()
-        .unwrap()
-        .get(&active_sheet)
-        .map(|o| !o.row_groups.is_empty() || !o.column_groups.is_empty())
-        .unwrap_or(false);
-    let effect = if will_be_saved {
-        DocumentEffect::mutates(&file_state)
-    } else {
-        DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)
-    };
-    let mut outlines = state.outlines.write(&effect).unwrap();
+    with_outline_undo(&state, "Outline settings", || {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        // `SheetOutline.settings` (summary-below / summary-right) IS serialized -- the
+        // whole SheetOutline is `serde_json::to_value`d into `workbook.outlines`. But
+        // `collect_comments_scenarios_outlines_for_save` SKIPS any outline with no row and
+        // no column groups, so a settings change on an ungrouped sheet never reaches the
+        // file. Dirty only when there is an outline that will actually be written; on an
+        // ungrouped sheet the settings are also invisible in the UI (there are no groups to
+        // summarise), so this branch is unreachable in practice and marking it would be a
+        // prompt the user could not satisfy.
+        let will_be_saved = state
+            .outlines
+            .read()
+            .unwrap()
+            .get(&active_sheet)
+            .map(|o| !o.row_groups.is_empty() || !o.column_groups.is_empty())
+            .unwrap_or(false);
+        let effect = if will_be_saved {
+            DocumentEffect::mutates(&file_state)
+        } else {
+            DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)
+        };
+        let mut outlines = state.outlines.write(&effect).unwrap();
 
-    let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
-    outline.settings = settings;
+        let outline = outlines.entry(active_sheet).or_insert_with(SheetOutline::new);
+        outline.settings = settings;
 
-    GroupResult::ok(outline.clone())
+        GroupResult::ok(outline.clone())
+    })
 }
 
 /// Clear all outline/grouping for the current sheet
@@ -1054,13 +1110,15 @@ pub fn clear_outline(
     state: State<AppState>,
     file_state: State<FileState>,
 ) -> GroupResult {
-    let result = clear_outline_inner(&state, &file_state);
+    let result = with_outline_undo(&state, "Clear outline", || {
+        clear_outline_inner(&state, &file_state)
+    });
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
 }
 
 pub(crate) fn clear_outline_inner(state: &AppState, file_state: &FileState) -> GroupResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`). Clearing a sheet that has no
     // outline removes nothing, so it must not dirty -- resolved under a READ guard
     // before the decision, like every other refusal/no-op in this file.
@@ -1090,7 +1148,7 @@ pub fn is_row_hidden_by_group(
     state: State<AppState>,
     row: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let outlines = state.outlines.read().unwrap();
 
     outlines
@@ -1105,7 +1163,7 @@ pub fn is_col_hidden_by_group(
     state: State<AppState>,
     col: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let outlines = state.outlines.read().unwrap();
 
     outlines
@@ -1117,7 +1175,7 @@ pub fn is_col_hidden_by_group(
 /// Get all hidden rows due to grouping
 #[tauri::command]
 pub fn get_hidden_rows_by_group(state: State<AppState>) -> Vec<u32> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let outlines = state.outlines.read().unwrap();
 
     outlines
@@ -1129,7 +1187,7 @@ pub fn get_hidden_rows_by_group(state: State<AppState>) -> Vec<u32> {
 /// Get all hidden columns due to grouping
 #[tauri::command]
 pub fn get_hidden_cols_by_group(state: State<AppState>) -> Vec<u32> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let outlines = state.outlines.read().unwrap();
 
     outlines

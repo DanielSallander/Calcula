@@ -34,9 +34,9 @@ static CELL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 /// Capture a snapshot of the current grid state for undo.
 fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
     let grid = state.grid.read().unwrap();
-    let row_heights = state.row_heights.lock().unwrap();
-    let column_widths = state.column_widths.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let row_heights = state.row_heights.read().unwrap();
+    let column_widths = state.column_widths.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
 
     GridSnapshot {
         cells: grid.cells.clone(),
@@ -575,7 +575,7 @@ fn shift_per_sheet_range_stores(
     //
     // Arithmetic and fail-safe drop rule live in
     // [`coord_shift::shift_allow_edit_ranges`]; this is the wiring.
-    if let Ok(mut store) = state.sheet_protection.lock() {
+    if let Ok(mut store) = state.sheet_protection.write(effect) {
         if let Some(protection) = store.get_mut(&sheet_index) {
             if !protection.allow_edit_ranges.is_empty() {
                 // Snapshot ONLY the ranges — never the whole record. The
@@ -662,8 +662,12 @@ fn shift_per_sheet_range_stores(
 ///
 /// Only the active-sheet mirror is touched — `all_merged_regions[active]` is
 /// stale by design until the next sheet switch.
-fn shift_merged_regions(state: &AppState, edit: calp::writeback::StructuralEdit) {
-    let Ok(mut merges) = state.merged_regions.lock() else {
+fn shift_merged_regions(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    edit: calp::writeback::StructuralEdit,
+) {
+    let Ok(mut merges) = state.merged_regions.write(effect) else {
         return;
     };
     if merges.is_empty() {
@@ -716,10 +720,11 @@ fn shift_merge_set(
 /// pre-shift merge set).
 fn shift_merged_regions_for_sheet(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
 ) {
-    crate::report::with_sheet_merges(state, sheet_index, |merges| {
+    crate::report::with_sheet_merges_mut(state, effect, sheet_index, |merges| {
         if merges.is_empty() {
             return;
         }
@@ -870,11 +875,12 @@ fn shift_style_tiers_single(grid: &mut engine::Grid, edit: calp::writeback::Stru
 /// The caller must already hold the undo-stack lock inside `begin_transaction`.
 fn shift_sheet_auto_filter(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
 ) {
-    let Ok(mut auto_filters) = state.auto_filters.lock() else {
+    let Ok(mut auto_filters) = state.auto_filters.write(effect) else {
         return;
     };
     let Some(af) = auto_filters.get_mut(&sheet_index) else {
@@ -1041,7 +1047,7 @@ fn shift_writeback_draft_regions(
 ) {
     let Some(sheet_id) = state
         .sheet_ids
-        .lock()
+        .read()
         .ok()
         .and_then(|ids| ids.get(sheet_index).copied())
     else {
@@ -1284,7 +1290,7 @@ pub fn insert_rows(
     // updates only; the active canvas shows nothing from that sheet, so the
     // empty payload is the correct "no repaint" answer).
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if let Some(target) = sheet_index {
             if target != active {
                 off_sheet_structural_edit(
@@ -1300,7 +1306,7 @@ pub fn insert_rows(
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
     {
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "insertRows", "insert rows")?;
     }
     // WRITEBACK SHIFT GUARD. Inserting at `row` pushes every row from `row`
@@ -1315,11 +1321,13 @@ pub fn insert_rows(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    // `lock_pending`: this guard is taken with the grid, before the gates below
+    // have finished and before the effect exists.
+    let row_heights = state.row_heights.lock_pending().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
 
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1339,6 +1347,7 @@ pub fn insert_rows(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = grid.authorize(&effect);
     let mut grids = grids.authorize(&effect);
+    let mut row_heights = row_heights.authorize(&effect);
     // Cell-type assignments move with their rows; their pre-shift state is
     // recorded in the SAME transaction so one undo restores grid + assignments
     // atomically.
@@ -1376,6 +1385,7 @@ pub fn insert_rows(
     // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
     shift_sheet_auto_filter(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
@@ -1411,7 +1421,7 @@ pub fn insert_rows(
     {
         let sheet_name = state
             .sheet_names
-            .lock()
+            .read()
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
@@ -1454,7 +1464,7 @@ pub fn insert_rows(
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet's name.
     let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -1581,7 +1591,7 @@ pub fn insert_rows(
     // guard above is dropped — std::sync::Mutex is not reentrant, so
     // shifting while that guard is alive self-deadlocks. Still after
     // capture_grid_snapshot, which is what makes undo restore them.
-    shift_merged_regions(&state, calp::writeback::StructuralEdit::RowInsert { at: row, count });
+    shift_merged_regions(&state, &effect, calp::writeback::StructuralEdit::RowInsert { at: row, count });
 
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_row_insert(&state, &effect, &pivot_state, row, count, active_sheet);
@@ -1591,8 +1601,8 @@ pub fn insert_rows(
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Return updated cells with merge info
@@ -1607,8 +1617,8 @@ pub fn insert_rows(
     
     // Update IdRegistry for the structural shift
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         if let Some(&sid) = sheet_ids.get(active) {
             let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
             id_reg.shift_rows_down(sid, row, count);
@@ -1637,7 +1647,7 @@ pub fn insert_columns(
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if let Some(target) = sheet_index {
             if target != active {
                 off_sheet_structural_edit(
@@ -1653,7 +1663,7 @@ pub fn insert_columns(
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
     {
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "insertColumns", "insert columns")?;
     }
     // WRITEBACK SHIFT GUARD, column twin of the one in `insert_rows`.
@@ -1663,11 +1673,13 @@ pub fn insert_columns(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    // `lock_pending`: this guard is taken with the grid, before the gates below
+    // have finished and before the effect exists.
+    let column_widths = state.column_widths.lock_pending().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
 
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1687,6 +1699,7 @@ pub fn insert_columns(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = grid.authorize(&effect);
     let mut grids = grids.authorize(&effect);
+    let mut column_widths = column_widths.authorize(&effect);
     // Cell-type assignments move with their columns (same transaction; see insert_rows).
     {
         let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
@@ -1721,6 +1734,7 @@ pub fn insert_columns(
     // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
     shift_sheet_auto_filter(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
@@ -1756,7 +1770,7 @@ pub fn insert_columns(
     {
         let sheet_name = state
             .sheet_names
-            .lock()
+            .read()
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
@@ -1799,7 +1813,7 @@ pub fn insert_columns(
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -1923,7 +1937,7 @@ pub fn insert_columns(
     // guard above is dropped — std::sync::Mutex is not reentrant, so
     // shifting while that guard is alive self-deadlocks. Still after
     // capture_grid_snapshot, which is what makes undo restore them.
-    shift_merged_regions(&state, calp::writeback::StructuralEdit::ColInsert { at: col, count });
+    shift_merged_regions(&state, &effect, calp::writeback::StructuralEdit::ColInsert { at: col, count });
 
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_col_insert(&state, &effect, &pivot_state, col, count, active_sheet);
@@ -1933,8 +1947,8 @@ pub fn insert_columns(
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Return updated cells with merge info
@@ -1949,8 +1963,8 @@ pub fn insert_columns(
 
     // Update IdRegistry for the structural shift
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         if let Some(&sid) = sheet_ids.get(active) {
             let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
             id_reg.shift_cols_right(sid, col, count);
@@ -2373,7 +2387,7 @@ pub fn delete_rows(
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if let Some(target) = sheet_index {
             if target != active {
                 off_sheet_structural_edit(
@@ -2389,7 +2403,7 @@ pub fn delete_rows(
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
     {
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "deleteRows", "delete rows")?;
     }
     // WRITEBACK SHIFT GUARD. Deleting from `row` both removes rows and pulls
@@ -2400,7 +2414,7 @@ pub fn delete_rows(
     // Check if any spill range would be broken by this row deletion.
     // Block if any spill range has cells both inside and outside the deleted rows.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let spill_ranges = state.spill_ranges.lock().unwrap();
         for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
             if sheet_idx != active_sheet { continue; }
@@ -2432,11 +2446,13 @@ pub fn delete_rows(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    // `lock_pending`: this guard is taken with the grid, before the gates below
+    // have finished and before the effect exists.
+    let row_heights = state.row_heights.lock_pending().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
 
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -2456,6 +2472,7 @@ pub fn delete_rows(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = grid.authorize(&effect);
     let mut grids = grids.authorize(&effect);
+    let mut row_heights = row_heights.authorize(&effect);
     // Assignments on deleted rows drop; those below shift up (same transaction;
     // see insert_rows).
     {
@@ -2493,6 +2510,7 @@ pub fn delete_rows(
     // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
     shift_sheet_auto_filter(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
@@ -2528,7 +2546,7 @@ pub fn delete_rows(
     {
         let sheet_name = state
             .sheet_names
-            .lock()
+            .read()
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
@@ -2571,7 +2589,7 @@ pub fn delete_rows(
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -2719,7 +2737,7 @@ pub fn delete_rows(
     // guard above is dropped — std::sync::Mutex is not reentrant, so
     // shifting while that guard is alive self-deadlocks. Still after
     // capture_grid_snapshot, which is what makes undo restore them.
-    shift_merged_regions(&state, calp::writeback::StructuralEdit::RowDelete { at: row, count });
+    shift_merged_regions(&state, &effect, calp::writeback::StructuralEdit::RowDelete { at: row, count });
 
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_row_delete(&state, &effect, &pivot_state, row, count, active_sheet);
@@ -2729,8 +2747,8 @@ pub fn delete_rows(
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
     
     // Return updated cells with merge info
@@ -2745,8 +2763,8 @@ pub fn delete_rows(
     
     // Update IdRegistry for the structural shift
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         if let Some(&sid) = sheet_ids.get(active) {
             let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
             id_reg.shift_rows_up(sid, row, count);
@@ -2775,7 +2793,7 @@ pub fn delete_columns(
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if let Some(target) = sheet_index {
             if target != active {
                 off_sheet_structural_edit(
@@ -2791,14 +2809,14 @@ pub fn delete_columns(
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
     {
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "deleteColumns", "delete columns")?;
     }
     // WRITEBACK SHIFT GUARD, column twin of the one in `delete_rows`.
     crate::calp_commands::ensure_col_shift_unclaimed(&state, "delete columns here", col)?;
     // Check if any spill range would be broken by this column deletion.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let spill_ranges = state.spill_ranges.lock().unwrap();
         for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
             if sheet_idx != active_sheet { continue; }
@@ -2828,11 +2846,13 @@ pub fn delete_columns(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    // `lock_pending`: this guard is taken with the grid, before the gates below
+    // have finished and before the effect exists.
+    let column_widths = state.column_widths.lock_pending().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
 
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -2852,6 +2872,7 @@ pub fn delete_columns(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = grid.authorize(&effect);
     let mut grids = grids.authorize(&effect);
+    let mut column_widths = column_widths.authorize(&effect);
     // Assignments on deleted columns drop; those to the right shift left (same
     // transaction; see insert_rows).
     {
@@ -2888,6 +2909,7 @@ pub fn delete_columns(
     // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
     shift_sheet_auto_filter(
         &state,
+        &effect,
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
@@ -2923,7 +2945,7 @@ pub fn delete_columns(
     {
         let sheet_name = state
             .sheet_names
-            .lock()
+            .read()
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
@@ -2965,7 +2987,7 @@ pub fn delete_columns(
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -3113,7 +3135,7 @@ pub fn delete_columns(
     // guard above is dropped — std::sync::Mutex is not reentrant, so
     // shifting while that guard is alive self-deadlocks. Still after
     // capture_grid_snapshot, which is what makes undo restore them.
-    shift_merged_regions(&state, calp::writeback::StructuralEdit::ColDelete { at: col, count });
+    shift_merged_regions(&state, &effect, calp::writeback::StructuralEdit::ColDelete { at: col, count });
 
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_col_delete(&state, &effect, &pivot_state, col, count, active_sheet);
@@ -3123,8 +3145,8 @@ pub fn delete_columns(
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Return updated cells with merge info
@@ -3139,8 +3161,8 @@ pub fn delete_columns(
 
     // Update IdRegistry for the structural shift
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         if let Some(&sid) = sheet_ids.get(active) {
             let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
             id_reg.shift_cols_left(sid, col, count);
@@ -3286,16 +3308,16 @@ pub fn relocate_cell_references(
         return Ok(Vec::new());
     }
 
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
@@ -3347,7 +3369,7 @@ pub fn relocate_cell_references(
     for (r, c, new_formula) in &rewrites {
         // Record undo
         let prev = grid.get_cell(*r, *c).cloned();
-        undo_stack.record_cell_change(*r, *c, prev.clone());
+        undo_stack.record_cell_change(active_sheet, *r, *c, prev.clone());
 
         // Preserve existing style
         let existing_style_index = prev.as_ref().map_or(0, |c| c.style_index);
@@ -3580,7 +3602,7 @@ pub(crate) fn shift_misc_coordinate_stores(
                     }
                 }
                 let cols = crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
-                crate::commands::dimensions::set_user_hidden_for_sheet(state, sheet_index, shifted, cols);
+                crate::commands::dimensions::set_user_hidden_for_sheet(state, effect, sheet_index, shifted, cols);
                 rows_before = Some(sorted);
             }
         } else {
@@ -3598,7 +3620,7 @@ pub(crate) fn shift_misc_coordinate_stores(
                     }
                 }
                 let rows = crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index);
-                crate::commands::dimensions::set_user_hidden_for_sheet(state, sheet_index, rows, shifted);
+                crate::commands::dimensions::set_user_hidden_for_sheet(state, effect, sheet_index, rows, shifted);
                 cols_before = Some(sorted);
             }
         }
@@ -4755,7 +4777,7 @@ pub(crate) fn off_sheet_structural_edit(
 
     // Bounds first, so every later step can index freely.
     {
-        let sheet_count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+        let sheet_count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
         if target >= sheet_count {
             return Err(format!(
                 "Sheet index {} out of range: workbook has {} sheet(s)",
@@ -4866,7 +4888,7 @@ pub(crate) fn off_sheet_structural_edit(
         // sublocks while these are held, exactly as the active-sheet path does.
         let mut mirror = state.grid.write(&effect).map_err(|e| e.to_string())?;
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 
         while grids.len() <= target {
@@ -4919,13 +4941,13 @@ pub(crate) fn off_sheet_structural_edit(
 
         // The generic-edit store shifts, all sheet-parameterized already.
         shift_writeback_draft_regions(state, &effect, &mut undo_stack, target, edit);
-        shift_sheet_auto_filter(state, &mut undo_stack, target, edit);
+        shift_sheet_auto_filter(state, &effect, &mut undo_stack, target, edit);
         shift_per_sheet_cell_stores(state, &effect, &mut undo_stack, target, edit);
         shift_style_tiers_single(&mut grids[target], edit);
         shift_misc_coordinate_stores(state, &effect, &mut undo_stack, target, edit);
 
         let sheet_names_snapshot: Vec<String> =
-            state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+            state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
         let edited_sheet_name = sheet_names_snapshot
             .get(target)
             .cloned()
@@ -5065,7 +5087,7 @@ pub(crate) fn off_sheet_structural_edit(
     // active (take-semantics; the caller guarantees target != active).
     match edit {
         SE::RowInsert { at, count } => {
-            let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+            let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
             if let Some(heights) = all_rh.get_mut(target) {
                 let old: Vec<(u32, f64)> = heights.iter().map(|(&r, &h)| (r, h)).collect();
                 heights.clear();
@@ -5075,7 +5097,7 @@ pub(crate) fn off_sheet_structural_edit(
             }
         }
         SE::RowDelete { at, count } => {
-            let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+            let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
             if let Some(heights) = all_rh.get_mut(target) {
                 let old: Vec<(u32, f64)> = heights.iter().map(|(&r, &h)| (r, h)).collect();
                 heights.clear();
@@ -5088,7 +5110,7 @@ pub(crate) fn off_sheet_structural_edit(
             }
         }
         SE::ColInsert { at, count } => {
-            let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+            let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
             if let Some(widths) = all_cw.get_mut(target) {
                 let old: Vec<(u32, f64)> = widths.iter().map(|(&c, &w)| (c, w)).collect();
                 widths.clear();
@@ -5098,7 +5120,7 @@ pub(crate) fn off_sheet_structural_edit(
             }
         }
         SE::ColDelete { at, count } => {
-            let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+            let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
             if let Some(widths) = all_cw.get_mut(target) {
                 let old: Vec<(u32, f64)> = widths.iter().map(|(&c, &w)| (c, w)).collect();
                 widths.clear();
@@ -5115,7 +5137,7 @@ pub(crate) fn off_sheet_structural_edit(
     // Merges follow the edit (per-sheet store; undo restores them from the
     // structural snapshot, so no undo entry here — same rule as the active
     // twin).
-    shift_merged_regions_for_sheet(state, target, edit);
+    shift_merged_regions_for_sheet(state, &effect, target, edit);
 
     // Pivot regions + table boundaries on the target sheet.
     match edit {
@@ -5139,7 +5161,7 @@ pub(crate) fn off_sheet_structural_edit(
 
     // IdRegistry follows the shift on the TARGET sheet's id.
     {
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         if let Some(&sid) = sheet_ids.get(target) {
             let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
             match edit {

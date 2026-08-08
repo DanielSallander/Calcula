@@ -361,9 +361,24 @@ pub fn set_control_metadata(
 
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
+    //
+    // UNDO. This is the creation door, so the PRE-mutation store is the undo
+    // snapshot; captured under a read guard before `mutates` constructs, and
+    // recorded after the write guard is dropped (the undo stack is taken after
+    // the store, never while holding it -- see `record_controls_undo`).
+    let previous: Vec<((usize, u32, u32), ControlMetadata)> = state
+        .controls
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
     let effect = DocumentEffect::mutates(&file_state);
-    let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
-    controls.insert((sheet_index, row, col), metadata.clone());
+    {
+        let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
+        controls.insert((sheet_index, row, col), metadata.clone());
+    }
+    crate::undo_commands::record_controls_undo(&state, previous, "Add control");
     Ok(metadata)
 }
 
@@ -376,11 +391,33 @@ pub fn remove_control_metadata(
     row: u32,
     col: u32,
 ) -> bool {
+    // REFUSAL FIRST. Removing a control that is not there changes nothing, so it
+    // must neither dirty the document nor push an undo entry -- an undo step
+    // that restores the state it was recorded in makes Ctrl+Z a no-op the user
+    // has to press twice. Resolved under a READ guard, before
+    // `DocumentEffect::mutates` sets the flag in its constructor.
+    let previous: Vec<((usize, u32, u32), ControlMetadata)> = {
+        let store = match state.controls.read() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if !store.contains_key(&(sheet_index, row, col)) {
+            return false;
+        }
+        store.iter().map(|(k, v)| (*k, v.clone())).collect()
+    };
+
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
     let effect = DocumentEffect::mutates(&file_state);
-    let mut controls = state.controls.write(&effect).unwrap();
-    controls.remove(&(sheet_index, row, col)).is_some()
+    let removed = {
+        let mut controls = state.controls.write(&effect).unwrap();
+        controls.remove(&(sheet_index, row, col)).is_some()
+    };
+    if removed {
+        crate::undo_commands::record_controls_undo(&state, previous, "Delete control");
+    }
+    removed
 }
 
 /// The `macroRef` control property: the module id of the recorded macro a button
@@ -412,7 +449,7 @@ pub fn list_controls_referencing_macro(
     macro_id: String,
 ) -> Vec<MacroLinkingControl> {
     let controls = state.controls.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let mut out: Vec<MacroLinkingControl> = controls
         .iter()
         .filter(|(_, meta)| {
@@ -595,7 +632,7 @@ pub fn resolve_control_properties(
     drop(controls);
 
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     // Build evaluator once for all formulas
     let evaluator = if sheet_index < grids.len() && sheet_index < sheet_names.len() {

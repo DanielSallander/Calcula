@@ -31,6 +31,19 @@ export const AppEvents = {
   DISPLAY_HEADINGS_TOGGLED: "app:display-headings-toggled",
   DISPLAY_FORMULA_BAR_TOGGLED: "app:display-formula-bar-toggled",
 
+  // The active sheet's DISPLAY FLAGS were replaced in the BACKEND and every
+  // renderer of them must re-read the authority. No payload: the single
+  // hydration path reads `get_sheet_display_flags`, so nobody can act on a
+  // partial copy.
+  //
+  // The six *_TOGGLED events above are frontend INTENTS — Layout.tsx answers
+  // each by dispatching to Core AND writing back through
+  // `set_sheet_display_flags`. This one is the opposite direction: the backend
+  // moved (a script, an MCP tool, a package pull, `new_file`, `open_file`) and
+  // the frontend is being told to catch up. Emitting a *_TOGGLED here instead
+  // would bounce the value the backend just reported straight back at it.
+  SHEET_DISPLAY_FLAGS_CHANGED: "app:sheet-display-flags-changed",
+
   // Selection events
   SELECTION_CHANGED: "app:selection-changed",
 
@@ -164,6 +177,14 @@ export const AppEvents = {
   // chevron regions (and, with circles on, the invalid-cell markers).
   VALIDATIONS_CHANGED: "app:validations-changed",
 
+  // On-grid controls (buttons, shapes, pictures) were created, deleted or
+  // restored behind the frontend's back. The Controls extension keeps ONE
+  // sheet's controls in a frontend store, loaded on activation and swapped on
+  // a sheet change, so a backend-only change to that store is invisible to it:
+  // a repaint re-renders the same stale list. Undo/redo of a control
+  // create/delete is the route that needs this.
+  CONTROLS_CHANGED: "app:controls-changed",
+
   // Blur commit prevention
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
 
@@ -272,7 +293,24 @@ export const AppEvents = {
  * extension consumes each. The Shell translator maps each domain to the concrete
  * per-feature refresh event(s).
  */
-export type MutationDomain = "styles" | "pivot" | "slicer" | "ribbonFilter" | "paneControl" | "objects";
+export type MutationDomain =
+  | "styles"
+  | "pivot"
+  | "slicer"
+  | "ribbonFilter"
+  | "paneControl"
+  | "objects"
+  // The NON-CELL domains. Undo/redo used to announce none of these, so
+  // undoing a grouping, a hyperlink, a validation rule, a note or a deleted
+  // shape left the owning extension's cache — and therefore the painted
+  // grid — showing the undone state. The forward paths got their refresh
+  // announcements first; these are the same four announcements reached from
+  // the undo direction, plus controls.
+  | "outline"
+  | "hyperlinks"
+  | "validations"
+  | "annotations"
+  | "controls";
 
 /** Payload of AppEvents.MUTATION_REFRESH. */
 export interface MutationRefreshPayload {

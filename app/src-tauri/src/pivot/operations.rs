@@ -473,7 +473,7 @@ pub(crate) fn build_cache_with_synthetic_dim(
 /// Falls back to active sheet if destination_sheet is not set or not found.
 pub(crate) fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefinition) -> usize {
     if let Some(ref sheet_name) = definition.destination_sheet {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         for (idx, name) in sheet_names.iter().enumerate() {
             if name == sheet_name {
                 return idx;
@@ -481,7 +481,7 @@ pub(crate) fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefin
         }
     }
     // Fallback to active sheet
-    *state.active_sheet.lock().unwrap()
+    *state.active_sheet.read().unwrap()
 }
 
 /// Clears cells in a pivot region from the grid.
@@ -830,7 +830,7 @@ pub(crate) fn check_pivot_overlap(
 pub(crate) fn sheet_names_snapshot(state: &AppState) -> Vec<String> {
     state
         .sheet_names
-        .lock()
+        .read()
         .map(|names| names.clone())
         .unwrap_or_default()
 }
@@ -950,7 +950,7 @@ pub(crate) fn update_pivot_in_grid(
     // Get old region before writing new data
     let old_region = get_pivot_region(state, pivot_id);
 
-    let mut styles = state.style_registry.lock().unwrap();
+    let mut styles = state.style_registry.write(effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
         // Clear old pivot area first if it exists
@@ -967,7 +967,7 @@ pub(crate) fn update_pivot_in_grid(
         }
 
         // Check if this is the active sheet — if so, write to both grids in one pass
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let is_active = dest_sheet_idx == active_sheet;
 
         let pivot_merges = if is_active {
@@ -998,7 +998,7 @@ pub(crate) fn update_pivot_in_grid(
         let new_end_row = dest_row + view.row_count.max(1) as u32 - 1;
         let new_end_col = dest_col + view.col_count.max(1) as u32 - 1;
 
-        let mut merged = state.merged_regions.lock().unwrap();
+        let mut merged = state.merged_regions.write(effect).unwrap();
 
         // Remove merges in old pivot region
         if let Some(ref region) = old_region {
@@ -1025,6 +1025,7 @@ pub(crate) fn update_pivot_in_grid(
 /// the longest formatted value, using a character-based width estimate.
 pub(crate) fn auto_fit_pivot_columns(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
@@ -1113,14 +1114,14 @@ pub(crate) fn auto_fit_pivot_columns(
             (grid_col, width)
         })
         .collect();
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     if dest_sheet_idx == active {
-        let mut widths = state.column_widths.lock().unwrap();
+        let mut widths = state.column_widths.write(effect).unwrap();
         for (col, w) in fitted {
             widths.insert(col, w);
         }
     } else {
-        let mut all = state.all_column_widths.lock().unwrap();
+        let mut all = state.all_column_widths.write(effect).unwrap();
         while all.len() <= dest_sheet_idx {
             all.push(std::collections::HashMap::new());
         }
@@ -1520,9 +1521,9 @@ pub(crate) fn recalculate_sheet_formulas(
     );
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     // Build pivot data lookup closure for GETPIVOTDATA evaluation
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
@@ -1546,8 +1547,8 @@ pub(crate) fn recalculate_sheet_formulas(
     let tables_map = state.tables.read().unwrap();
     let table_names_map = state.table_names.read().unwrap();
     let named_ranges_map = state.named_ranges.read().unwrap();
-    let row_heights = state.row_heights.lock().unwrap();
-    let column_widths = state.column_widths.lock().unwrap();
+    let row_heights = state.row_heights.read().unwrap();
+    let column_widths = state.column_widths.read().unwrap();
 
     // Empty user files map — pivot recalc doesn't need external file references
     let empty_user_files: HashMap<String, Vec<u8>> = HashMap::new();

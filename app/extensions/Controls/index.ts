@@ -1013,6 +1013,41 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(context.events.on(AppEvents.SHEET_CHANGED, reloadForSheetChange));
 
   // -----------------------------------------------------------------------
+  // 19d. Re-load them when the BACKEND's control store changed underneath us.
+  //
+  // Undo and redo of a control create/delete are the reason this exists. Both
+  // rewrite `workbook.controls` in Rust and neither goes through any of this
+  // extension's own delete/create paths, so the frontend store — which holds one
+  // sheet's controls and is otherwise only ever swapped on a sheet change — kept
+  // describing the state the user just undid. Repainting does not help: the
+  // repaint reads the same stale store, so an undone deletion left the shape
+  // gone and an undone creation left it on screen, both permanently.
+  //
+  // Same queue as the other two reloaders, for the same reason (ordering, not
+  // luck, decides which read wins). Unlike `reloadForSheetChange` this does NOT
+  // early-return when the sheet index is unchanged — the sheet is exactly what
+  // has not changed here; the store's CONTENTS have.
+  const reloadForBackendChange = () => {
+    documentReloadQueue = documentReloadQueue.then(async () => {
+      if (loadedSheetIndex !== null) removeFloatingControlsForSheet(loadedSheetIndex);
+      deselectFloatingControl();
+      // A control that was just restored or removed must not keep painting from
+      // a cached bitmap keyed by its (anchor-derived) id.
+      invalidateAllFloatingButtonCaches();
+      invalidateAllShapeCaches();
+      invalidateAllImageCaches();
+      // `loadFloatingControls` reads the ACTIVE sheet and records which one it
+      // loaded, so the index stays owned by one function.
+      await loadFloatingControls();
+      syncFloatingControlRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }).catch((err) => {
+      console.error("[Controls] Backend-change reload failed:", err);
+    });
+  };
+  cleanupFns.push(context.events.on(AppEvents.CONTROLS_CHANGED, reloadForBackendChange));
+
+  // -----------------------------------------------------------------------
   // 20. Register context menu items for floating controls
   // -----------------------------------------------------------------------
   const unregContextMenu = registerControlContextMenu();

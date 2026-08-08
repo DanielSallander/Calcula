@@ -156,7 +156,7 @@ pub(crate) fn apply_named_style_impl(
     // an unlock vector too — the built-in "Normal" style carries locked:true,
     // and any user-defined style could carry locked:false.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_protection_cells(
             state,
             active_sheet,
@@ -181,10 +181,10 @@ pub(crate) fn apply_named_style_impl(
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let mut updated_cells = Vec::new();
@@ -229,7 +229,7 @@ pub(crate) fn apply_named_style_impl(
             }
 
             // Record undo
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
             // Display resolution honours the row/column tiers (the cell was just
             // written above, so this reflects the newly applied named style).
@@ -387,7 +387,7 @@ struct SavedNamedStyle {
 /// there are none. Sorted by name for deterministic artifact bytes.
 pub fn collect_named_styles_for_save(state: &AppState) -> Option<Vec<u8>> {
     let named = state.named_styles.read().ok()?;
-    let styles = state.style_registry.lock().ok()?;
+    let styles = state.style_registry.read().ok()?;
     let mut customs: Vec<SavedNamedStyle> = named
         .values()
         .filter(|ns| !ns.built_in)
@@ -416,7 +416,7 @@ pub fn restore_named_styles(state: &AppState, bytes: Option<&[u8]>) {
     let Ok(customs) = serde_json::from_slice::<Vec<SavedNamedStyle>>(bytes) else {
         return;
     };
-    let Ok(mut styles) = state.style_registry.lock() else { return };
+    let Ok(mut styles) = state.style_registry.write(&load) else { return };
     for c in customs {
         // A file-supplied name never overwrites a built-in.
         if named.get(&c.name).is_some_and(|ns| ns.built_in) {
@@ -442,11 +442,11 @@ pub fn restore_named_styles(state: &AppState, bytes: Option<&[u8]>) {
 /// Initialize the built-in named styles in AppState.
 /// Called once during `create_app_state()`.
 pub fn init_builtin_named_styles(state: &AppState) {
-    let mut styles = state.style_registry.lock().unwrap();
     // Seeding the built-ins of a BLANK document (app startup and File > New). Same
     // class as the load path: `new_file` assigns is_modified = false as its last act,
     // and a brand-new workbook must not open already prompting to save.
     let seed = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+    let mut styles = state.style_registry.write(&seed).unwrap();
     let mut named = state.named_styles.write(&seed).unwrap();
 
     // Helper to register a named style

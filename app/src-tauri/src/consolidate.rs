@@ -399,8 +399,64 @@ fn consolidate_by_category(
 // Tauri command
 // ============================================================================
 
+/// DEPENDENTS RECALCULATE (§2c). Consolidation is a bulk range rewrite — it
+/// writes an aggregated block into a destination range — and it recalculated
+/// nothing, so `=SUM(dest)` beside the output kept its pre-consolidation value.
+///
+/// The recalc is driven from HERE rather than from inside `consolidate_data_inner`
+/// because that function has two independent write branches (label mode and
+/// position mode), each ending in its own `ConsolidateResult` inside its own
+/// lock scope. Seeding from the result's `updated_cells` — which already lists
+/// exactly the positions written, in both branches — needs no lock at all and
+/// cannot drift from the write when a third branch appears.
 #[tauri::command]
 pub fn consolidate_data(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    params: ConsolidateParams,
+) -> ConsolidateResult {
+    let dest_sheet = params.dest_sheet_index;
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut result = consolidate_data_inner(state.clone(), file_state, params);
+
+    if !result.success || result.updated_cells.is_empty() {
+        return result;
+    }
+
+    let seeds: Vec<(u32, u32)> = result
+        .updated_cells
+        .iter()
+        .map(|c| (c.row, c.col))
+        .collect();
+
+    if dest_sheet == active_sheet {
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &seeds,
+            &mut result.updated_cells,
+        );
+    } else {
+        crate::commands::data::recalc_after_off_sheet_write(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &[dest_sheet],
+        );
+    }
+
+    result
+}
+
+fn consolidate_data_inner(
     state: State<AppState>,
     file_state: State<FileState>,
     params: ConsolidateParams,
@@ -425,9 +481,9 @@ pub fn consolidate_data(
     // Acquire locks (same order as goal_seek.rs to avoid deadlocks)
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let num_sheets = grids.len();
@@ -487,7 +543,7 @@ pub fn consolidate_data(
         // written. Pure gate form: grid/grids/styles are already held here
         // (canonical order allows sheet_protection last).
         if total_rows > 0 && total_cols > 0 {
-            let protection_storage = state.sheet_protection.lock().unwrap();
+            let protection_storage = state.sheet_protection.read().unwrap();
             let dest_grid = if dest_sheet == active_sheet { &*grid } else { &grids[dest_sheet] };
             if let Err(e) = crate::protection::check_sheet_protection_range_in(
                 &protection_storage,
@@ -605,7 +661,7 @@ pub fn consolidate_data(
 
         // Sheet protection on the destination block, same as category mode.
         {
-            let protection_storage = state.sheet_protection.lock().unwrap();
+            let protection_storage = state.sheet_protection.read().unwrap();
             let dest_grid = if dest_sheet == active_sheet { &*grid } else { &grids[dest_sheet] };
             if let Err(e) = crate::protection::check_sheet_protection_range_in(
                 &protection_storage,

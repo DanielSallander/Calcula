@@ -98,6 +98,42 @@ test.describe("Panel placement freedom", () => {
       // Never leak a ribbon placement into other specs (it persists in
       // localStorage and animation.spec.ts expects the sidebar default).
       await setPlacement(page, "sidebar").catch(() => {});
+
+      // AND never leak the two things this test turns on, which cost more than
+      // the placement did (docs/design/open-decisions-2026-08.md sec 3a/3b):
+      //
+      //   * THE OPEN SIDEBAR PANEL. It takes 320px off the grid, so every later
+      //     grid golden fails on SIZE before a single pixel is compared --
+      //     "Expected an image 1232px by 556px, received 912px by 556px". That is
+      //     paste-special and protection, four results, none of them about
+      //     pasting or protection.
+      //   * THE LOADED DRIVER. `anim-set-driver` above loads a clock-cell driver,
+      //     and Animation's play pill then sits over A1:C2 as a hit-testable
+      //     region that swallows cell clicks. "Stop (reset)" does NOT unload it;
+      //     clearDriver does.
+      await page
+        .evaluate(async () => {
+          // The extension's own handle. The dev `__calcImport` bridge would hand
+          // back a SECOND engine instance with its own clock and clear nothing —
+          // see the note in animation.spec.ts.
+          const w = window as unknown as {
+            __CALCULA_ANIMATION__?: { playbackEngine?: { clearDriver?: () => Promise<void> } };
+          };
+          await w.__CALCULA_ANIMATION__?.playbackEngine?.clearDriver?.();
+        })
+        .catch(() => {});
+      // Close the panel through the registry rather than by clicking the
+      // activity-bar toggle: a toggle is only correct if you know the current
+      // state, and by this point the test may have left it either way.
+      await page
+        .evaluate(() => {
+          const reg = (window as unknown as {
+            __CALCULA_PANEL_REGISTRY__?: { closePanel?: (id?: string) => void };
+          }).__CALCULA_PANEL_REGISTRY__;
+          reg?.closePanel?.("animation.timeline");
+        })
+        .catch(() => {});
+      await page.waitForTimeout(300);
     }
   });
 });

@@ -183,7 +183,7 @@ fn check_region_cells_protection<'a>(
 /// Returns the bounding box of each spill range for visual rendering.
 #[tauri::command]
 pub fn get_spill_ranges(state: State<AppState>) -> Vec<SpillRangeInfo> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let spill_ranges = state.spill_ranges.lock().unwrap();
     let mut result = Vec::new();
 
@@ -223,15 +223,15 @@ pub fn get_viewport_cells(
     let perf_t0 = Instant::now();
 
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let protection = state.sheet_protection.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let protection = state.sheet_protection.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
     // One probe for the whole viewport: formula hiding only bites on a
     // protected sheet, so an unprotected one skips the per-cell check entirely.
     let sheet_protected = {
         // Deref-and-drop: no guard is held across the grid locks above.
-        let active = *state.active_sheet.lock().unwrap();
+        let active = *state.active_sheet.read().unwrap();
         protection.get(&active).map(|p| p.protected).unwrap_or(false)
     };
     let perf_t1_locks = Instant::now();
@@ -360,11 +360,11 @@ pub fn get_viewport_cells(
 /// Get a single cell's data.
 #[tauri::command]
 pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let protection = state.sheet_protection.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let protection = state.sheet_protection.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
     // Withhold the formula when the sheet is protected and the cell is marked
     // hidden — the value and formatting still come through.
@@ -443,12 +443,12 @@ pub fn get_range_cells_typed(
         ));
     }
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
     let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let protection = state.sheet_protection.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let protection = state.sheet_protection.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let grid: &Grid = if target_sheet == active_sheet {
@@ -509,8 +509,8 @@ pub fn get_watch_cells(
 ) -> Vec<Option<CellData>> {
     let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     fn read_cell(
@@ -831,7 +831,7 @@ pub fn update_cell(
 /// control anchored at (active_sheet, row, col), or None (the overwhelmingly
 /// common case — a single HashMap probe under a brief lock).
 fn named_control_anchor_name(state: &AppState, row: u32, col: u32) -> Option<String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let controls = state.controls.read().unwrap();
     controls
         .get(&(active_sheet, row, col))
@@ -919,7 +919,7 @@ fn update_cell_impl(
     let user_files = user_files_state.files.lock().unwrap();
 
     // Check sheet protection: a locked cell on a protected sheet is refused.
-    let active_sheet_for_region_check = *state.active_sheet.lock().unwrap();
+    let active_sheet_for_region_check = *state.active_sheet.read().unwrap();
     crate::protection::check_sheet_protection_cells(
         &state,
         active_sheet_for_region_check,
@@ -948,15 +948,15 @@ fn update_cell_impl(
         }
     }
 
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -967,7 +967,7 @@ fn update_cell_impl(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
@@ -1091,7 +1091,7 @@ fn update_cell_impl(
         );
 
         // Record undo after successful change
-        undo_stack.record_cell_change(row, col, previous_cell);
+        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
         // Mark workbook as dirty
         // Already dirtied by the `effect` bound above -- one `mutates` per
@@ -1198,8 +1198,8 @@ fn update_cell_impl(
                 let engine_ast = crate::convert_expr(&resolved);
                 cell.set_cached_ast(engine_ast.clone());
                 // Build EvalContext with current cell position and dimension state
-                let rh_map = state.row_heights.lock().unwrap().clone();
-                let cw_map = state.column_widths.lock().unwrap().clone();
+                let rh_map = state.row_heights.read().unwrap().clone();
+                let cw_map = state.column_widths.read().unwrap().clone();
                 let eval_ctx = engine::EvalContext {
                     cube_prefetch: cube_arc.clone(),
                     current_row: Some(row),
@@ -1402,7 +1402,7 @@ fn update_cell_impl(
     );
 
     // Record undo after successful change
-    undo_stack.record_cell_change(row, col, previous_cell);
+    undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
     // Recalculate dependents if automatic mode
     if *calc_mode == "automatic" {
@@ -1560,8 +1560,8 @@ fn update_cell_impl(
             // edit that triggered it; reuse that decision rather than making a second.
             let cp_effect = crate::document_effect::DocumentEffect::mutates(file_state);
             let mut cp_storage = state.computed_properties.write(&cp_effect).unwrap();
-            let mut rh = state.row_heights.lock().unwrap();
-            let mut cw = state.column_widths.lock().unwrap();
+            let mut rh = state.row_heights.write(&cp_effect).unwrap();
+            let mut cw = state.column_widths.write(&cp_effect).unwrap();
 
             let (cp_dim_changes, cp_style_refresh) =
                 crate::computed_properties::re_evaluate_for_changed_cells(
@@ -1594,8 +1594,8 @@ fn update_cell_impl(
                 .map(|c| (c.sheet_index.unwrap_or(active_sheet), c.row, c.col))
                 .collect();
 
-            let rh = state.row_heights.lock().unwrap();
-            let cw = state.column_widths.lock().unwrap();
+            let rh = state.row_heights.read().unwrap();
+            let cw = state.column_widths.read().unwrap();
 
             // Slicer computed-property caches are persisted with the slicer. This runs
             // inside `update_cell_impl`, which already dirtied for the triggering cell
@@ -2280,7 +2280,7 @@ pub fn update_cells_batch(
     // output region — the single-cell edit path (update_cell_impl) already
     // rejects these, and a partial paste would be worse than none.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         check_region_cells_protection(&state, active_sheet, updates.iter().map(|u| (u.row, u.col)))?;
     }
 
@@ -2302,7 +2302,7 @@ pub fn update_cells_batch(
     // dependency maps cannot see. Names are collected BEFORE the batch core
     // runs; the targeted recalc runs AFTER it, once every core lock dropped.
     let anchor_names: Vec<String> = {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let controls = state.controls.read().unwrap();
         if controls.is_empty() {
             Vec::new()
@@ -2447,7 +2447,7 @@ pub(crate) fn update_cells_batch_core(
     // fill). Excel refuses such a gesture outright rather than applying the part
     // that happens to land on unlocked cells.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_protection_cells(
             &state,
             active_sheet,
@@ -2457,7 +2457,7 @@ pub(crate) fn update_cells_batch_core(
 
     // Check if any target cell is a spilled value (before acquiring other locks)
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let spill_hosts = state.spill_hosts.lock().unwrap();
         for update in &updates {
             check_spill_protection(&spill_hosts, active_sheet, update.row, update.col, update.row, update.col)?;
@@ -2470,8 +2470,8 @@ pub(crate) fn update_cells_batch_core(
         if wb_index.is_empty() {
             (updates, 0usize)
         } else {
-            let active_sheet = *state.active_sheet.lock().unwrap();
-            let sheet_ids = state.sheet_ids.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
+            let sheet_ids = state.sheet_ids.read().unwrap();
             if let Some(&sid) = sheet_ids.get(active_sheet) {
                 let mut kept = Vec::with_capacity(updates.len());
                 let mut skipped = 0usize;
@@ -2497,15 +2497,15 @@ pub(crate) fn update_cells_batch_core(
     }
 
     // Acquire all locks once
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -2516,7 +2516,7 @@ pub(crate) fn update_cells_batch_core(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
@@ -2628,7 +2628,7 @@ pub(crate) fn update_cells_batch_core(
             });
 
             override_edits.push((row, col, previous_cell.clone(), grid.get_cell(row, col).cloned()));
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
             cells_needing_recalc.push((row, col));
             continue;
         }
@@ -2914,7 +2914,7 @@ pub(crate) fn update_cells_batch_core(
         });
 
         override_edits.push((row, col, previous_cell.clone(), grid.get_cell(row, col).cloned()));
-        undo_stack.record_cell_change(row, col, previous_cell);
+        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
         cells_needing_recalc.push((row, col));
     }
 
@@ -3157,8 +3157,18 @@ pub(crate) fn update_cells_batch_core(
 
 /// Clear a cell.
 #[tauri::command]
-pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32, col: u32) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+/// DEPENDENTS RECALCULATE (§2c). The single-cell twin of `clear_range`, and it
+/// carried the same defect: clearing one cell propagated to nothing at all.
+pub fn clear_cell(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    row: u32,
+    col: u32,
+) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Check if cell is a spilled value
     {
@@ -3242,10 +3252,37 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
     }
 
     // Record undo if there was actually a cell to clear
-    if previous_cell.is_some() {
-        undo_stack.record_cell_change(row, col, previous_cell);
+    let had_content = previous_cell.is_some();
+    if had_content {
+        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
+
+    // PHASE B — dependents, after every guard above is released (std mutexes
+    // are not reentrant; the recalc takes the same grid + dependency maps).
+    drop(undo_stack);
+    drop(cross_sheet_dependencies_map);
+    drop(cross_sheet_dependents_map);
+    drop(row_dependencies_map);
+    drop(row_dependents_map);
+    drop(column_dependencies_map);
+    drop(column_dependents_map);
+    drop(dependencies_map);
+    drop(dependents_map);
+    drop(grids);
+    drop(grid);
+
+    if had_content {
+        let mut recalculated = Vec::new();
+        recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &[(row, col)],
+            &mut recalculated,
+        );
     }
 
     Ok(())
@@ -3254,16 +3291,27 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
 /// Clear a range of cells efficiently.
 /// Only clears cells that actually exist within the range.
 /// Returns an error if any cell in the range is a spilled value (not the origin).
+///
+/// DEPENDENTS RECALCULATE (§2c). This is the Delete key, and it used to
+/// recalculate NOTHING — not cross-sheet, not even same-sheet. Erasing the
+/// inputs of `=SUM(...)` left the total at its pre-delete number until some
+/// unrelated later edit happened to sweep it up. Exactly the `sort_range`
+/// defect: a bulk range command that rewrites cells and never seeds the
+/// cascade. Every cell that actually held content is a seed for the ONE shared
+/// `recalc_after_active_sheet_bulk_rewrite`.
 #[tauri::command]
 pub fn clear_range(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
     end_col: u32,
 ) -> Result<u32, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Check if any cell in the range is a spill host (part of a spilled array, not the origin)
     {
@@ -3333,7 +3381,7 @@ pub fn clear_range(
         let previous_cell = grid.get_cell(row, col).cloned();
         if previous_cell.is_some() {
             override_edits.push((row, col, previous_cell.clone(), None));
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
         }
 
         grid.clear_cell(row, col);
@@ -3377,6 +3425,41 @@ pub fn clear_range(
         undo_stack.commit_transaction();
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
+
+    // PHASE B — dependents. Seeds are the cells that actually HELD content
+    // (`override_edits` is pushed only when `previous_cell.is_some()`), so an
+    // empty selection costs one `is_empty` check. Cleared cells have no formula
+    // of their own, so the shared cascade skips them as seeds and re-evaluates
+    // only what READ them — same-sheet through the dependency maps, other
+    // sheets through `cascade_cross_sheet_dependents`.
+    //
+    // The guards above must be released first: the recalc takes the same
+    // grid/dependency mutexes and std mutexes are not reentrant. Same second-
+    // lock-phase shape as `sort_range`.
+    let seeds: Vec<(u32, u32)> = override_edits.iter().map(|(r, c, _, _)| (*r, *c)).collect();
+    drop(undo_stack);
+    drop(cross_sheet_dependencies_map);
+    drop(cross_sheet_dependents_map);
+    drop(row_dependencies_map);
+    drop(row_dependents_map);
+    drop(column_dependencies_map);
+    drop(column_dependents_map);
+    drop(dependencies_map);
+    drop(dependents_map);
+    drop(grids);
+    drop(grid);
+
+    if !seeds.is_empty() {
+        let mut recalculated = Vec::new();
+        recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &seeds,
+            &mut recalculated,
+        );
     }
 
     Ok(count)
@@ -3579,12 +3662,12 @@ pub fn clear_range_with_options(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ClearRangeParams,
 ) -> Result<ClearRangeResult, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Wave 3: an explicit non-active target takes the off-sheet path.
     if let Some(target) = params.sheet_index {
         if target != active_sheet {
-            let count = state.sheet_names.lock().unwrap().len();
+            let count = state.sheet_names.read().unwrap().len();
             if target >= count {
                 return Err(format!(
                     "Sheet index {} out of range: workbook has {} sheet(s)",
@@ -3645,7 +3728,7 @@ pub fn clear_range_with_options(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -3655,7 +3738,7 @@ pub fn clear_range_with_options(
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let ClearRangeParams {
@@ -3728,7 +3811,7 @@ pub fn clear_range_with_options(
                 // Clear everything - same as existing clear_range
                 if previous_cell.is_some() {
                     override_edits.push((row, col, previous_cell.clone(), None));
-                    undo_stack.record_cell_change(row, col, previous_cell);
+                    undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
                 }
                 grid.clear_cell(row, col);
                 if active_sheet < grids.len() {
@@ -3791,7 +3874,7 @@ pub fn clear_range_with_options(
             ClearApplyTo::Contents => {
                 // Clear values and formulas, keep formatting
                 if let Some(ref cell) = previous_cell {
-                    undo_stack.record_cell_change(row, col, previous_cell.clone());
+                    undo_stack.record_cell_change(active_sheet, row, col, previous_cell.clone());
 
                     let style_index = cell.style_index;
                     let mut new_cell = engine::Cell::new();
@@ -3861,7 +3944,7 @@ pub fn clear_range_with_options(
             ClearApplyTo::Formats => {
                 // Clear formatting, keep values
                 if let Some(ref cell) = previous_cell {
-                    undo_stack.record_cell_change(row, col, previous_cell.clone());
+                    undo_stack.record_cell_change(active_sheet, row, col, previous_cell.clone());
 
                     // Index 0 = INHERIT, so this returns the cell to its
                     // row/column style tier rather than to the workbook default.
@@ -3914,7 +3997,7 @@ pub fn clear_range_with_options(
                 // For now, treat RemoveHyperlinks as clear formats
                 if let Some(ref cell) = previous_cell {
                     if apply_to == ClearApplyTo::RemoveHyperlinks {
-                        undo_stack.record_cell_change(row, col, previous_cell.clone());
+                        undo_stack.record_cell_change(active_sheet, row, col, previous_cell.clone());
 
                         // Index 0 = INHERIT; see the note in the Formats branch.
                         let mut new_cell = cell.clone();
@@ -3969,6 +4052,44 @@ pub fn clear_range_with_options(
         undo_stack.commit_transaction();
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    }
+
+    // PHASE B — dependents (§2c), the active-sheet half of what
+    // `clear_range_with_options_off_sheet` has always done through
+    // `recalc_after_off_sheet_write`. Same asymmetry as `sort_range`: clearing
+    // a sheet you were NOT looking at recalculated, clearing the one in front
+    // of you did not.
+    //
+    // Seeds are the CONTENT-clearing branches only. `override_edits` is pushed
+    // exactly by All/ResetContents/Contents; Formats, Hyperlinks and
+    // RemoveHyperlinks change `style_index` and nothing a formula can read, so
+    // they seed nothing and the cascade returns on the empty check. That is
+    // deliberately tighter than the off-sheet twin, which excludes only Formats.
+    let seeds: Vec<(u32, u32)> = override_edits.iter().map(|(r, c, _, _)| (*r, *c)).collect();
+    drop(locale);
+    drop(merged_regions);
+    drop(undo_stack);
+    drop(cross_sheet_dependencies_map);
+    drop(cross_sheet_dependents_map);
+    drop(row_dependencies_map);
+    drop(row_dependents_map);
+    drop(column_dependencies_map);
+    drop(column_dependents_map);
+    drop(dependencies_map);
+    drop(dependents_map);
+    drop(style_registry);
+    drop(grids);
+    drop(grid);
+
+    if !seeds.is_empty() {
+        recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &seeds,
+            &mut updated_cells,
+        );
     }
 
     Ok(ClearRangeResult {
@@ -4082,7 +4203,7 @@ pub(crate) fn sort_range_off_sheet(
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
-        let styles = state.style_registry.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let grid = &mut grids[target];
 
@@ -4270,10 +4391,10 @@ pub fn sort_range(
 ) -> Result<SortRangeResult, String> {
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if let Some(target) = params.sheet_index {
             if target != active_sheet {
-                let count = state.sheet_names.lock().unwrap().len();
+                let count = state.sheet_names.read().unwrap().len();
                 if target >= count {
                     return Err(format!(
                         "Sheet index {} out of range: workbook has {} sheet(s)",
@@ -4296,7 +4417,7 @@ pub fn sort_range(
     // Sheet protection, BOTH axes: the allowSort option must permit sorting at
     // all, and every cell in the range must be writable (a sort rewrites them).
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_action(&state, active_sheet, "sort", "sort")?;
         crate::protection::check_sheet_protection_range(
             &state, active_sheet,
@@ -4307,7 +4428,7 @@ pub fn sort_range(
 
     // Check if any cell in the sort range is a spilled value
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let spill_hosts = state.spill_hosts.lock().unwrap();
         check_spill_protection(
             &spill_hosts, active_sheet,
@@ -4334,17 +4455,17 @@ pub fn sort_range(
 
     // Cloned before the long-lived locks: the dependency rebuild below needs
     // the official sheet names to canonicalise cross-sheet keys.
-    let sheet_names_for_rebuild = state.sheet_names.lock().unwrap().clone();
+    let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let SortRangeParams {
@@ -4467,7 +4588,7 @@ pub fn sort_range(
 
                     // Record undo for the target cell
                     let prev_cell = grid.get_cell(target_row, target_col).cloned();
-                    undo_stack.record_cell_change(target_row, target_col, prev_cell);
+                    undo_stack.record_cell_change(active_sheet, target_row, target_col, prev_cell);
 
                     if let Some(cell) = cell_opt {
                         // A moved formula must keep referring to its own row:
@@ -4606,7 +4727,7 @@ pub fn sort_range(
 
                     // Record undo for the target cell
                     let prev_cell = grid.get_cell(target_row, target_col).cloned();
-                    undo_stack.record_cell_change(target_row, target_col, prev_cell);
+                    undo_stack.record_cell_change(active_sheet, target_row, target_col, prev_cell);
 
                     if let Some(cell) = cell_opt {
                         // Shift relative column references with the move
@@ -5033,7 +5154,7 @@ pub fn get_used_range(
     state: State<AppState>,
     sheet_index: Option<usize>,
 ) -> Result<UsedRangeResult, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
     let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
@@ -5072,15 +5193,15 @@ pub fn get_cells_in_rows(
     end_row: u32,
 ) -> Vec<CellData> {
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let protection = state.sheet_protection.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let protection = state.sheet_protection.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
     // One probe for the whole viewport: formula hiding only bites on a
     // protected sheet, so an unprotected one skips the per-cell check entirely.
     let sheet_protected = {
         // Deref-and-drop: no guard is held across the grid locks above.
-        let active = *state.active_sheet.lock().unwrap();
+        let active = *state.active_sheet.read().unwrap();
         protection.get(&active).map(|p| p.protected).unwrap_or(false)
     };
     let mut cells = Vec::new();
@@ -5111,15 +5232,15 @@ pub fn get_cells_in_cols(
     end_col: u32,
 ) -> Vec<CellData> {
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let protection = state.sheet_protection.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let protection = state.sheet_protection.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
     // One probe for the whole viewport: formula hiding only bites on a
     // protected sheet, so an unprotected one skips the per-cell check entirely.
     let sheet_protected = {
         // Deref-and-drop: no guard is held across the grid locks above.
-        let active = *state.active_sheet.lock().unwrap();
+        let active = *state.active_sheet.read().unwrap();
         protection.get(&active).map(|p| p.protected).unwrap_or(false)
     };
     let mut cells = Vec::new();
@@ -5173,13 +5294,16 @@ pub fn has_content_in_range(
 pub fn remove_duplicates(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: RemoveDuplicatesParams,
 ) -> RemoveDuplicatesResult {
     // Sheet protection first, before any grid lock: removing duplicates rewrites
     // the whole range. Reported through the result's `error` field, since this
     // command does not return Result.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if let Err(e) = crate::protection::check_sheet_protection_range(
             &state,
             active_sheet,
@@ -5202,10 +5326,10 @@ pub fn remove_duplicates(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let RemoveDuplicatesParams {
@@ -5346,7 +5470,7 @@ pub fn remove_duplicates(
 
             // Record undo for the target cell
             let prev_cell = grid.get_cell(target_row, target_col).cloned();
-            undo_stack.record_cell_change(target_row, target_col, prev_cell);
+            undo_stack.record_cell_change(active_sheet, target_row, target_col, prev_cell);
 
             if let Some(cell) = cell_opt {
                 grid.set_cell(target_row, target_col, cell.clone());
@@ -5399,7 +5523,7 @@ pub fn remove_duplicates(
         for col in min_col..=max_col {
             let prev_cell = grid.get_cell(row, col).cloned();
             if prev_cell.is_some() {
-                undo_stack.record_cell_change(row, col, prev_cell);
+                undo_stack.record_cell_change(active_sheet, row, col, prev_cell);
                 grid.clear_cell(row, col);
                 if active_sheet < grids.len() {
                     grids[active_sheet].clear_cell(row, col);
@@ -5423,6 +5547,43 @@ pub fn remove_duplicates(
     }
 
     undo_stack.commit_transaction();
+
+    // Formula cells were COMPACTED UPWARDS into new positions, so the
+    // dependency maps still describe where they used to live — the same
+    // BUG-0010 hazard `sort_range` rebuilds for. Rebuild before seeding, or the
+    // cascade below would walk stale edges.
+    let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
+    crate::undo_commands::rebuild_all_dependencies_from_grid(
+        &grid,
+        active_sheet,
+        &sheet_names_for_rebuild,
+        &state,
+    );
+
+    // PHASE B — dependents (§2c). Remove-duplicates rewrites EVERY cell of its
+    // range (compact up, then clear the tail), so every position in the range
+    // is a seed. Second lock phase for the usual reason: the recalc needs the
+    // dependency maps `rebuild_all_dependencies_from_grid` just held.
+    drop(locale);
+    drop(merged_regions);
+    drop(undo_stack);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+
+    if duplicates_removed > 0 {
+        let seeds: Vec<(u32, u32)> = (min_row..=max_row)
+            .flat_map(|r| (min_col..=max_col).map(move |c| (r, c)))
+            .collect();
+        recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &seeds,
+            &mut updated_cells,
+        );
+    }
 
     RemoveDuplicatesResult {
         success: true,
@@ -5501,7 +5662,7 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     );
     let user_files = user_files_state.files.lock().unwrap();
 
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
     // themselves persisted (formulas, literals, locale, control values), so it
     // must not dirty on its own account: the ENTRY command that made those
@@ -5513,14 +5674,14 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     );
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
     let cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Manual calculation mode: the user asked for stale values until F9.
@@ -5628,7 +5789,13 @@ pub(crate) fn recalc_after_off_sheet_write(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     sheet_indices: &[usize],
 ) {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // Cross-sheet cycle detection is memoised for this whole scope: the loop
+    // below calls `recalculate_sheet_values` 2*(sheets+1) times and the answer
+    // is a function of the ASTs, which recalculation never changes. Without
+    // this the workbook-level graph would be rebuilt on every one of those
+    // calls. See calculation.rs `begin_circular_pass`.
+    let _circular_pass = crate::calculation::begin_circular_pass();
     for _pass in 0..2 {
         for &idx in sheet_indices {
             if idx == active_sheet {
@@ -5747,9 +5914,9 @@ pub fn update_cell_on_sheets(
     let wrote: Vec<usize> = {
         let locale = state.locale.lock().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
 
@@ -5764,7 +5931,7 @@ pub fn update_cell_on_sheets(
                 let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
                 if previous_cell.is_some() {
                     undo_stack.begin_transaction(format!("Clear cell on sheet {}", sheet_idx));
-                    undo_stack.record_cell_change(row, col, previous_cell);
+                    undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
                     grids[sheet_idx].clear_cell(row, col);
                     undo_stack.commit_transaction();
                 }
@@ -5829,7 +5996,7 @@ pub fn update_cell_on_sheets(
                 }
 
                 grids[sheet_idx].set_cell(row, col, cell);
-                undo_stack.record_cell_change(row, col, previous_cell);
+                undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
                 undo_stack.commit_transaction();
                 wrote.push(sheet_idx);
             }
@@ -5857,10 +6024,20 @@ pub fn update_cell_on_sheets(
 
 /// Clear a range of cells on multiple non-active sheets.
 /// Used for sheet grouping: when the user presses Delete with grouped sheets.
+///
+/// DEPENDENTS RECALCULATE (§2c). Like every other clear path this one
+/// propagated nothing; unlike them it writes to sheets the user is not looking
+/// at, so `recalc_after_off_sheet_write` is the right shape — it evaluates each
+/// written sheet plus the active one, which is also what puts a formula on the
+/// ACTIVE sheet reading a cleared grouped sheet back in step.
 #[tauri::command]
 pub fn clear_range_on_sheets(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     sheet_indices: Vec<usize>,
     start_row: u32,
     start_col: u32,
@@ -5892,8 +6069,10 @@ pub fn clear_range_on_sheets(
     // USER CONTENT to non-active sheets, which the paired `clear_range` never covered.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    // Sheets that actually lost content — the recalc seed set for phase B.
+    let mut cleared_sheets: Vec<usize> = Vec::new();
 
     for &sheet_idx in &sheet_indices {
         if sheet_idx == active_sheet || sheet_idx >= grids.len() {
@@ -5916,6 +6095,7 @@ pub fn clear_range_on_sheets(
         if cells_to_clear.is_empty() {
             continue;
         }
+        cleared_sheets.push(sheet_idx);
 
         undo_stack.begin_transaction(format!(
             "Clear range on sheet {}",
@@ -5926,12 +6106,28 @@ pub fn clear_range_on_sheets(
         for (r, c) in cells_to_clear {
             let previous_cell = grid.get_cell(r, c).cloned();
             if previous_cell.is_some() {
-                undo_stack.record_cell_change(r, c, previous_cell);
+                undo_stack.record_cell_change(sheet_idx, r, c, previous_cell);
             }
             grid.clear_cell(r, c);
         }
 
         undo_stack.commit_transaction();
+    }
+
+    // PHASE B — dependents. `recalc_after_off_sheet_write` takes its own locks
+    // (it calls `recalculate_sheet_values`), so the caller must hold none.
+    drop(undo_stack);
+    drop(grids);
+
+    if !cleared_sheets.is_empty() {
+        recalc_after_off_sheet_write(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &cleared_sheets,
+        );
     }
 
     Ok(())
@@ -5984,7 +6180,7 @@ pub fn fill_range(
 
     // Sheet protection over the FILL TARGET (the source is only read).
     {
-        let active = *state.active_sheet.lock().unwrap();
+        let active = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_protection_range(
             &state,
             active,
@@ -6012,11 +6208,11 @@ pub fn fill_range(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Acquire all locks once
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -6027,7 +6223,7 @@ pub fn fill_range(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
@@ -6097,7 +6293,7 @@ pub fn fill_range(
             // Record previous state for undo
             let previous_cell = grid.get_cell(tr, tc).cloned();
             let pre_for_override = previous_cell.clone();
-            undo_stack.record_cell_change(tr, tc, previous_cell);
+            undo_stack.record_cell_change(active_sheet, tr, tc, previous_cell);
 
             // Find the source cell
             let source_cell = source_cells.get(&(rel_r, rel_c));
@@ -6688,3 +6884,10 @@ mod writeback_range_guard_wiring_tests {
 #[cfg(test)]
 #[path = "cross_sheet_recalc_tests.rs"]
 mod cross_sheet_recalc_tests;
+
+/// §2c follow-on — bulk range commands that rewrite cells must seed the ONE
+/// shared cascade, and cycles must be detected across sheet boundaries. Also a
+/// CHILD module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "bulk_rewrite_recalc_tests.rs"]
+mod bulk_rewrite_recalc_tests;

@@ -580,7 +580,15 @@ function activate(context: ExtensionContext): void {
 function deactivate(): void {
   if (!isActivated) return;
   for (const fn of cleanupFns) {
-    try { fn(); } catch {}
+    // One failing cleanup must not strand the others, so the loop continues —
+    // but it does not continue SILENTLY. These teardowns unmount validator
+    // workers and drop event listeners; a swallowed throw here is a leak that
+    // survives deactivate with nothing to show for it.
+    try {
+      fn();
+    } catch (error) {
+      console.error("[Distribution] a deactivate cleanup threw; continuing", error);
+    }
   }
   cleanupFns.length = 0;
   resetWritebackSnapshot();

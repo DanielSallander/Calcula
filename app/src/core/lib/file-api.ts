@@ -312,6 +312,18 @@ function announceBackendStateReplaced(): void {
   // `SheetTabs` re-reads on SHEET_CHANGED, which is also literally true here —
   // the active sheet is now the new document's first one.
   emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: 0, sheetName: '' });
+  // The four per-sheet DISPLAY FLAGS (displayZeros / showFormulas / viewMode /
+  // displayHeadings) are replaced too, and they are the one backend-state cache
+  // the user can SEE from across the room. `new_file` resets all four in Rust and
+  // `open_file` loads the document's own — but the renderer reads Core state, fed
+  // by the `DISPLAY_*_TOGGLED` intents, so neither reached it. Measured: a
+  // workbook saved with the headings hidden, then File > New, kept the headings
+  // hidden for the rest of the session while the backend reported them shown.
+  //
+  // SHEET_CHANGED does not cover it: Core hydrates the flags on the `sheet:
+  // normalSwitch` window event that SheetTabs emits, which is a different event
+  // with a different meaning (a user picked another tab), and this is not one.
+  emitAppEvent(AppEvents.SHEET_DISPLAY_FLAGS_CHANGED);
 }
 
 export async function newFile(): Promise<void> {

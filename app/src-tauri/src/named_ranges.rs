@@ -373,7 +373,7 @@ pub fn get_named_range_for_selection(
     end_col: u32,
 ) -> Option<NamedRange> {
     let named_ranges = state.named_ranges.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let current_sheet_name = sheet_names.get(sheet_index).cloned().unwrap_or_default();
 
     // Build the expected refers_to patterns to match against.
@@ -520,7 +520,7 @@ pub fn resolve_named_range_coords(
     name: String,
 ) -> Result<NamedRangeCoords, String> {
     let named_ranges = state.named_ranges.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let key = name.to_uppercase();
     let nr = named_ranges
@@ -777,8 +777,8 @@ pub fn apply_names_to_formulas(
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Build the list of (name, col_letters, row_1based) for single-cell named ranges

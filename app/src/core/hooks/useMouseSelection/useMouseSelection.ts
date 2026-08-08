@@ -37,6 +37,7 @@ import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../types";
 import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
+import { rowHeaderGutter, colHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -469,7 +470,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         }
 
         // Normal mode: select all (corner click)
-        if (mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24)) {
+        if (mouseX < (rowHeaderGutter(config)) && mouseY < (colHeaderGutter(config))) {
           event.preventDefault();
           if (onCommitBeforeSelect) {
             await onCommitBeforeSelect();
@@ -627,7 +628,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
               setCursorStyle("pointer");
             }
             // Check if over corner (select-all button) - show pointer
-            else if (mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24)) {
+            else if (mouseX < (rowHeaderGutter(config)) && mouseY < (colHeaderGutter(config))) {
               setCursorStyle("pointer");
             }
             // Check if over column header (not resize handle) - show down arrow
@@ -637,7 +638,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                 // Check if hovering over a filter button in column header
                 const override = getColumnHeaderOverride(headerCol, viewport.startRow);
                 if (override?.showFilterButton) {
-                  const rowHeaderWidth = config.rowHeaderWidth || 50;
+                  const rowHeaderWidth = rowHeaderGutter(config);
                   const scrollX = viewport.scrollX || 0;
                   let colX = rowHeaderWidth - scrollX;
                   for (let c = 0; c < headerCol; c++) {

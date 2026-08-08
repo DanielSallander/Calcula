@@ -10,6 +10,9 @@ import { getViewportCells } from "../../lib/tauri-api";
 import {
   EDITOR_CHROME_PX,
   computeExpandedEditorWidth,
+  computeExpandedEditorHeight,
+  countEditorLines,
+  editorLineHeight,
   measureEditorTextWidth,
 } from "./expansion";
 import * as S from "./InlineEditor.styles";
@@ -17,6 +20,7 @@ import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder, isGlobalFormulaMode, setGlobalCursorPosition, getGlobalCursorPosition } from "../../hooks/useEditing";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../../api/formulaAutocomplete";
 import { isColumnAutocompleteVisible, ColumnAutocompleteEvents } from "../../../api/columnAutocomplete";
+import { rowHeaderGutter, colHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -101,7 +105,7 @@ function calculateColumnX(
   dimensions: DimensionOverrides,
   scrollX: number
 ): number {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const rowHeaderWidth = rowHeaderGutter(config);
   let x = rowHeaderWidth;
   for (let c = 0; c < col; c++) {
     x += getColumnWidth(c, config, dimensions);
@@ -118,7 +122,7 @@ function calculateRowY(
   dimensions: DimensionOverrides,
   scrollY: number
 ): number {
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const colHeaderHeight = colHeaderGutter(config);
   let y = colHeaderHeight;
   for (let r = 0; r < row; r++) {
     y += getRowHeight(r, config, dimensions);
@@ -274,7 +278,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     zoom = 1,
   } = props;
 
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const isCommittingRef = useRef(false);
   // FIX: Track when ESC is pressed to prevent blur from committing
   const isCancelingRef = useRef(false);
@@ -423,11 +427,28 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     zoom,
   ]);
 
+  // Logical bottom edge the editor may not cross.
+  const viewportBottom = (typeof window !== "undefined" ? window.innerHeight : 0) / (zoom || 1);
+
+  // Vertical growth for Alt+Enter entries. Unlike the horizontal walk this
+  // needs no neighbour lookup — see computeExpandedEditorHeight for why the two
+  // rules are deliberately asymmetric.
+  const expandedHeight = useMemo(
+    () =>
+      computeExpandedEditorHeight({
+        y: logicalPos.y,
+        baseHeight: logicalPos.height,
+        lineCount: countEditorLines(editing.value),
+        maxBottom: viewportBottom,
+      }),
+    [editing.value, logicalPos.y, logicalPos.height, viewportBottom]
+  );
+
   const position = {
     x: logicalPos.x * zoom,
     y: logicalPos.y * zoom,
     width: expandedWidth * zoom,
-    height: logicalPos.height * zoom,
+    height: expandedHeight * zoom,
     visible: logicalPos.visible,
   };
 
@@ -435,7 +456,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
    * Handle input value changes.
    */
   const handleChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
+    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
       if (!disabled) {
         onValueChange(event.target.value);
 
@@ -488,8 +509,16 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
    * FIX: Added F4 handler to toggle absolute/relative cell reference modes.
    */
   const handleKeyDown = useCallback(
-    async (event: React.KeyboardEvent<HTMLInputElement>) => {
+    async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (disabled || isCommittingRef.current) {
+        // In a <textarea> both of these keys have a DEFAULT text-mutating
+        // action. The old <input> made that harmless (it inserted nothing and
+        // sanitized newlines away); here an Enter arriving while a commit is
+        // in flight would append a line break to an entry that is already on
+        // its way to the backend, and a Tab would put a literal tab in it.
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+        }
         return;
       }
 
@@ -684,7 +713,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
    * FIX: Also checks isCancelingRef to prevent commit after ESC.
    */
   const handleBlur = useCallback(
-    async (event: React.FocusEvent<HTMLInputElement>) => {
+    async (event: React.FocusEvent<HTMLTextAreaElement>) => {
       // Don't commit if already committing (e.g., from Enter key)
       if (isCommittingRef.current || disabled) {
         return;
@@ -906,8 +935,9 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   }
 
   return (
-    <S.EditorInput
+    <S.EditorTextArea
       ref={inputRef}
+      rows={1}
       // Stable hook for tests and for anything that must find the live editor
       // in the DOM. styled-components hashes the class name, so `[class*=...]`
       // does not work here (the same trap documented for E2E dialog
@@ -918,6 +948,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       $y={position.y}
       $width={position.width}
       $height={position.height}
+      $lineHeight={editorLineHeight(logicalPos.height) * zoom}
       $zoom={zoom}
       value={editing.value}
       onChange={handleChange}
@@ -931,6 +962,9 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       autoCapitalize="off"
     />
   );
+  // NOTE: `data-inline-editor` is what E2E and anything else locates the editor
+  // with — deliberately an attribute rather than a tag, which is why swapping
+  // <input> for <textarea> did not move a single selector.
 }
 
 export default InlineEditor;

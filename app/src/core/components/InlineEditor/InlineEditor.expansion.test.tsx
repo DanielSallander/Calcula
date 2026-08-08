@@ -81,8 +81,10 @@ const VIEWPORT: Viewport = {
 let root: Root;
 let host: HTMLDivElement;
 
-function editorEl(): HTMLInputElement {
-  return host.querySelector("input") as HTMLInputElement;
+// The editor is a <textarea> (an <input> strips the newlines Alt+Enter puts in
+// the entry). Locate it by its stable data attribute, never by tag.
+function editorEl(): HTMLTextAreaElement {
+  return host.querySelector("[data-inline-editor]") as HTMLTextAreaElement;
 }
 
 /** The width the editor is actually rendered at, in px. */
@@ -194,7 +196,7 @@ describe("InlineEditor expands over neighbouring cells (Excel parity)", () => {
         </GridProvider>,
       );
     });
-    expect(host.querySelector("input")).toBeNull();
+    expect(host.querySelector("[data-inline-editor]")).toBeNull();
   });
 
   it("does not expand a MERGED cell past its own span", async () => {

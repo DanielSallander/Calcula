@@ -7,6 +7,7 @@ import React, { useRef, useCallback, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import * as monaco from "monaco-editor";
+import { enforceLfLineEndings } from "../../lib/monacoLineEndings";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Monaco 0.52+ moved json to top-level; languages.json still works at runtime
 const monacoJson = (monaco.languages as any).json;
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
@@ -26,6 +27,10 @@ self.MonacoEnvironment = {
 };
 
 loader.config({ monaco });
+// Stored text is LF on every platform. Monaco defaults a model created from
+// EMPTY text to the OS ending (CRLF here), and @monaco-editor/react creates the
+// model before an async document arrives - see _shared/lib/monacoLineEndings.ts.
+enforceLfLineEndings(monaco);
 
 // ============================================================================
 // Schema Registration

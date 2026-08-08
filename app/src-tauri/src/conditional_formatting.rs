@@ -589,11 +589,11 @@ pub struct UpdateCFParams {
 /// without this an out-of-range index would silently read (or clear) a phantom
 /// sheet's rule list instead of erroring.
 fn resolve_cf_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usize, String> {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     match sheet_index {
         None => Ok(active),
         Some(idx) => {
-            let count = state.sheet_names.lock().unwrap().len();
+            let count = state.sheet_names.read().unwrap().len();
             if idx < count {
                 Ok(idx)
             } else {
@@ -623,7 +623,7 @@ pub(crate) fn add_conditional_format_impl(
     file_state: &FileState,
     params: AddCFParams,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Rules live in `workbook.conditional_formats` and are written only by the save
     // path, so adding one changes what a save would write.
     let effect = DocumentEffect::mutates(file_state);
@@ -661,7 +661,7 @@ pub fn update_conditional_format(
     file_state: State<FileState>,
     params: UpdateCFParams,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
@@ -701,7 +701,7 @@ pub fn delete_conditional_format(
     file_state: State<FileState>,
     rule_id: u64,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
@@ -727,7 +727,7 @@ pub fn reorder_conditional_formats(
     file_state: State<FileState>,
     rule_ids: Vec<u64>,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
@@ -755,7 +755,7 @@ pub fn get_conditional_format(
     state: State<AppState>,
     rule_id: u64,
 ) -> Option<ConditionalFormatDefinition> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let cf_storage = state.conditional_formats.read().unwrap();
 
     cf_storage
@@ -788,10 +788,10 @@ pub fn evaluate_conditional_formats(
     end_row: u32,
     end_col: u32,
 ) -> EvaluateCFResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let cf_storage = state.conditional_formats.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let rules = match cf_storage.get(&active_sheet) {
         Some(r) => r,

@@ -6,6 +6,7 @@
 import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, VisibleRange, FreezePaneLayout } from "../../../types";
 import { ensureDimensions } from "../styles/styleUtils";
 import { getColumnWidth, getRowHeight } from "./dimensions";
+import { rowHeaderGutter, colHeaderGutter } from "./headerVisibility";
 
 /**
  * Calculate the visible cell range based on viewport and scroll position.
@@ -33,8 +34,8 @@ export function calculateVisibleRange(
 
   const scrollX = viewport.scrollX || 0;
   const scrollY = viewport.scrollY || 0;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
 
@@ -192,7 +193,7 @@ export function calculateFrozenTopRange(
   }
   
   const layout = calculateFreezePaneLayout(freezeConfig, config, dimensions);
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const rowHeaderWidth = rowHeaderGutter(config);
   const totalCols = config.totalCols || 100;
   const dims = ensureDimensions(dimensions);
   
@@ -259,7 +260,7 @@ export function calculateFrozenLeftRange(
   }
   
   const layout = calculateFreezePaneLayout(freezeConfig, config, dimensions);
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const dims = ensureDimensions(dimensions);
   
@@ -321,8 +322,8 @@ export function calculateScrollableRange(
 ): VisibleRange {
   const { freezeRow, freezeCol } = freezeConfig;
   const layout = calculateFreezePaneLayout(freezeConfig, config, dimensions);
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   const dims = ensureDimensions(dimensions);

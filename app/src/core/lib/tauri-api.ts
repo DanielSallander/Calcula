@@ -1646,6 +1646,15 @@ export interface UndoResult {
    *  shift a structural undo reverses). Re-read getUserHiddenRows/Cols:
    *  nothing in updatedCells reveals that a row's visibility changed. */
   hiddenChanged: boolean;
+  /** Every refresh DOMAIN this undo/redo touched, named exactly as the Shell's
+   *  MUTATION_REFRESH translator expects.
+   *
+   *  The flags above are DERIVED from this same set in Rust, so the two cannot
+   *  disagree; the list exists because the flags could not grow — the domains
+   *  that never got one (outline, hyperlinks, validations, annotations,
+   *  controls) are precisely the ones whose undo repainted nothing. Read this,
+   *  not the flags, when deciding what to refresh. */
+  refreshDomains: string[];
 }
 
 /**

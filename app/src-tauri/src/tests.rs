@@ -347,7 +347,7 @@ fn test_split_config_set_and_get() {
 
     // Initially no split
     {
-        let configs = state.split_configs.lock().unwrap();
+        let configs = state.split_configs.read().unwrap();
         let config = configs.get(0).unwrap();
         assert!(config.split_row.is_none());
         assert!(config.split_col.is_none());
@@ -355,8 +355,8 @@ fn test_split_config_set_and_get() {
 
     // Set a split at row 5, col 3
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
-        let mut configs = state.split_configs.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
+        let mut configs = state.split_configs.write(&crate::document_effect::test_seed_effect()).unwrap();
         configs[active_sheet] = sheets::SplitConfig {
             split_row: Some(5),
             split_col: Some(3),
@@ -365,7 +365,7 @@ fn test_split_config_set_and_get() {
 
     // Verify it was stored
     {
-        let configs = state.split_configs.lock().unwrap();
+        let configs = state.split_configs.read().unwrap();
         let config = configs.get(0).unwrap();
         assert_eq!(config.split_row, Some(5));
         assert_eq!(config.split_col, Some(3));
@@ -378,7 +378,7 @@ fn test_split_config_remove() {
 
     // Set a split
     {
-        let mut configs = state.split_configs.lock().unwrap();
+        let mut configs = state.split_configs.write(&crate::document_effect::test_seed_effect()).unwrap();
         configs[0] = sheets::SplitConfig {
             split_row: Some(10),
             split_col: Some(5),
@@ -387,13 +387,13 @@ fn test_split_config_remove() {
 
     // Remove the split (set to default)
     {
-        let mut configs = state.split_configs.lock().unwrap();
+        let mut configs = state.split_configs.write(&crate::document_effect::test_seed_effect()).unwrap();
         configs[0] = sheets::SplitConfig::default();
     }
 
     // Verify it was cleared
     {
-        let configs = state.split_configs.lock().unwrap();
+        let configs = state.split_configs.read().unwrap();
         let config = configs.get(0).unwrap();
         assert!(config.split_row.is_none());
         assert!(config.split_col.is_none());
@@ -406,7 +406,7 @@ fn test_split_config_per_sheet() {
 
     // Add a second sheet's split config
     {
-        let mut configs = state.split_configs.lock().unwrap();
+        let mut configs = state.split_configs.write(&crate::document_effect::test_seed_effect()).unwrap();
         configs.push(sheets::SplitConfig {
             split_row: Some(8),
             split_col: Some(4),
@@ -415,7 +415,7 @@ fn test_split_config_per_sheet() {
 
     // Sheet 0 should have no split, sheet 1 should have split
     {
-        let configs = state.split_configs.lock().unwrap();
+        let configs = state.split_configs.read().unwrap();
         assert!(configs[0].split_row.is_none());
         assert_eq!(configs[1].split_row, Some(8));
         assert_eq!(configs[1].split_col, Some(4));
@@ -454,7 +454,7 @@ fn run_go_to_special(
     search_range: Option<(u32, u32, u32, u32)>,
 ) -> Vec<(u32, u32)> {
     let grid = state.grid.read().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let (sr, sc, er, ec) = search_range.unwrap_or((0, 0, grid.max_row, grid.max_col));
 
     let mut cells = Vec::new();

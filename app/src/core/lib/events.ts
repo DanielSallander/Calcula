@@ -109,6 +109,24 @@ export const AppEvents = {
   VALIDATIONS_CHANGED: "app:validations-changed",
   OUTLINE_CHANGED: "app:outline-changed",
   HYPERLINKS_CHANGED: "app:hyperlinks-changed",
+
+  // The active sheet's DISPLAY FLAGS (displayZeros / showFormulas / viewMode /
+  // displayHeadings) were replaced in the BACKEND and the renderer must re-read
+  // them. Carries no payload on purpose: the one hydration path
+  // (`loadSheetDisplayFlags`) reads the authority, so a subscriber can never act
+  // on a stale or partial copy.
+  //
+  // Two emitters, one meaning. `shell/sheetDisplayFlagsBridge.ts` re-emits the
+  // Rust `sheet:display-flags-changed` announcement (any route that reaches
+  // `set_sheet_display_flags` without going through the View menu), and
+  // `core/lib/file-api.ts`'s `announceBackendStateReplaced()` fires it for
+  // `new_file` / `open_file`, which replace all four at once.
+  //
+  // DISTINCT from DISPLAY_HEADINGS_TOGGLED and friends, and it must stay
+  // distinct: those are frontend INTENTS that Layout.tsx answers by writing back
+  // to the backend, so re-emitting one here would echo a value the backend just
+  // reported straight back at it.
+  SHEET_DISPLAY_FLAGS_CHANGED: "app:sheet-display-flags-changed",
 } as const;
 
 export type AppEventType = (typeof AppEvents)[keyof typeof AppEvents];

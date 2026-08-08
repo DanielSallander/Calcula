@@ -57,6 +57,78 @@ async function configureClockDriver(grid: GridLike, cell: string, from: string, 
 }
 
 test.describe("Animation extension", () => {
+  /**
+   * THE ROOT OF THE FUNCTIONAL-SUITE CASCADE (docs/design/open-decisions-2026-08.md
+   * sec 3a/3b). This file used to leave three things in the shared workbook, and the
+   * first of them was eating clicks for the other eighty-nine specs:
+   *
+   *   1. A LOADED PLAYBACK DRIVER. Animation's play pill is a floating grid
+   *      overlay shown whenever `frameCount > 0`, anchored near the sheet origin
+   *      -- it covers A1:C2. It is a hit-testable region, so `grid.clickCell("A1")`
+   *      landed on the pill and toggled playback instead of selecting the cell.
+   *      Nothing in the file ever unloaded the driver, so from this spec onward
+   *      every write to A1/B1/C1 went wherever the selection happened to be and
+   *      every read came back as the previous spec's residue. That is the whole
+   *      of `editing.spec.ts` failing 3/3 in the ordered run and 12/12 cold, and
+   *      most of `dimensions`.
+   *   2. A CHART, at (320, 40) 400x300 on sheet 0, in every grid golden after
+   *      this point.
+   *   3. CELL DATA in column AA, which is outside the box `resetGrid` clears.
+   *
+   * Stopping playback is NOT enough -- `stop()` restores the model but leaves the
+   * driver loaded, so the pill stays. `clearDriver()` is the one that unloads it.
+   */
+  test.afterAll(async ({ sharedPage }) => {
+    await sharedPage.evaluate(async () => {
+      const w = window as unknown as {
+        __CALCULA_ANIMATION__?: { playbackEngine?: { clearDriver?: () => Promise<void> } };
+        __CALCULA_PANEL_REGISTRY__?: { closePanel?: (id?: string) => void };
+        __TAURI__?: { core: { invoke: (c: string, a?: unknown) => Promise<unknown> } };
+      };
+      // 0. CLOSE THE PANEL this file opens with View > Animation Timeline. An
+      //    open side panel takes 320px off [data-grid-area] — 1232px becomes
+      //    912px — so every later grid golden fails on SIZE before a single
+      //    pixel is compared. Measured: closePanel("animation.timeline") takes
+      //    it straight back to 1232.
+      try {
+        w.__CALCULA_PANEL_REGISTRY__?.closePanel?.("animation.timeline");
+      } catch {
+        /* the registry is a dev/E2E handle; never let it mask a real result */
+      }
+      // 1. Unload the driver -> the play pill's region is removed.
+      //
+      // Through the extension's OWN handle, not through the dev `__calcImport`
+      // bridge. That bridge does a real dynamic import, which for a stateful
+      // module hands back a SECOND instance with its own clock: the first
+      // version of this cleanup called clearDriver on a fresh engine that had no
+      // driver, reported success, and left the pill exactly where it was. The
+      // probe that caught it read `frameCount: 0` while the pill on screen said
+      // "11/11". Anything reaching live extension state must go through a
+      // window handle the extension itself published.
+      await w.__CALCULA_ANIMATION__?.playbackEngine?.clearDriver?.();
+      // 2. The chart, and the cells this file seeded (Z/AA are outside resetGrid).
+      const tauri = w.__TAURI__;
+      if (tauri?.core?.invoke) {
+        try {
+          const charts = (await tauri.core.invoke("get_charts")) as Array<{ id: string }>;
+          for (const c of charts) {
+            await tauri.core.invoke("delete_chart", { id: c.id }).catch(() => {});
+          }
+        } catch {
+          /* nothing to delete */
+        }
+        await tauri.core
+          .invoke("clear_range_with_options", {
+            params: { startRow: 0, startCol: 0, endRow: 20, endCol: 26, applyTo: "All" },
+          })
+          .catch(() => {});
+      }
+      window.dispatchEvent(new Event("charts:refresh"));
+      window.dispatchEvent(new Event("grid:refresh"));
+    });
+    await sharedPage.waitForTimeout(400);
+  });
+
   test("clock-cell driver steps write transiently, recalc dependents, and stop restores", async ({ grid }) => {
     const page = grid.page;
 

@@ -11,6 +11,11 @@ import {
 } from "@api/gridOverlays";
 import type { ChartDefinition, ChartSpec } from "../types";
 import { validateChartSpec } from "./chartSpecValidate";
+import {
+  chartSpecNeedsRepair,
+  normalizeChartDefinition,
+  normalizeChartSpec,
+} from "./chartSpecNormalize";
 import { chartsBackend } from "./chartsBackend";
 
 // ============================================================================
@@ -51,9 +56,30 @@ function toEntry(chart: ChartDefinition): ChartEntry {
   };
 }
 
-/** Deserialize a ChartEntry from the backend into a ChartDefinition. */
+/**
+ * Deserialize a ChartEntry from the backend into a ChartDefinition.
+ *
+ * THE ONLY PLACE a foreign JSON blob becomes a typed chart, and therefore the
+ * only place the type's promises can be made true. `specJson` is whatever was
+ * handed to the `save_chart` command — by this build, by an older one, by an
+ * `.xlsx` or `.calp` import, by a sandboxed script, or by a test harness — and
+ * the painters read `spec.xAxis.title` / `spec.legend.visible` with no guard.
+ * An unchecked `as ChartDefinition` here is what let an incomplete record reach
+ * the paint path and make the chart render its own exception (see
+ * chartSpecNormalize.ts). Completing the record costs one shallow copy per
+ * chart at load and removes the whole failure mode.
+ */
 function fromEntry(entry: ChartEntry): ChartDefinition {
-  return JSON.parse(entry.specJson) as ChartDefinition;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(entry.specJson);
+  } catch {
+    parsed = null;
+  }
+  return normalizeChartDefinition(parsed, {
+    chartId: entry.id,
+    sheetIndex: entry.sheetIndex,
+  });
 }
 
 /** True for non-null, non-array objects (the values we recurse into when merging). */
@@ -155,6 +181,30 @@ export async function loadChartsFromBackend(): Promise<void> {
     // schema no longer accepts. We WARN rather than drop — dropping a chart that
     // still renders fine would be a worse regression than a stale key. The broker
     // write path (validateChartSpec) gates new writes; this is a load-time canary.
+    //
+    // Note the division of labour with fromEntry: MISSING structure is repaired
+    // (a chart with no yAxis renders with a default one instead of painting an
+    // exception), while WRONG structure is reported here and left alone. The
+    // repair is announced separately so "we changed what was loaded" never hides
+    // inside a schema warning.
+    for (const entry of entries) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(entry.specJson);
+      } catch {
+        raw = null;
+      }
+      const rawSpec =
+        raw && typeof raw === "object" && "spec" in (raw as Record<string, unknown>)
+          ? (raw as Record<string, unknown>).spec
+          : raw;
+      if (chartSpecNeedsRepair(rawSpec)) {
+        console.warn(
+          `[Charts] Chart ${entry.id} was persisted without a complete spec ` +
+            `(missing axes/legend/palette); default values were supplied so it renders.`,
+        );
+      }
+    }
     for (const chart of charts) {
       const violations = validateChartSpec(chart.spec);
       if (violations.length > 0) {
@@ -203,7 +253,11 @@ export function createChart(
     y: placement.y,
     width: placement.width,
     height: placement.height,
-    spec,
+    // Same reasoning as fromEntry: `spec` is typed but not all callers are
+    // type-checked against it — the script broker and the MCP tools hand over a
+    // parsed JSON object. Completing here means no path into the store can
+    // produce a chart the painters cannot draw.
+    spec: normalizeChartSpec(spec),
   };
   charts.push(chart);
   // Persist to backend (fire-and-forget)
@@ -266,7 +320,12 @@ export function mergeSpecPreview(chartId: string, specUpdates: Partial<ChartSpec
 export function replaceChartSpec(chartId: string, spec: ChartSpec): void {
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
-    chart.spec = spec;
+    // A full overwrite is the one write that can DELETE a required field —
+    // hand-editing the Spec tab and removing `yAxis` is a two-keystroke way to
+    // make a chart paint an exception. Optional fields (filters, trendlines,
+    // layers) still delete normally; only the structure the painters
+    // dereference unguarded is restored.
+    chart.spec = normalizeChartSpec(spec);
     scheduleSave(chartId);
   }
 }

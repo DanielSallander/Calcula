@@ -47,7 +47,7 @@ pub fn read_cell_range(
 ) -> Result<String, String> {
     let state = handle.state::<AppState>();
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Formula hiding applies to the AI surface too — arguably most of all. A
@@ -55,10 +55,10 @@ pub fn read_cell_range(
     // an AI tool that dumps them into model context is the widest possible
     // disclosure. One probe: hiding only bites on a protected sheet.
     let sheet_protected = {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         state
             .sheet_protection
-            .lock()
+            .read()
             .map_err(|e| e.to_string())?
             .get(&active)
             .map(|p| p.protected)
@@ -167,10 +167,10 @@ pub fn get_sheet_summary(
 ) -> Result<String, String> {
     let state = handle.state::<AppState>();
     let grids = state.grids.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let active_grid = state.grid.read().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
     let options = AiSerializeOptions {
         max_chars: max_chars as usize,
@@ -183,7 +183,7 @@ pub fn get_sheet_summary(
 
     // Hidden formulas are withheld from the AI context exactly like every
     // other read path. Canonical lock order allows sheet_protection last.
-    let protection_storage = state.sheet_protection.lock().map_err(|e| e.to_string())?;
+    let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
     for (i, name) in sheet_names.iter().enumerate() {
         if i == active_sheet {
@@ -297,8 +297,8 @@ pub fn apply_cell_formatting(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
     let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let mut styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 
     // Make the AI/MCP format UNDOABLE in one transaction, like the in-app path.
@@ -372,7 +372,7 @@ pub fn apply_cell_formatting(
                     grids[active_sheet].set_cell(row, col, cell);
                 }
             }
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
             count += 1;
         }
     }
@@ -696,7 +696,7 @@ pub fn create_chart_from_spec(
     let state = handle.state::<AppState>();
     let sheet = match sheet_index {
         Some(s) => s as usize,
-        None => *state.active_sheet.lock().map_err(|e| e.to_string())?,
+        None => *state.active_sheet.read().map_err(|e| e.to_string())?,
     };
     let chart_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     let display_name = name.unwrap_or("AI Chart");
@@ -1116,9 +1116,9 @@ async fn run_script_with_model(
     let state = handle.state::<AppState>();
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
     let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
-    let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     // The REAL host inputs, so a script sees the live locale / calculation mode
     // / named styles rather than engine defaults (what `ScriptEngine::run` gave).
     let app_info = crate::scripting::types::build_app_info(&state);
@@ -1278,9 +1278,9 @@ fn run_engine_script(
 
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
     let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
-    let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     drop(state);
 
     let (result, modified_grids) = script_engine::ScriptEngine::run(

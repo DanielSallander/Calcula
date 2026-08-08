@@ -561,3 +561,107 @@ describe("MCP tools — every tool is tier-classified and every gate is real", (
     expect(tools.length).toBeGreaterThan(30); // the parser really read server.rs
   });
 });
+
+// ===========================================================================
+// MUTATION REFRESH DOMAINS — Rust `wire_name` vs the TS union vs the Shell map
+// ===========================================================================
+//
+// The §2e fix turned the undo announcement from a ladder of booleans into a
+// DOMAIN SET, precisely because "adding a domain means editing a Rust struct, a
+// TS interface and a list in Core in step" is what left outline / hyperlinks /
+// validations / annotations / controls announcing nothing for as long as they
+// existed. The set is now data on BOTH sides — but the two sides are still
+// hand-synchronised, and the TS side fails SILENTLY: Core casts the backend's
+// `refreshDomains: string[]` straight to `MutationDomain[]`, and the Shell
+// translator looks each one up with `?? []`. A Rust domain TypeScript has never
+// heard of is therefore dropped without a word, which is the original defect
+// wearing the new design's clothes. Nothing but this test can see that.
+describe("undo/redo mutation-refresh domains", () => {
+  const undoRs = readRepo("app/src-tauri/src/undo_commands.rs");
+  const eventsTs = readRepo("app/src/api/events.ts");
+  const bootstrapTs = readRepo("app/src/shell/bootstrap.ts");
+
+  /** Every `Some("...")` wire name in `MutationDomain::wire_name`. */
+  const rustDomains = (): string[] => {
+    const body = rustItemBody(stripRustNoise(undoRs), "pub(crate) fn wire_name");
+    return [...new Set([...body.matchAll(/Some\("([A-Za-z]+)"\)/g)].map((m) => m[1]))];
+  };
+
+  /** The `MutationDomain` string-union members. */
+  const tsDomains = (): string[] => {
+    // Comments are stripped BEFORE the terminator is located: the rationale
+    // prose inside this union contains a semicolon, and searching the raw text
+    // for one truncates the union silently in the middle — which is a drift
+    // guard that reports drift it invented.
+    const source = eventsTs.replace(/^[ \t]*\/\/.*$/gm, "");
+    const at = source.indexOf("export type MutationDomain");
+    expect(at, "`export type MutationDomain` not found in app/src/api/events.ts").toBeGreaterThan(-1);
+    const end = source.indexOf(";", at);
+    expect(end, "the MutationDomain union has no terminator").toBeGreaterThan(at);
+    return [...new Set([...source.slice(at, end).matchAll(/"([A-Za-z]+)"/g)].map((m) => m[1]))];
+  };
+
+  it("every Rust wire name is a member of the TS MutationDomain union", () => {
+    const missing = rustDomains().filter((d) => !tsDomains().includes(d));
+    expect(
+      missing,
+      `MutationDomain::wire_name in app/src-tauri/src/undo_commands.rs reports domain(s) ` +
+        `the frontend does not know: ${missing.join(", ")}.\n\n` +
+        `Core casts the backend list straight to MutationDomain[] and the Shell translator ` +
+        `looks each entry up with "?? []", so an unknown domain is dropped in SILENCE — the ` +
+        `undone change stays on screen and nothing reports a problem. That is exactly the ` +
+        `defect the domain SET replaced.\n\n` +
+        `FIX: add the member to MutationDomain in app/src/api/events.ts and give it a row in ` +
+        `MUTATION_DOMAIN_EVENTS in app/src/shell/bootstrap.ts.`,
+    ).toEqual([]);
+  });
+
+  it("every TS domain except `styles` is produced by the backend", () => {
+    // "styles" is deliberately Core's own: `handleUndo` always prepends it
+    // because undo can re-apply formatting and no restore kind reports it.
+    const orphans = tsDomains().filter((d) => d !== "styles" && !rustDomains().includes(d));
+    expect(
+      orphans,
+      `MutationDomain in app/src/api/events.ts declares domain(s) nothing in ` +
+        `app/src-tauri/src/undo_commands.rs ever reports: ${orphans.join(", ")}. A domain no ` +
+        `emitter produces is a refresh that looks wired and never fires. Either give it a ` +
+        `wire_name arm or delete it.`,
+    ).toEqual([]);
+  });
+
+  it("the Shell translator has a row for every domain", () => {
+    const map = bootstrapTs.slice(
+      bootstrapTs.indexOf("const MUTATION_DOMAIN_EVENTS"),
+      bootstrapTs.indexOf("onAppEvent<MutationRefreshPayload>"),
+    );
+    expect(map.length, "MUTATION_DOMAIN_EVENTS not found in app/src/shell/bootstrap.ts")
+      .toBeGreaterThan(0);
+    const rows = new Set(
+      map
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => !line.startsWith("//"))
+        .map((line) => line.slice(0, line.indexOf(":")))
+        .filter((key) => /^[A-Za-z]+$/.test(key)),
+    );
+    const untranslated = tsDomains().filter((d) => !rows.has(d));
+    expect(
+      untranslated,
+      `MUTATION_DOMAIN_EVENTS in app/src/shell/bootstrap.ts has no row for: ` +
+        `${untranslated.join(", ")}. The Record<MutationDomain, ...> type normally catches ` +
+        `this at compile time; this assertion exists because the lookup is "?? []" at ` +
+        `runtime, so a row deleted along with a widened type would fail silently.`,
+    ).toEqual([]);
+  });
+
+  it("the guards fire for a domain only one side knows", () => {
+    // Non-vacuity: the parsers really read both sources, and the comparison is
+    // the thing that would go red.
+    expect(rustDomains()).toContain("controls");
+    expect(tsDomains()).toContain("controls");
+    expect(rustDomains().length).toBeGreaterThan(5);
+    expect([...rustDomains(), "telepathy"].filter((d) => !tsDomains().includes(d))).toEqual([
+      "telepathy",
+    ]);
+  });
+});

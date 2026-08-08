@@ -13,6 +13,7 @@ import {
 } from "@api/dimensions";
 import { getPageSetup, movePageBreak, colToIndex } from "@api/lib";
 import type { PageSetup } from "@api/lib";
+import { rowHeaderGutter, colHeaderGutter } from "@api";
 
 // ============================================================================
 // State
@@ -227,8 +228,8 @@ function handleMouseDown(e: MouseEvent): void {
   const canvasX = e.clientX - rect.left;
   const canvasY = e.clientY - rect.top;
 
-  const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
-  const colHeaderHeight = lastConfig.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(lastConfig);
+  const colHeaderHeight = colHeaderGutter(lastConfig);
   const defaultColWidth = lastConfig.defaultCellWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 20;
 
@@ -285,8 +286,8 @@ function handleMouseMove(e: MouseEvent): void {
   }
 
   // Hover cursor feedback
-  const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
-  const colHeaderHeight = lastConfig.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(lastConfig);
+  const colHeaderHeight = colHeaderGutter(lastConfig);
   const defaultColWidth = lastConfig.defaultCellWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 20;
 
@@ -337,8 +338,8 @@ function handleMouseUp(e: MouseEvent): void {
     return;
   }
 
-  const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
-  const colHeaderHeight = lastConfig.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(lastConfig);
+  const colHeaderHeight = colHeaderGutter(lastConfig);
   const defaultColWidth = lastConfig.defaultCellWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 20;
 
@@ -443,8 +444,8 @@ export function renderPageBreakOverlay(
   lastCanvasWidth = canvasWidth;
   lastCanvasHeight = canvasHeight;
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const defaultColWidth = config.defaultCellWidth || 100;
   const defaultRowHeight = config.defaultRowHeight || 20;
 

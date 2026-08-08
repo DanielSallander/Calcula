@@ -23,9 +23,11 @@ import {
 import { initKeybindings } from "../api/keybindings";
 import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
+import { getGridRegions } from "../api/gridOverlays";
 import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
 import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/distribution";
 import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
+import { bridgeSheetDisplayFlagsAnnouncement } from "./sheetDisplayFlagsBridge";
 
 import {
   registerExtensionRegistryService,
@@ -377,6 +379,16 @@ export function bootstrapShell(): void {
   // panel's persisted placement deterministically instead of via UI clicks).
   (window as any).__CALCULA_PANEL_REGISTRY__ = panelRegistry;
 
+  // Expose the grid OVERLAY registry for the E2E residue guard
+  // (e2e/tests/zz-workbook-residue.spec.ts). It is the only way to ask the
+  // running app what floating objects are on the grid: a dynamic import of
+  // gridOverlays.ts through the dev __calcImport bridge yields a SECOND module
+  // instance with its own empty region list, so a guard built on that reads
+  // zero regions no matter what is actually painted -- it passes vacuously,
+  // which is worse than not existing. Measured, not assumed: the probe that
+  // found this reported `regions: []` while a play pill was visibly on screen.
+  (window as any).__CALCULA_GRID_OVERLAYS__ = { getGridRegions };
+
   // Grid Extensions Service - adapts Shell types to API types
   const gridExtensionsService: GridExtensionsService = {
     registerContextMenuItem: (item: GridContextMenuItem) => {
@@ -466,6 +478,12 @@ export function bootstrapShell(): void {
   // shell/dirtyStateBridge.ts for why the backend side is ONE event.
   void bridgeDirtyStateAnnouncement();
 
+  // 2g: bridge the backend's per-sheet DISPLAY FLAGS announcement, so the
+  // renderer follows the authority when the authority is moved by something
+  // other than the View menu (a script, an MCP tool, a package pull, an E2E
+  // spec). See shell/sheetDisplayFlagsBridge.ts for the defect this closes.
+  void bridgeSheetDisplayFlagsAnnouncement();
+
   // Model-extensibility Phase 1: bridge the Rust-emitted BI model lifecycle
   // events onto the @api event bus. The backend is the single emitter (its
   // model-install choke points fire exactly once per edit); this bridge is the
@@ -500,6 +518,17 @@ export function bootstrapShell(): void {
     // with no sheet change — without this the cache would stay stale and the
     // guard would wave edits through on a re-protected sheet.
     objects: ["charts:refresh", "sparklines:refresh", AppEvents.TABLE_DEFINITIONS_UPDATED, "animation:refresh", "grid:refresh", "protection:refresh"],
+    // The four backend-state refresh announcements, reached from the UNDO
+    // direction. Their forward routes emit them from the IPC wrapper; undo
+    // and redo do not go through those wrappers at all (one `undo` command
+    // restores every domain at once), so the Rust result reports the domains
+    // it touched and they are translated to the very same events the
+    // extensions already listen to.
+    outline: [AppEvents.OUTLINE_CHANGED],
+    hyperlinks: [AppEvents.HYPERLINKS_CHANGED],
+    validations: [AppEvents.VALIDATIONS_CHANGED],
+    annotations: [AppEvents.ANNOTATIONS_CHANGED],
+    controls: [AppEvents.CONTROLS_CHANGED, "grid:refresh"],
   };
   onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
     const fired = new Set<string>();

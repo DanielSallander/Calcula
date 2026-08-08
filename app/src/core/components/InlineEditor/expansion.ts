@@ -18,6 +18,11 @@
  *  each side) and two pixels of caret slack. Logical pixels, pre-zoom. */
 export const EDITOR_CHROME_PX = 4 * 2 + 2 * 2 + 2;
 
+/** Vertical chrome: the 2px border, top and bottom. The editor is
+ *  `box-sizing: border-box`, so one line of text occupies
+ *  `height - EDITOR_VCHROME_PX`. Logical pixels, pre-zoom. */
+export const EDITOR_VCHROME_PX = 2 * 2;
+
 export interface EditorExpansionInput {
   /** Editor left edge in logical px (already clamped to the row header). */
   x: number;
@@ -72,6 +77,62 @@ export function computeExpandedEditorWidth(input: EditorExpansionInput): number 
   // stop at the viewport regardless.
   const viewportLimit = Math.max(baseWidth, maxRight - x);
   return Math.max(baseWidth, Math.min(width, desiredWidth, viewportLimit));
+}
+
+// ---------------------------------------------------------------------------
+// Vertical expansion (Alt+Enter)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lines in an entry. Alt+Enter is the only way to put a newline in one, and the
+ * editor never soft-wraps (`white-space: pre`), so line count is exactly the
+ * number of hard breaks plus one.
+ */
+export function countEditorLines(text: string): number {
+  if (text === "") return 1;
+  return text.split("\n").length;
+}
+
+/** Height of one line of text inside a box of `baseHeight`. */
+export function editorLineHeight(baseHeight: number): number {
+  return Math.max(1, baseHeight - EDITOR_VCHROME_PX);
+}
+
+export interface EditorVerticalExpansionInput {
+  /** Editor top edge in logical px (already clamped to the column header). */
+  y: number;
+  /** Height of the edited cell itself, logical px (already header-clipped). */
+  baseHeight: number;
+  /** Lines in the entry; 1 for an ordinary single-line edit. */
+  lineCount: number;
+  /** Bottom edge in logical px the editor may not cross (the viewport). */
+  maxBottom: number;
+}
+
+/**
+ * The height the inline editor should render at.
+ *
+ * WHY THIS DOES NOT CHECK WHAT IS UNDERNEATH, while the horizontal rule refuses
+ * to cover any occupied neighbour: the two are answering different questions.
+ * Horizontal expansion mirrors how a long value DISPLAYS when it is not being
+ * edited — it spills right only into empty cells — so the editor matching that
+ * keeps the entry where the value will end up. A multi-line value has no such
+ * display behaviour: it never spills downward, it is clipped inside its own
+ * row. So there is nothing for a vertical rule to mirror, and Excel's in-cell
+ * editor simply overlays the rows beneath while the edit is open. The viewport
+ * is therefore the only bound, which also keeps the newline out of the typing
+ * path's IPC budget: no extra lookup is needed to grow downward.
+ */
+export function computeExpandedEditorHeight(input: EditorVerticalExpansionInput): number {
+  const { y, baseHeight, lineCount, maxBottom } = input;
+
+  if (lineCount <= 1) return baseHeight;
+
+  const desired = baseHeight + (lineCount - 1) * editorLineHeight(baseHeight);
+  // Never smaller than the cell, even when the cell itself is already past the
+  // viewport bottom (a partially scrolled row).
+  const viewportLimit = Math.max(baseHeight, maxBottom - y);
+  return Math.max(baseHeight, Math.min(desired, viewportLimit));
 }
 
 // ---------------------------------------------------------------------------

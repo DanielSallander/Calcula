@@ -28,21 +28,25 @@
 import { test, expect } from "../fixtures";
 import type { Page } from "@playwright/test";
 import { execFileSync } from "child_process";
+import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
 const CASE = process.env.CLOSE_CASE ?? "dirty";
-const WINDOW_LISTER = path.join(
-  os.homedir(),
-  "AppData",
-  "Local",
-  "Temp",
-  "claude",
-  "c--Dropbox-Projekt-Calcula",
-  "ffc06ccd-ce77-42f8-bee3-71899bcec1e9",
-  "scratchpad",
-  "list-app-windows.ps1",
-);
+
+/**
+ * The native-window enumerator, IN THE REPO next to `launch-with-cdp.ps1`.
+ *
+ * It used to be an absolute path into one agent session's scratchpad
+ * (`.../Temp/claude/<session-uuid>/scratchpad/`). That directory is
+ * session-scoped and machine-local, so on any other checkout the script is
+ * simply absent — and `listAppWindows` caught the failure and returned `[]`.
+ * An empty window list is exactly what the CLEAN case asserts
+ * (`expect(promptSeen).toBeNull()`), so half of this spec would have PASSED
+ * VACUOUSLY, reporting that no prompt appeared when in truth nothing had
+ * looked. Vendored so the file is version-controlled with its only caller.
+ */
+const WINDOW_LISTER = path.join(__dirname, "..", "list-app-windows.ps1");
 const BASE_FILE = path.join(os.tmpdir(), "calcula-dirty-close.cala");
 
 interface AppWindow {
@@ -53,8 +57,20 @@ interface AppWindow {
   visible: boolean;
 }
 
-/** Enumerate every top-level window owned by a running `app.exe`. */
+/**
+ * Enumerate every top-level window owned by a running `app.exe`.
+ *
+ * THROWS when the enumerator itself could not run. "No windows" and "could not
+ * look" must not share a return value here: the clean case passes on an empty
+ * list, so swallowing the failure turns a broken probe into a green test.
+ */
 function listAppWindows(): AppWindow[] {
+  if (!fs.existsSync(WINDOW_LISTER)) {
+    throw new Error(
+      `the native-window enumerator is missing at ${WINDOW_LISTER} — this ` +
+        `spec cannot tell "no prompt appeared" from "nothing looked"`,
+    );
+  }
   let out = "";
   try {
     out = execFileSync(
@@ -62,8 +78,8 @@ function listAppWindows(): AppWindow[] {
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", WINDOW_LISTER],
       { encoding: "utf-8", timeout: 30_000 },
     );
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(`could not enumerate app windows: ${String(error)}`);
   }
   return out
     .split("\n")
@@ -207,12 +223,33 @@ test.describe.serial(`Close prompt (CLOSE_CASE=${CASE})`, () => {
       await sleep(3000);
       expect(appIsRunning(), "the app closed while the prompt was up").toBe(true);
 
-      // Clean up: the prompt owns the UI thread, so end this app lifetime here.
-      // The runner relaunches for the next case.
+      // Clean up: a modal native prompt owns the UI thread, so there is no way
+      // out except ending this app lifetime.
+      //
+      // SCOPED TO THE PROMPTING PID, deliberately. This used to be
+      // `Get-Process -Name app | Stop-Process -Force`, which kills EVERY
+      // app.exe on the machine — the shared E2E instance, a second instance, a
+      // developer's own Calcula with unsaved work. It is also the whole of the
+      // "two unexplained hard crashes": `Stop-Process -Force` is
+      // `TerminateProcess(h, -1)`, so the app's exit code is 0xffffffff, and
+      // the next spec in the alphabetical order (`shapes-hometab`) found the
+      // instance gone. Killing one PID cannot reach a bystander process.
+      //
+      // NOTE for whoever runs this: under `E2E_MANUAL=1` nothing relaunches the
+      // app afterwards (the old comment here claimed "the runner relaunches for
+      // the next case", which is true only for the managed-launch path). Any
+      // spec ordered after this one in a shared-instance run needs the app
+      // brought back up first.
+      const victim = promptSeen?.pid;
+      expect(victim, "no PID to clean up — the prompt window was never seen").toBeTruthy();
       try {
         execFileSync(
           "powershell",
-          ["-NoProfile", "-Command", "Get-Process -Name app -ErrorAction SilentlyContinue | Stop-Process -Force"],
+          [
+            "-NoProfile",
+            "-Command",
+            `Stop-Process -Id ${victim} -Force -ErrorAction SilentlyContinue`,
+          ],
           { encoding: "utf-8", timeout: 30_000 },
         );
       } catch { /* already gone */ }

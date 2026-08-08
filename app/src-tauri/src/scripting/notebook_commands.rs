@@ -194,9 +194,9 @@ async fn run_cell_internal(
 
     // Phase 1 (sync): clone AppState data + checkpoint bookkeeping
     let grids = app_state.grids.read().map_err(|e| e.to_string())?.clone();
-    let style_registry = app_state.style_registry.lock().map_err(|e| e.to_string())?.clone();
-    let sheet_names = app_state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
-    let active_sheet = *app_state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let style_registry = app_state.style_registry.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names = app_state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
 
     {
         let mut runtime = script_state
@@ -530,7 +530,7 @@ async fn notebook_rewind_internal(
     // would strand the user with the notebook's output if the sheet were
     // protected in between. Same reasoning as `solver_revert`; see the
     // exempt-paths block in protection.rs.
-    let active_sheet = *app_state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
     {
         let active_grid_clone = snapshot_grids.get(active_sheet).cloned();
 

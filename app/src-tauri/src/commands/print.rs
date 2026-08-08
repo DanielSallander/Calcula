@@ -25,7 +25,7 @@ use std::fs;
 /// Get the page setup for the active sheet.
 #[tauri::command]
 pub fn get_page_setup(state: State<AppState>) -> PageSetup {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let page_setups = state.page_setups.read().unwrap();
     page_setups
         .get(active_sheet)
@@ -40,7 +40,7 @@ pub fn set_page_setup(
     file_state: State<FileState>,
     setup: PageSetup,
 ) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -57,15 +57,15 @@ pub fn set_page_setup(
 /// Returns cell data, styles, dimensions, merged regions, and page setup.
 #[tauri::command]
 pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let page_setups = state.page_setups.read().unwrap();
-    let col_widths_map = state.column_widths.lock().unwrap();
-    let row_heights_map = state.row_heights.lock().unwrap();
+    let col_widths_map = state.column_widths.read().unwrap();
+    let row_heights_map = state.row_heights.read().unwrap();
 
     let sheet_name = sheet_names
         .get(active_sheet)
@@ -187,7 +187,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
 /// Insert a manual row page break before the specified row.
 #[tauri::command]
 pub fn insert_row_page_break(state: State<AppState>, file_state: State<FileState>, row: u32) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -206,7 +206,7 @@ pub fn insert_row_page_break(state: State<AppState>, file_state: State<FileState
 /// Remove a manual row page break at the specified row.
 #[tauri::command]
 pub fn remove_row_page_break(state: State<AppState>, file_state: State<FileState>, row: u32) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -222,7 +222,7 @@ pub fn remove_row_page_break(state: State<AppState>, file_state: State<FileState
 /// Insert a manual column page break before the specified column.
 #[tauri::command]
 pub fn insert_col_page_break(state: State<AppState>, file_state: State<FileState>, col: u32) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -241,7 +241,7 @@ pub fn insert_col_page_break(state: State<AppState>, file_state: State<FileState
 /// Remove a manual column page break at the specified column.
 #[tauri::command]
 pub fn remove_col_page_break(state: State<AppState>, file_state: State<FileState>, col: u32) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -257,7 +257,7 @@ pub fn remove_col_page_break(state: State<AppState>, file_state: State<FileState
 /// Remove all manual page breaks for the active sheet.
 #[tauri::command]
 pub fn reset_all_page_breaks(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -311,7 +311,7 @@ pub(crate) fn set_print_area_impl(
         end_row + 1,
     );
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -326,7 +326,7 @@ pub(crate) fn set_print_area_impl(
 /// Clear the print area for the active sheet.
 #[tauri::command]
 pub fn clear_print_area(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -354,7 +354,7 @@ pub fn set_print_title_rows(
 
     let title_str = format!("{}:{}", start_row + 1, end_row + 1);
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -369,7 +369,7 @@ pub fn set_print_title_rows(
 /// Clear print title rows for the active sheet.
 #[tauri::command]
 pub fn clear_print_title_rows(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -401,7 +401,7 @@ pub fn set_print_title_cols(
         col_index_to_letter(end_col),
     );
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -416,7 +416,7 @@ pub fn set_print_title_cols(
 /// Clear print title columns for the active sheet.
 #[tauri::command]
 pub fn clear_print_title_cols(state: State<AppState>, file_state: State<FileState>) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
@@ -452,7 +452,7 @@ pub fn move_page_break(
         _ => return Err(format!("Invalid direction '{}': must be 'row' or 'col'", direction)),
     };
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = DocumentEffect::mutates(&file_state);
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 

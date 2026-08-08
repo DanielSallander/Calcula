@@ -36,36 +36,40 @@ use std::collections::{HashMap, HashSet};
 // Harness
 // ---------------------------------------------------------------------------
 
-struct Workbook {
-    state: AppState,
-    file: FileState,
-    files: UserFilesState,
-    slicer: SlicerState,
-    pivots: PivotState,
-    pane: crate::pane_control::PaneControlState,
-    filters: crate::ribbon_filter::RibbonFilterState,
+/// `pub(super)` so the sibling `bulk_rewrite_recalc_tests` can drive the SAME
+/// harness instead of hand-copying one. Copied harnesses drift, and a drifted
+/// harness is how a recalculation defect hides — which is the whole subject of
+/// this file.
+pub(super) struct Workbook {
+    pub(super) state: AppState,
+    pub(super) file: FileState,
+    pub(super) files: UserFilesState,
+    pub(super) slicer: SlicerState,
+    pub(super) pivots: PivotState,
+    pub(super) pane: crate::pane_control::PaneControlState,
+    pub(super) filters: crate::ribbon_filter::RibbonFilterState,
 }
 
 impl Workbook {
     /// `sheets` sheets named Sheet1..SheetN, sheet 0 active.
-    fn new(sheets: usize) -> Self {
+    pub(super) fn new(sheets: usize) -> Self {
         assert!(sheets >= 1);
         let state = crate::create_app_state();
         for i in 1..sheets {
             state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
-            state.sheet_names.lock().unwrap().push(format!("Sheet{}", i + 1));
-            state.all_column_widths.lock().unwrap().push(HashMap::new());
-            state.all_row_heights.lock().unwrap().push(HashMap::new());
-            state.all_user_hidden_rows.lock().unwrap().push(HashSet::new());
-            state.all_user_hidden_cols.lock().unwrap().push(HashSet::new());
+            state.sheet_names.write(&crate::document_effect::test_seed_effect()).unwrap().push(format!("Sheet{}", i + 1));
+            state.all_column_widths.write(&crate::document_effect::test_seed_effect()).unwrap().push(HashMap::new());
+            state.all_row_heights.write(&crate::document_effect::test_seed_effect()).unwrap().push(HashMap::new());
+            state.all_user_hidden_rows.write(&crate::document_effect::test_seed_effect()).unwrap().push(HashSet::new());
+            state.all_user_hidden_cols.write(&crate::document_effect::test_seed_effect()).unwrap().push(HashSet::new());
             state
                 .sheet_ids
-                .lock()
+                .write(&crate::document_effect::test_seed_effect())
                 .unwrap()
-                .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
         }
         {
-            let mut all = state.all_merged_regions.lock().unwrap();
+            let mut all = state.all_merged_regions.write(&crate::document_effect::test_seed_effect()).unwrap();
             while all.len() < sheets {
                 all.push(HashSet::new());
             }
@@ -82,7 +86,7 @@ impl Workbook {
     }
 
     /// One edit through the REAL single-cell edit path.
-    fn set(&self, row: u32, col: u32, value: &str) -> UpdateCellResult {
+    pub(super) fn set(&self, row: u32, col: u32, value: &str) -> UpdateCellResult {
         update_cell_impl(
             &self.state,
             &self.file,
@@ -127,10 +131,10 @@ impl Workbook {
     /// mirror, then rebuild the sheet-less dependency maps for the new sheet.
     /// That rebuild is BUG-0016's fix and is exactly what makes the cross-sheet
     /// maps the only surviving description of the sheets you left.
-    fn switch_to(&self, index: usize) {
+    pub(super) fn switch_to(&self, index: usize) {
         {
             let mut grids = self.state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
-            let mut active = self.state.active_sheet.lock().unwrap();
+            let mut active = self.state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap();
             let mut mirror = self.state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             let old = *active;
             if old == index {
@@ -143,14 +147,14 @@ impl Workbook {
         crate::undo_commands::rebuild_all_dependencies(&self.state);
     }
 
-    fn value(&self, sheet: usize, row: u32, col: u32) -> CellValue {
+    pub(super) fn value(&self, sheet: usize, row: u32, col: u32) -> CellValue {
         self.state.grids.read().unwrap()[sheet]
             .get_cell(row, col)
             .map(|c| c.value.clone())
             .unwrap_or(CellValue::Empty)
     }
 
-    fn number(&self, sheet: usize, row: u32, col: u32) -> f64 {
+    pub(super) fn number(&self, sheet: usize, row: u32, col: u32) -> f64 {
         match self.value(sheet, row, col) {
             CellValue::Number(n) => n,
             other => panic!(
@@ -171,7 +175,7 @@ impl Workbook {
     fn permute_active(&self, moves: &[((u32, u32), (u32, u32))]) {
         let mut grid = self.state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         let mut grids = self.state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
-        let active = *self.state.active_sheet.lock().unwrap();
+        let active = *self.state.active_sheet.read().unwrap();
         // Read every source cell BEFORE writing any destination, so a
         // permutation cannot read a cell another move already overwrote.
         let landed: Vec<((u32, u32), Option<engine::Cell>)> = moves
@@ -208,8 +212,8 @@ impl Workbook {
 
     /// The LOAD path: re-evaluate every formula on every sheet from scratch,
     /// in topological order, ignoring the dependency edges entirely.
-    fn recalculate_every_sheet(&self) {
-        let sheets = self.state.sheet_names.lock().unwrap().len();
+    pub(super) fn recalculate_every_sheet(&self) {
+        let sheets = self.state.sheet_names.read().unwrap().len();
         for idx in 0..sheets {
             crate::calculation::recalculate_sheet_values(
                 &self.state,
@@ -1119,7 +1123,7 @@ fn sort_range_recalculates_the_range_it_rewrote() {
 
 /// The body of a top-level `fn <name>(` in `source`, up to the next item at
 /// column 0.
-fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
+pub(super) fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
     let needle = format!("fn {}(", name);
     let start = source
         .find(&needle)

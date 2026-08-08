@@ -1030,8 +1030,8 @@ pub fn eval_formula_init(
     let session_id = eval_state.new_session_id();
 
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     if active_sheet >= grids.len() {
         return error_state(&session_id, "Invalid active sheet.");
@@ -1115,7 +1115,7 @@ pub fn eval_formula_evaluate(
     session_id: String,
 ) -> EvalStepState {
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
     let session = match sessions.get_mut(&session_id) {
@@ -1155,7 +1155,7 @@ pub fn eval_formula_step_in(
     session_id: String,
 ) -> EvalStepState {
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
     let session = match sessions.get_mut(&session_id) {
@@ -1248,7 +1248,7 @@ pub fn eval_formula_step_out(
     session_id: String,
 ) -> EvalStepState {
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
     let session = match sessions.get_mut(&session_id) {
@@ -1288,7 +1288,7 @@ pub fn eval_formula_restart(
     session_id: String,
 ) -> EvalStepState {
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let mut sessions = eval_state.sessions.lock().unwrap();
     let session = match sessions.get_mut(&session_id) {

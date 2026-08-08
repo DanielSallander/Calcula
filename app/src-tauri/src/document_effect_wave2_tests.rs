@@ -64,7 +64,7 @@ fn seeded_state() -> AppState {
 }
 
 fn protect_sheet(state: &AppState, sheet: usize) {
-    state.sheet_protection.lock().unwrap().insert(
+    state.sheet_protection.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
         sheet,
         crate::protection::SheetProtection { protected: true, ..Default::default() },
     );

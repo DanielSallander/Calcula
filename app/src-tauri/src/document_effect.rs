@@ -604,6 +604,19 @@ impl<'a, T> PendingGuard<'a, T> {
     }
 }
 
+/// A seeding effect for unit-test harnesses: building a two-sheet `AppState`
+/// by hand is not a document edit.
+///
+/// `#[cfg(test)]`, so it does not exist in the shipped binary and the guarantee
+/// this module makes outside the test build is unchanged. It exists because
+/// dozens of harnesses push per-sheet slots onto the parallel vectors, and
+/// spelling `deliberately_clean(CleanReason::LoadingFromDisk)` out at each of
+/// them buries the assertion the test is actually making.
+#[cfg(test)]
+pub fn test_seed_effect() -> DocumentEffect {
+    DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk)
+}
+
 /// Mutable guard, obtainable only by presenting a [`DocumentEffect`].
 pub struct WriteGuard<'a, T>(MutexGuard<'a, T>);
 
@@ -945,5 +958,109 @@ mod tests {
                 decl
             );
         }
+    }
+
+    /// THE FIELDS WHOSE `Persisted<T>` STATUS IS NOT SELF-EVIDENT.
+    ///
+    /// The grid pair above is obviously the document, so nobody would demote it
+    /// by accident. These are the ones that LOOK like view state and are not:
+    /// widths, hidden rows, zoom, split bars, the active index, the style
+    /// registry, the filter and protection stores. Every one of them ends up in
+    /// the .cala, and every one of them was a bare `Mutex` until this pass -- so
+    /// the failure mode this test exists for is a future author reading
+    /// `sheet_zooms` as "just the viewport" and reaching for `Mutex` again.
+    ///
+    /// The check is on the source text because there is nothing else to check:
+    /// a demotion compiles, `.lock()` hands back a `MutexGuard`, and every one
+    /// of the ~1,100 call sites gated here silently mutates undecided again.
+    #[test]
+    fn every_persisted_appstate_store_is_gated_not_a_bare_mutex() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("lib.rs");
+
+        // (field, why it reaches disk) -- the second half is the argument, and
+        // it is here so a future demotion has to be argued against, not just
+        // made to compile.
+        let must_be_gated: &[(&str, &str)] = &[
+            ("sheet_names", "Sheet::name, every save"),
+            ("sheet_ids", "Sheet::id -- the stable identity every SheetId-keyed section resolves through"),
+            ("active_sheet", "workbook.active_sheet (gated to say NO: writes are Navigation)"),
+            ("style_registry", "Sheet::from_grid resolves every cell's style through it"),
+            ("column_widths", "DimensionData, active sheet"),
+            ("row_heights", "DimensionData, active sheet"),
+            ("all_column_widths", "DimensionData, background sheets"),
+            ("all_row_heights", "DimensionData, background sheets"),
+            ("default_row_height", "workbook.default_row_height"),
+            ("default_column_width", "workbook.default_column_width"),
+            ("merged_regions", "Sheet::merged_regions, active sheet"),
+            ("all_merged_regions", "Sheet::merged_regions, background sheets"),
+            ("user_hidden_rows", "Sheet::user_hidden_rows -- a third hidden-ness AUTHORITY with nowhere else to live"),
+            ("user_hidden_cols", "Sheet::user_hidden_cols"),
+            ("all_user_hidden_rows", "Sheet::user_hidden_rows, background sheets"),
+            ("all_user_hidden_cols", "Sheet::user_hidden_cols, background sheets"),
+            ("sheet_zooms", "Sheet::zoom (.cala v6)"),
+            ("split_configs", "Sheet::split_row / split_col"),
+            ("auto_filters", "user_files/autofilters.json"),
+            ("sheet_protection", "workbook.sheet_protections"),
+            ("workbook_protection", "workbook.workbook_protection"),
+            ("model_writeback", "user_files/model_writeback_values.json"),
+        ];
+
+        let mut ungated: Vec<String> = Vec::new();
+        for (field, why) in must_be_gated {
+            let decl = code_lines(&src)
+                .map(|(_, l)| l.trim())
+                .find(|l| l.starts_with(&format!("pub {}:", field)))
+                .unwrap_or_else(|| panic!("AppState no longer declares `{}`", field));
+            if !decl.contains("Persisted<") {
+                ungated.push(format!("{}  ({})\n      {}", field, why, decl));
+            }
+        }
+        assert!(
+            ungated.is_empty(),
+            "these AppState stores are written into the .cala and MUST be \
+             `Persisted<T>`; a bare Mutex re-opens every write on them:\n  {}",
+            ungated.join("\n  ")
+        );
+    }
+
+    /// The negative half: `scroll_areas` must STAY a bare `Mutex`.
+    ///
+    /// It is the one store that looks like it belongs in the list above and
+    /// does not -- `assemble_workbook_for_save` never reads it and
+    /// `persistence::Sheet` has no `scroll_area` field, so a dirty flag raised
+    /// on it would promise the user that saving keeps something that is gone
+    /// either way. Promoting it is only correct AFTER the persistence gap it
+    /// documents is closed, and this test is what makes that ordering explicit
+    /// rather than remembered.
+    #[test]
+    fn scroll_areas_stays_ungated_until_it_is_actually_persisted() {
+        let lib = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("lib.rs");
+        let decl = code_lines(&lib)
+            .map(|(_, l)| l.trim())
+            .find(|l| l.starts_with("pub scroll_areas:"))
+            .expect("AppState must still declare scroll_areas");
+        let persistence = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence.rs"),
+        )
+        .expect("persistence.rs");
+        let saved = code_lines(&persistence)
+            .any(|(_, l)| l.contains("scroll_area") && l.contains("workbook"));
+        assert!(
+            !saved,
+            "the save path now writes scroll_areas -- promote it to Persisted<T> \
+             and move it into `every_persisted_appstate_store_is_gated_not_a_bare_mutex`"
+        );
+        assert!(
+            !decl.contains("Persisted<"),
+            "scroll_areas is gated but still never saved: a dirty flag on state \
+             that never reaches disk makes the close prompt lie in the other \
+             direction. Fix the persistence gap first."
+        );
     }
 }

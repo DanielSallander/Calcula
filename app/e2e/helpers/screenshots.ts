@@ -149,6 +149,26 @@ export async function resetToNewWorkbook(page: Page): Promise<void> {
  * Clear the grid by selecting all cells and deleting content + formatting.
  * Use this at the start of workflow tests to avoid stale data from prior tests
  * (all tests share the same app instance).
+ *
+ * IT CLEARS THE USED RANGE, NOT A FIXED BOX (see docs/design/open-decisions-2026-08.md
+ * §3b). The fixed box was A1:Z1000 — columns 0-25 — and every spec that wrote
+ * outside it left data that survived every subsequent reset for the rest of the
+ * run. `charts.spec.ts` seeding column AA is the case that was actually found:
+ * four values that no reset in the suite could reach, sitting in the workbook
+ * while ninety specs ran over it.
+ *
+ * The union with the old box is deliberate. `get_used_range` is a bounding box
+ * over cells that still HOLD something, so a cell that carries only formatting
+ * (or one the backend has already forgotten but the frontend has not repainted)
+ * can fall outside it; clearing at least the historical box means this helper
+ * can only ever clear more than it used to, never less.
+ *
+ * WHAT IT STILL DOES NOT REACH, stated plainly rather than implied: charts,
+ * shapes, images, pane controls, named ranges, styles, filters, sheets beyond
+ * the active one, and every per-sheet display flag. Those need `new_file`,
+ * which is exactly what the `journey` project exists to quarantine. A spec that
+ * creates one of those objects is responsible for removing it — see the header
+ * of `e2e/tests/charts.spec.ts` for the shape that takes.
  */
 export async function resetGrid(page: Page): Promise<void> {
   // Dismiss any open dialogs/menus
@@ -173,11 +193,22 @@ export async function resetGrid(page: Page): Promise<void> {
     const tauri = (window as any).__TAURI__;
     if (tauri?.core?.invoke) {
       try {
+        // The box the helper has always cleared, kept as a FLOOR.
+        let endRow = 999;
+        let endCol = 25;
+        try {
+          const used: {
+            startRow: number; startCol: number; endRow: number; endCol: number; empty: boolean;
+          } = await tauri.core.invoke("get_used_range", {});
+          if (!used.empty) {
+            endRow = Math.max(endRow, used.endRow);
+            endCol = Math.max(endCol, used.endCol);
+          }
+        } catch {
+          // Older backend without get_used_range: the floor still applies.
+        }
         await tauri.core.invoke("clear_range_with_options", {
-          params: {
-            startRow: 0, startCol: 0, endRow: 999, endCol: 25,
-            applyTo: "All",
-          },
+          params: { startRow: 0, startCol: 0, endRow, endCol, applyTo: "All" },
         });
         window.dispatchEvent(new Event("grid:refresh"));
       } catch {

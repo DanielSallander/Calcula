@@ -659,7 +659,7 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
 fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
     let tables = state.tables.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Find the table
@@ -716,7 +716,7 @@ fn get_table_available_values(
 ) -> Result<std::collections::HashSet<String>, String> {
     let tables = state.tables.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let table = tables

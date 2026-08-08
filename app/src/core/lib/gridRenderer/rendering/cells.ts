@@ -30,6 +30,7 @@ import {
 import { drawCellFill } from "../styles/fillRenderer";
 import { buildMergeSlaveIndex } from "./mergeIndex";
 import { pointsToPixels, buildCellFont } from "../fonts";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 // ============================================================================
 // Over-selection cell decorations
@@ -598,8 +599,8 @@ function drawBorderLine(
  */
 export function drawCellText(state: RenderState): CellDecorationContext[] {
   const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
 

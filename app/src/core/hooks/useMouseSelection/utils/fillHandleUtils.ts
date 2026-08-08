@@ -7,6 +7,7 @@ import type { GridConfig, Viewport, Selection, DimensionOverrides } from "../../
 import { calculateVisibleRange, getColumnWidth, getRowHeight, getColumnX, getRowY } from "../../../lib/gridRenderer";
 import { ensureDimensions } from "../../../lib/gridRenderer/styles/styleUtils";
 import { getGridRegions } from "../../../../api/gridOverlays";
+import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
 
 interface FillHandleCursorDependencies {
   config: GridConfig;
@@ -50,8 +51,8 @@ export function createFillHandleCursorChecker(
       }
     }
 
-    const rowHeaderWidth = config.rowHeaderWidth || 50;
-    const colHeaderHeight = config.colHeaderHeight || 24;
+    const rowHeaderWidth = rowHeaderGutter(config);
+    const colHeaderHeight = colHeaderGutter(config);
 
     // Ensure dimensions is defined
     const dims = ensureDimensions(dimensions);

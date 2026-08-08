@@ -272,7 +272,7 @@ pub fn create_pivot_inner(
     // from the current selection context; the destination sheet is resolved
     // below and is gated by the per-cell write gates that follow).
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_action(
             &state, active_sheet, "pivotTables", "create or change pivot tables",
         )?;
@@ -284,12 +284,12 @@ pub fn create_pivot_inner(
 
     // Get source sheet
     let source_sheet_idx = request.source_sheet.unwrap_or_else(|| {
-        *state.active_sheet.lock().unwrap()
+        *state.active_sheet.read().unwrap()
     });
 
     // Get destination sheet - use provided value or fall back to active sheet
     let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
-        *state.active_sheet.lock().unwrap()
+        *state.active_sheet.read().unwrap()
     });
 
     log_info!(
@@ -356,7 +356,7 @@ pub fn create_pivot_inner(
     // sheet is what lets refresh and drill-through read the right sheet
     // instead of assuming sheet 0.
     {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         if dest_sheet_idx < sheet_names.len() {
             definition.destination_sheet = Some(sheet_names[dest_sheet_idx].clone());
         }
@@ -404,7 +404,7 @@ pub fn create_pivot_inner(
 
     // Write pivot output to destination grid (empty for now, but reserves the space)
     {
-        let mut styles = state.style_registry.lock().unwrap();
+        let mut styles = state.style_registry.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
 
         // Verify destination sheet exists
@@ -430,14 +430,14 @@ pub fn create_pivot_inner(
 
             // Insert pivot merge regions
             if !pivot_merges.is_empty() {
-                let mut merged = state.merged_regions.lock().unwrap();
+                let mut merged = state.merged_regions.write(&effect).unwrap();
                 for mr in pivot_merges {
                     merged.insert(mr);
                 }
             }
 
             // IMPORTANT: If dest_sheet is the currently active sheet, sync state.grid
-            let active_sheet = *state.active_sheet.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
             if dest_sheet_idx == active_sheet {
                 let mut grid = state.grid.write(&effect).unwrap();
                 // Copy the cells we just wrote to state.grid as well
@@ -628,7 +628,7 @@ pub fn undo_pivot_overwrite(
                                             dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
                                         }
                                     }
-                                    let active_sheet = *state.active_sheet.lock().unwrap();
+                                    let active_sheet = *state.active_sheet.read().unwrap();
                                     if snapshot.dest_sheet_idx == active_sheet {
                                         let mut grid = state.grid.write(&effect).unwrap();
                                         for sc in &snapshot.overwritten_cells {
@@ -908,7 +908,7 @@ pub async fn update_pivot_fields(
 
     // Auto-fit column widths if enabled
     if auto_fit {
-        auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
+        auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
     }
 
     // Update pivot region tracking
@@ -1339,7 +1339,7 @@ pub fn delete_pivot_table(
             );
             
             // Sync to state.grid if this is the active sheet
-            let active_sheet = *state.active_sheet.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
             if dest_sheet_idx == active_sheet {
                 let mut grid = state.grid.write(&effect).unwrap();
                 for row in region.start_row..=region.end_row {
@@ -1932,7 +1932,7 @@ pub fn get_pivot_at_cell(
 ) -> Result<Option<PivotRegionInfo>, String> {
     use crate::pivot::utils::{aggregation_to_string, report_layout_to_string, values_position_to_string};
     
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     
     // Check if cell is in any pivot region (via the generic protected region system)
     let pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
@@ -2163,7 +2163,7 @@ pub fn get_pivot_data_formula(
     row: u32,
     col: u32,
 ) -> Result<Option<super::types::GetPivotDataFormulaResult>, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Check if cell is in a pivot region
     let _pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
@@ -2188,7 +2188,7 @@ pub fn get_pivot_regions_for_sheet(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
 ) -> Vec<PivotRegionData> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let regions = state.protected_regions.lock().unwrap();
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
 
@@ -2405,7 +2405,7 @@ pub async fn change_pivot_data_source(
 
     // Get source sheet
     let source_sheet_idx = request.source_sheet.unwrap_or_else(|| {
-        *state.active_sheet.lock().unwrap()
+        *state.active_sheet.read().unwrap()
     });
 
     // Clamp source_end to grid's actual data extent (handles full-column refs)
@@ -4714,9 +4714,9 @@ pub async fn drill_through_to_sheet(
     let col_count = headers.len();
 
     // Create new sheet
-    let mut sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let active_sheet = state.active_sheet.lock_pending().unwrap();
     let current_grid = state.grid.lock_pending().unwrap();
     // Drill-through APPENDS A WHOLE NEW SHEET of detail rows. The non-verb name is
     // exactly why a mutating-verb heuristic missed it; the sheet and its per-sheet
@@ -4724,6 +4724,11 @@ pub async fn drill_through_to_sheet(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grids = grids.authorize(&effect);
     let mut current_grid = current_grid.authorize(&effect);
+    let mut sheet_names = sheet_names.authorize(&effect);
+    // The drill-through sheet is created AND switched to; the switch rides the
+    // creation's effect rather than a Navigation one, because the sheet that is
+    // now active did not exist before this command ran.
+    let mut active_sheet = active_sheet.authorize(&effect);
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
 
     // Generate a unique sheet name
@@ -5401,7 +5406,7 @@ pub async fn create_pivot_from_bi_model(
     // Parse destination
     let destination = parse_cell_ref(&request.destination_cell)?;
     let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
-        *state.active_sheet.lock().unwrap()
+        *state.active_sheet.read().unwrap()
     });
 
     // Check that destination doesn't overlap an existing pivot table
@@ -5415,7 +5420,7 @@ pub async fn create_pivot_from_bi_model(
     definition.destination = destination;
     definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
     {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         if dest_sheet_idx < sheet_names.len() {
             definition.destination_sheet = Some(sheet_names[dest_sheet_idx].clone());
         }
@@ -5435,10 +5440,10 @@ pub async fn create_pivot_from_bi_model(
 
     // Write empty pivot placeholder to grid
     {
-        let mut styles = state.style_registry.lock().unwrap();
+        let mut styles = state.style_registry.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            let active_sheet = *state.active_sheet.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
             let pivot_merges = if dest_sheet_idx == active_sheet {
                 let mut grid = state.grid.write(&effect).unwrap();
                 let merges = write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
@@ -5450,7 +5455,7 @@ pub async fn create_pivot_from_bi_model(
 
             // Update merge regions
             if !pivot_merges.is_empty() {
-                let mut merged = state.merged_regions.lock().unwrap();
+                let mut merged = state.merged_regions.write(&effect).unwrap();
                 // Clear merges in pivot region first
                 let (dr, dc) = destination;
                 let er = dr + view.row_count.max(1) as u32 - 1;
@@ -5648,7 +5653,7 @@ pub async fn update_bi_pivot_fields(
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
                 if auto_fit {
-                    auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
+                    auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
                 }
                 update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
                 recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
@@ -6890,7 +6895,7 @@ pub async fn update_bi_pivot_fields(
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
     if auto_fit {
-        auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
+        auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
     }
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
@@ -7064,7 +7069,7 @@ pub fn show_report_filter_pages(
         let sheet_name = sanitize_sheet_name(value_label);
 
         // Use AppState to create the sheet and write the pivot view
-        let mut sheet_names = state.sheet_names.lock().unwrap();
+        let mut sheet_names = state.sheet_names.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
 
         // Skip if sheet already exists
@@ -7079,7 +7084,7 @@ pub fn show_report_filter_pages(
         let sheet_idx = grids.len() - 1;
 
         // Write the pivot view to the new sheet as static cells
-        let mut styles = state.style_registry.lock().unwrap();
+        let mut styles = state.style_registry.write(&effect).unwrap();
         if let Some(grid) = grids.get_mut(sheet_idx) {
             let _ = crate::pivot::operations::write_pivot_to_grid(
                 grid,

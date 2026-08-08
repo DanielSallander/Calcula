@@ -334,6 +334,376 @@ fn partition_formula_cells(
     (non_circular, groups)
 }
 
+// ---------------------------------------------------------------------------
+// Cross-sheet circular references (§2c follow-on)
+// ---------------------------------------------------------------------------
+//
+// `partition_formula_cells` above runs Kahn's algorithm over ONE sheet's local
+// map, and that map is built from `ExtractedRefs::cells` — same-sheet
+// references only. A cycle that crosses a sheet boundary therefore had no
+// detector anywhere: `Sheet1!A1 = Sheet2!A1` with `Sheet2!A1 = Sheet1!A1`
+// terminated and produced whichever number the evaluation order happened to
+// leave behind, instead of `#CIRCULAR!`. An order-dependent number is the worst
+// possible failure for the soak/regression oracles, which compare recalc
+// results across runs.
+//
+// The fix is one workbook-level graph, computed by `workbook_circular_cells`
+// and merged into each sheet's partition, so a cross-sheet cycle lands in
+// exactly the same `circular_groups` bucket a same-sheet cycle lands in — and
+// therefore inherits the ITERATIVE-CALCULATION branch unchanged. That last
+// point is the requirement that shaped the design: iterative calculation is a
+// supported feature, and a deliberate circular reference under it must keep
+// converging rather than start reporting `#CIRCULAR!`.
+//
+// COST. This is the hot path, so the walk is gated twice before it can become
+// a workbook-sized traversal:
+//
+//   1. **No cross-sheet reference anywhere => return immediately.** The scan
+//      that discovers this is the same single AST walk that would build the
+//      graph, so a single-sheet workbook pays one pass over its own ASTs and
+//      nothing more.
+//   2. **The SHEET-LEVEL projection must itself contain a cycle.** Project
+//      every cross-sheet edge down to (precedent sheet -> dependent sheet) and
+//      run Kahn over that S-node graph. A cell cycle crossing a boundary
+//      implies a cycle in this projection, so an ACYCLIC projection is a sound
+//      proof that no cross-sheet cell cycle exists — and real workbooks are
+//      overwhelmingly layered (data sheets feeding a summary sheet), i.e.
+//      acyclic. Only a workbook whose sheets genuinely reference each other in
+//      a loop pays for the full cell-level Kahn.
+//
+// On top of that the result is memoised for the duration of a recalculation
+// PASS (`begin_circular_pass`), because `recalc_after_off_sheet_write` calls
+// `recalculate_sheet_values` 2*(S+1) times in a row and the answer cannot
+// change between those calls: recalculation rewrites cell VALUES, never
+// formulas or ASTs, and the graph is a function of the ASTs alone.
+//
+// Reasoned, not measured: the gates are structural (they remove the traversal
+// entirely rather than making it faster), and the memo bounds the remaining
+// work at one traversal per pass instead of 2*(S+1).
+
+thread_local! {
+    /// `None` = no pass open (compute and throw away).
+    /// `Some(None)` = pass open, not computed yet.
+    /// `Some(Some(set))` = pass open, computed.
+    static CIRCULAR_PASS: std::cell::RefCell<
+        Option<Option<std::rc::Rc<std::collections::HashSet<(usize, u32, u32)>>>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Guard returned by `begin_circular_pass`.
+pub(crate) struct CircularPassGuard {
+    /// Only the OUTERMOST scope clears the memo, so a nested
+    /// `recalculate_sheet_values` cannot discard the set its caller is reusing.
+    owns: bool,
+}
+
+impl Drop for CircularPassGuard {
+    fn drop(&mut self) {
+        if self.owns {
+            CIRCULAR_PASS.with(|c| *c.borrow_mut() = None);
+        }
+    }
+}
+
+/// Memoise cross-sheet cycle detection across every `recalculate_sheet_values`
+/// call made inside this scope. Safe precisely because nothing inside a
+/// recalculation pass edits a formula.
+pub(crate) fn begin_circular_pass() -> CircularPassGuard {
+    CIRCULAR_PASS.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.is_some() {
+            CircularPassGuard { owns: false }
+        } else {
+            *slot = Some(None);
+            CircularPassGuard { owns: true }
+        }
+    })
+}
+
+/// The pass-scoped accessor: computes on first demand, reuses thereafter.
+fn cross_sheet_circular_cells(
+    grids: &[engine::Grid],
+    sheet_names: &[String],
+) -> std::rc::Rc<std::collections::HashSet<(usize, u32, u32)>> {
+    let cached = CIRCULAR_PASS.with(|c| c.borrow().clone());
+    match cached {
+        Some(Some(set)) => set,
+        Some(None) => {
+            let set = std::rc::Rc::new(workbook_circular_cells(grids, sheet_names));
+            CIRCULAR_PASS.with(|c| *c.borrow_mut() = Some(Some(set.clone())));
+            set
+        }
+        None => std::rc::Rc::new(workbook_circular_cells(grids, sheet_names)),
+    }
+}
+
+/// Every formula cell that sits on — or downstream of — a dependency cycle
+/// once CROSS-SHEET edges are taken into account.
+///
+/// "Downstream of" is deliberate and matches `partition_formula_cells`
+/// exactly: Kahn leaves a cell in the residue when any precedent of it is
+/// still in the residue, so a cell reading a circular cell is reported too.
+/// The same-sheet detector has always behaved that way, and the two must agree
+/// or a cycle would be reported differently depending on whether it happened
+/// to cross a boundary.
+///
+/// Returns an EMPTY set for a workbook with no cross-sheet references at all,
+/// so same-sheet-only workbooks are unaffected (their cycles are still found
+/// by `partition_formula_cells`, which keeps running unchanged).
+pub(crate) fn workbook_circular_cells(
+    grids: &[engine::Grid],
+    sheet_names: &[String],
+) -> std::collections::HashSet<(usize, u32, u32)> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    type Node = (usize, u32, u32);
+
+    // Precedent lists over FORMULA CELLS ONLY. A literal has no outgoing edge,
+    // so it can never be part of a cycle and never needs to be a node.
+    let mut precedents: HashMap<Node, Vec<Node>> = HashMap::new();
+    let mut formula_cells: Vec<Node> = Vec::new();
+    // (precedent sheet -> dependent sheet) for CROSS-sheet edges only.
+    let mut sheet_edges: HashSet<(usize, usize)> = HashSet::new();
+    // Raw, un-filtered cross-sheet edges; kept so the second phase does not
+    // have to re-walk every AST.
+    let mut cross_edges: Vec<(Node, Node)> = Vec::new();
+    let mut same_sheet_edges: Vec<(Node, Node)> = Vec::new();
+
+    // Sheet name -> index, matched case-insensitively because the lexer
+    // UPPERCASES bare identifiers (`=Sheet1!A2` is stored as `SHEET1!A2`).
+    // Same normalisation `normalize_cross_sheet_refs` performs for the
+    // dependency maps; done inline here because this walk wants the INDEX, and
+    // resolving straight to it avoids materialising the canonical name.
+    let sheet_index_of = |name: &str| -> Option<usize> {
+        sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+    };
+
+    for (sheet_idx, grid) in grids.iter().enumerate() {
+        for (&(row, col), cell) in &grid.cells {
+            let Some(ast) = &cell.ast else { continue };
+            if !cell.has_formula() {
+                continue;
+            }
+            let node: Node = (sheet_idx, row, col);
+            formula_cells.push(node);
+
+            let refs = crate::extract_all_references(ast, grid);
+            for &(r, c) in &refs.cells {
+                same_sheet_edges.push(((sheet_idx, r, c), node));
+            }
+            for (name, r, c) in &refs.cross_sheet_cells {
+                let Some(target_sheet) = sheet_index_of(name) else {
+                    continue; // reference to a sheet that no longer exists
+                };
+                // A PREFIXED reference to the cell's own sheet
+                // (`=Sheet1!A1` written on Sheet1) is a same-sheet edge that
+                // `ExtractedRefs::cells` never reports, so the local detector
+                // misses it too. Recorded as a sheet SELF-loop below, which is
+                // what makes the projection treat it as cyclic.
+                sheet_edges.insert((target_sheet, sheet_idx));
+                cross_edges.push(((target_sheet, *r, *c), node));
+            }
+        }
+    }
+
+    // GATE 1: no cross-sheet reference anywhere.
+    if sheet_edges.is_empty() {
+        return HashSet::new();
+    }
+
+    // GATE 2: the sheet-level projection must contain a cycle.
+    if !sheet_graph_has_cycle(&sheet_edges, sheet_names.len()) {
+        return HashSet::new();
+    }
+
+    // Full cell-level Kahn over both edge kinds.
+    let formula_set: HashSet<Node> = formula_cells.iter().copied().collect();
+    for (from, to) in same_sheet_edges.into_iter().chain(cross_edges.into_iter()) {
+        if formula_set.contains(&from) {
+            precedents.entry(to).or_default().push(from);
+        }
+    }
+
+    let mut in_degree: HashMap<Node, usize> = formula_cells.iter().map(|&n| (n, 0)).collect();
+    let mut dependents: HashMap<Node, Vec<Node>> = HashMap::new();
+    for (&node, preds) in &precedents {
+        for &pred in preds {
+            *in_degree.entry(node).or_insert(0) += 1;
+            dependents.entry(pred).or_default().push(node);
+        }
+    }
+
+    let mut queue: VecDeque<Node> = in_degree
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&n, _)| n)
+        .collect();
+    let mut removed: HashSet<Node> = HashSet::new();
+    while let Some(node) = queue.pop_front() {
+        removed.insert(node);
+        if let Some(deps) = dependents.get(&node) {
+            for &dep in deps {
+                if let Some(d) = in_degree.get_mut(&dep) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push_back(dep);
+                    }
+                }
+            }
+        }
+    }
+
+    formula_set.difference(&removed).copied().collect()
+}
+
+/// Kahn over the S-node sheet projection. A self-edge (a sheet referencing
+/// itself through an explicit prefix) counts as a cycle: it can never reach
+/// in-degree zero, which is exactly the answer wanted.
+fn sheet_graph_has_cycle(edges: &std::collections::HashSet<(usize, usize)>, sheets: usize) -> bool {
+    use std::collections::VecDeque;
+
+    let mut in_degree = vec![0usize; sheets];
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); sheets];
+    let mut edge_count = 0usize;
+    for &(from, to) in edges {
+        if from >= sheets || to >= sheets {
+            continue;
+        }
+        out[from].push(to);
+        in_degree[to] += 1;
+        edge_count += 1;
+    }
+    if edge_count == 0 {
+        return false;
+    }
+
+    let mut queue: VecDeque<usize> = (0..sheets).filter(|&i| in_degree[i] == 0).collect();
+    let mut removed = 0usize;
+    while let Some(node) = queue.pop_front() {
+        removed += 1;
+        for &next in &out[node] {
+            in_degree[next] -= 1;
+            if in_degree[next] == 0 {
+                queue.push_back(next);
+            }
+        }
+    }
+    removed != sheets
+}
+
+/// Move this sheet's cross-sheet cycle members out of the topologically-sorted
+/// bucket and into the circular bucket, so they take the SAME branch a
+/// same-sheet cycle takes: `#CIRCULAR!` when iteration is off, and the
+/// convergence loop when it is on.
+///
+/// Members already in a same-sheet circular group are untouched — they are not
+/// in `non_circular` to begin with.
+fn merge_cross_sheet_circular(
+    sheet_index: usize,
+    circular: &std::collections::HashSet<(usize, u32, u32)>,
+    non_circular: &mut Vec<(u32, u32, String)>,
+    circular_groups: &mut Vec<Vec<(u32, u32, String)>>,
+) {
+    if circular.is_empty() {
+        return;
+    }
+    let on_this_sheet: std::collections::HashSet<(u32, u32)> = circular
+        .iter()
+        .filter(|(s, _, _)| *s == sheet_index)
+        .map(|(_, r, c)| (*r, *c))
+        .collect();
+    if on_this_sheet.is_empty() {
+        return;
+    }
+    let moved: Vec<(u32, u32, String)> = non_circular
+        .iter()
+        .filter(|(r, c, _)| on_this_sheet.contains(&(*r, *c)))
+        .cloned()
+        .collect();
+    if moved.is_empty() {
+        return;
+    }
+    non_circular.retain(|(r, c, _)| !on_this_sheet.contains(&(*r, *c)));
+    // ONE group for the whole sheet-local residue. Grouping matters only under
+    // iterative calculation, where a group is iterated as a unit; merging
+    // independent cycles into one unit converges them together, which is
+    // wasteful at worst and never wrong.
+    circular_groups.push(moved);
+}
+
+/// Stamp `#CIRCULAR!` on the members of a detected cross-sheet cycle that do
+/// NOT live on the sheet this pass is evaluating. Returns the cells it changed.
+///
+/// WHY THIS EXISTS — THE OTHER HALF OF THE SAME FACT.
+/// `merge_cross_sheet_circular` moves only the members on `active_sheet` into a
+/// circular group, because that is the only sheet a pass evaluates. `calculate_now`
+/// evaluates exactly one sheet, so with `Sheet1!A1 = Sheet2!A1` and
+/// `Sheet2!A1 = Sheet1!A1` it reported `#CIRCULAR!` on the sheet you were LOOKING
+/// AT and left the other member holding whatever number the previous evaluation
+/// order produced — `0`. Measured on the running app, not reasoned: F9 on Sheet1
+/// gave `#CIRCULAR` / `0`, and only a second F9 after switching to Sheet2 made the
+/// two agree.
+///
+/// That surviving number is the exact defect the workbook-level detector exists to
+/// remove. It is also strictly worse than the original bug in one respect: half the
+/// cycle now says "error" while the other half says "zero", so a user reading the
+/// summary sheet gets a plausible number with a contradiction one tab away.
+/// `recalculate_sheet_values` never had the problem because the off-sheet write path
+/// calls it for EVERY sheet; nothing calls `calculate_now` more than once.
+///
+/// A CYCLE IS A WORKBOOK-LEVEL FACT, so it is reported on every sheet that owns a
+/// member. This is not a second detector and not a second traversal: `circular` is
+/// the set the caller already computed, it is EMPTY for any workbook with no
+/// cross-sheet reference at all (gate 1 of `workbook_circular_cells`), and this
+/// walks only its own members.
+///
+/// GATED ON ITERATION BEING OFF, for the same reason the active-sheet branch is:
+/// under iterative calculation the members CONVERGE (one hop per whole-workbook
+/// round — see `recalculate_sheet_values`), and stamping them here would be exactly
+/// the regression `iterative_mode_never_writes_circular_across_sheets` forbids.
+///
+/// The ACTIVE sheet is deliberately skipped: its members are written by the caller's
+/// own circular-group loop, which also owns the iterative branch and the mirror.
+pub(crate) fn mark_off_sheet_circular_cells(
+    grids: &mut [engine::Grid],
+    circular: &std::collections::HashSet<(usize, u32, u32)>,
+    active_sheet: usize,
+    iteration_enabled: bool,
+) -> Vec<(usize, u32, u32)> {
+    if circular.is_empty() || iteration_enabled {
+        return Vec::new();
+    }
+    // Sorted so the reported order is deterministic: these cells reach the
+    // frontend as a list, and the soak/regression oracles compare runs.
+    let mut targets: Vec<(usize, u32, u32)> = circular
+        .iter()
+        .filter(|(s, _, _)| *s != active_sheet && *s < grids.len())
+        .copied()
+        .collect();
+    targets.sort_unstable();
+
+    let mut marked = Vec::new();
+    for (sheet, row, col) in targets {
+        let existing = match grids[sheet].get_cell(row, col).cloned() {
+            Some(cell) => cell,
+            None => continue,
+        };
+        // Already reported: nothing moved, so nothing is announced. Keeps a
+        // repeated F9 from re-emitting the whole cycle every time.
+        if matches!(
+            existing.value,
+            engine::CellValue::Error(engine::CellError::Circular)
+        ) {
+            continue;
+        }
+        let mut updated = existing;
+        updated.value = engine::CellValue::Error(engine::CellError::Circular);
+        grids[sheet].set_cell(row, col, updated);
+        marked.push((sheet, row, col));
+    }
+    marked
+}
+
 /// Recalculate all formulas in the grid.
 /// When iterative calculation is enabled, circular references are resolved
 /// by repeatedly evaluating the circular group until convergence.
@@ -413,8 +783,8 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     );
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // The active-sheet mirror (state.grid) is the source of truth; grids[i]
     // can lag behind it (see get_watch_cells note in commands/data.rs).
@@ -424,7 +794,7 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     if active_sheet < grids.len() {
         grids[active_sheet] = grid.clone();
     }
-    let mut styles = state.style_registry.lock().unwrap();
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
@@ -470,13 +840,60 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     let tables_map = state.tables.read().unwrap();
     let table_names_map = state.table_names.read().unwrap();
     let named_ranges_map = state.named_ranges.read().unwrap();
-    let mut row_heights = state.row_heights.lock().unwrap();
-    let mut column_widths = state.column_widths.lock().unwrap();
+    let mut row_heights = state.row_heights.write(&effect).unwrap();
+    let mut column_widths = state.column_widths.write(&effect).unwrap();
     let dependencies_map = state.dependencies.lock().unwrap();
 
     // Partition formula cells into non-circular (topological order) and circular groups
     let (mut non_circular, mut circular_groups) = partition_formula_cells(&formula_cells, &dependencies_map);
     drop(dependencies_map);
+
+    // §2c follow-on: `state.dependencies` has no sheet dimension, so F9 could
+    // not see a cycle that crosses a boundary either. Same merge as
+    // `recalculate_sheet_values`; the sheet under recalculation here is always
+    // the active one.
+    {
+        let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names);
+        merge_cross_sheet_circular(
+            active_sheet,
+            &cross_circular,
+            &mut non_circular,
+            &mut circular_groups,
+        );
+        // ...and the members on the OTHER sheets, which this pass does not
+        // evaluate and which were therefore left holding an order-dependent
+        // number while the active sheet said `#CIRCULAR!`. See
+        // `mark_off_sheet_circular_cells` for the measurement.
+        let marked =
+            mark_off_sheet_circular_cells(&mut grids, &cross_circular, active_sheet, iteration_enabled);
+        for (sheet, row, col) in marked {
+            let effective_style_index = grids[sheet].effective_style_index(row, col);
+            let style = styles.get(effective_style_index);
+            let formula = grids[sheet]
+                .get_cell(row, col)
+                .and_then(|c| c.formula_string())
+                .map(|f| format!("={}", f));
+            updated_cells.push(CellData {
+                row,
+                col,
+                display: format_cell_value(
+                    &engine::CellValue::Error(engine::CellError::Circular),
+                    style,
+                    &locale,
+                ),
+                display_color: None,
+                formula,
+                style_index: effective_style_index,
+                row_span: 1,
+                col_span: 1,
+                // NAMED, so the frontend cannot paint an off-sheet value onto the
+                // sheet on screen: Core applies only cells with no sheet index.
+                sheet_index: Some(sheet),
+                rich_text: None,
+                accounting_layout: None,
+            });
+        }
+    }
 
     // RESUME. If the previous pass on this sheet was cancelled, recalculate only
     // what it never reached, so an accidental Cancel costs nothing.
@@ -831,12 +1248,12 @@ pub(crate) fn recalculate_sheet_values(
     );
     let mut grid_mirror = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     if sheet_index >= grids.len() {
         return;
     }
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
 
     let iteration_enabled = *state.iteration_enabled.lock().unwrap();
@@ -876,8 +1293,8 @@ pub(crate) fn recalculate_sheet_values(
     let table_names_map = state.table_names.read().unwrap();
     let named_ranges_map = state.named_ranges.read().unwrap();
     let (column_widths, row_heights) = {
-        let all_cw = state.all_column_widths.lock().unwrap();
-        let all_rh = state.all_row_heights.lock().unwrap();
+        let all_cw = state.all_column_widths.read().unwrap();
+        let all_rh = state.all_row_heights.read().unwrap();
         (
             all_cw.get(sheet_index).cloned().unwrap_or_default(),
             all_rh.get(sheet_index).cloned().unwrap_or_default(),
@@ -896,7 +1313,19 @@ pub(crate) fn recalculate_sheet_values(
             }
         }
     }
-    let (non_circular, circular_groups) = partition_formula_cells(&formula_cells, &local_deps);
+    let (mut non_circular, mut circular_groups) =
+        partition_formula_cells(&formula_cells, &local_deps);
+
+    // §2c follow-on: `local_deps` describes THIS sheet only, so a cycle that
+    // crosses a boundary is invisible to the partition above and used to
+    // produce an order-dependent number. Merge the workbook-level answer in.
+    let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names);
+    merge_cross_sheet_circular(
+        sheet_index,
+        &cross_circular,
+        &mut non_circular,
+        &mut circular_groups,
+    );
 
     let mut cancelled = false;
     let mut pending_cells: Vec<PendingCell> = Vec::new();
@@ -1225,7 +1654,7 @@ pub(crate) fn recalc_visibility_dependents_core(
     let (visibility_sheets, prepass_active_sheet) = {
         let grid = state.grid.read().unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();
         }
@@ -1248,7 +1677,7 @@ pub(crate) fn recalc_visibility_dependents_core(
     // each source sheet (reverse-propagation seeds). Brief locks, canonical
     // order, no grid lock held.
     let (sheet_edges, active_deps_by_source) = {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let cross = state.cross_sheet_dependents.lock().unwrap();
         let mut edges: HashMap<usize, HashSet<usize>> = HashMap::new();
         let mut active_deps: HashMap<usize, Vec<(u32, u32)>> = HashMap::new();
@@ -1300,20 +1729,20 @@ pub(crate) fn recalc_visibility_dependents_core(
     // Pass 2: active sheet, spill-aware, under the update_cell-style lock set.
     let updated_cells = {
         let user_files = user_files_state.files.lock().unwrap();
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();
         }
 
-        let styles = state.style_registry.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
         let dependents_map = state.dependents.lock().unwrap();
         let column_dependents_map = state.column_dependents.lock().unwrap();
         let row_dependents_map = state.row_dependents.lock().unwrap();
         let cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
-        let merged_regions = state.merged_regions.lock().unwrap();
+        let merged_regions = state.merged_regions.read().unwrap();
         let locale = state.locale.lock().unwrap();
         let cascade_tables = state.tables.read().unwrap();
         let cascade_table_names = state.table_names.read().unwrap();

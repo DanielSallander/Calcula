@@ -42,7 +42,15 @@ describe('AppEvents', () => {
     // validation rule changed zero pixels until something unrelated forced a
     // refresh. They are also the signal an out-of-band mutator (a .calp pull,
     // an MCP tool, a test that invoked the Rust command directly) can dispatch.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`71`);
+    //
+    // 73 since SHEET_DISPLAY_FLAGS_CHANGED and CONTROLS_CHANGED. The first is
+    // the counterpart of the six *_TOGGLED events and points the OTHER way: the
+    // four per-sheet display flags are backend state (.cala v6), and until now
+    // nothing told the renderer when a script, an MCP tool, a package pull or
+    // `new_file` moved them — so the grid kept painting the previous document's
+    // headings. It carries no payload deliberately; the single hydration path
+    // re-reads `get_sheet_display_flags`.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`73`);
   });
 
   it('all values use the app: prefix', () => {

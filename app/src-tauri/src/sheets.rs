@@ -304,12 +304,12 @@ fn remap_sheet_keyed_stores(
     // deleting/reordering sheets leaves protection attached to the WRONG index
     // — and now that protection persists, a stale index serializes under a
     // freshly-minted bogus SheetId and reattaches to sheet 0 on reopen.
-    remap_indexed_map(&mut state.sheet_protection.lock().unwrap(), &remap);
+    remap_indexed_map(&mut state.sheet_protection.write(effect).unwrap(), &remap);
     // AutoFilters are sheet-index-keyed too and were the one store missing
     // here: deleting or moving a sheet left every filter attached to the wrong
     // index, so its criteria hid rows on an unrelated sheet and the owning
     // table's id no longer matched anything on its own sheet.
-    remap_indexed_map(&mut state.auto_filters.lock().unwrap(), &remap);
+    remap_indexed_map(&mut state.auto_filters.write(effect).unwrap(), &remap);
 }
 
 // ============================================================================
@@ -318,8 +318,8 @@ fn remap_sheet_keyed_stores(
 
 #[tauri::command]
 pub fn get_sheets(state: State<AppState>) -> SheetsResult {
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_index = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_index = *state.active_sheet.read().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
@@ -332,7 +332,7 @@ pub fn get_sheets(state: State<AppState>) -> SheetsResult {
 
 #[tauri::command]
 pub fn get_active_sheet(state: State<AppState>) -> usize {
-    *state.active_sheet.lock().unwrap()
+    *state.active_sheet.read().unwrap()
 }
 
 /// The workbook's stable sheet uuids in index order. Lets per-sheet
@@ -343,7 +343,7 @@ pub fn get_active_sheet(state: State<AppState>) -> usize {
 pub fn get_sheet_ids(state: State<AppState>) -> Vec<String> {
     state
         .sheet_ids
-        .lock()
+        .read()
         .unwrap()
         .iter()
         .map(|id| id.to_string())
@@ -353,7 +353,7 @@ pub fn get_sheet_ids(state: State<AppState>) -> Vec<String> {
 /// Get the gridlines visibility setting for the active sheet.
 #[tauri::command]
 pub fn get_show_gridlines(state: State<AppState>) -> bool {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     let gridlines = state.show_gridlines.read().unwrap();
     gridlines.get(active).copied().unwrap_or(true)
 }
@@ -361,10 +361,26 @@ pub fn get_show_gridlines(state: State<AppState>) -> bool {
 /// Read the DISPLAY FLAGS for the active sheet.
 #[tauri::command]
 pub fn get_sheet_display_flags(state: State<AppState>) -> crate::api_types::SheetDisplayFlags {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     let flags = state.sheet_display_flags.read().unwrap();
     flags.get(active).cloned().unwrap_or_default()
 }
+
+/// The Tauri event announcing that the active sheet's display flags CHANGED.
+///
+/// WHY THE SETTER HAS TO ANNOUNCE. These four flags have a backend authority that
+/// round-trips the `.cala`, but the thing that DRAWS them is frontend Core state, fed
+/// by the `DISPLAY_*_TOGGLED` app events the View menu emits. Anything that reaches
+/// this command WITHOUT going through that menu -- a script, an MCP tool, a `.calp`
+/// materialisation, an E2E spec restoring state -- moved the authority and left the
+/// renderer describing the previous document. Measured on the running app: after one
+/// spec restored the flags here, the whole session painted with the row/column
+/// headings switched OFF while `get_sheet_display_flags` reported them ON.
+///
+/// Bridged onto the `@api` bus by `app/src/shell/sheetDisplayFlagsBridge.ts`, exactly
+/// like `document:dirty-changed`. The payload is the RESULT of applying the patch, not
+/// the patch, so a subscriber never has to merge.
+pub const SHEET_DISPLAY_FLAGS_EVENT: &str = "sheet:display-flags-changed";
 
 /// Set the DISPLAY FLAGS for the active sheet.
 ///
@@ -375,31 +391,39 @@ pub fn get_sheet_display_flags(state: State<AppState>) -> crate::api_types::Shee
 /// times the cost for no benefit.
 #[tauri::command]
 pub fn set_sheet_display_flags(
+    app: tauri::AppHandle,
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
     patch: crate::api_types::SheetDisplayFlagsPatch,
 ) {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     // Persisted per-sheet view state dirties, exactly like `set_show_gridlines` and
     // `set_split_window`; the only exception is navigation (see `set_active_sheet`).
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut flags = state.sheet_display_flags.write(&effect).unwrap();
-    while flags.len() <= active {
-        flags.push(crate::api_types::SheetDisplayFlags::default());
-    }
-    let entry = &mut flags[active];
-    if let Some(v) = patch.display_zeros {
-        entry.display_zeros = v;
-    }
-    if let Some(v) = patch.show_formulas {
-        entry.show_formulas = v;
-    }
-    if let Some(v) = patch.view_mode {
-        entry.view_mode = v;
-    }
-    if let Some(v) = patch.display_headings {
-        entry.display_headings = v;
-    }
+    let announced = {
+        let mut flags = state.sheet_display_flags.write(&effect).unwrap();
+        while flags.len() <= active {
+            flags.push(crate::api_types::SheetDisplayFlags::default());
+        }
+        let entry = &mut flags[active];
+        if let Some(v) = patch.display_zeros {
+            entry.display_zeros = v;
+        }
+        if let Some(v) = patch.show_formulas {
+            entry.show_formulas = v;
+        }
+        if let Some(v) = patch.view_mode {
+            entry.view_mode = v;
+        }
+        if let Some(v) = patch.display_headings {
+            entry.display_headings = v;
+        }
+        entry.clone()
+    };
+    // Announce AFTER the guard is dropped: a subscriber that answers by calling
+    // `get_sheet_display_flags` would deadlock against a still-held write lock.
+    use tauri::Emitter;
+    let _ = app.emit(SHEET_DISPLAY_FLAGS_EVENT, announced);
 }
 
 /// Set the gridlines visibility for the active sheet.
@@ -409,7 +433,7 @@ pub fn set_show_gridlines(
     file_state: State<FileState>,
     visible: bool,
 ) {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     // `sheet.show_gridlines` is persisted (enrich_workbook_metadata). Persisted view
     // state dirties -- the only exception is navigation (see `set_active_sheet`).
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -431,19 +455,19 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
         crate::document_effect::CleanReason::Navigation,
     );
     let (result, switched) = {
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut current_grid = state.grid.write(&effect).unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
-    let mut column_widths = state.column_widths.lock().unwrap();
-    let mut row_heights = state.row_heights.lock().unwrap();
-    let mut all_column_widths = state.all_column_widths.lock().unwrap();
-    let mut all_row_heights = state.all_row_heights.lock().unwrap();
-    let mut merged_regions = state.merged_regions.lock().unwrap();
-    let mut all_merged_regions = state.all_merged_regions.lock().unwrap();
+    let mut column_widths = state.column_widths.write(&effect).unwrap();
+    let mut row_heights = state.row_heights.write(&effect).unwrap();
+    let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
+    let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
+    let mut merged_regions = state.merged_regions.write(&effect).unwrap();
+    let mut all_merged_regions = state.all_merged_regions.write(&effect).unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -528,17 +552,17 @@ pub fn add_sheet(
     // per-sheet persisted vector.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let result = {
-    let mut sheet_names = state.sheet_names.lock().unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
-    let mut column_widths = state.column_widths.lock().unwrap();
-    let mut row_heights = state.row_heights.lock().unwrap();
-    let mut all_column_widths = state.all_column_widths.lock().unwrap();
-    let mut all_row_heights = state.all_row_heights.lock().unwrap();
+    let mut column_widths = state.column_widths.write(&effect).unwrap();
+    let mut row_heights = state.row_heights.write(&effect).unwrap();
+    let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
+    let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
 
     let new_name = name.unwrap_or_else(|| {
         let mut counter = sheet_names.len() + 1;
@@ -576,7 +600,7 @@ pub fn add_sheet(
     grids.push(new_grid.clone());
     freeze_configs.push(FreezeConfig::default());
     {
-        let mut split_configs = state.split_configs.lock().unwrap();
+        let mut split_configs = state.split_configs.write(&effect).unwrap();
         split_configs.push(SplitConfig::default());
     }
     {
@@ -584,7 +608,7 @@ pub fn add_sheet(
         scroll_areas.push(None);
     }
     {
-        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        let mut sheet_zooms = state.sheet_zooms.write(&effect).unwrap();
         sheet_zooms.push(persistence::DEFAULT_SHEET_ZOOM_PERCENT);
     }
     {
@@ -595,7 +619,7 @@ pub fn add_sheet(
         page_setups.push(crate::api_types::PageSetup::default());
     }
     {
-        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        let mut sheet_ids = state.sheet_ids.write(&effect).unwrap();
         sheet_ids.push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
     }
     tab_colors.push(String::new());
@@ -613,11 +637,11 @@ pub fn add_sheet(
     all_column_widths.push(HashMap::new());
     all_row_heights.push(HashMap::new());
     crate::commands::dimensions::stash_active_user_hidden(&state, old_index);
-    crate::commands::dimensions::push_user_hidden_sheet(&state);
+    crate::commands::dimensions::push_user_hidden_sheet(&state, &effect);
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
         // Save current sheet's merged regions before switching
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         while all_merged.len() <= old_index {
             all_merged.push(HashSet::new());
         }
@@ -653,19 +677,19 @@ pub fn delete_sheet(
     // Deleting a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let result = {
-    let mut sheet_names = state.sheet_names.lock().unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
     let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut column_widths = state.column_widths.lock().unwrap();
-    let mut row_heights = state.row_heights.lock().unwrap();
-    let mut all_column_widths = state.all_column_widths.lock().unwrap();
-    let mut all_row_heights = state.all_row_heights.lock().unwrap();
+    let mut column_widths = state.column_widths.write(&effect).unwrap();
+    let mut row_heights = state.row_heights.write(&effect).unwrap();
+    let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
+    let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
 
     if sheet_names.len() <= 1 {
         return Err("Cannot delete the last sheet".to_string());
@@ -705,7 +729,7 @@ pub fn delete_sheet(
     // pointing at a sheet that no longer exists — and publish a selector for it.
     // (Read before the sheet_ids entry is removed further down.)
     {
-        let deleted_sheet_id = state.sheet_ids.lock().ok().and_then(|ids| ids.get(index).copied());
+        let deleted_sheet_id = state.sheet_ids.read().ok().and_then(|ids| ids.get(index).copied());
         if let Some(sid) = deleted_sheet_id {
             if let Ok(mut regions) = state.writeback_draft_regions.write(&effect) {
                 let before = regions.len();
@@ -829,7 +853,7 @@ pub fn delete_sheet(
         grids.remove(index);
     }
     {
-        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        let mut sheet_ids = state.sheet_ids.write(&effect).unwrap();
         if index < sheet_ids.len() {
             sheet_ids.remove(index);
         }
@@ -844,7 +868,7 @@ pub fn delete_sheet(
         freeze_configs.remove(index);
     }
     {
-        let mut split_configs = state.split_configs.lock().unwrap();
+        let mut split_configs = state.split_configs.write(&effect).unwrap();
         if index < split_configs.len() {
             split_configs.remove(index);
         }
@@ -856,7 +880,7 @@ pub fn delete_sheet(
         }
     }
     {
-        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        let mut sheet_zooms = state.sheet_zooms.write(&effect).unwrap();
         if index < sheet_zooms.len() {
             sheet_zooms.remove(index);
         }
@@ -886,11 +910,11 @@ pub fn delete_sheet(
         all_row_heights.remove(index);
     }
     crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
-    crate::commands::dimensions::remove_user_hidden_sheet(&state, index);
+    crate::commands::dimensions::remove_user_hidden_sheet(&state, &effect, index);
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
         // Save current merged regions before deleting
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         while all_merged.len() <= old_active {
             all_merged.push(HashSet::new());
         }
@@ -932,8 +956,8 @@ pub fn delete_sheet(
     crate::commands::dimensions::load_active_user_hidden(&state, new_active);
     // Load new active sheet's merged regions
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         if new_active < all_merged.len() {
             *current_merged = std::mem::take(&mut all_merged[new_active]);
         }
@@ -960,8 +984,10 @@ pub fn rename_sheet(
     new_name: String,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "rename a sheet")?;
-    let mut sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    // Same reason the grid pair below is `lock_pending`: the three validation
+    // gates can still refuse, and this guard has to be held across them.
+    let sheet_names = state.sheet_names.lock_pending().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
@@ -991,6 +1017,7 @@ pub fn rename_sheet(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grids = grids.authorize(&effect);
     let mut current_grid = current_grid.authorize(&effect);
+    let mut sheet_names = sheet_names.authorize(&effect);
 
     let old_name = sheet_names[index].clone();
     sheet_names[index] = trimmed_name.clone();
@@ -1042,8 +1069,8 @@ pub(crate) fn set_freeze_panes_impl(
     // not: the two contradicted each other inside one file, and a workbook whose only
     // change was a freeze closed "clean" with the layout silently discarded.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
@@ -1074,7 +1101,7 @@ pub(crate) fn set_freeze_panes_impl(
 
 #[tauri::command]
 pub fn get_freeze_panes(state: State<AppState>) -> FreezeConfig {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
 
     freeze_configs.get(active_sheet).cloned().unwrap_or_default()
@@ -1097,9 +1124,12 @@ pub fn set_split_window(
     split_row: Option<u32>,
     split_col: Option<u32>,
 ) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // Nothing below can refuse, so the effect is minted here and the write it
+    // authorises is the same statement that sets the flag.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     {
-        let mut split_configs = state.split_configs.lock().unwrap();
+        let mut split_configs = state.split_configs.write(&effect).unwrap();
 
         // Ensure split_configs has enough entries
         while split_configs.len() <= active_sheet {
@@ -1111,15 +1141,14 @@ pub fn set_split_window(
             split_col,
         };
     }
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(())
 }
 
 #[tauri::command]
 pub fn get_split_window(state: State<AppState>) -> SplitConfig {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let split_configs = state.split_configs.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let split_configs = state.split_configs.read().unwrap();
 
     split_configs.get(active_sheet).cloned().unwrap_or_default()
 }
@@ -1146,9 +1175,7 @@ pub fn set_sheet_zoom(
     file_state: State<crate::persistence::FileState>,
     zoom: f64,
 ) -> Result<(), String> {
-    if set_sheet_zoom_inner(&state, zoom)? {
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-    }
+    set_sheet_zoom_inner(&state, &file_state, zoom)?;
     Ok(())
 }
 
@@ -1157,7 +1184,11 @@ pub fn set_sheet_zoom(
 /// plus the "did it actually change?" answer are the parts worth pinning.
 ///
 /// Returns whether the stored value actually changed.
-pub(crate) fn set_sheet_zoom_inner(state: &AppState, zoom: f64) -> Result<bool, String> {
+pub(crate) fn set_sheet_zoom_inner(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    zoom: f64,
+) -> Result<bool, String> {
     if !zoom.is_finite()
         || !(script_engine::types::ZOOM_MIN_PERCENT..=script_engine::types::ZOOM_MAX_PERCENT)
             .contains(&zoom)
@@ -1168,21 +1199,34 @@ pub(crate) fn set_sheet_zoom_inner(state: &AppState, zoom: f64) -> Result<bool, 
             script_engine::types::ZOOM_MAX_PERCENT
         ));
     }
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let mut sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    // `lock_pending`, and the no-op case returns WITHOUT writing at all: the
+    // "re-writing the same zoom is not a change" rule used to live in the
+    // command (which decided whether to call `mutates` from this bool). With
+    // the store gated, the rule and the write are one statement apart and
+    // cannot drift -- and the read-decide-write stays in one critical section.
+    let sheet_zooms = state.sheet_zooms.lock_pending().map_err(|e| e.to_string())?;
+    let changed = match sheet_zooms.get(active_sheet) {
+        Some(current) => (current - zoom).abs() >= 1e-9,
+        None => true,
+    };
+    if !changed {
+        return Ok(false);
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut sheet_zooms = sheet_zooms.authorize(&effect);
     while sheet_zooms.len() <= active_sheet {
         sheet_zooms.push(persistence::DEFAULT_SHEET_ZOOM_PERCENT);
     }
-    let changed = (sheet_zooms[active_sheet] - zoom).abs() >= 1e-9;
     sheet_zooms[active_sheet] = zoom;
-    Ok(changed)
+    Ok(true)
 }
 
 /// Read the ACTIVE sheet's zoom as a REAL PERCENT.
 #[tauri::command]
 pub fn get_sheet_zoom(state: State<AppState>) -> f64 {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_zooms = state.sheet_zooms.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_zooms = state.sheet_zooms.read().unwrap();
     sheet_zooms
         .get(active_sheet)
         .copied()
@@ -1204,17 +1248,17 @@ pub fn move_sheet(
     crate::protection::check_workbook_structure(&state, "move a sheet")?;
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut sheet_names = state.sheet_names.lock().unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
-    let mut column_widths = state.column_widths.lock().unwrap();
-    let mut row_heights = state.row_heights.lock().unwrap();
-    let mut all_column_widths = state.all_column_widths.lock().unwrap();
-    let mut all_row_heights = state.all_row_heights.lock().unwrap();
+    let mut column_widths = state.column_widths.write(&effect).unwrap();
+    let mut row_heights = state.row_heights.write(&effect).unwrap();
+    let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
+    let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     let count = sheet_names.len();
@@ -1266,7 +1310,7 @@ pub fn move_sheet(
     rotate_element(&mut *grids, from_index, to_index);
     rotate_element(&mut *freeze_configs, from_index, to_index);
     {
-        let mut split_configs = state.split_configs.lock().unwrap();
+        let mut split_configs = state.split_configs.write(&effect).unwrap();
         ensure_vec_len(&mut split_configs, count);
         rotate_element(&mut *split_configs, from_index, to_index);
     }
@@ -1276,12 +1320,12 @@ pub fn move_sheet(
         rotate_element(&mut *scroll_areas, from_index, to_index);
     }
     {
-        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        let mut sheet_zooms = state.sheet_zooms.write(&effect).unwrap();
         ensure_vec_len_with(&mut *sheet_zooms, count, || persistence::DEFAULT_SHEET_ZOOM_PERCENT);
         rotate_element(&mut *sheet_zooms, from_index, to_index);
     }
     {
-        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        let mut sheet_ids = state.sheet_ids.write(&effect).unwrap();
         ensure_vec_len_with(&mut *sheet_ids, count, || identity::SheetId::from_bytes(identity::generate_uuid_v7()));
         rotate_element(&mut *sheet_ids, from_index, to_index);
     }
@@ -1290,7 +1334,7 @@ pub fn move_sheet(
     rotate_element(&mut *all_column_widths, from_index, to_index);
     rotate_element(&mut *all_row_heights, from_index, to_index);
     crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
-    crate::commands::dimensions::rotate_user_hidden_sheet(&state, from_index, to_index, count);
+    crate::commands::dimensions::rotate_user_hidden_sheet(&state, &effect, from_index, to_index, count);
     rotate_element(&mut *page_setups, from_index, to_index);
     {
         let mut gridlines = state.show_gridlines.write(&effect).unwrap();
@@ -1307,8 +1351,8 @@ pub fn move_sheet(
         rotate_element(&mut *display_flags, from_index, to_index);
     }
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         ensure_vec_len(&mut all_merged, count);
         all_merged[old_active] = std::mem::take(&mut *current_merged);
         rotate_element(&mut *all_merged, from_index, to_index);
@@ -1339,8 +1383,8 @@ pub fn move_sheet(
     *row_heights = std::mem::take(&mut all_row_heights[new_active]);
     crate::commands::dimensions::load_active_user_hidden(&state, new_active);
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         if new_active < all_merged.len() {
             *current_merged = std::mem::take(&mut all_merged[new_active]);
         }
@@ -1404,17 +1448,17 @@ pub fn copy_sheet(
     crate::protection::check_workbook_structure(&state, "copy a sheet")?;
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut sheet_names = state.sheet_names.lock().unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
-    let mut column_widths = state.column_widths.lock().unwrap();
-    let mut row_heights = state.row_heights.lock().unwrap();
-    let mut all_column_widths = state.all_column_widths.lock().unwrap();
-    let mut all_row_heights = state.all_row_heights.lock().unwrap();
+    let mut column_widths = state.column_widths.write(&effect).unwrap();
+    let mut row_heights = state.row_heights.write(&effect).unwrap();
+    let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
+    let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
     let mut page_setups = state.page_setups.write(&effect).unwrap();
 
     let count = sheet_names.len();
@@ -1472,7 +1516,7 @@ pub fn copy_sheet(
     grids.insert(insert_at, cloned_grid.clone());
     freeze_configs.insert(insert_at, cloned_freeze);
     {
-        let mut split_configs = state.split_configs.lock().unwrap();
+        let mut split_configs = state.split_configs.write(&effect).unwrap();
         ensure_vec_len(&mut split_configs, count);
         let cloned_split = split_configs[source_index].clone();
         split_configs.insert(insert_at, cloned_split);
@@ -1486,7 +1530,7 @@ pub fn copy_sheet(
     {
         // A copied sheet keeps the original's zoom — the copy is meant to look
         // like what was copied.
-        let mut sheet_zooms = state.sheet_zooms.lock().unwrap();
+        let mut sheet_zooms = state.sheet_zooms.write(&effect).unwrap();
         ensure_vec_len_with(&mut *sheet_zooms, count, || persistence::DEFAULT_SHEET_ZOOM_PERCENT);
         let cloned_zoom = sheet_zooms[source_index];
         sheet_zooms.insert(insert_at, cloned_zoom);
@@ -1494,7 +1538,7 @@ pub fn copy_sheet(
     tab_colors.insert(insert_at, cloned_tab_color);
     sheet_visibility.insert(insert_at, "visible".to_string()); // Copy is always visible
     {
-        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        let mut sheet_ids = state.sheet_ids.write(&effect).unwrap();
         ensure_vec_len_with(&mut *sheet_ids, count, || identity::SheetId::from_bytes(identity::generate_uuid_v7()));
         // Copy gets a fresh ID (it's a new distinct sheet)
         sheet_ids.insert(insert_at, identity::SheetId::from_bytes(identity::generate_uuid_v7()));
@@ -1518,11 +1562,11 @@ pub fn copy_sheet(
     all_column_widths.insert(insert_at, cloned_widths);
     all_row_heights.insert(insert_at, cloned_heights);
     crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
-    crate::commands::dimensions::duplicate_user_hidden_sheet(&state, source_index, insert_at);
+    crate::commands::dimensions::duplicate_user_hidden_sheet(&state, &effect, source_index, insert_at);
     page_setups.insert(insert_at, cloned_page_setup);
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         ensure_vec_len(&mut all_merged, count);
         all_merged[old_active] = std::mem::take(&mut *current_merged);
         let cloned_merged = all_merged[source_index].clone();
@@ -1537,8 +1581,8 @@ pub fn copy_sheet(
     *row_heights = std::mem::take(&mut all_row_heights[new_index]);
     crate::commands::dimensions::load_active_user_hidden(&state, new_index);
     {
-        let mut all_merged = state.all_merged_regions.lock().unwrap();
-        let mut current_merged = state.merged_regions.lock().unwrap();
+        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+        let mut current_merged = state.merged_regions.write(&effect).unwrap();
         if new_index < all_merged.len() {
             *current_merged = std::mem::take(&mut all_merged[new_index]);
         }
@@ -1595,8 +1639,8 @@ pub fn hide_sheet(
     level: Option<String>,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "hide a sheet")?;
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
 
@@ -1651,8 +1695,8 @@ pub fn unhide_sheet(
     file_state: State<FileState>,
     index: usize,
 ) -> Result<SheetsResult, String> {
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
 
@@ -1681,8 +1725,8 @@ pub fn set_tab_color(
     index: usize,
     color: String,
 ) -> Result<SheetsResult, String> {
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
 
@@ -1706,8 +1750,8 @@ pub fn set_tab_color(
 /// Navigate to the next visible sheet (wraps around).
 #[tauri::command]
 pub fn next_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
 
     let count = sheet_names.len();
@@ -1758,7 +1802,7 @@ pub(crate) fn set_scroll_area_impl(
     state: &AppState,
     scroll_area: Option<String>,
 ) -> Result<(), String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let mut scroll_areas = state.scroll_areas.lock().unwrap();
 
     ensure_vec_len(&mut scroll_areas, active_sheet + 1);
@@ -1771,7 +1815,7 @@ pub(crate) fn set_scroll_area_impl(
 /// Returns None if no restriction is set.
 #[tauri::command]
 pub fn get_scroll_area(state: State<AppState>) -> Option<String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let scroll_areas = state.scroll_areas.lock().unwrap();
 
     scroll_areas.get(active_sheet).cloned().flatten()
@@ -1780,8 +1824,8 @@ pub fn get_scroll_area(state: State<AppState>) -> Option<String> {
 /// Navigate to the previous visible sheet (wraps around).
 #[tauri::command]
 pub fn previous_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
 
     let count = sheet_names.len();
@@ -2113,23 +2157,30 @@ mod sheet_zoom_tests {
     #[test]
     fn writing_a_zoom_reports_a_real_change_but_a_no_op_write_does_not() {
         let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
         {
-            let mut names = state.sheet_names.lock().unwrap();
+            let mut names = state
+                .sheet_names
+                .write(&crate::document_effect::test_seed_effect())
+                .unwrap();
             *names = vec!["Sheet1".into(), "Sheet2".into()];
         }
         {
-            let mut zooms = state.sheet_zooms.lock().unwrap();
+            let mut zooms = state
+                .sheet_zooms
+                .write(&crate::document_effect::test_seed_effect())
+                .unwrap();
             *zooms = vec![100.0, 100.0];
         }
-        *state.active_sheet.lock().unwrap() = 1;
+        *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 1;
 
-        assert!(super::set_sheet_zoom_inner(&state, 60.0).unwrap());
+        assert!(super::set_sheet_zoom_inner(&state, &fs, 60.0).unwrap());
         assert!(
-            !super::set_sheet_zoom_inner(&state, 60.0).unwrap(),
+            !super::set_sheet_zoom_inner(&state, &fs, 60.0).unwrap(),
             "re-writing the same zoom is not a change"
         );
 
-        let zooms = state.sheet_zooms.lock().unwrap();
+        let zooms = state.sheet_zooms.read().unwrap();
         assert_eq!(zooms[0], 100.0, "only the ACTIVE sheet may be written");
         assert_eq!(zooms[1], 60.0);
     }
@@ -2139,19 +2190,20 @@ mod sheet_zoom_tests {
     #[test]
     fn an_illegal_zoom_is_refused_and_leaves_the_stored_value_alone() {
         let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
         for bad in [0.0, 9.9, 400.1, 5000.0, f64::NAN, f64::INFINITY] {
             assert!(
-                super::set_sheet_zoom_inner(&state, bad).is_err(),
+                super::set_sheet_zoom_inner(&state, &fs, bad).is_err(),
                 "{bad} must be refused"
             );
         }
         assert_eq!(
-            *state.sheet_zooms.lock().unwrap(),
+            *state.sheet_zooms.read().unwrap(),
             vec![persistence::DEFAULT_SHEET_ZOOM_PERCENT]
         );
 
         // The edges themselves are legal.
-        assert!(super::set_sheet_zoom_inner(&state, 10.0).is_ok());
-        assert!(super::set_sheet_zoom_inner(&state, 400.0).is_ok());
+        assert!(super::set_sheet_zoom_inner(&state, &fs, 10.0).is_ok());
+        assert!(super::set_sheet_zoom_inner(&state, &fs, 400.0).is_ok());
     }
 }

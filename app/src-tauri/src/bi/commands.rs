@@ -2785,6 +2785,10 @@ pub async fn bi_insert_result(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: BiInsertRequest,
     query_result: BiQueryResult,
     query_request: BiQueryRequest,
@@ -2824,13 +2828,6 @@ pub async fn bi_insert_result(
         end_col,
     )?;
 
-    // Create bold style for headers
-    let bold_style_idx = {
-        let mut styles = state.style_registry.lock().unwrap();
-        let style = CellStyle::new().with_bold(true);
-        styles.get_or_create(style)
-    };
-
     // Write cells to grid
     {
         // Refusal-first: the destination-sheet check is the last thing that can
@@ -2841,6 +2838,16 @@ pub async fn bi_insert_result(
             return Err("Invalid sheet index".to_string());
         }
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
+        // The header style is minted AFTER the gate. It used to be created above
+        // it, which added an entry to the persisted style registry even when the
+        // sheet-index check then refused the whole insert.
+        let bold_style_idx = {
+            let mut styles = state.style_registry.write(&effect).unwrap();
+            let style = CellStyle::new().with_bold(true);
+            styles.get_or_create(style)
+        };
+
         let mut grids = grids.authorize(&effect);
         let grid = &mut grids[request.sheet_index];
 
@@ -2873,7 +2880,7 @@ pub async fn bi_insert_result(
 
     // Sync to active grid if this is the active sheet
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if request.sheet_index == active_sheet {
             let grids = state.grids.read().unwrap();
             if let Some(src_grid) = grids.get(request.sheet_index) {
@@ -2909,7 +2916,7 @@ pub async fn bi_insert_result(
 
     // Create named ranges for each result column
     {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let sheet_name = sheet_names
             .get(request.sheet_index)
             .cloned()
@@ -2972,6 +2979,38 @@ pub async fn bi_insert_result(
         region_id: format!("bi-{}", region_id),
     };
 
+    // PHASE B — dependents (§2c). Inserting a query result is a bulk range
+    // rewrite: it writes a whole block of values into the grid and used to
+    // recalculate nothing, so a formula reading the result region kept whatever
+    // it read from the PREVIOUS insert. Locks are all released by here (each
+    // block above scopes its own).
+    {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        if request.sheet_index == active_sheet {
+            let seeds: Vec<(u32, u32)> = (start_row..=end_row)
+                .flat_map(|r| (start_col..=end_col).map(move |c| (r, c)))
+                .collect();
+            let mut recalculated = Vec::new();
+            crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                &state,
+                &user_files_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &seeds,
+                &mut recalculated,
+            );
+        } else {
+            crate::commands::data::recalc_after_off_sheet_write(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &[request.sheet_index],
+            );
+        }
+    }
+
     log_info!(
         "BI",
         "Inserted BI result region bi-{}: ({},{}) to ({},{})",
@@ -2991,6 +3030,10 @@ pub async fn bi_refresh_connection(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     connection_id: ConnectionId,
     window: tauri::Window,
 ) -> Result<Vec<BiQueryResult>, String> {
@@ -3012,6 +3055,12 @@ pub async fn bi_refresh_connection(
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
     let mut any_refreshed = false;
     let mut results = Vec::new();
+    // PHASE B seeds (§2m). Each iteration below rewrites one query's whole
+    // result block; the recalculation runs ONCE after the loop, when every
+    // grid guard has been dropped. Collected as (sheet, region) rather than
+    // recalculated per query because two active queries can share a sheet and
+    // a formula may read both.
+    let mut rewritten_regions: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
 
     // Clear query cache so refreshed queries hit the database for fresh data
     {
@@ -3068,9 +3117,12 @@ pub async fn bi_refresh_connection(
             }
         }
 
-        // Create bold style for headers
+        // Create bold style for headers. The clear-region block above closed
+        // its own scope (and its effect with it), and the refusal gate is
+        // behind us, so this block mints its own.
+        let header_effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let bold_style_idx = {
-            let mut styles = state.style_registry.lock().unwrap();
+            let mut styles = state.style_registry.write(&header_effect).unwrap();
             let style = CellStyle::new().with_bold(true);
             styles.get_or_create(style)
         };
@@ -3115,7 +3167,7 @@ pub async fn bi_refresh_connection(
 
         // Sync to active grid
         {
-            let active_sheet = *state.active_sheet.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
             if active_query.sheet_index == active_sheet {
                 let grids = state.grids.read().unwrap();
                 if let Some(src_grid) = grids.get(active_query.sheet_index) {
@@ -3139,6 +3191,19 @@ pub async fn bi_refresh_connection(
             }
         }
 
+        // The region this query rewrote, for the PHASE B recalculation after
+        // the loop. It is the UNION of the old block (cleared above) and the
+        // new one: a refresh that returns FEWER rows blanks cells a formula
+        // was reading, and a `=SUM()` over the shrunken tail is exactly as
+        // stale as one over the rewritten head.
+        rewritten_regions.push((
+            active_query.sheet_index,
+            start_row,
+            start_col,
+            std::cmp::max(active_query.end_row, new_end_row),
+            std::cmp::max(active_query.end_col, new_end_col),
+        ));
+
         // Update protected region bounds
         {
             let mut regions = state.protected_regions.lock().unwrap();
@@ -3153,7 +3218,7 @@ pub async fn bi_refresh_connection(
 
         // Update named ranges
         {
-            let sheet_names = state.sheet_names.lock().unwrap();
+            let sheet_names = state.sheet_names.read().unwrap();
             let sheet_name = sheet_names
                 .get(active_query.sheet_index)
                 .cloned()
@@ -3217,6 +3282,53 @@ pub async fn bi_refresh_connection(
     // Save cache after refresh if any tables were actually refreshed
     if any_refreshed {
         save_cache_for_connection(&bi_state, connection_id).await;
+    }
+
+    // PHASE B — dependents (§2m). A refresh is a bulk range rewrite exactly as
+    // `bi_insert_result` is: it replaces a whole block of values and used to
+    // recalculate nothing, so every formula reading a refreshed region kept the
+    // PREVIOUS refresh's numbers until an unrelated later edit swept them up.
+    // The sibling `bi_insert_result` was fixed and this one was not, which is
+    // the same active-path/off-path asymmetry that hid `sort_range` and
+    // `clear_range`. Locks are all released by here — each block above scopes
+    // its own — so this runs as a second phase, and it goes through the ONE
+    // shared cascade rather than a copy of the walk.
+    if !rewritten_regions.is_empty() {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        let mut seeds: Vec<(u32, u32)> = Vec::new();
+        let mut off_sheets: Vec<usize> = Vec::new();
+        for &(sheet, start_row, start_col, end_row, end_col) in &rewritten_regions {
+            if sheet == active_sheet {
+                for r in start_row..=end_row {
+                    for c in start_col..=end_col {
+                        seeds.push((r, c));
+                    }
+                }
+            } else if !off_sheets.contains(&sheet) {
+                off_sheets.push(sheet);
+            }
+        }
+        if !seeds.is_empty() {
+            let mut recalculated = Vec::new();
+            crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                &state,
+                &user_files_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &seeds,
+                &mut recalculated,
+            );
+        }
+        if !off_sheets.is_empty() {
+            crate::commands::data::recalc_after_off_sheet_write(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &off_sheets,
+            );
+        }
     }
 
     Ok(results)
@@ -3304,7 +3416,7 @@ pub async fn bi_get_region_at_cell(
     row: u32,
     col: u32,
 ) -> Result<Option<BiRegionInfo>, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let regions = state.protected_regions.lock().unwrap();
 
     for region in regions.iter() {

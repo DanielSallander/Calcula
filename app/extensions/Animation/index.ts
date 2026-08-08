@@ -89,6 +89,28 @@ function activate(context: ExtensionContext): void {
   // On-canvas play control (floating pill; appears while a driver is loaded).
   cleanupFns.push(installPlayOverlay());
 
+  // E2E handle on the LIVE engine (mirrors __CALCULA_PANEL_REGISTRY__ in
+  // shell/bootstrap.ts). Two facts make this necessary rather than convenient:
+  //
+  //   1. There is NO WAY IN THE PRODUCT to unload a driver. Every lifecycle
+  //      event above calls `stopAndRestore`, which restores the model and leaves
+  //      the driver loaded; the panel's button is labelled "Stop" and does the
+  //      same; closing the panel does nothing. Only `clearDriver` unloads, and
+  //      nothing calls it. So the play pill, once shown, stays on A1:C2 until
+  //      the page reloads — see open-decisions-2026-08.md §2q, which is about
+  //      the product, not the tests.
+  //   2. A test cannot reach the engine any other way. The dev `__calcImport`
+  //      bridge performs a real dynamic import, which for a STATEFUL module
+  //      yields a second instance with its own clock — measured: it reported
+  //      `frameCount: 0` while the pill on screen read "11/11". A cleanup built
+  //      on that silently does nothing.
+  //
+  // When (1) is fixed this handle should go with it.
+  (window as unknown as Record<string, unknown>).__CALCULA_ANIMATION__ = { playbackEngine };
+  cleanupFns.push(() => {
+    delete (window as unknown as Record<string, unknown>).__CALCULA_ANIMATION__;
+  });
+
   // Load saved animations for the already-open workbook, and on file open/new.
   void loadAnimations();
   cleanupFns.push(onAppEvent(AppEvents.AFTER_OPEN, () => void loadAnimations()));

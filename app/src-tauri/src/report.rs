@@ -108,17 +108,45 @@ pub struct ReportUndoSnapshot {
 /// sheet is active, else its slot in the per-sheet store. Report writes must go
 /// through this — mutating `merged_regions` for a background sheet would corrupt
 /// the VISIBLE sheet's merges (and lose the background sheet's own).
+///
+/// READ-ONLY. The mutating half is [`with_sheet_merges_mut`], which demands a
+/// `DocumentEffect`. Splitting them was forced by onboarding `merged_regions`
+/// to `Persisted<T>` and is worth keeping: this function used to hand every
+/// caller a `&mut` whether it wanted one or not, so "which of the 17 call sites
+/// actually change the document?" could only be answered by reading all 17.
 pub fn with_sheet_merges<R>(
     state: &AppState,
     sheet_idx: usize,
+    f: impl FnOnce(&HashSet<MergedRegion>) -> R,
+) -> R {
+    let active = *state.active_sheet.read().unwrap();
+    if sheet_idx == active {
+        let merged = state.merged_regions.read().unwrap();
+        f(&merged)
+    } else {
+        let all = state.all_merged_regions.read().unwrap();
+        match all.get(sheet_idx) {
+            Some(set) => f(set),
+            // A sheet with no slot yet has no merges; growing the vector is a
+            // write, and a READ must not perform one.
+            None => f(&HashSet::new()),
+        }
+    }
+}
+
+/// The mutating half of [`with_sheet_merges`].
+pub fn with_sheet_merges_mut<R>(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    sheet_idx: usize,
     f: impl FnOnce(&mut HashSet<MergedRegion>) -> R,
 ) -> R {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     if sheet_idx == active {
-        let mut merged = state.merged_regions.lock().unwrap();
+        let mut merged = state.merged_regions.write(effect).unwrap();
         f(&mut merged)
     } else {
-        let mut all = state.all_merged_regions.lock().unwrap();
+        let mut all = state.all_merged_regions.write(effect).unwrap();
         while all.len() <= sheet_idx {
             all.push(HashSet::new());
         }
@@ -355,7 +383,7 @@ fn write_report_to_grid(
     let old = get_report_region(state, report_id);
 
     {
-        let mut styles = state.style_registry.lock().unwrap();
+        let mut styles = state.style_registry.write(effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(sheet_idx) {
             if let Some(ref r) = old {
@@ -364,7 +392,7 @@ fn write_report_to_grid(
                 }
             }
 
-            let active_sheet = *state.active_sheet.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
             let merges = if sheet_idx == active_sheet {
                 let mut active_grid = state.grid.write(&effect).unwrap();
                 if let Some(ref r) = old {
@@ -386,7 +414,7 @@ fn write_report_to_grid(
 
             // Merge bookkeeping targets THIS report's sheet (per-sheet store when
             // it isn't the active one — never the visible sheet's set).
-            with_sheet_merges(state, sheet_idx, |merged| {
+            with_sheet_merges_mut(state, effect, sheet_idx, |merged| {
                 if let Some(ref r) = old {
                     if r.sheet_index == sheet_idx {
                         merged.retain(|m| {
@@ -434,14 +462,14 @@ fn clear_report_region(state: &AppState, effect: &crate::document_effect::Docume
                 clear_pivot_region_from_grid(dest_grid, r.start_row, r.start_col, r.end_row, r.end_col);
             }
         }
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if r.sheet_index == active_sheet {
             let mut active_grid = state.grid.write(&effect).unwrap();
             active_grid.clear_region(r.start_row, r.start_col, r.end_row, r.end_col);
             active_grid.recalculate_bounds();
         }
         // Merge bookkeeping on the report's own sheet (not the visible one).
-        with_sheet_merges(state, r.sheet_index, |merged| {
+        with_sheet_merges_mut(state, effect, r.sheet_index, |merged| {
             merged.retain(|m| {
                 !(m.start_row >= r.start_row && m.end_row <= r.end_row
                     && m.start_col >= r.start_col && m.end_col <= r.end_col)

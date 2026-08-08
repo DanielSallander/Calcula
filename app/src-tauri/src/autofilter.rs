@@ -1003,7 +1003,7 @@ pub(crate) fn apply_auto_filter_inner(
     file_state: &FileState,
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1012,9 +1012,9 @@ pub(crate) fn apply_auto_filter_inner(
     }
     // Gate passed, so this call will commit an AutoFilter.
     let effect = DocumentEffect::mutates(file_state);
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    let mut auto_filters = state.auto_filters.write(&effect).unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
@@ -1107,24 +1107,31 @@ fn clear_column_criteria_inner(
     file_state: &FileState,
     column_index: u32,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // Inside the mutating branch only: the `else` below is a refusal
         // ("No AutoFilter exists for this sheet") and must leave the document clean.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         auto_filter.column_filters.remove(&column_index);
 
         // Recompute hidden rows
@@ -1174,13 +1181,20 @@ fn clear_auto_filter_criteria_inner(
     state: &AppState,
     file_state: &FileState,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
 
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // Mutating branch only; the `else` is a refusal.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         auto_filter.column_filters.clear();
         auto_filter.hidden_rows.clear();
 
@@ -1223,25 +1237,32 @@ pub(crate) fn reapply_auto_filter_inner(
     state: &AppState,
     file_state: &FileState,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // Mutating branch only; the `else` is a refusal. Re-applying recomputes
         // `hidden_rows`, which is folded into the persisted `Sheet::hidden_rows`.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         // Recompute hidden rows
         if active_sheet < grids.len() {
             recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
@@ -1289,13 +1310,17 @@ fn remove_auto_filter_inner(
     state: &AppState,
     file_state: &FileState,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // `lock_pending`: "there was no filter to remove" is reported as SUCCESS and
+    // changes nothing, so it must leave the document clean.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
 
-    if let Some(auto_filter) = auto_filters.remove(&active_sheet) {
-        // Conditional mutation: the `else` arm reports success for "there was no
-        // filter to remove", which changes nothing and must not dirty.
+    if auto_filters.contains_key(&active_sheet) {
         let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .remove(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
 
         drop(auto_filters);
@@ -1341,8 +1366,8 @@ fn remove_auto_filter_inner(
 pub fn get_auto_filter(
     state: State<AppState>,
 ) -> Option<AutoFilterInfo> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let auto_filters = state.auto_filters.read().unwrap();
 
     auto_filters.get(&active_sheet).map(|af| af.into())
 }
@@ -1352,8 +1377,8 @@ pub fn get_auto_filter(
 pub fn get_auto_filter_range(
     state: State<AppState>,
 ) -> Option<(u32, u32, u32, u32)> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let auto_filters = state.auto_filters.read().unwrap();
 
     auto_filters.get(&active_sheet).map(|af| (af.start_row, af.start_col, af.end_row, af.end_col))
 }
@@ -1364,8 +1389,8 @@ pub fn get_auto_filter_range(
 pub fn get_hidden_rows(
     state: State<AppState>,
 ) -> Vec<u32> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let auto_filters = state.auto_filters.read().unwrap();
     let adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
 
     let mut result: HashSet<u32> = HashSet::new();
@@ -1397,7 +1422,7 @@ pub(crate) fn set_advanced_filter_hidden_rows_inner(
     file_state: &FileState,
     rows: Vec<u32>,
 ) {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
     // These rows are unioned into the persisted `Sheet::hidden_rows` at save time,
     // so both arms change what a save writes -- unless the "clear" arm finds nothing
@@ -1427,7 +1452,7 @@ pub(crate) fn clear_advanced_filter_hidden_rows_inner(
     state: &AppState,
     file_state: &FileState,
 ) {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
     // Only dirty if there was something to clear: this runs on every advanced-filter
     // teardown, including ones where no rows were ever hidden.
@@ -1442,8 +1467,8 @@ pub fn is_row_filtered(
     state: State<AppState>,
     row: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let auto_filters = state.auto_filters.read().unwrap();
 
     auto_filters.get(&active_sheet)
         .map(|af| af.hidden_rows.contains(&row))
@@ -1456,10 +1481,10 @@ pub fn get_filter_unique_values(
     state: State<AppState>,
     column_index: u32,
 ) -> UniqueValuesResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let auto_filters = state.auto_filters.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let auto_filters = state.auto_filters.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let _theme = state.theme.read().unwrap();
 
@@ -1547,24 +1572,31 @@ fn set_column_filter_values_inner(
     values: Vec<String>,
     include_blanks: bool,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // Mutating branch only; the `else` is a refusal.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         let mut filter_values = values;
         if include_blanks {
             filter_values.push("(Blanks)".to_string());
@@ -1639,24 +1671,31 @@ fn set_column_custom_filter_inner(
     criterion2: Option<String>,
     operator: Option<FilterOperator>,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // Mutating branch only; the `else` is a refusal.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         let criteria = FilterCriteria {
             filter_on: FilterOn::Custom,
             criterion1: Some(criterion1),
@@ -1724,16 +1763,19 @@ fn set_column_top_bottom_filter_inner(
     filter_on: FilterOn,
     value: u32,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
@@ -1754,10 +1796,14 @@ fn set_column_top_bottom_filter_inner(
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // After BOTH the protection gate and the filter_on validation, and inside the
         // mutating branch only.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         let criteria = FilterCriteria {
             filter_on,
             criterion1: Some(value.to_string()),
@@ -2014,7 +2060,7 @@ fn run_advanced_filter_inner(
     file_state: &FileState,
     params: AdvancedFilterParams,
 ) -> AdvancedFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let (l_start_row, l_start_col, l_end_row, l_end_col) = params.list_range;
     let (cr_start_row, cr_start_col, cr_end_row, cr_end_col) = params.criteria_range;
 
@@ -2031,7 +2077,7 @@ fn run_advanced_filter_inner(
     // then drop them before touching advanced_filter_hidden_rows.
     let (data_rows, criteria_rows): (Vec<(u32, Vec<String>)>, Vec<HashMap<u32, AdvParsedCriterion>>) = {
         let grids = state.grids.read().unwrap();
-        let style_registry = state.style_registry.lock().unwrap();
+        let style_registry = state.style_registry.read().unwrap();
         let locale = state.locale.lock().unwrap();
         if active_sheet >= grids.len() {
             return err("Invalid sheet index");
@@ -2391,24 +2437,31 @@ fn set_column_dynamic_filter_inner(
     column_index: u32,
     dynamic_criteria: DynamicFilterCriteria,
 ) -> AutoFilterResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
     ) {
         return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
     }
-    let mut auto_filters = state.auto_filters.lock().unwrap();
+    // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
+    // this sheet") and must leave the document clean, so the dirty decision
+    // belongs INSIDE the branch -- which is exactly what this guard postpones.
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
 
     // Pre-mutation snapshot for undo (BUG-0003).
     let undo_previous = auto_filters.get(&active_sheet).cloned();
-    if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
+    if undo_previous.is_some() {
         // Mutating branch only; the `else` is a refusal.
-        let _effect = DocumentEffect::mutates(file_state);
+        let effect = DocumentEffect::mutates(file_state);
+        let mut auto_filters = auto_filters.authorize(&effect);
+        let auto_filter = auto_filters
+            .get_mut(&active_sheet)
+            .expect("presence checked immediately above, under the same lock");
         let criteria = FilterCriteria {
             filter_on: FilterOn::Dynamic,
             dynamic_criteria: Some(dynamic_criteria),

@@ -27,6 +27,30 @@ test.describe("Column Width & Row Height", () => {
   // (persistence::DEFAULT_ROW_HEIGHT_PX / DEFAULT_COLUMN_WIDTH_PX). That stale
   // pair wrote a real override on top of a clean grid, so goldens recorded after
   // this spec encoded 100px columns the app never actually defaults to.
+  // CONTENT is cleared once, at the END of the file, not per test.
+  //
+  // Per test would be wrong twice over. The screenshots inside this describe are
+  // taken BEFORE the hook runs, so an afterEach cannot help them; and two of these
+  // tests legitimately read the grid the previous one left (row-height reuses A1),
+  // so clearing between them would rewrite goldens that are not the problem.
+  //
+  // The problem is what escapes the FILE. `resetGrid` clears the used range but
+  // specs downstream do not all call it, and this file left "This column should
+  // be wider" in B1 for the rest of the run -- which is the string editing.spec.ts
+  // read where it expected "EditMe" (open-decisions-2026-08.md sec 3a). The
+  // widths were already restored per test; the text was not restored at all.
+  test.afterAll(async ({ sharedPage }) => {
+    await sharedPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      if (!tauri?.core?.invoke) return;
+      await tauri.core
+        .invoke("clear_range_with_options", {
+          params: { startRow: 0, startCol: 0, endRow: 1, endCol: 2, applyTo: "All" },
+        })
+        .catch(() => {});
+      window.dispatchEvent(new Event("grid:refresh"));
+    });
+  });
   test.afterEach(async ({ sharedPage }) => {
     await sharedPage.evaluate(async () => {
       const tauri = (window as any).__TAURI__;

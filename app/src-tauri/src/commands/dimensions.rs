@@ -2,6 +2,7 @@
 // PURPOSE: Managing row heights and column widths.
 
 use crate::api_types::{DefaultDimensions, DimensionData};
+use crate::document_effect::{CleanReason, DocumentEffect, Persisted};
 use crate::persistence::FileState;
 use crate::AppState;
 use tauri::State;
@@ -12,10 +13,13 @@ pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, co
     // allowFormatColumns option gate. Returns Result (it used to return unit) so
     // a refusal can reach the user instead of the resize silently not happening.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_action(&state, active_sheet, "formatColumns", "resize columns")?;
     }
-    let mut widths = state.column_widths.lock().unwrap();
+    // The protection gate above is the only thing that can still refuse, so the
+    // effect is minted here: constructing it dirties the workbook immediately.
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut widths = state.column_widths.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
     // Record previous state for undo
@@ -30,22 +34,20 @@ pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, co
     // Record undo
     undo_stack.record_column_width_change(col, previous_width);
 
-    // Mark workbook as dirty
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
 /// Get a column width.
 #[tauri::command]
 pub fn get_column_width(state: State<AppState>, col: u32) -> Option<f64> {
-    let widths = state.column_widths.lock().unwrap();
+    let widths = state.column_widths.read().unwrap();
     widths.get(&col).copied()
 }
 
 /// Get all column widths.
 #[tauri::command]
 pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
-    let widths = state.column_widths.lock().unwrap();
+    let widths = state.column_widths.read().unwrap();
     widths
         .iter()
         .map(|(&index, &size)| DimensionData { index, size, dimension_type: "column".to_string() })
@@ -57,10 +59,11 @@ pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
 pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row: u32, height: f64) -> Result<(), String> {
     // allowFormatRows option gate; see set_column_width for the Result change.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_action(&state, active_sheet, "formatRows", "resize rows")?;
     }
-    let mut heights = state.row_heights.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut heights = state.row_heights.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
     // Record previous state for undo
@@ -75,22 +78,20 @@ pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row:
     // Record undo
     undo_stack.record_row_height_change(row, previous_height);
 
-    // Mark workbook as dirty
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(())
 }
 
 /// Get a row height.
 #[tauri::command]
 pub fn get_row_height(state: State<AppState>, row: u32) -> Option<f64> {
-    let heights = state.row_heights.lock().unwrap();
+    let heights = state.row_heights.read().unwrap();
     heights.get(&row).copied()
 }
 
 /// Get all row heights.
 #[tauri::command]
 pub fn get_all_row_heights(state: State<AppState>) -> Vec<DimensionData> {
-    let heights = state.row_heights.lock().unwrap();
+    let heights = state.row_heights.read().unwrap();
     heights
         .iter()
         .map(|(&index, &size)| DimensionData { index, size, dimension_type: "row".to_string() })
@@ -100,8 +101,8 @@ pub fn get_all_row_heights(state: State<AppState>) -> Vec<DimensionData> {
 /// Get the default row height and column width.
 #[tauri::command]
 pub fn get_default_dimensions(state: State<AppState>) -> DefaultDimensions {
-    let row_h = *state.default_row_height.lock().unwrap();
-    let col_w = *state.default_column_width.lock().unwrap();
+    let row_h = *state.default_row_height.read().unwrap();
+    let col_w = *state.default_column_width.read().unwrap();
     DefaultDimensions {
         default_row_height: row_h,
         default_column_width: col_w,
@@ -112,7 +113,8 @@ pub fn get_default_dimensions(state: State<AppState>) -> DefaultDimensions {
 #[tauri::command]
 pub fn set_default_row_height(state: State<AppState>, file_state: State<FileState>, height: f64) -> DefaultDimensions {
     let clamped = if height < 1.0 { 1.0 } else { height };
-    let mut h = state.default_row_height.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut h = state.default_row_height.write(&effect).unwrap();
     let previous = *h;
     *h = clamped;
     drop(h);
@@ -123,8 +125,7 @@ pub fn set_default_row_height(state: State<AppState>, file_state: State<FileStat
     undo_stack.record_custom_restore("default_row_height".to_string(), data, "Change default row height");
     drop(undo_stack);
 
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let col_w = *state.default_column_width.lock().unwrap();
+    let col_w = *state.default_column_width.read().unwrap();
     DefaultDimensions {
         default_row_height: clamped,
         default_column_width: col_w,
@@ -135,7 +136,8 @@ pub fn set_default_row_height(state: State<AppState>, file_state: State<FileStat
 #[tauri::command]
 pub fn set_default_column_width(state: State<AppState>, file_state: State<FileState>, width: f64) -> DefaultDimensions {
     let clamped = if width < 1.0 { 1.0 } else { width };
-    let mut w = state.default_column_width.lock().unwrap();
+    let effect = DocumentEffect::mutates(&file_state);
+    let mut w = state.default_column_width.write(&effect).unwrap();
     let previous = *w;
     *w = clamped;
     drop(w);
@@ -146,8 +148,7 @@ pub fn set_default_column_width(state: State<AppState>, file_state: State<FileSt
     undo_stack.record_custom_restore("default_column_width".to_string(), data, "Change default column width");
     drop(undo_stack);
 
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let row_h = *state.default_row_height.lock().unwrap();
+    let row_h = *state.default_row_height.read().unwrap();
     DefaultDimensions {
         default_row_height: row_h,
         default_column_width: clamped,
@@ -181,13 +182,18 @@ use std::collections::HashSet;
 /// Rather than mirror this into all the sites that push a sheet, the accessors
 /// below grow on demand -- a missed site then yields an EMPTY set (nothing
 /// hidden) instead of a panic or a set read off the wrong sheet.
-pub(crate) fn ensure_user_hidden_len(state: &AppState, len: usize) {
-    if let Ok(mut rows) = state.all_user_hidden_rows.lock() {
+///
+/// Takes the caller's `DocumentEffect` rather than minting one: growing the
+/// vector is bookkeeping that rides whatever operation needed the slot, and a
+/// helper that minted its own `deliberately_clean` here would be an opt-out
+/// nobody had to argue for.
+pub(crate) fn ensure_user_hidden_len(state: &AppState, effect: &DocumentEffect, len: usize) {
+    if let Ok(mut rows) = state.all_user_hidden_rows.write(effect) {
         while rows.len() < len {
             rows.push(HashSet::new());
         }
     }
-    if let Ok(mut cols) = state.all_user_hidden_cols.lock() {
+    if let Ok(mut cols) = state.all_user_hidden_cols.write(effect) {
         while cols.len() < len {
             cols.push(HashSet::new());
         }
@@ -196,55 +202,77 @@ pub(crate) fn ensure_user_hidden_len(state: &AppState, len: usize) {
 
 /// Move the ACTIVE sheet's user-hidden sets into per-sheet slot `index`
 /// (leaving the active mirror empty). Call before switching away from `index`.
+///
+/// NAVIGATION, not a document change: this moves a value between the active
+/// mirror and its per-sheet slot, and `build_workbook_for_save` reads whichever
+/// of the two is authoritative for the sheet it is writing. The bytes a save
+/// produces are identical before and after, so the effect is minted here rather
+/// than demanded from the caller — a sheet switch must not raise the asterisk.
 pub(crate) fn stash_active_user_hidden(state: &AppState, index: usize) {
-    ensure_user_hidden_len(state, index + 1);
-    if let (Ok(mut all), Ok(mut active)) =
-        (state.all_user_hidden_rows.lock(), state.user_hidden_rows.lock())
-    {
+    let effect = DocumentEffect::deliberately_clean(CleanReason::Navigation);
+    ensure_user_hidden_len(state, &effect, index + 1);
+    if let (Ok(mut all), Ok(mut active)) = (
+        state.all_user_hidden_rows.write(&effect),
+        state.user_hidden_rows.write(&effect),
+    ) {
         all[index] = std::mem::take(&mut *active);
     }
-    if let (Ok(mut all), Ok(mut active)) =
-        (state.all_user_hidden_cols.lock(), state.user_hidden_cols.lock())
-    {
+    if let (Ok(mut all), Ok(mut active)) = (
+        state.all_user_hidden_cols.write(&effect),
+        state.user_hidden_cols.write(&effect),
+    ) {
         all[index] = std::mem::take(&mut *active);
     }
 }
 
 /// Move per-sheet slot `index` into the ACTIVE mirror. Call after switching to
-/// `index`.
+/// `index`. Navigation, for the reason `stash_active_user_hidden` gives.
 pub(crate) fn load_active_user_hidden(state: &AppState, index: usize) {
-    ensure_user_hidden_len(state, index + 1);
-    if let (Ok(mut all), Ok(mut active)) =
-        (state.all_user_hidden_rows.lock(), state.user_hidden_rows.lock())
-    {
+    let effect = DocumentEffect::deliberately_clean(CleanReason::Navigation);
+    ensure_user_hidden_len(state, &effect, index + 1);
+    if let (Ok(mut all), Ok(mut active)) = (
+        state.all_user_hidden_rows.write(&effect),
+        state.user_hidden_rows.write(&effect),
+    ) {
         *active = std::mem::take(&mut all[index]);
     }
-    if let (Ok(mut all), Ok(mut active)) =
-        (state.all_user_hidden_cols.lock(), state.user_hidden_cols.lock())
-    {
+    if let (Ok(mut all), Ok(mut active)) = (
+        state.all_user_hidden_cols.write(&effect),
+        state.user_hidden_cols.write(&effect),
+    ) {
         *active = std::mem::take(&mut all[index]);
     }
 }
 
 /// Append an empty per-sheet slot (a brand-new sheet hides nothing).
-pub(crate) fn push_user_hidden_sheet(state: &AppState) {
-    if let Ok(mut rows) = state.all_user_hidden_rows.lock() {
+///
+/// The four structural helpers below take the caller's effect: adding,
+/// deleting, duplicating and reordering a sheet all change what a save writes,
+/// but WHICH of `mutates` / `LoadingFromDisk` applies is the calling command's
+/// decision (a load rebuilds the whole vector and must stay clean).
+pub(crate) fn push_user_hidden_sheet(state: &AppState, effect: &DocumentEffect) {
+    if let Ok(mut rows) = state.all_user_hidden_rows.write(effect) {
         rows.push(HashSet::new());
     }
-    if let Ok(mut cols) = state.all_user_hidden_cols.lock() {
+    if let Ok(mut cols) = state.all_user_hidden_cols.write(effect) {
         cols.push(HashSet::new());
     }
 }
 
 /// Insert a per-sheet slot at `at`, cloned from `source` (sheet duplicate).
-pub(crate) fn duplicate_user_hidden_sheet(state: &AppState, source: usize, at: usize) {
-    ensure_user_hidden_len(state, source.max(at) + 1);
-    if let Ok(mut rows) = state.all_user_hidden_rows.lock() {
+pub(crate) fn duplicate_user_hidden_sheet(
+    state: &AppState,
+    effect: &DocumentEffect,
+    source: usize,
+    at: usize,
+) {
+    ensure_user_hidden_len(state, effect, source.max(at) + 1);
+    if let Ok(mut rows) = state.all_user_hidden_rows.write(effect) {
         let cloned = rows[source].clone();
         let at = at.min(rows.len());
         rows.insert(at, cloned);
     }
-    if let Ok(mut cols) = state.all_user_hidden_cols.lock() {
+    if let Ok(mut cols) = state.all_user_hidden_cols.write(effect) {
         let cloned = cols[source].clone();
         let at = at.min(cols.len());
         cols.insert(at, cloned);
@@ -252,13 +280,13 @@ pub(crate) fn duplicate_user_hidden_sheet(state: &AppState, source: usize, at: u
 }
 
 /// Drop the per-sheet slot for a deleted sheet.
-pub(crate) fn remove_user_hidden_sheet(state: &AppState, index: usize) {
-    if let Ok(mut rows) = state.all_user_hidden_rows.lock() {
+pub(crate) fn remove_user_hidden_sheet(state: &AppState, effect: &DocumentEffect, index: usize) {
+    if let Ok(mut rows) = state.all_user_hidden_rows.write(effect) {
         if index < rows.len() {
             rows.remove(index);
         }
     }
-    if let Ok(mut cols) = state.all_user_hidden_cols.lock() {
+    if let Ok(mut cols) = state.all_user_hidden_cols.write(effect) {
         if index < cols.len() {
             cols.remove(index);
         }
@@ -277,12 +305,18 @@ fn rotate_slot<T>(v: &mut Vec<T>, from: usize, to: usize) {
 }
 
 /// Rotate a per-sheet slot from `from` to `to` (sheet reorder).
-pub(crate) fn rotate_user_hidden_sheet(state: &AppState, from: usize, to: usize, count: usize) {
-    ensure_user_hidden_len(state, count);
-    if let Ok(mut rows) = state.all_user_hidden_rows.lock() {
+pub(crate) fn rotate_user_hidden_sheet(
+    state: &AppState,
+    effect: &DocumentEffect,
+    from: usize,
+    to: usize,
+    count: usize,
+) {
+    ensure_user_hidden_len(state, effect, count);
+    if let Ok(mut rows) = state.all_user_hidden_rows.write(effect) {
         rotate_slot(&mut rows, from, to);
     }
-    if let Ok(mut cols) = state.all_user_hidden_cols.lock() {
+    if let Ok(mut cols) = state.all_user_hidden_cols.write(effect) {
         rotate_slot(&mut cols, from, to);
     }
 }
@@ -290,13 +324,13 @@ pub(crate) fn rotate_user_hidden_sheet(state: &AppState, from: usize, to: usize,
 /// The user-hidden rows for ANY sheet, active or not. The active sheet's set
 /// lives in the mirror; every other sheet's in the per-sheet vector.
 pub(crate) fn user_hidden_rows_for_sheet(state: &AppState, sheet_index: usize) -> HashSet<u32> {
-    let active = state.active_sheet.lock().map(|a| *a).unwrap_or(0);
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(0);
     if sheet_index == active {
-        state.user_hidden_rows.lock().map(|s| s.clone()).unwrap_or_default()
+        state.user_hidden_rows.read().map(|s| s.clone()).unwrap_or_default()
     } else {
         state
             .all_user_hidden_rows
-            .lock()
+            .read()
             .ok()
             .and_then(|v| v.get(sheet_index).cloned())
             .unwrap_or_default()
@@ -305,13 +339,13 @@ pub(crate) fn user_hidden_rows_for_sheet(state: &AppState, sheet_index: usize) -
 
 /// The user-hidden columns for ANY sheet (see `user_hidden_rows_for_sheet`).
 pub(crate) fn user_hidden_cols_for_sheet(state: &AppState, sheet_index: usize) -> HashSet<u32> {
-    let active = state.active_sheet.lock().map(|a| *a).unwrap_or(0);
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(0);
     if sheet_index == active {
-        state.user_hidden_cols.lock().map(|s| s.clone()).unwrap_or_default()
+        state.user_hidden_cols.read().map(|s| s.clone()).unwrap_or_default()
     } else {
         state
             .all_user_hidden_cols
-            .lock()
+            .read()
             .ok()
             .and_then(|v| v.get(sheet_index).cloned())
             .unwrap_or_default()
@@ -321,23 +355,24 @@ pub(crate) fn user_hidden_cols_for_sheet(state: &AppState, sheet_index: usize) -
 /// Replace the user-hidden sets for ANY sheet, active or not (load paths).
 pub(crate) fn set_user_hidden_for_sheet(
     state: &AppState,
+    effect: &DocumentEffect,
     sheet_index: usize,
     rows: HashSet<u32>,
     cols: HashSet<u32>,
 ) {
-    ensure_user_hidden_len(state, sheet_index + 1);
-    let active = state.active_sheet.lock().map(|a| *a).unwrap_or(0);
-    if let Ok(mut all) = state.all_user_hidden_rows.lock() {
+    ensure_user_hidden_len(state, effect, sheet_index + 1);
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(0);
+    if let Ok(mut all) = state.all_user_hidden_rows.write(effect) {
         all[sheet_index] = rows.clone();
     }
-    if let Ok(mut all) = state.all_user_hidden_cols.lock() {
+    if let Ok(mut all) = state.all_user_hidden_cols.write(effect) {
         all[sheet_index] = cols.clone();
     }
     if sheet_index == active {
-        if let Ok(mut mirror) = state.user_hidden_rows.lock() {
+        if let Ok(mut mirror) = state.user_hidden_rows.write(effect) {
             *mirror = rows;
         }
-        if let Ok(mut mirror) = state.user_hidden_cols.lock() {
+        if let Ok(mut mirror) = state.user_hidden_cols.write(effect) {
             *mirror = cols;
         }
     }
@@ -426,7 +461,7 @@ pub(crate) fn set_rows_hidden_inner(
 ) -> Result<Vec<u32>, String> {
     // Hiding a row IS a row format in Excel, and it is gated by the same
     // protection option as resizing one.
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     crate::protection::check_sheet_action(
         state,
         active_sheet,
@@ -434,8 +469,11 @@ pub(crate) fn set_rows_hidden_inner(
         if hidden { "hide rows" } else { "unhide rows" },
     )?;
 
+    // After the protection gate, before the mutation (see `set_column_width`).
+    let effect = DocumentEffect::mutates(file_state);
+
     let previous: Vec<u32> = {
-        let mut set = state.user_hidden_rows.lock().unwrap();
+        let mut set = state.user_hidden_rows.write(&effect).unwrap();
         let mut prev: Vec<u32> = set.iter().copied().collect();
         prev.sort_unstable();
         for r in rows {
@@ -457,7 +495,6 @@ pub(crate) fn set_rows_hidden_inner(
         );
     }
 
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(sorted_set(&state.user_hidden_rows))
 }
 
@@ -479,7 +516,7 @@ pub(crate) fn set_cols_hidden_inner(
     cols: &[u32],
     hidden: bool,
 ) -> Result<Vec<u32>, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     crate::protection::check_sheet_action(
         state,
         active_sheet,
@@ -487,8 +524,10 @@ pub(crate) fn set_cols_hidden_inner(
         if hidden { "hide columns" } else { "unhide columns" },
     )?;
 
+    let effect = DocumentEffect::mutates(file_state);
+
     let previous: Vec<u32> = {
-        let mut set = state.user_hidden_cols.lock().unwrap();
+        let mut set = state.user_hidden_cols.write(&effect).unwrap();
         let mut prev: Vec<u32> = set.iter().copied().collect();
         prev.sort_unstable();
         for c in cols {
@@ -510,12 +549,11 @@ pub(crate) fn set_cols_hidden_inner(
         );
     }
 
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(sorted_set(&state.user_hidden_cols))
 }
 
-fn sorted_set(m: &std::sync::Mutex<HashSet<u32>>) -> Vec<u32> {
-    let set = m.lock().unwrap();
+fn sorted_set(m: &Persisted<HashSet<u32>>) -> Vec<u32> {
+    let set = m.read().unwrap();
     let mut v: Vec<u32> = set.iter().copied().collect();
     v.sort_unstable();
     v
@@ -548,9 +586,9 @@ pub(crate) fn resolve_sheet(
     sheet_index: Option<usize>,
     method: &str,
 ) -> Result<usize, String> {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     let target = sheet_index.unwrap_or(active);
-    let count = state.sheet_names.lock().map(|n| n.len()).unwrap_or(0);
+    let count = state.sheet_names.read().map(|n| n.len()).unwrap_or(0);
     if target >= count {
         return Err(format!(
             "{}: no sheet with index {} (the workbook has {} sheet(s))",

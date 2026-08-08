@@ -155,8 +155,8 @@ pub fn evaluate_expressions(
     log_enter!("CMD", "evaluate_expressions", "count={}", expressions.len());
 
     let grids = state.grids.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let user_files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 
     if active_sheet >= grids.len() || active_sheet >= sheet_names.len() {
@@ -329,9 +329,9 @@ pub fn evaluate_formula_typed(
     log_enter!("CMD", "evaluate_formula_typed", "count={}", expressions.len());
 
     let grids = state.grids.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
     let user_files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 

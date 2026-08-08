@@ -298,13 +298,13 @@ pub fn anim_apply_frame(
     // Lock order matches scenario_show to avoid cross-path deadlocks.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     if sheet_idx >= grids.len() {
@@ -391,13 +391,13 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
 
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     if sheet_idx >= grids.len() {

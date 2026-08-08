@@ -340,13 +340,14 @@ pub(crate) fn apply_user_hidden_to_sheet(
 /// the same split the dimension maps use.
 pub(crate) fn restore_user_hidden_from_workbook(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     workbook: &Workbook,
     active_idx: usize,
 ) -> Result<(), String> {
-    let mut all_uhr = state.all_user_hidden_rows.lock().map_err(|e| e.to_string())?;
-    let mut all_uhc = state.all_user_hidden_cols.lock().map_err(|e| e.to_string())?;
-    let mut active_uhr = state.user_hidden_rows.lock().map_err(|e| e.to_string())?;
-    let mut active_uhc = state.user_hidden_cols.lock().map_err(|e| e.to_string())?;
+    let mut all_uhr = state.all_user_hidden_rows.write(effect).map_err(|e| e.to_string())?;
+    let mut all_uhc = state.all_user_hidden_cols.write(effect).map_err(|e| e.to_string())?;
+    let mut active_uhr = state.user_hidden_rows.write(effect).map_err(|e| e.to_string())?;
+    let mut active_uhc = state.user_hidden_cols.write(effect).map_err(|e| e.to_string())?;
     all_uhr.clear();
     all_uhc.clear();
     active_uhr.clear();
@@ -373,13 +374,13 @@ pub(crate) fn apply_sheet_view_to_sheet(
     sheet: &mut persistence::Sheet,
     sheet_index: usize,
 ) {
-    if let Ok(split_configs) = state.split_configs.lock() {
+    if let Ok(split_configs) = state.split_configs.read() {
         if let Some(sc) = split_configs.get(sheet_index) {
             sheet.split_row = sc.split_row;
             sheet.split_col = sc.split_col;
         }
     }
-    if let Ok(zooms) = state.sheet_zooms.lock() {
+    if let Ok(zooms) = state.sheet_zooms.read() {
         if let Some(z) = zooms.get(sheet_index) {
             sheet.zoom = *z;
         }
@@ -393,10 +394,11 @@ pub(crate) fn apply_sheet_view_to_sheet(
 /// away a saved split even once the save side wrote one.
 pub(crate) fn restore_sheet_view_from_workbook(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     workbook: &Workbook,
 ) -> Result<(), String> {
-    let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
-    let mut sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+    let mut split_configs = state.split_configs.write(effect).map_err(|e| e.to_string())?;
+    let mut sheet_zooms = state.sheet_zooms.write(effect).map_err(|e| e.to_string())?;
     split_configs.clear();
     sheet_zooms.clear();
     for sheet in &workbook.sheets {
@@ -423,15 +425,15 @@ pub fn build_workbook_for_save(
 ) -> Result<Workbook, String> {
     let grids = state.grids.read().map_err(|e| e.to_string())?;
     let active_grid = state.grid.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-    let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
-    let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-    let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let col_widths = state.column_widths.read().map_err(|e| e.to_string())?;
+    let row_heights = state.row_heights.read().map_err(|e| e.to_string())?;
+    let all_cw = state.all_column_widths.read().map_err(|e| e.to_string())?;
+    let all_rh = state.all_row_heights.read().map_err(|e| e.to_string())?;
     let tables = state.tables.read().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
 
     let mut workbook = Workbook::new();
     workbook.sheets.clear();
@@ -489,8 +491,8 @@ pub fn build_workbook_for_save(
     // honest.
     workbook.media = state.media.read().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.read().unwrap().clone();
-    workbook.default_row_height = *state.default_row_height.lock().unwrap();
-    workbook.default_column_width = *state.default_column_width.lock().unwrap();
+    workbook.default_row_height = *state.default_row_height.read().unwrap();
+    workbook.default_column_width = *state.default_column_width.read().unwrap();
 
     // Include workbook properties
     {
@@ -521,7 +523,7 @@ pub fn build_workbook_for_save_with_slicers(
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
 ) -> Result<Workbook, String> {
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
-    let sheet_ids_bwfs = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_ids_bwfs = state.sheet_ids.read().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_bwfs);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
@@ -664,7 +666,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
         return;
     }
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let sheet_count = workbook.sheets.len();
 
     for i in 0..sheet_count {
@@ -678,10 +680,10 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
             end_col: r.end_col,
         };
         if i == active_sheet {
-            if let Ok(regions) = state.merged_regions.lock() {
+            if let Ok(regions) = state.merged_regions.read() {
                 workbook.sheets[i].merged_regions = regions.iter().map(to_saved).collect();
             }
-        } else if let Ok(all_merged) = state.all_merged_regions.lock() {
+        } else if let Ok(all_merged) = state.all_merged_regions.read() {
             if let Some(regions) = all_merged.get(i) {
                 workbook.sheets[i].merged_regions = regions.iter().map(to_saved).collect();
             }
@@ -723,7 +725,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
         }
     }
     // AutoFilter hidden rows
-    if let Ok(auto_filters) = state.auto_filters.lock() {
+    if let Ok(auto_filters) = state.auto_filters.read() {
         if let Some(af) = auto_filters.get(&i) {
             for row in &af.hidden_rows {
                 workbook.sheets[i].hidden_rows.insert(*row);
@@ -995,7 +997,7 @@ fn collect_protection_for_save(
     let mut per_sheet: BTreeMap<usize, (Option<serde_json::Value>, Option<serde_json::Value>)> =
         BTreeMap::new();
 
-    if let Ok(store) = state.sheet_protection.lock() {
+    if let Ok(store) = state.sheet_protection.read() {
         for (idx, prot) in store.iter() {
             // Persist any entry that still carries authored intent. The old
             // predicate tested only `protected`/`password_hash` despite a
@@ -1037,7 +1039,7 @@ fn collect_protection_for_save(
 
     let workbook_protection = state
         .workbook_protection
-        .lock()
+        .read()
         .ok()
         .filter(|wp| wp.protected)
         .and_then(|wp| serde_json::to_value(&*wp).ok());
@@ -1582,7 +1584,7 @@ pub(crate) fn collect_pivot_definitions(
         Ok(bm) => bm,
         Err(_) => return,
     };
-    let sheet_names = match state.sheet_names.lock() {
+    let sheet_names = match state.sheet_names.read() {
         Ok(sn) => sn,
         Err(_) => return,
     };
@@ -1721,7 +1723,7 @@ fn restore_pivot_definitions(
 
         // Register the protected region so the frontend can discover this pivot
         if let Some(ref view) = view {
-            let sheet_names = state.sheet_names.lock().unwrap();
+            let sheet_names = state.sheet_names.read().unwrap();
             let dest_sheet_name = def.destination_sheet.as_deref().unwrap_or("");
             let dest_sheet_idx = sheet_names.iter()
                 .position(|n| n == dest_sheet_name)
@@ -1802,7 +1804,7 @@ fn assemble_workbook_for_save(
     // sparklines, user files, theme and defaults, and runs the per-sheet
     // metadata enrichment.
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
-    let sheet_ids_save = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_ids_save = state.sheet_ids.read().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pane_controls = collect_pane_controls_for_save(pane_control_state);
@@ -1866,7 +1868,7 @@ fn assemble_workbook_for_save(
     // Serialize model writeback entries (writeback COLUMN history) into
     // user_files — the single source of truth the engine stores rebuild from.
     {
-        let store = state.model_writeback.lock().map_err(|e| e.to_string())?;
+        let store = state.model_writeback.read().map_err(|e| e.to_string())?;
         if !store.entries.is_empty() {
             let json = serde_json::to_vec_pretty(&*store).map_err(|e| e.to_string())?;
             workbook
@@ -1879,7 +1881,7 @@ fn assemble_workbook_for_save(
     // user_files (BUG-0013: filters and the table<->autofilter linkage were
     // lost across save/reload).
     {
-        let auto_filters = state.auto_filters.lock().map_err(|e| e.to_string())?;
+        let auto_filters = state.auto_filters.read().map_err(|e| e.to_string())?;
         if !auto_filters.is_empty() {
             let json = serde_json::to_vec_pretty(&*auto_filters).map_err(|e| e.to_string())?;
             workbook.user_files.insert("autofilters.json".to_string(), json);
@@ -2410,23 +2412,23 @@ pub fn open_file(
         }
 
         // Set sheet names
-        let mut names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let mut names = state.sheet_names.write(&load_effect).map_err(|e| e.to_string())?;
         *names = workbook.sheets.iter().map(|s| s.name.clone()).collect();
 
         // Restore sheet IDs from the workbook
-        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.write(&load_effect).map_err(|e| e.to_string())?;
         *sheet_ids = workbook.sheets.iter().map(|s| s.id).collect();
 
         // Set active sheet index
-        *state.active_sheet.lock().map_err(|e| e.to_string())? = active_idx;
+        *state.active_sheet.write(&load_effect).map_err(|e| e.to_string())? = active_idx;
 
         // Set the active grid (clone from the all_grids vec)
         let mut grid = state.grid.write(&load_effect).map_err(|e| e.to_string())?;
         *grid = all_grids[active_idx].clone();
 
         // Set active sheet dimensions
-        let mut col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-        let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+        let mut col_widths = state.column_widths.write(&load_effect).map_err(|e| e.to_string())?;
+        let mut row_heights = state.row_heights.write(&load_effect).map_err(|e| e.to_string())?;
         *col_widths = all_cw_vec[active_idx].clone();
         *row_heights = all_rh_vec[active_idx].clone();
 
@@ -2436,14 +2438,14 @@ pub fn open_file(
         let mut grids = state.grids.write(&load_effect).map_err(|e| e.to_string())?;
         *grids = all_grids;
 
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&load_effect).map_err(|e| e.to_string())?;
         *all_cw = all_cw_vec;
 
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&load_effect).map_err(|e| e.to_string())?;
         *all_rh = all_rh_vec;
 
         // Set shared style registry
-        let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        let mut styles = state.style_registry.write(&load_effect).map_err(|e| e.to_string())?;
         *styles = shared_styles;
 
         // Clear dependency maps (will be rebuilt on recalculation)
@@ -2461,8 +2463,8 @@ pub fn open_file(
         *table_names = new_table_names;
 
         // Restore default dimensions
-        *state.default_row_height.lock().unwrap() = workbook.default_row_height;
-        *state.default_column_width.lock().unwrap() = workbook.default_column_width;
+        *state.default_row_height.write(&load_effect).unwrap() = workbook.default_row_height;
+        *state.default_column_width.write(&load_effect).unwrap() = workbook.default_column_width;
 
         // ---- Freeze pane configs for all sheets ----
         let mut freeze_configs = state.freeze_configs.write(&load_effect).map_err(|e| e.to_string())?;
@@ -2477,7 +2479,7 @@ pub fn open_file(
         // ---- Split configs + zoom for all sheets ----
         // Restored from the file, not reset: this used to push a default for
         // every sheet, which is what threw away the saved split.
-        restore_sheet_view_from_workbook(state.inner(), &workbook)?;
+        restore_sheet_view_from_workbook(state.inner(), &load_effect, &workbook)?;
 
         // ---- Scroll areas (reset to None for each sheet) ----
         // Deliberately NOT persisted, and this matches Excel: `ScrollArea` is
@@ -2505,9 +2507,9 @@ pub fn open_file(
         }
 
         // ---- Merged regions for ALL sheets ----
-        let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+        let mut merged_regions = state.merged_regions.write(&load_effect).map_err(|e| e.to_string())?;
         merged_regions.clear();
-        let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
+        let mut all_merged = state.all_merged_regions.write(&load_effect).map_err(|e| e.to_string())?;
         all_merged.clear();
         for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
             let mut sheet_merges = std::collections::HashSet::new();
@@ -2526,7 +2528,7 @@ pub fn open_file(
         }
 
         // ---- User-hidden rows/cols for ALL sheets ----
-        restore_user_hidden_from_workbook(&state, &workbook, active_idx)?;
+        restore_user_hidden_from_workbook(&state, &load_effect, &workbook, active_idx)?;
 
         // ---- Per-sheet gridlines visibility ----
         let mut show_gridlines = state.show_gridlines.write(&load_effect).map_err(|e| e.to_string())?;
@@ -2778,7 +2780,7 @@ pub fn open_file(
     // stores are cleared FIRST so a file without protection never inherits the
     // previous session's locks. Like CF/DV, all of this was lost on every
     // reload before this — a protected workbook reopened fully unprotected.
-    if let Ok(mut sheet_prot) = state.sheet_protection.lock() {
+    if let Ok(mut sheet_prot) = state.sheet_protection.write(&load_effect) {
         sheet_prot.clear();
         for entry in &workbook.sheet_protections {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
@@ -2805,10 +2807,10 @@ pub fn open_file(
         // `state.grid` is the authoritative mirror for the ACTIVE sheet and was
         // already cloned out of `all_grids` earlier in this function, so writing
         // only `grids[idx]` would leave the active sheet un-imported.
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         let mut active_grid = state.grid.write(&load_effect).unwrap();
         let mut grids = state.grids.write(&load_effect).unwrap();
-        let mut styles = state.style_registry.lock().unwrap();
+        let mut styles = state.style_registry.write(&load_effect).unwrap();
         for entry in &workbook.sheet_protections {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
             let Some(ref v) = entry.cell_protection else { continue };
@@ -2854,7 +2856,7 @@ pub fn open_file(
             }
         }
     }
-    if let Ok(mut wb_prot) = state.workbook_protection.lock() {
+    if let Ok(mut wb_prot) = state.workbook_protection.write(&load_effect) {
         *wb_prot = workbook
             .workbook_protection
             .as_ref()
@@ -3030,7 +3032,7 @@ pub fn open_file(
                 serde_json::from_slice::<crate::bi::writeback::ModelWritebackStore>(&bytes).ok()
             })
             .unwrap_or_default();
-        *state.model_writeback.lock().map_err(|e| e.to_string())? = restored;
+        *state.model_writeback.write(&load_effect).map_err(|e| e.to_string())? = restored;
         *state.model_writeback_floor.lock().map_err(|e| e.to_string())? =
             chrono::Utc::now().to_rfc3339();
     }
@@ -3066,7 +3068,7 @@ pub fn open_file(
     // (BUG-0013: saved_to_table cannot persist auto_filter_id, so the link
     // is reconstructed here the same way table creation establishes it).
     {
-        let mut auto_filters = state.auto_filters.lock().map_err(|e| e.to_string())?;
+        let mut auto_filters = state.auto_filters.write(&load_effect).map_err(|e| e.to_string())?;
         if let Some(json_bytes) = workbook.user_files.remove("autofilters.json") {
             if let Ok(filters) =
                 serde_json::from_slice::<crate::autofilter::AutoFilterStorage>(&json_bytes)
@@ -3169,9 +3171,9 @@ pub fn open_file(
     crate::document_effect::mark_saved(&file_state);
 
     let grid = state.grid.read().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
-    let merged = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let merged = state.merged_regions.read().map_err(|e| e.to_string())?;
 
     let cells: Vec<CellData> = grid
         .cells
@@ -3215,11 +3217,14 @@ pub fn open_file(
 /// launched with. Both sides now read `persistence`'s constants, and the test
 /// that pins them together calls THIS, so it exercises the same code
 /// `new_file` does rather than a copy of it.
-pub(crate) fn reset_default_geometry(state: &AppState) {
-    if let Ok(mut h) = state.default_row_height.lock() {
+pub(crate) fn reset_default_geometry(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+) {
+    if let Ok(mut h) = state.default_row_height.write(effect) {
         *h = ::persistence::DEFAULT_ROW_HEIGHT_PX;
     }
-    if let Ok(mut w) = state.default_column_width.lock() {
+    if let Ok(mut w) = state.default_column_width.write(effect) {
         *w = ::persistence::DEFAULT_COLUMN_WIDTH_PX;
     }
 }
@@ -3244,9 +3249,9 @@ pub fn new_file(
     );
     {
         let mut grid = state.grid.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let mut col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-        let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+        let mut styles = state.style_registry.write(&reset_effect).map_err(|e| e.to_string())?;
+        let mut col_widths = state.column_widths.write(&reset_effect).map_err(|e| e.to_string())?;
+        let mut row_heights = state.row_heights.write(&reset_effect).map_err(|e| e.to_string())?;
         let mut deps = state.dependents.lock().map_err(|e| e.to_string())?;
         let mut tables = state.tables.write(&reset_effect).map_err(|e| e.to_string())?;
         let mut table_names = state.table_names.write(&reset_effect).map_err(|e| e.to_string())?;
@@ -3263,15 +3268,15 @@ pub fn new_file(
         grids.push(engine::grid::Grid::new());
 
         // Reset sheet names to a single "Sheet1"
-        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.write(&reset_effect).map_err(|e| e.to_string())?;
         *sheet_names = vec!["Sheet1".to_string()];
 
         // Reset active sheet to 0
-        *state.active_sheet.lock().map_err(|e| e.to_string())? = 0;
+        *state.active_sheet.write(&reset_effect).map_err(|e| e.to_string())? = 0;
 
         // Reset per-sheet dimension storage
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&reset_effect).map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&reset_effect).map_err(|e| e.to_string())?;
         all_cw.clear();
         all_cw.push(std::collections::HashMap::new());
         all_rh.clear();
@@ -3282,18 +3287,18 @@ pub fn new_file(
         table_names.clear();
 
         // Reset default dimensions (see `reset_default_geometry`).
-        reset_default_geometry(state.inner());
+        reset_default_geometry(state.inner(), &reset_effect);
 
         // Reset freeze/split/scroll configs to single default sheet
         let mut freeze_configs = state.freeze_configs.write(&reset_effect).map_err(|e| e.to_string())?;
         freeze_configs.clear();
         freeze_configs.push(crate::sheets::FreezeConfig { freeze_row: None, freeze_col: None });
 
-        let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
+        let mut split_configs = state.split_configs.write(&reset_effect).map_err(|e| e.to_string())?;
         split_configs.clear();
         split_configs.push(crate::sheets::SplitConfig::default());
 
-        let mut sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+        let mut sheet_zooms = state.sheet_zooms.write(&reset_effect).map_err(|e| e.to_string())?;
         sheet_zooms.clear();
         sheet_zooms.push(::persistence::DEFAULT_SHEET_ZOOM_PERCENT);
 
@@ -3311,18 +3316,18 @@ pub fn new_file(
         sheet_visibility.push("visible".to_string());
 
         // Reset merged regions
-        state.merged_regions.lock().map_err(|e| e.to_string())?.clear();
-        let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
+        state.merged_regions.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+        let mut all_merged = state.all_merged_regions.write(&reset_effect).map_err(|e| e.to_string())?;
         all_merged.clear();
         all_merged.push(std::collections::HashSet::new());
 
         // Reset user-hidden rows/cols
-        state.user_hidden_rows.lock().map_err(|e| e.to_string())?.clear();
-        state.user_hidden_cols.lock().map_err(|e| e.to_string())?.clear();
-        let mut all_uhr = state.all_user_hidden_rows.lock().map_err(|e| e.to_string())?;
+        state.user_hidden_rows.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+        state.user_hidden_cols.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+        let mut all_uhr = state.all_user_hidden_rows.write(&reset_effect).map_err(|e| e.to_string())?;
         all_uhr.clear();
         all_uhr.push(std::collections::HashSet::new());
-        let mut all_uhc = state.all_user_hidden_cols.lock().map_err(|e| e.to_string())?;
+        let mut all_uhc = state.all_user_hidden_cols.write(&reset_effect).map_err(|e| e.to_string())?;
         all_uhc.clear();
         all_uhc.push(std::collections::HashSet::new());
 
@@ -3364,16 +3369,16 @@ pub fn new_file(
     *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
 
     // Clear sheet protection and cell protection
-    state.sheet_protection.lock().map_err(|e| e.to_string())?.clear();
+    state.sheet_protection.write(&reset_effect).map_err(|e| e.to_string())?.clear();
     // Workbook structure protection must reset too — without this a File>New
     // after opening a structure-protected workbook inherits the old password
     // (and, now that protection persists, would even SAVE the old hash into
     // the fresh document).
-    *state.workbook_protection.lock().map_err(|e| e.to_string())? =
+    *state.workbook_protection.write(&reset_effect).map_err(|e| e.to_string())? =
         crate::protection::WorkbookProtection::default();
 
     // Clear auto filters
-    state.auto_filters.lock().map_err(|e| e.to_string())?.clear();
+    state.auto_filters.write(&reset_effect).map_err(|e| e.to_string())?.clear();
 
     // Clear outlines/grouping
     state.outlines.write(&reset_effect).map_err(|e| e.to_string())?.clear();
@@ -3831,14 +3836,14 @@ pub fn get_ai_context(
     options: AiSerializeOptions,
 ) -> Result<String, String> {
     let grids = state.grids.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let active_grid = state.grid.read().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
     // Build sheet inputs — use stored grids for non-active sheets, active grid for current.
     // Hidden formulas are withheld exactly like every other read path.
-    let protection_storage = state.sheet_protection.lock().map_err(|e| e.to_string())?;
+    let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
     for (i, name) in sheet_names.iter().enumerate() {
         if i == active_sheet {
@@ -4184,8 +4189,8 @@ pub fn xlsx_save_loss_report(
         "Cell behaviors (bricks)",
     );
     check(
-        state.sheet_protection.lock().map_err(|e| e.to_string())?.values().any(|p| p.protected)
-            || state.workbook_protection.lock().map_err(|e| e.to_string())?.protected,
+        state.sheet_protection.read().map_err(|e| e.to_string())?.values().any(|p| p.protected)
+            || state.workbook_protection.read().map_err(|e| e.to_string())?.protected,
         "Sheet/workbook protection",
     );
     check(
@@ -4913,12 +4918,12 @@ mod default_geometry_and_sheet_view_tests {
     fn new_file_geometry_equals_launch_geometry() {
         let launched = crate::create_app_state();
         assert_eq!(
-            *launched.default_row_height.lock().unwrap(),
+            *launched.default_row_height.read().unwrap(),
             DEFAULT_ROW_HEIGHT_PX,
             "app launch must start at the documented default row height"
         );
         assert_eq!(
-            *launched.default_column_width.lock().unwrap(),
+            *launched.default_column_width.read().unwrap(),
             DEFAULT_COLUMN_WIDTH_PX,
             "app launch must start at the documented default column width"
         );
@@ -4926,18 +4931,18 @@ mod default_geometry_and_sheet_view_tests {
         // A workbook that has been messed with, then reset the way File > New
         // resets it (the same function `new_file` calls).
         let after_new = crate::create_app_state();
-        *after_new.default_row_height.lock().unwrap() = 37.5;
-        *after_new.default_column_width.lock().unwrap() = 212.0;
-        reset_default_geometry(&after_new);
+        *after_new.default_row_height.write(&crate::document_effect::test_seed_effect()).unwrap() = 37.5;
+        *after_new.default_column_width.write(&crate::document_effect::test_seed_effect()).unwrap() = 212.0;
+        reset_default_geometry(&after_new, &crate::document_effect::test_seed_effect());
 
         assert_eq!(
-            *after_new.default_row_height.lock().unwrap(),
-            *launched.default_row_height.lock().unwrap(),
+            *after_new.default_row_height.read().unwrap(),
+            *launched.default_row_height.read().unwrap(),
             "File > New must hand out the SAME row height the app launched with"
         );
         assert_eq!(
-            *after_new.default_column_width.lock().unwrap(),
-            *launched.default_column_width.lock().unwrap(),
+            *after_new.default_column_width.read().unwrap(),
+            *launched.default_column_width.read().unwrap(),
             "File > New must hand out the SAME column width the app launched with"
         );
     }
@@ -4958,10 +4963,10 @@ mod default_geometry_and_sheet_view_tests {
     fn a_fresh_workbook_is_unzoomed_and_unsplit() {
         let state = crate::create_app_state();
         assert_eq!(
-            *state.sheet_zooms.lock().unwrap(),
+            *state.sheet_zooms.read().unwrap(),
             vec![DEFAULT_SHEET_ZOOM_PERCENT]
         );
-        let splits = state.split_configs.lock().unwrap();
+        let splits = state.split_configs.read().unwrap();
         assert_eq!(splits.len(), 1);
         assert!(splits[0].split_row.is_none() && splits[0].split_col.is_none());
     }
@@ -4972,11 +4977,11 @@ mod default_geometry_and_sheet_view_tests {
     fn zoom_is_per_sheet_and_survives_save_and_reload() {
         let state = crate::create_app_state();
         {
-            let mut zooms = state.sheet_zooms.lock().unwrap();
+            let mut zooms = state.sheet_zooms.write(&crate::document_effect::test_seed_effect()).unwrap();
             *zooms = vec![100.0, 60.0, 175.0];
         }
         {
-            let mut splits = state.split_configs.lock().unwrap();
+            let mut splits = state.split_configs.write(&crate::document_effect::test_seed_effect()).unwrap();
             *splits = vec![
                 crate::sheets::SplitConfig::default(),
                 crate::sheets::SplitConfig { split_row: Some(12), split_col: None },
@@ -5003,14 +5008,14 @@ mod default_geometry_and_sheet_view_tests {
 
         // Load side: hydrate a DIFFERENT, pristine AppState from the file.
         let reopened = crate::create_app_state();
-        restore_sheet_view_from_workbook(&reopened, &loaded).unwrap();
+        restore_sheet_view_from_workbook(&reopened, &crate::document_effect::test_seed_effect(), &loaded).unwrap();
 
         assert_eq!(
-            *reopened.sheet_zooms.lock().unwrap(),
+            *reopened.sheet_zooms.read().unwrap(),
             vec![100.0, 60.0, 175.0],
             "each sheet must come back at ITS OWN zoom"
         );
-        let splits = reopened.split_configs.lock().unwrap();
+        let splits = reopened.split_configs.read().unwrap();
         assert_eq!(splits[0].split_row, None);
         assert_eq!(splits[0].split_col, None);
         assert_eq!(splits[1].split_row, Some(12));
@@ -5046,11 +5051,11 @@ mod default_geometry_and_sheet_view_tests {
     fn resetting_to_a_new_workbook_clears_zoom_and_split() {
         let state = crate::create_app_state();
         {
-            let mut zooms = state.sheet_zooms.lock().unwrap();
+            let mut zooms = state.sheet_zooms.write(&crate::document_effect::test_seed_effect()).unwrap();
             *zooms = vec![250.0, 60.0];
         }
         {
-            let mut splits = state.split_configs.lock().unwrap();
+            let mut splits = state.split_configs.write(&crate::document_effect::test_seed_effect()).unwrap();
             *splits = vec![
                 crate::sheets::SplitConfig { split_row: Some(3), split_col: Some(3) },
                 crate::sheets::SplitConfig::default(),
@@ -5059,13 +5064,13 @@ mod default_geometry_and_sheet_view_tests {
 
         // What `new_file` does to these two vectors.
         let blank = ::persistence::Workbook::new();
-        restore_sheet_view_from_workbook(&state, &blank).unwrap();
+        restore_sheet_view_from_workbook(&state, &crate::document_effect::test_seed_effect(), &blank).unwrap();
 
         assert_eq!(
-            *state.sheet_zooms.lock().unwrap(),
+            *state.sheet_zooms.read().unwrap(),
             vec![DEFAULT_SHEET_ZOOM_PERCENT]
         );
-        let splits = state.split_configs.lock().unwrap();
+        let splits = state.split_configs.read().unwrap();
         assert_eq!(splits.len(), 1);
         assert!(splits[0].split_row.is_none() && splits[0].split_col.is_none());
     }

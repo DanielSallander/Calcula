@@ -16,6 +16,23 @@ import { test, expect } from "../fixtures";
 test.describe("Sales dashboard workflow", () => {
   test.describe.configure({ mode: "serial" });
 
+  // Step 7 persists a chart through `save_chart` and never removes it, so it
+  // outlives the file (open-decisions-2026-08.md sec 3b). Nothing else in the
+  // suite owns a chart by this point, so sweeping is safe and is what a failed
+  // run needs -- an assertion that threw before the delete must not leak.
+  test.afterAll(async ({ sharedPage }) => {
+    await sharedPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      if (!tauri?.core?.invoke) return;
+      const charts: Array<{ id: string }> = await tauri.core.invoke("get_charts");
+      for (const c of charts) {
+        await tauri.core.invoke("delete_chart", { id: c.id }).catch(() => {});
+      }
+      window.dispatchEvent(new Event("charts:refresh"));
+      window.dispatchEvent(new Event("grid:refresh"));
+    });
+  });
+
   test("step 1: enter sales data table", async ({ grid }) => {
     // Headers
     await grid.setCellValueDirect("A470", "Region");

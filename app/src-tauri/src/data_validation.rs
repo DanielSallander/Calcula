@@ -557,11 +557,11 @@ pub fn resolve_list_source(
 /// so without this an out-of-range index would silently create a phantom
 /// sheet's rule list instead of erroring.
 fn resolve_validation_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usize, String> {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     match sheet_index {
         None => Ok(active),
         Some(idx) => {
-            let count = state.sheet_names.lock().unwrap().len();
+            let count = state.sheet_names.read().unwrap().len();
             if idx < count {
                 Ok(idx)
             } else {
@@ -739,10 +739,10 @@ pub fn validate_cell(
     // cell, and it runs on every keystroke in the editor — the one place a
     // four-second formula would read as a frozen keyboard.
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let validations = state.data_validations.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     // Get the validation rule for this cell
     let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {
@@ -803,7 +803,7 @@ pub fn get_validation_prompt(
     row: u32,
     col: u32,
 ) -> Option<DataValidationPrompt> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let validations = state.data_validations.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
@@ -824,10 +824,10 @@ pub fn get_invalid_cells(
     state: State<AppState>,
 ) -> InvalidCellsResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let validations = state.data_validations.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     let mut invalid_cells = Vec::new();
 
@@ -880,10 +880,10 @@ pub fn get_validation_list_values(
     row: u32,
     col: u32,
 ) -> Option<Vec<String>> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let validations = state.data_validations.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
         if let Some(validation) = get_validation_for_cell(sheet_validations, row, col) {
@@ -909,7 +909,7 @@ pub fn has_in_cell_dropdown(
     row: u32,
     col: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let validations = state.data_validations.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
@@ -933,10 +933,10 @@ pub fn validate_pending_value(
     pending_value: String,
 ) -> CellValidationResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let validations = state.data_validations.read().unwrap();
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
 
     // Get the validation rule for this cell
     let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {

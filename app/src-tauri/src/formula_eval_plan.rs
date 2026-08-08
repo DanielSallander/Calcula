@@ -1022,8 +1022,8 @@ pub fn get_formula_eval_plan(
     col: u32,
 ) -> Result<FormulaEvalPlan, String> {
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     if active_sheet >= grids.len() {
         return Err("Invalid active sheet.".to_string());

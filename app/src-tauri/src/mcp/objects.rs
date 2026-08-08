@@ -212,7 +212,7 @@ pub(crate) fn update_chart_core(
     let target_sheet = sheet_index.map(|s| s as usize).unwrap_or(previous.sheet_index);
     if target_sheet != previous.sheet_index {
         crate::protection::check_sheet_action(state, target_sheet, "editObjects", "edit objects")?;
-        let sheet_count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+        let sheet_count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
         if target_sheet >= sheet_count {
             return Err(format!(
                 "Sheet index {} out of range (workbook has {} sheet(s)).",
@@ -1120,7 +1120,7 @@ pub fn rename_sheet(handle: &AppHandle, index: usize, new_name: &str) -> Result<
     require_tier(handle, "rename_sheet")?;
     let old_name = {
         let state = handle.state::<AppState>();
-        let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
         names
             .get(index)
             .cloned()
@@ -1157,7 +1157,7 @@ pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> 
     require_tier(handle, "delete_sheet")?;
     let name = {
         let state = handle.state::<AppState>();
-        let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
         names
             .get(index)
             .cloned()
@@ -1195,7 +1195,7 @@ pub fn move_sheet(handle: &AppHandle, from_index: usize, to_index: usize) -> Res
     require_tier(handle, "move_sheet")?;
     let name = {
         let state = handle.state::<AppState>();
-        let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
         names
             .get(from_index)
             .cloned()
@@ -1467,7 +1467,10 @@ mod tests {
         let id = entry.id.to_string();
         state.charts.write(&seed).unwrap().push(entry);
         {
-            let mut protection = state.sheet_protection.lock().unwrap();
+            let mut protection = state
+                .sheet_protection
+                .write(&crate::document_effect::test_seed_effect())
+                .unwrap();
             let mut p = crate::protection::SheetProtection::default();
             p.protected = true;
             p.options.allow_edit_objects = false;

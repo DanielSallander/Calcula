@@ -30,7 +30,7 @@ fn with_sheet_grid<T>(
     sheet_index: Option<usize>,
     f: impl FnOnce(&engine::Grid) -> T,
 ) -> Result<T, String> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
     let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
@@ -184,7 +184,7 @@ pub fn go_to_special(
     search_range: Option<(u32, u32, u32, u32)>,
 ) -> GoToSpecialResult {
     let grid = state.grid.read().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Determine search bounds
     let (sr, sc, er, ec) = search_range.unwrap_or((0, 0, grid.max_row, grid.max_col));
@@ -370,7 +370,7 @@ pub(crate) fn hidden_row_sources_for_sheet(
         crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index);
     let mut filter_hidden: std::collections::HashSet<u32> = std::collections::HashSet::new();
     {
-        let auto_filters = state.auto_filters.lock().unwrap();
+        let auto_filters = state.auto_filters.read().unwrap();
         if let Some(af) = auto_filters.get(&sheet_index) {
             filter_hidden.extend(af.hidden_rows.iter().copied());
         }
@@ -528,7 +528,7 @@ pub fn get_special_cells(
     // Resolve the target sheet FIRST, then gather the hidden sets while no
     // grid lock is held (collect_* take their own locks).
     let target_sheet = {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         sheet_index.unwrap_or(active_sheet)
     };
     let (hidden_rows, hidden_cols) = if kind == "visible" {
@@ -670,7 +670,7 @@ mod special_cells_tests {
         {
             let mut af = crate::autofilter::AutoFilter::new(0, 0, 6, 0);
             af.hidden_rows = [2u32, 3].into_iter().collect();
-            state.auto_filters.lock().unwrap().insert(0, af);
+            state.auto_filters.write(&crate::document_effect::test_seed_effect()).unwrap().insert(0, af);
         }
         // An advanced filter hides row 4.
         state

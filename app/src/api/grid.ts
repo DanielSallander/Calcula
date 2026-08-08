@@ -9,6 +9,20 @@ export { useGridContext, useGridState, useGridDispatch, getGridStateSnapshot } f
 // Re-export hit-testing for extensions
 export { getCellFromPixel } from "../core/lib/gridRenderer";
 
+// THE header-gutter rule. An extension painting an overlay in grid coordinates
+// must offset by the same gutters the renderer used, or it lands one header
+// away from the cells — and it must read them through these accessors rather
+// than `config.rowHeaderWidth || 50`, because `||` cannot tell a collapsed
+// gutter (View > Headings off, a legal 0) from a missing one.
+export {
+  rowHeaderGutter,
+  colHeaderGutter,
+  resolveHeaderSizes,
+  effectiveGridConfig,
+  FALLBACK_ROW_HEADER_WIDTH,
+  FALLBACK_COL_HEADER_HEIGHT,
+} from "../core/lib/gridRenderer/layout/headerVisibility";
+
 // Re-export grid actions (Find actions removed - they live in FindReplaceDialog extension)
 export {
   setSelection,

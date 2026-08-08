@@ -1,0 +1,988 @@
+//! FILENAME: app/src-tauri/src/commands/bulk_rewrite_recalc_tests.rs
+//! PURPOSE: the §2c follow-ons — bulk range commands that rewrite cells must
+//! seed the ONE shared cascade, and dependency cycles must be detected across
+//! sheet boundaries.
+//!
+//! A child module of `commands::data` (declared with `#[path]` there) so it
+//! reaches `recalc_after_active_sheet_bulk_rewrite` and the dependency-map
+//! helpers. It reuses the `Workbook` harness from `cross_sheet_recalc_tests`
+//! rather than copying one: a copied harness drifts, and a drifted harness is
+//! exactly how the defects below stayed hidden.
+//!
+//! THE TWO DEFECTS THESE PIN.
+//!
+//! 1. **`clear_range` recalculated NOTHING** — not cross-sheet, not even
+//!    same-sheet. This is the Delete key. Erasing the inputs of `=SUM(...)`
+//!    left the total showing its pre-delete number until some unrelated later
+//!    edit swept it up. Identical in class to the `sort_range` defect: a bulk
+//!    range command that rewrites cells and never seeds the cascade. The class
+//!    had recurred twice, so the sweep that produced these tests covered every
+//!    sibling (see the wiring test at the bottom).
+//!
+//! 2. **A cycle crossing a sheet boundary was detected nowhere.**
+//!    `partition_formula_cells` runs Kahn's algorithm over one sheet's local
+//!    map, built from same-sheet references only, so `Sheet1!A1 = Sheet2!A1`
+//!    with `Sheet2!A1 = Sheet1!A1` terminated and produced whichever number the
+//!    evaluation order happened to leave behind instead of `#CIRCULAR!`. An
+//!    ORDER-DEPENDENT number is the worst failure available here, because the
+//!    soak and regression oracles compare recalc results across runs.
+
+use super::cross_sheet_recalc_tests::{body_of, Workbook};
+use super::*;
+use engine::{CellError, CellValue};
+
+// ---------------------------------------------------------------------------
+// Reproducing a bulk clear
+// ---------------------------------------------------------------------------
+
+/// Reproduce exactly what `clear_range` does to the grid in its FIRST lock
+/// phase: erase the cells and drop their outgoing dependency edges, touching
+/// nothing else. Returns the cells that actually held content — which is
+/// precisely the seed list `clear_range` now hands to phase B.
+///
+/// `clear_range` is a `#[tauri::command]` taking `State` and so cannot run
+/// in-process; this reproduces its WRITE, and the wiring test below proves from
+/// source that it still calls the recalculation afterwards. Same split the
+/// `sort_range` tests use.
+fn clear_active_range(
+    wb: &Workbook,
+    min_row: u32,
+    min_col: u32,
+    max_row: u32,
+    max_col: u32,
+) -> Vec<(u32, u32)> {
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut grid = wb.state.grid.write(&effect).unwrap();
+    let mut grids = wb.state.grids.write(&effect).unwrap();
+    let active_sheet = *wb.state.active_sheet.read().unwrap();
+    let mut dependents_map = wb.state.dependents.lock().unwrap();
+    let mut dependencies_map = wb.state.dependencies.lock().unwrap();
+    let mut column_dependents_map = wb.state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = wb.state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = wb.state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = wb.state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = wb.state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = wb.state.cross_sheet_dependencies.lock().unwrap();
+
+    let targets: Vec<(u32, u32)> = grid
+        .cells
+        .keys()
+        .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
+        .cloned()
+        .collect();
+
+    let mut cleared = Vec::new();
+    for (row, col) in targets {
+        if grid.get_cell(row, col).is_none() {
+            continue;
+        }
+        cleared.push((row, col));
+        grid.clear_cell(row, col);
+        if active_sheet < grids.len() {
+            grids[active_sheet].clear_cell(row, col);
+        }
+        crate::update_cross_sheet_dependencies(
+            (active_sheet, row, col),
+            Default::default(),
+            &mut cross_sheet_dependencies_map,
+            &mut cross_sheet_dependents_map,
+        );
+        crate::update_dependencies(
+            (row, col),
+            Default::default(),
+            &mut dependencies_map,
+            &mut dependents_map,
+        );
+        crate::update_column_dependencies(
+            (row, col),
+            Default::default(),
+            &mut column_dependencies_map,
+            &mut column_dependents_map,
+        );
+        crate::update_row_dependencies(
+            (row, col),
+            Default::default(),
+            &mut row_dependencies_map,
+            &mut row_dependents_map,
+        );
+    }
+    cleared.sort_unstable();
+    cleared
+}
+
+/// Phase B, exactly as every fixed command now runs it.
+fn recalc_bulk(wb: &Workbook, seeds: &[(u32, u32)]) -> Vec<CellData> {
+    let mut updated = Vec::new();
+    recalc_after_active_sheet_bulk_rewrite(
+        &wb.state,
+        &wb.files,
+        &wb.pane,
+        &wb.filters,
+        seeds,
+        &mut updated,
+    );
+    updated
+}
+
+// ---------------------------------------------------------------------------
+// 1. Clearing a range recalculates its dependents
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clearing_a_range_recalculates_its_same_sheet_dependents() {
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "10");
+    wb.set(1, 0, "20");
+    wb.set(2, 0, "30");
+    wb.set(4, 0, "=SUM(A1:A3)");
+    assert_eq!(wb.number(0, 4, 0), 60.0, "precondition");
+
+    let seeds = clear_active_range(&wb, 0, 0, 1, 0);
+    assert_eq!(seeds, vec![(0, 0), (1, 0)], "both literals held content");
+
+    recalc_bulk(&wb, &seeds);
+
+    assert_eq!(
+        wb.number(0, 4, 0),
+        30.0,
+        "clearing A1:A2 left `=SUM(A1:A3)` at its pre-delete total — the Delete \
+         key seeded no cascade at all, the same defect `sort_range` had"
+    );
+}
+
+#[test]
+fn clearing_a_range_recalculates_cross_sheet_dependents() {
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "10");
+    wb.set(1, 0, "20");
+    wb.set(4, 0, "=SUM(A1:A3)");
+
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A5");
+    wb.set(1, 0, "=A1*2");
+    assert_eq!(wb.number(1, 0, 0), 30.0, "precondition");
+    assert_eq!(wb.number(1, 1, 0), 60.0, "precondition");
+    wb.switch_to(0);
+
+    let seeds = clear_active_range(&wb, 0, 0, 1, 0);
+    recalc_bulk(&wb, &seeds);
+
+    assert_eq!(wb.number(0, 4, 0), 0.0, "same-sheet total");
+    assert_eq!(
+        wb.number(1, 0, 0),
+        0.0,
+        "the first cross-sheet hop kept the pre-delete total"
+    );
+    assert_eq!(
+        wb.number(1, 1, 0),
+        0.0,
+        "the SECOND hop — a dependent of the cross-sheet dependent — is what \
+         the shared `cascade_cross_sheet_dependents` walk exists to reach"
+    );
+}
+
+#[test]
+fn clearing_cells_that_hold_no_content_seeds_nothing() {
+    // The empty-selection case: `clear_range` must not pay for a cascade when
+    // it erased nothing, which is what makes the fix free on the common path.
+    let wb = Workbook::new(1);
+    wb.set(4, 0, "=SUM(A1:A3)");
+    let seeds = clear_active_range(&wb, 0, 0, 1, 0);
+    assert!(seeds.is_empty(), "no cell in A1:A2 held content");
+}
+
+// ---------------------------------------------------------------------------
+// 2. Cross-sheet cycles report #CIRCULAR!
+// ---------------------------------------------------------------------------
+
+fn assert_circular(wb: &Workbook, sheet: usize, row: u32, col: u32, what: &str) {
+    match wb.value(sheet, row, col) {
+        CellValue::Error(CellError::Circular) => {}
+        other => panic!(
+            "{}: sheet {} ({},{}) is {:?}, expected #CIRCULAR!. A cycle crossing a \
+             sheet boundary was detected nowhere, so it produced an ORDER-DEPENDENT \
+             number instead of an error",
+            what, sheet, row, col, other
+        ),
+    }
+}
+
+#[test]
+fn a_two_sheet_cycle_reports_circular() {
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "=Sheet2!A1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    wb.recalculate_every_sheet();
+
+    assert_circular(&wb, 0, 0, 0, "two-sheet cycle");
+    assert_circular(&wb, 1, 0, 0, "two-sheet cycle");
+}
+
+#[test]
+fn a_three_sheet_cycle_reports_circular() {
+    let wb = Workbook::new(3);
+    wb.set(0, 0, "=Sheet2!A1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet3!A1");
+    wb.switch_to(2);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    wb.recalculate_every_sheet();
+
+    for sheet in 0..3 {
+        assert_circular(&wb, sheet, 0, 0, "three-sheet cycle");
+    }
+}
+
+#[test]
+fn a_prefixed_self_reference_is_a_cycle_too() {
+    // `=Sheet1!A1` written ON Sheet1 is a same-sheet cycle that the LOCAL
+    // detector cannot see: `ExtractedRefs::cells` reports only UNPREFIXED
+    // references, so this edge lands in `cross_sheet_cells` and was invisible
+    // to `partition_formula_cells`. The sheet-level projection records it as a
+    // self-loop, which is why the workbook walk catches it.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    wb.recalculate_every_sheet();
+
+    assert_circular(&wb, 0, 0, 0, "prefixed self reference");
+}
+
+#[test]
+fn mutual_sheet_references_without_a_cell_cycle_stay_numeric() {
+    // THE FALSE-POSITIVE GUARD, and the reason the sheet-level projection can
+    // only ever be a fast REJECT. Sheet1 reads Sheet2 and Sheet2 reads Sheet1,
+    // so the projection is cyclic — but the two edges touch different cells and
+    // there is no cell cycle at all. Reporting #CIRCULAR! here would be far
+    // worse than the bug being fixed: this is an ordinary layered workbook.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "5"); // Sheet1!A1, a literal
+    wb.set(0, 1, "=Sheet2!B1"); // Sheet1!B1
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1"); // Sheet2!A1
+    wb.set(0, 1, "7"); // Sheet2!B1, a literal
+    wb.switch_to(0);
+
+    wb.recalculate_every_sheet();
+
+    assert_eq!(wb.number(0, 0, 1), 7.0, "Sheet1!B1 reads Sheet2!B1");
+    assert_eq!(wb.number(1, 0, 0), 5.0, "Sheet2!A1 reads Sheet1!A1");
+}
+
+#[test]
+fn a_same_sheet_cycle_still_reports_circular() {
+    // Behaviour that must NOT change: the local detector still owns this case,
+    // and a single-sheet workbook never reaches the workbook-level walk at all
+    // (gate 1 returns immediately when nothing references another sheet).
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "=A2+1");
+    wb.set(1, 0, "=A1+1");
+
+    wb.recalculate_every_sheet();
+
+    assert_circular(&wb, 0, 0, 0, "same-sheet cycle");
+    assert_circular(&wb, 0, 1, 0, "same-sheet cycle");
+}
+
+#[test]
+fn an_acyclic_cross_sheet_chain_stays_numeric() {
+    // The ordinary case the gates protect: a layered workbook, where the
+    // sheet-level projection is a DAG and the workbook walk returns without
+    // ever building the cell-level graph.
+    let wb = Workbook::new(3);
+    wb.set(0, 0, "6");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1*2");
+    wb.switch_to(2);
+    wb.set(0, 0, "=Sheet2!A1+1");
+    wb.switch_to(0);
+
+    wb.recalculate_every_sheet();
+
+    assert_eq!(wb.number(1, 0, 0), 12.0);
+    assert_eq!(wb.number(2, 0, 0), 13.0);
+}
+
+// ---------------------------------------------------------------------------
+// 2b. F9 evaluates ONE sheet, and a cycle spans several
+// ---------------------------------------------------------------------------
+//
+// Found LIVE on the running app (remaining-correctness.spec.ts), not by
+// reading. Every test above recalculates EVERY sheet, because that is what the
+// off-sheet write path does — `recalc_after_off_sheet_write` calls
+// `recalculate_sheet_values` once per sheet. `calculate_now` does not: it is F9,
+// Formulas > Calculate > Calculate Workbook, and the calculate-before-save step,
+// and it evaluates the ACTIVE sheet alone.
+//
+// So `merge_cross_sheet_circular` moved the active sheet's members into a
+// circular group and the members on the other sheets were left holding whatever
+// number the previous evaluation order produced. Measured: F9 on Sheet1 gave
+// `#CIRCULAR` on Sheet1!A1 and `0` on Sheet2!A1, and only a second F9 after
+// switching tabs made them agree. That surviving number is the order-dependent
+// answer this detector exists to remove — and it is worse than the original bug
+// in one respect, because half the cycle now says "error" while the other half
+// says "zero", one tab apart.
+//
+// `mark_off_sheet_circular_cells` closes it: a cycle is a workbook-level fact,
+// so every sheet owning a member reports it.
+
+/// The set `calculate_now` computes for itself, from the same walk.
+fn workbook_cycle_members(wb: &Workbook) -> std::collections::HashSet<(usize, u32, u32)> {
+    let grids = wb.state.grids.read().unwrap();
+    let names = wb.state.sheet_names.read().unwrap().clone();
+    crate::calculation::workbook_circular_cells(&grids, &names)
+}
+
+/// Do to the grids exactly what `calculate_now` now does after its merge.
+fn mark_off_sheet(wb: &Workbook, active: usize) -> Vec<(usize, u32, u32)> {
+    let circular = workbook_cycle_members(wb);
+    let iteration_enabled = *wb.state.iteration_enabled.lock().unwrap();
+    let mut grids = wb
+        .state
+        .grids
+        .write(&crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::DerivedCache,
+        ))
+        .unwrap();
+    crate::calculation::mark_off_sheet_circular_cells(
+        &mut grids,
+        &circular,
+        active,
+        iteration_enabled,
+    )
+}
+
+#[test]
+fn an_f9_pass_reports_the_cycle_members_it_did_not_evaluate() {
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "=Sheet2!A1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    // What F9 evaluates: the ACTIVE sheet, and only that.
+    crate::calculation::recalculate_sheet_values(&wb.state, &wb.files, &wb.pivots, 0, None);
+
+    assert_circular(&wb, 0, 0, 0, "the sheet F9 evaluated");
+    // TEETH. The single-sheet pass CANNOT have reported the other member — it
+    // never looked at Sheet2 — so the assertion after the mark is a change and
+    // not the state the fixture arrived in.
+    assert!(
+        !matches!(wb.value(1, 0, 0), CellValue::Error(CellError::Circular)),
+        "Sheet2!A1 was already circular before the off-sheet mark ran; this test \
+         would then prove nothing about the mark"
+    );
+
+    let marked = mark_off_sheet(&wb, 0);
+    assert_eq!(
+        marked,
+        vec![(1usize, 0u32, 0u32)],
+        "the mark must name exactly the off-sheet member it changed"
+    );
+    assert_circular(&wb, 1, 0, 0, "the sheet F9 did NOT evaluate");
+}
+
+#[test]
+fn a_repeated_f9_does_not_re_announce_an_already_circular_cell() {
+    // The frontend repaints what the command RETURNS, so a mark that reported
+    // every member on every pass would make each F9 look like a change to a
+    // workbook nothing had touched.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "=Sheet2!A1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+    crate::calculation::recalculate_sheet_values(&wb.state, &wb.files, &wb.pivots, 0, None);
+
+    assert_eq!(mark_off_sheet(&wb, 0).len(), 1, "the first pass marks it");
+    assert!(
+        mark_off_sheet(&wb, 0).is_empty(),
+        "a second pass must announce nothing — the value did not move"
+    );
+    assert_circular(&wb, 1, 0, 0, "and it is still circular");
+}
+
+#[test]
+fn the_off_sheet_mark_leaves_a_layered_workbook_alone() {
+    // The false-positive guard, restated for the new writer. The sheet-level
+    // projection is an over-approximation, so this fixture has a CYCLIC
+    // projection and no cell cycle at all — and it is an entirely ordinary
+    // layered workbook. Marking anything here would be far worse than the bug.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "5");
+    wb.set(0, 1, "=Sheet2!B1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.set(0, 1, "7");
+    wb.switch_to(0);
+    wb.recalculate_every_sheet();
+
+    assert!(
+        mark_off_sheet(&wb, 0).is_empty(),
+        "nothing may be marked in a workbook with no cell cycle"
+    );
+    assert_eq!(wb.number(1, 0, 0), 5.0, "Sheet2!A1 is still a number");
+    assert_eq!(wb.number(0, 0, 1), 7.0, "Sheet1!B1 is still a number");
+}
+
+#[test]
+fn the_off_sheet_mark_is_skipped_under_iterative_calculation() {
+    // The negative half, stated on its own. Under iteration the off-sheet
+    // members CONVERGE (one hop per whole-workbook round); stamping them
+    // #CIRCULAR! is precisely the regression the iterative guards forbid, and
+    // this writer runs on the same hot path they do.
+    let wb = Workbook::new(2);
+    *wb.state.iteration_enabled.lock().unwrap() = true;
+    wb.set(0, 0, "=Sheet2!A1*0.5+10");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+    crate::calculation::recalculate_sheet_values(&wb.state, &wb.files, &wb.pivots, 0, None);
+
+    assert!(
+        mark_off_sheet(&wb, 0).is_empty(),
+        "the off-sheet mark must do nothing at all while iteration is enabled"
+    );
+    for sheet in 0..2 {
+        assert!(
+            !matches!(wb.value(sheet, 0, 0), CellValue::Error(CellError::Circular)),
+            "sheet {} reported #CIRCULAR! with iterative calculation ENABLED",
+            sheet
+        );
+    }
+}
+
+#[test]
+fn calculate_now_marks_the_cycle_members_on_the_sheets_it_does_not_evaluate() {
+    // `calculate_now` is a `#[tauri::command]` taking `State` and `Window`, so
+    // it cannot run in-process. The behaviour is tested above; this proves the
+    // command still CALLS the writer, and the failure mode is silent.
+    const CALCULATION_RS: &str = include_str!("../calculation.rs");
+    let body = body_of(CALCULATION_RS, "calculate_now");
+    assert!(
+        body.contains("mark_off_sheet_circular_cells("),
+        "`calculate_now` merges the ACTIVE sheet's cross-sheet cycle members and \
+         stops there, so the members on every other sheet keep the number the \
+         previous evaluation order left behind — F9 reports #CIRCULAR! on the \
+         sheet you are looking at and a plausible 0 one tab away"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Iterative calculation must keep converging
+// ---------------------------------------------------------------------------
+
+#[test]
+fn iterative_calculation_still_converges_across_sheets() {
+    // Iterative calculation is a SUPPORTED feature: a deliberate circular
+    // reference under it must converge, not start reporting #CIRCULAR! because
+    // the cycle detector learned to see across sheets. Routing cross-sheet
+    // cycle members into the SAME `circular_groups` bucket a same-sheet cycle
+    // lands in is what buys this — they inherit the `iteration_enabled` branch
+    // unchanged.
+    //
+    // x = 0.5x + 10  =>  x = 20.
+    let wb = Workbook::new(2);
+    *wb.state.iteration_enabled.lock().unwrap() = true;
+
+    wb.set(0, 0, "=Sheet2!A1*0.5+10");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    // Each whole-workbook round advances the cycle one hop, because a per-sheet
+    // pass iterates only the members living on the sheet it is evaluating and
+    // reads the other sheet's cached value. The ratio is 0.5, so this is
+    // geometric and 60 rounds is enormous headroom.
+    for _ in 0..60 {
+        wb.recalculate_every_sheet();
+    }
+
+    let a = wb.number(0, 0, 0);
+    let b = wb.number(1, 0, 0);
+    assert!(
+        (a - 20.0).abs() < 1e-6,
+        "iterative cross-sheet cycle did not converge: Sheet1!A1 = {}",
+        a
+    );
+    assert!(
+        (b - 20.0).abs() < 1e-6,
+        "iterative cross-sheet cycle did not converge: Sheet2!A1 = {}",
+        b
+    );
+}
+
+#[test]
+fn iterative_mode_never_writes_circular_across_sheets() {
+    // The negative half of the test above, stated on its own so a regression
+    // that reports #CIRCULAR! under iteration fails loudly rather than as a
+    // convergence assertion.
+    let wb = Workbook::new(2);
+    *wb.state.iteration_enabled.lock().unwrap() = true;
+
+    wb.set(0, 0, "=Sheet2!A1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    wb.recalculate_every_sheet();
+
+    for (sheet, label) in [(0usize, "Sheet1!A1"), (1usize, "Sheet2!A1")] {
+        assert!(
+            !matches!(wb.value(sheet, 0, 0), CellValue::Error(CellError::Circular)),
+            "{} reported #CIRCULAR! with iterative calculation ENABLED",
+            label
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4. The detector's own gates
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_workbook_walk_returns_immediately_without_cross_sheet_references() {
+    // Gate 1, asserted directly: a workbook whose formulas never name another
+    // sheet gets an empty answer, so single-sheet workbooks are untouched and
+    // keep relying on `partition_formula_cells` alone.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "=A2+1");
+    wb.set(1, 0, "=A1+1"); // a genuine SAME-sheet cycle
+    wb.switch_to(0);
+
+    let grids = wb.state.grids.read().unwrap();
+    let names = wb.state.sheet_names.read().unwrap().clone();
+    let circular = crate::calculation::workbook_circular_cells(&grids, &names);
+
+    assert!(
+        circular.is_empty(),
+        "gate 1 must return an EMPTY set when nothing references another sheet \
+         — same-sheet cycles stay the local detector's job"
+    );
+}
+
+#[test]
+fn the_workbook_walk_finds_both_members_of_a_cross_sheet_cycle() {
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "=Sheet2!A1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    let grids = wb.state.grids.read().unwrap();
+    let names = wb.state.sheet_names.read().unwrap().clone();
+    let circular = crate::calculation::workbook_circular_cells(&grids, &names);
+
+    assert!(circular.contains(&(0, 0, 0)), "Sheet1!A1 is a cycle member");
+    assert!(circular.contains(&(1, 0, 0)), "Sheet2!A1 is a cycle member");
+    assert_eq!(circular.len(), 2, "and nothing else is");
+}
+
+// ---------------------------------------------------------------------------
+// 5. Every bulk rewrite path seeds the cascade
+// ---------------------------------------------------------------------------
+
+/// THE SIBLING SWEEP, asserted from source.
+///
+/// This class has now recurred three times — `update_cells_batch_core` and
+/// `fill_range` (BUG-0019), then `sort_range`, then every command below. Each
+/// of these takes `State` and cannot run in-process, and the failure mode is
+/// silent (stale values, no error), so the wiring is pinned from source the way
+/// `sort_range_recalculates_the_range_it_rewrote` pins its own.
+///
+/// A command that rewrites cell CONTENT and appears in neither list is the next
+/// instance of this bug.
+#[test]
+fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
+    const DATA_RS: &str = include_str!("data.rs");
+    const SEARCH_RS: &str = include_str!("search.rs");
+    const MERGE_RS: &str = include_str!("../merge_commands.rs");
+
+    // ACTIVE-sheet rewrites: seeds into `recalc_after_active_sheet_bulk_rewrite`.
+    let active: &[(&str, &str)] = &[
+        ("clear_cell", DATA_RS),
+        ("clear_range", DATA_RS),
+        ("clear_range_with_options", DATA_RS),
+        ("sort_range", DATA_RS),
+        ("remove_duplicates", DATA_RS),
+        ("replace_all", SEARCH_RS),
+        ("replace_single", SEARCH_RS),
+        // A merge DESTROYS every slave cell's value.
+        ("merge_cells", MERGE_RS),
+    ];
+    for (name, source) in active {
+        let body = body_of(source, name);
+        assert!(
+            body.contains("recalc_after_active_sheet_bulk_rewrite("),
+            "`{}` rewrites cells on the active sheet without seeding the shared \
+             cascade — its dependents keep stale values until an unrelated later \
+             edit sweeps them up",
+            name
+        );
+    }
+
+    // OFF-sheet rewrites: whole-sheet evaluation through the off-sheet helper.
+    let off_sheet: &[(&str, &str)] = &[
+        ("clear_range_on_sheets", DATA_RS),
+        ("clear_range_with_options_off_sheet", DATA_RS),
+        ("sort_range_off_sheet", DATA_RS),
+        ("replace_all_off_sheet", SEARCH_RS),
+        ("replace_single_off_sheet", SEARCH_RS),
+        // Found at integration: the ACTIVE `merge_cells` was fixed and its
+        // off-sheet twin was not — the same asymmetry as `sort_range`, mirrored,
+        // so it was the sheet you were NOT looking at that stayed wrong.
+        ("merge_cells_off_sheet", MERGE_RS),
+    ];
+    for (name, source) in off_sheet {
+        let body = body_of(source, name);
+        assert!(
+            body.contains("recalc_after_off_sheet_write("),
+            "`{}` writes cells on a non-active sheet without recalculating anything",
+            name
+        );
+    }
+
+    // EITHER-sheet rewrites: the destination is a parameter, so these branch on
+    // it and must carry BOTH helpers.
+    const CONSOLIDATE_RS: &str = include_str!("../consolidate.rs");
+    const BI_RS: &str = include_str!("../bi/commands.rs");
+    let either: &[(&str, &str)] = &[
+        ("consolidate_data", CONSOLIDATE_RS),
+        ("bi_insert_result", BI_RS),
+        // Found at integration, in the same file as the one that WAS fixed: a
+        // refresh replaces the whole result block exactly as an insert writes
+        // it, so every formula reading a refreshed region kept the PREVIOUS
+        // refresh's numbers.
+        ("bi_refresh_connection", BI_RS),
+    ];
+    for (name, source) in either {
+        let body = body_of(source, name);
+        assert!(
+            body.contains("recalc_after_active_sheet_bulk_rewrite(")
+                && body.contains("recalc_after_off_sheet_write("),
+            "`{}` writes a block of cells to a destination sheet chosen at \
+             runtime, so it must recalculate on BOTH branches — an on-sheet \
+             destination through the seeded cascade, an off-sheet one through \
+             the whole-sheet helper",
+            name
+        );
+    }
+}
+
+#[test]
+fn remove_duplicates_rebuilds_dependencies_before_seeding() {
+    // Remove-duplicates COMPACTS rows upwards, so formula cells land at new
+    // positions and the dependency maps still describe where they used to live
+    // (the BUG-0010 hazard `sort_range` rebuilds for). Seeding a cascade over
+    // stale edges would walk the wrong graph, so the rebuild is part of the fix
+    // rather than an independent nicety.
+    const DATA_RS: &str = include_str!("data.rs");
+    let body = body_of(DATA_RS, "remove_duplicates");
+    assert!(
+        body.contains("rebuild_all_dependencies_from_grid("),
+        "`remove_duplicates` moves formula cells without rebuilding the \
+         dependency maps"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. The sweep, made exhaustive
+// ---------------------------------------------------------------------------
+
+/// EVERY function in the crate that writes a cell, classified — the census the
+/// hand-written list above cannot be.
+///
+/// `every_bulk_cell_rewrite_seeds_the_shared_cascade` pins twelve NAMED
+/// commands. That is exactly the shape the defect keeps hiding in: it recurred
+/// with `update_cells_batch_core` + `fill_range`, then `sort_range`, then ten
+/// siblings, and integration found two MORE that the ten-command sweep had not
+/// enumerated at all (`bi_refresh_connection`, whose own twin `bi_insert_result`
+/// had just been fixed, and `merge_cells_off_sheet`, the mirror of the
+/// active/off-sheet asymmetry that hid `sort_range`). A list of names cannot
+/// fail for the command nobody thought of, so this test does not take a list of
+/// names: it ENUMERATES the crate.
+///
+/// Every function containing a `set_cell` / `clear_cell` call must either
+/// recalculate (its body mentions one of the shared entry points) or appear in
+/// `EXEMPT` below with a written reason. A new cell-writing command fails this
+/// test until somebody makes that decision explicitly.
+#[test]
+fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() {
+    // (file relative to src/, function, reason it does not recalculate)
+    const EXEMPT: &[(&str, &str, &str)] = &[
+        // -- It IS recalculation, or an inner step of it -------------------
+        ("calculation.rs", "calculate_now", "the full-recalculation pass itself"),
+        ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of that pass: reports a cycle the pass already detected on the sheets it does not evaluate"),
+        ("commands/data.rs", "reevaluate_formula_cell", "the cascade's per-cell evaluator"),
+        ("commands/data.rs", "recalc_walked_cell", "the cross-sheet walk's per-cell step"),
+        ("pivot/operations.rs", "recalculate_sheet_formulas", "a whole-sheet evaluation"),
+        ("persistence.rs", "open_file", "the load path recalculates the workbook it just read"),
+        // -- Own evaluation loop over the cells it writes -------------------
+        ("data_tables.rs", "data_table_one_var", "what-if table: evaluates each substitution itself"),
+        ("data_tables.rs", "data_table_two_var", "what-if table: evaluates each substitution itself"),
+        ("data_tables.rs", "re_evaluate_formulas", "the what-if table's own evaluation step"),
+        ("data_tables.rs", "restore_cell", "restores the probe cell the loop borrowed"),
+        ("data_tables.rs", "set_cell_value", "sets the probe cell the loop borrowed"),
+        ("goal_seek.rs", "goal_seek", "iterates to a root, evaluating every trial itself"),
+        ("goal_seek.rs", "evaluate_target", "one goal-seek trial"),
+        ("goal_seek.rs", "finalize_result", "writes the converged value the loop already evaluated"),
+        ("solver.rs", "solver_solve", "runs its own objective evaluation loop"),
+        ("solver.rs", "solver_revert", "restores the pre-solve values the loop captured"),
+        ("solver.rs", "set_variables_and_evaluate", "one solver trial"),
+        ("scenario_manager.rs", "scenario_show", "transient scenario preview with its own evaluation"),
+        ("scenario_manager.rs", "scenario_summary", "builds a report block from values it evaluated"),
+        ("animation_commands.rs", "apply_set_ops_and_recalc", "transient frame playback; orders through the shared recalc_order_from_seeds"),
+        // -- Style only: changes nothing a formula can read -----------------
+        ("commands/styles.rs", "apply_formatting", "style_index only"),
+        ("commands/styles.rs", "apply_formatting_to_sheets", "style_index only"),
+        ("commands/styles.rs", "set_cell_style", "style_index only"),
+        ("commands/styles.rs", "set_cell_rich_text", "rich-text runs only"),
+        ("commands/styles.rs", "apply_border_preset", "style_index only"),
+        ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
+        ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
+        ("computed_properties.rs", "apply_fill_color", "style_index only"),
+        ("computed_properties.rs", "apply_style_change", "style_index only"),
+        ("mcp/tools.rs", "apply_cell_formatting", "style_index only"),
+        // -- Helper: the CALLER recalculates --------------------------------
+        ("consolidate.rs", "consolidate_data_inner", "`consolidate_data` seeds from its updated_cells"),
+        ("calp_commands.rs", "write_override_value", "all three override commands run recalculate_sheet_values after"),
+        ("commands/coord_shift.rs", "shift_per_sheet_cell_map", "generic coordinate-map shift used by the structural edit"),
+        ("scripting/commands.rs", "parse_script_formula_writes", "builds a detached grid; apply_script_modified_grids_core recalculates"),
+        ("commands/structure.rs", "shift_cross_sheet_formulas", "helper of the structural edit, which recalculates"),
+        ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "helper of off_sheet_structural_edit, which recalculates"),
+        ("undo_commands.rs", "apply_changes", "drives the cascade for every restore kind"),
+        ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes recalculates"),
+        ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes recalculates"),
+        ("undo_commands.rs", "apply_pivot_create_restore", "reports its sheet; apply_changes recalculates"),
+        ("undo_commands.rs", "apply_pivot_definition_restore", "reports its sheet; apply_changes recalculates"),
+        ("undo_commands.rs", "apply_report_restore", "reports its sheet; apply_changes recalculates"),
+        ("undo_commands.rs", "apply_script_grid_cells_restore", "reports its sheet; apply_changes recalculates"),
+        ("undo_commands.rs", "apply_sheet_structural_restore", "reports its sheet; apply_changes recalculates"),
+        // -- Writes a sheet nothing can yet reference -----------------------
+        ("pivot/commands.rs", "drill_through_to_sheet", "writes a freshly created sheet"),
+        // -- IN CLASS, left to their owner. Named so the next sweep starts
+        //    from a list rather than a grep. Each writes into a region whose
+        //    own refresh path is the thing that ought to trigger.
+        ("pivot/commands.rs", "create_pivot_inner", "IN CLASS — pivot owner: a formula over a freshly written pivot block stays stale"),
+        ("pivot/commands.rs", "delete_pivot_table", "IN CLASS — pivot owner: clearing the block leaves readers stale"),
+        ("pivot/commands.rs", "undo_pivot_overwrite", "IN CLASS — pivot owner"),
+        ("tables.rs", "toggle_totals_row", "IN CLASS — table owner"),
+        ("tables.rs", "set_totals_row_function", "IN CLASS — table owner"),
+        ("tables.rs", "set_calculated_column", "IN CLASS — table owner"),
+        ("tables.rs", "check_table_auto_expand", "IN CLASS — table owner"),
+        // -- Rewrites formula REFERENCES, not values ------------------------
+        ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; no value moves"),
+        ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; no value moves"),
+        ("commands/structure.rs", "relocate_cell_references", "RESIDUAL — re-evaluates the formulas it rewrites but does not cascade to THEIR dependents; the cut/paste flow's paste half seeds from the pasted block only"),
+    ];
+
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert!(
+        src_root.is_dir(),
+        "the crate source tree is not readable at {} — this census cannot run \
+         from a list, so it reads the tree",
+        src_root.display()
+    );
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(
+        files.len() > 50,
+        "only {} source files found under {} — the walk is broken, not the crate",
+        files.len(),
+        src_root.display()
+    );
+
+    let mut unclassified: Vec<String> = Vec::new();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for path in &files {
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Test sources are not the product.
+        if rel.ends_with("_tests.rs") || rel == "tests.rs" || rel.starts_with("tests/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        for (func, recalculates) in cell_writing_functions(&text) {
+            seen.push((rel.clone(), func.clone()));
+            if recalculates {
+                continue;
+            }
+            if EXEMPT.iter().any(|(f, n, _)| *f == rel && *n == func) {
+                continue;
+            }
+            unclassified.push(format!("{}::{}", rel, func));
+        }
+    }
+
+    assert!(
+        unclassified.is_empty(),
+        "these functions write cells and neither recalculate nor carry a \
+         recorded reason not to:\n  {}\n\nThis is the `sort_range` / \
+         `clear_range` / `bi_refresh_connection` class. Either seed the ONE \
+         shared cascade (`recalc_after_active_sheet_bulk_rewrite` for the \
+         active sheet, `recalc_after_off_sheet_write` for others, as a SECOND \
+         lock phase after the command's own guards are dropped) or add the \
+         function to EXEMPT with the reason it needs none.",
+        unclassified.join("\n  ")
+    );
+
+    // The exemption list must not outlive its entries either: a stale name in
+    // it reads as a considered decision about code that no longer exists.
+    let stale: Vec<String> = EXEMPT
+        .iter()
+        .filter(|(f, n, _)| !seen.iter().any(|(sf, sn)| sf == f && sn == n))
+        .map(|(f, n, _)| format!("{}::{}", f, n))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "EXEMPT names functions that no longer write cells:\n  {}",
+        stale.join("\n  ")
+    );
+
+    // Non-vacuity: the census must actually be finding the known members.
+    for (file, func) in [
+        ("commands/data.rs", "clear_range"),
+        ("commands/data.rs", "sort_range"),
+        ("bi/commands.rs", "bi_refresh_connection"),
+        ("merge_commands.rs", "merge_cells_off_sheet"),
+    ] {
+        assert!(
+            seen.iter().any(|(f, n)| f == file && n == func),
+            "the census did not even find `{}::{}` — it is not measuring what \
+             it claims to",
+            file,
+            func
+        );
+    }
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// `(function name, does its body reach a shared recalculation entry point)`
+/// for every function in `text` that writes a cell, with `#[cfg(test)]` modules
+/// removed first — a test fixture seeding a grid is not a product write.
+fn cell_writing_functions(text: &str) -> Vec<(String, bool)> {
+    const RECALC: [&str; 5] = [
+        "recalc_after_active_sheet_bulk_rewrite(",
+        "recalc_after_off_sheet_write(",
+        "recalculate_sheet_values(",
+        "cascade_cross_sheet_dependents(",
+        "recalc_order_from_seeds(",
+    ];
+    let lines: Vec<String> = strip_test_modules(text);
+
+    // (line index, indentation, name) of every `fn` item.
+    let mut starts: Vec<(usize, usize, String)> = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        if let Some((indent, name)) = parse_fn_header(line) {
+            starts.push((n, indent, name));
+        }
+    }
+
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for &(start, indent, ref name) in &starts {
+        // A function ends at the first line that is exactly its closing brace
+        // at its own indentation — how every item in this crate is written.
+        let closer = format!("{}}}", " ".repeat(indent));
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| *l == closer)
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len() - 1);
+        let body = &lines[start..=end];
+        let writes = body.iter().any(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && (l.contains(".set_cell(") || l.contains(".clear_cell("))
+        });
+        if !writes {
+            continue;
+        }
+        let joined = body.join("\n");
+        let recalculates = RECALC.iter().any(|r| joined.contains(r));
+        out.push((name.clone(), recalculates));
+    }
+    out
+}
+
+/// `(indentation, name)` if `line` opens a `fn` item.
+fn parse_fn_header(line: &str) -> Option<(usize, String)> {
+    let indent = line.len() - line.trim_start().len();
+    if indent > 4 {
+        return None; // deeper than an impl body: a closure or a nested item
+    }
+    let mut rest = line.trim_start();
+    for prefix in ["pub(crate) ", "pub(super) ", "pub(self) ", "pub ", "async ", "const ", "unsafe "] {
+        while let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped;
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some((indent, name))
+    }
+}
+
+/// The source with top-level `#[cfg(test)] mod ... { ... }` blocks blanked out.
+fn strip_test_modules(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let len = lines.len();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == "#[cfg(test)]" {
+            let mut j = i + 1;
+            while j < lines.len()
+                && (lines[j].trim_start().starts_with("#[") || lines[j].trim_start().starts_with("//"))
+            {
+                j += 1;
+            }
+            let is_mod = j < lines.len() && {
+                let t = lines[j].trim_start();
+                t.starts_with("mod ") || t.starts_with("pub mod ")
+            };
+            if is_mod {
+                let mut k = j;
+                while k < lines.len() && lines[k] != "}" {
+                    k += 1;
+                }
+                for line in lines.iter_mut().take((k + 1).min(len)).skip(i) {
+                    line.clear();
+                }
+                i = k + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    lines
+}

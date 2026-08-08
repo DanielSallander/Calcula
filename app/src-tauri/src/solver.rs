@@ -634,7 +634,7 @@ pub fn solver_solve(
     {
         let wb_index = state.writeback_index.lock().unwrap();
         if !wb_index.is_empty() {
-            let sheet_ids = state.sheet_ids.lock().unwrap();
+            let sheet_ids = state.sheet_ids.read().unwrap();
             if let Some(&sid) = sheet_ids.get(params.sheet_index) {
                 let mut blocked_cells = Vec::new();
                 for var in &params.variable_cells {
@@ -672,13 +672,13 @@ pub fn solver_solve(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
@@ -915,13 +915,13 @@ pub fn solver_revert(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Restore original values

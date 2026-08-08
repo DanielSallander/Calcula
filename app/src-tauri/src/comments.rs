@@ -356,7 +356,7 @@ pub(crate) fn add_comment_impl(
     file_state: &FileState,
     params: AddCommentParams,
 ) -> CommentResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let key = (params.row, params.col);
 
     // Mutual exclusivity: check if cell has a note
@@ -433,7 +433,7 @@ pub fn update_comment(
     file_state: State<FileState>,
     params: UpdateCommentParams,
 ) -> CommentResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -506,7 +506,7 @@ pub(crate) fn delete_comment_impl(
     file_state: &FileState,
     comment_id: String,
 ) -> CommentResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -570,7 +570,7 @@ pub fn get_comment(
     row: u32,
     col: u32,
 ) -> Option<Comment> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -585,7 +585,7 @@ pub fn get_comment_by_id(
     state: State<AppState>,
     comment_id: String,
 ) -> Option<Comment> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -600,7 +600,7 @@ pub fn get_comment_by_id(
 pub fn get_all_comments(
     state: State<AppState>,
 ) -> Vec<Comment> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -628,7 +628,7 @@ pub fn get_comments_for_sheet(
 pub fn get_comment_indicators(
     state: State<AppState>,
 ) -> Vec<CommentIndicator> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -656,7 +656,7 @@ pub fn get_comment_indicators_in_range(
     end_row: u32,
     end_col: u32,
 ) -> Vec<CommentIndicator> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -687,7 +687,7 @@ pub fn resolve_comment(
     comment_id: String,
     resolved: bool,
 ) -> CommentResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -741,7 +741,7 @@ pub fn add_reply(
     file_state: State<FileState>,
     params: AddReplyParams,
 ) -> ReplyResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -816,7 +816,7 @@ pub fn update_reply(
     file_state: State<FileState>,
     params: UpdateReplyParams,
 ) -> ReplyResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -892,7 +892,7 @@ pub fn delete_reply(
     comment_id: String,
     reply_id: String,
 ) -> ReplyResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -965,7 +965,7 @@ pub fn move_comment(
     new_row: u32,
     new_col: u32,
 ) -> CommentResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -1049,7 +1049,7 @@ pub fn move_comment(
 pub fn get_comment_count(
     state: State<AppState>,
 ) -> usize {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -1065,7 +1065,7 @@ pub fn has_comment(
     row: u32,
     col: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
     comments
@@ -1080,7 +1080,7 @@ pub fn clear_all_comments(
     state: State<AppState>,
     file_state: State<FileState>,
 ) -> usize {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     let effect = DocumentEffect::mutates(&file_state);
@@ -1106,7 +1106,7 @@ pub fn clear_comments_in_range(
     end_row: u32,
     end_col: u32,
 ) -> usize {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
     let effect = DocumentEffect::mutates(&file_state);

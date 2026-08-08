@@ -7,6 +7,28 @@
 import { test, expect } from "../fixtures";
 
 test.describe("Large data handling", () => {
+  // This file writes AE1:AE150, AF1:AF3, AG1:AG3 and AH1:AH20 -- columns 30-33,
+  // well outside the A1:Z1000 box the reset helper used to clear -- and never
+  // removed any of it. `evaluate-formula.spec.ts` screenshots that exact part of
+  // the sheet, so its golden (recorded on a clean grid: AI1:AI3 = 10/20/30 and
+  // nothing else) was being compared against a viewport full of "Row0..Row25",
+  // "Ääö Ñ ..." and two #CIRCULAR cells. 14 800 differing pixels, and nothing to
+  // do with evaluating a formula.
+  //
+  // See docs/design/open-decisions-2026-08.md sec 3b: the spec that creates the
+  // residue owns it.
+  test.afterAll(async ({ sharedPage }) => {
+    await sharedPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      if (!tauri?.core?.invoke) return;
+      await tauri.core
+        .invoke("clear_range_with_options", {
+          params: { startRow: 0, startCol: 30, endRow: 199, endCol: 33, applyTo: "All" },
+        })
+        .catch(() => {});
+      window.dispatchEvent(new Event("grid:refresh"));
+    });
+  });
   test("enter values in 100 cells rapidly", async ({ grid }) => {
     // Batch-set 100 cells via Tauri API
     await grid.page.evaluate(async () => {

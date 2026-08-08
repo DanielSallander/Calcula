@@ -13,7 +13,7 @@ use tauri::State;
 /// Get a style by index.
 #[tauri::command]
 pub fn get_style(state: State<AppState>, index: usize) -> StyleData {
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let theme = state.theme.read().unwrap();
     StyleData::from_cell_style(styles.get(index), &theme)
 }
@@ -21,7 +21,7 @@ pub fn get_style(state: State<AppState>, index: usize) -> StyleData {
 /// Get all styles.
 #[tauri::command]
 pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData> {
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let theme = state.theme.read().unwrap();
     styles.all_styles().iter().map(|s| StyleData::from_cell_style(s, &theme)).collect()
 }
@@ -44,7 +44,7 @@ pub fn set_cell_style(
     // format from an unlocked cell onto a locked one would otherwise silently
     // unlock it on a protected sheet.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_protection_range(
             &state, active_sheet, row, col, row, col,
         )?;
@@ -59,10 +59,10 @@ pub fn set_cell_style(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Record previous state for undo
@@ -86,7 +86,7 @@ pub fn set_cell_style(
         }
 
         // Record undo
-        undo_stack.record_cell_change(row, col, previous_cell);
+        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
         // The cell keeps its OWN index (written above); what is DISPLAYED is the
         // resolved one, so an index of 0 falls back to the row/column tier.
@@ -131,7 +131,7 @@ pub fn set_cell_style(
         }
 
         // Record undo (previous was None since cell didn't exist)
-        undo_stack.record_cell_change(row, col, previous_cell);
+        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -173,7 +173,7 @@ pub fn apply_formatting(
     // is the source of truth: without it, `applyFormatting({locked: false})`
     // would be an ungated way to unlock a protected sheet and then write freely.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         // The allowFormatCells option gates formatting as a KIND of operation;
         // the per-cell gate below then checks each target cell.
         crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "format cells")?;
@@ -193,10 +193,10 @@ pub fn apply_formatting(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let mut updated_cells = Vec::new();
@@ -259,7 +259,7 @@ pub fn apply_formatting(
                 if active_sheet < grids.len() {
                     grids[active_sheet].set_cell(row, col, updated_cell.clone());
                 }
-                undo_stack.record_cell_change(row, col, previous_cell);
+                undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
                 let new_style = styles.get(cached_new_index);
                 let fmt_result = format_cell_value_with_color(&updated_cell.value, new_style, &locale);
                 let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
@@ -424,7 +424,7 @@ pub fn apply_formatting(
             }
 
             // Record undo
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
             let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style, &locale);
             let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
@@ -516,8 +516,8 @@ pub fn apply_formatting_to_sheets(
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
     let cell_count = params.rows.len() * params.cols.len();
@@ -642,7 +642,7 @@ pub fn apply_formatting_to_sheets(
                 updated_cell.style_index = new_style_index;
                 grid.set_cell(row, col, updated_cell);
 
-                undo_stack.record_cell_change(row, col, previous_cell);
+                undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
             }
         }
 
@@ -1009,7 +1009,7 @@ fn parse_gradient_direction(s: &str) -> GradientDirection {
 /// Get the total number of styles.
 #[tauri::command]
 pub fn get_style_count(state: State<AppState>) -> usize {
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
     styles.len()
 }
 
@@ -1028,7 +1028,7 @@ pub fn set_cell_rich_text(
 ) -> Result<Option<CellData>, String> {
     // Sheet protection, before any lock below. Rich text is cell CONTENT.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
     }
 
@@ -1038,15 +1038,15 @@ pub fn set_cell_rich_text(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Record undo
     let previous = grid.get_cell(row, col).cloned();
-    undo_stack.record_cell_change(row, col, previous);
+    undo_stack.record_cell_change(active_sheet, row, col, previous);
 
     // Get or create the cell, update rich_text
     let engine_runs = runs.as_ref().map(|r| crate::api_types::data_to_rich_text_runs(r));
@@ -1124,7 +1124,7 @@ pub fn apply_border_preset(
     // Sheet protection, before any lock below: per-cell locks AND the
     // formatCells option flag (borders are formatting), matching apply_formatting.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         crate::protection::check_sheet_protection_range(
             &state,
             active_sheet,
@@ -1142,10 +1142,10 @@ pub fn apply_border_preset(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Build the border style to apply
@@ -1276,7 +1276,7 @@ pub fn apply_border_preset(
                 grids[active_sheet].set_cell(row, col, updated_cell.clone());
             }
 
-            undo_stack.record_cell_change(row, col, previous_cell);
+            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
             let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style, &locale);
             let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {

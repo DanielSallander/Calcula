@@ -16,6 +16,7 @@ import {
   getRowGutterWidget,
   drawRowGutterGlyph,
 } from "../../../../api/rowHeaderOverrides";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 /** Color for the double-line indicator drawn at hidden row/column boundaries. */
 const HIDDEN_INDICATOR_COLOR = "#4a4a4a";
@@ -74,8 +75,8 @@ function hasHiddenRowAfter(row: number, dims?: DimensionOverrides): boolean {
  */
 export function drawCorner(state: RenderState): void {
   const { ctx, config, theme } = state;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   // Background
   ctx.fillStyle = theme.cornerBackground;
@@ -93,8 +94,8 @@ export function drawCorner(state: RenderState): void {
  */
 export function drawColumnHeaders(state: RenderState): void {
   const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation, splitBarSize = 0, splitViewport, referenceStyle } = state;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   // In R1C1 mode, show column numbers (1-based) instead of letters
   const isR1C1 = referenceStyle === "R1C1";
   const getColLabel = (col: number): string => isR1C1 ? String(col + 1) : columnToLetter(col);
@@ -379,8 +380,8 @@ export function drawColumnHeaders(state: RenderState): void {
  */
 export function drawRowHeaders(state: RenderState): void {
   const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation, splitBarSize = 0, splitViewport } = state;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
 
   // Calculate row insertion/deletion animation offset (same logic as cells.ts)

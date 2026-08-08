@@ -708,23 +708,33 @@ export function useSpreadsheetSelection({
       // fan out to the concrete per-feature refresh events. Core stays
       // feature-agnostic — no pivot:refresh/slicers:refresh/styles:refresh/...
       // literals here. ("styles" is always included: undo can re-apply formatting.)
-      const domains: MutationDomain[] = ["styles"];
-      if (result.pivotChanged) domains.push("pivot");
-      if (result.slicerChanged) domains.push("slicer");
-      if (result.ribbonFilterChanged) domains.push("ribbonFilter");
-      if (result.paneControlChanged) domains.push("paneControl");
-      if (result.objectsChanged) domains.push("objects");
+      // The backend reports the domains; Core no longer re-derives them from a
+      // ladder of booleans. That ladder was the reason the NON-CELL domains
+      // announced nothing on undo: adding one meant editing a Rust struct, a TS
+      // interface and this list in step, and outline / hyperlinks / validations /
+      // annotations / controls never were. ("styles" is always included: undo can
+      // re-apply formatting, and no restore kind reports it.)
+      const domains: MutationDomain[] = [
+        "styles",
+        ...((result.refreshDomains ?? []) as MutationDomain[]),
+      ];
       emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
 
       // Control/filter state restored: recalc GET.CONTROLVALUE dependents
       // (fire-and-forget; repaints when done).
-      if (result.ribbonFilterChanged || result.paneControlChanged) {
+      if (domains.includes("ribbonFilter") || domains.includes("paneControl")) {
         void recalcControlValueCells();
       }
 
-      // Emit event to update any listeners (e.g., formula bar)
-      if (result.updatedCells.length > 0) {
-        const firstCell = result.updatedCells[0];
+      // Emit event to update any listeners (e.g., formula bar).
+      // ACTIVE-SHEET cells only. Now that a restore reports which sheet it
+      // wrote, an undo of an off-sheet edit can put a foreign cell first in
+      // the list, and the formula bar has no sheet dimension — it would show
+      // another sheet's content against the current selection.
+      const firstCell = result.updatedCells.find(
+        (c) => c.sheetIndex === null || c.sheetIndex === undefined
+      );
+      if (firstCell) {
         cellEvents.emit({
           row: firstCell.row,
           col: firstCell.col,
@@ -766,23 +776,33 @@ export function useSpreadsheetSelection({
 
       // Report the change DOMAINS this redo touched (see handleUndo) — one generic
       // event, Shell translates to per-feature refreshes. Core names no features.
-      const domains: MutationDomain[] = ["styles"];
-      if (result.pivotChanged) domains.push("pivot");
-      if (result.slicerChanged) domains.push("slicer");
-      if (result.ribbonFilterChanged) domains.push("ribbonFilter");
-      if (result.paneControlChanged) domains.push("paneControl");
-      if (result.objectsChanged) domains.push("objects");
+      // The backend reports the domains; Core no longer re-derives them from a
+      // ladder of booleans. That ladder was the reason the NON-CELL domains
+      // announced nothing on undo: adding one meant editing a Rust struct, a TS
+      // interface and this list in step, and outline / hyperlinks / validations /
+      // annotations / controls never were. ("styles" is always included: undo can
+      // re-apply formatting, and no restore kind reports it.)
+      const domains: MutationDomain[] = [
+        "styles",
+        ...((result.refreshDomains ?? []) as MutationDomain[]),
+      ];
       emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "redo" });
 
       // Control/filter state restored: recalc GET.CONTROLVALUE dependents
       // (fire-and-forget; repaints when done).
-      if (result.ribbonFilterChanged || result.paneControlChanged) {
+      if (domains.includes("ribbonFilter") || domains.includes("paneControl")) {
         void recalcControlValueCells();
       }
 
-      // Emit event to update any listeners (e.g., formula bar)
-      if (result.updatedCells.length > 0) {
-        const firstCell = result.updatedCells[0];
+      // Emit event to update any listeners (e.g., formula bar).
+      // ACTIVE-SHEET cells only. Now that a restore reports which sheet it
+      // wrote, an undo of an off-sheet edit can put a foreign cell first in
+      // the list, and the formula bar has no sheet dimension — it would show
+      // another sheet's content against the current selection.
+      const firstCell = result.updatedCells.find(
+        (c) => c.sheetIndex === null || c.sheetIndex === undefined
+      );
+      if (firstCell) {
         cellEvents.emit({
           row: firstCell.row,
           col: firstCell.col,

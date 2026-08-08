@@ -287,11 +287,11 @@ pub struct UpdateHyperlinkParams {
 /// write into a sheet slot that does not exist (the storage is a HashMap, so
 /// nothing else would ever complain).
 fn resolve_hyperlink_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usize, String> {
-    let active = *state.active_sheet.lock().unwrap();
+    let active = *state.active_sheet.read().unwrap();
     match sheet_index {
         None => Ok(active),
         Some(idx) => {
-            let count = state.sheet_names.lock().unwrap().len();
+            let count = state.sheet_names.read().unwrap().len();
             if idx < count {
                 Ok(idx)
             } else {
@@ -387,7 +387,7 @@ pub fn update_hyperlink(
     file_state: State<FileState>,
     params: UpdateHyperlinkParams,
 ) -> HyperlinkResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowInsertHyperlinks option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
@@ -527,7 +527,7 @@ pub fn get_all_hyperlinks(state: State<AppState>, sheet_index: Option<usize>) ->
 /// Get hyperlink indicators for rendering (shows which cells have hyperlinks)
 #[tauri::command]
 pub fn get_hyperlink_indicators(state: State<AppState>) -> Vec<HyperlinkIndicator> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let hyperlinks = state.hyperlinks.read().unwrap();
 
     hyperlinks
@@ -547,7 +547,7 @@ pub fn get_hyperlinks_in_range(
     end_row: u32,
     end_col: u32,
 ) -> Vec<HyperlinkIndicator> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let hyperlinks = state.hyperlinks.read().unwrap();
 
     let min_row = start_row.min(end_row);
@@ -576,7 +576,7 @@ pub fn has_hyperlink(
     row: u32,
     col: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let hyperlinks = state.hyperlinks.read().unwrap();
 
     hyperlinks
@@ -595,7 +595,7 @@ pub fn clear_hyperlinks_in_range(
     end_row: u32,
     end_col: u32,
 ) -> u32 {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // NOTE: not option-gated. This returns a bare count with no error channel,
     // so a refusal would be an indistinguishable 0 — a silent no-op is worse
     // than no gate. Clearing hyperlinks still goes through the per-cell write
@@ -640,7 +640,7 @@ pub fn move_hyperlink(
     to_row: u32,
     to_col: u32,
 ) -> HyperlinkResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // allowInsertHyperlinks option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "insertHyperlinks", "insert hyperlinks",

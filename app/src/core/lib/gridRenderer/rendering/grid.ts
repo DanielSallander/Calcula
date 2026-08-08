@@ -6,6 +6,7 @@
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 /**
  * Check if a grid line should be skipped due to a merged cell.
@@ -173,8 +174,8 @@ function getLineSegments(
  */
 export function drawGridLines(state: RenderState): void {
   const { ctx, width, height, config, viewport, theme, dimensions, cells, insertionAnimation, overlayRegionBounds } = state;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
 
@@ -303,8 +304,8 @@ export function drawGridLines(state: RenderState): void {
  */
 export function drawCellBackgrounds(state: RenderState): void {
   const { ctx, width, height, config, theme } = state;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   ctx.fillStyle = theme.cellBackground;
   const startX = rowHeaderWidth;

@@ -8,6 +8,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import type { editor as monacoEditor } from "monaco-editor";
 import * as monaco from "monaco-editor";
+import { enforceLfLineEndings } from "../../_shared/lib/monacoLineEndings";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Monaco 0.52+ moved typescript to top-level; languages.typescript still works at runtime
 const monacoTs = (monaco.languages as any).typescript;
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
@@ -76,6 +77,10 @@ self.MonacoEnvironment = {
 };
 
 loader.config({ monaco });
+// Stored text is LF on every platform. Monaco defaults a model created from
+// EMPTY text to the OS ending (CRLF here), and @monaco-editor/react creates the
+// model before an async document arrives — see _shared/lib/monacoLineEndings.ts.
+enforceLfLineEndings(monaco);
 
 // Inject CSS for breakpoint glyph markers + window styling
 (function injectEditorStyles() {

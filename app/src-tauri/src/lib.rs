@@ -195,6 +195,9 @@ mod tests;
 mod eval_budget_tests;
 
 #[cfg(test)]
+mod error_display_tests;
+
+#[cfg(test)]
 mod document_effect_pilot_tests;
 
 #[cfg(test)]
@@ -237,9 +240,24 @@ pub struct AppState {
     /// sole writer.
     pub grids: document_effect::Persisted<Vec<Grid>>,
     /// Sheet names in order
-    pub sheet_names: Mutex<Vec<String>>,
-    /// Currently active sheet index
-    pub active_sheet: Mutex<usize>,
+    pub sheet_names: document_effect::Persisted<Vec<String>>,
+    /// Currently active sheet index.
+    ///
+    /// PERSISTED (`workbook.active_sheet`) -> `Persisted<T>`, and ONBOARDED IN
+    /// ORDER TO SAY NO. Excel dirties on a sheet switch; Calcula deliberately
+    /// does not, because merely LOOKING at a workbook must never raise the
+    /// close prompt. Before this the divergence was a comment on
+    /// `set_active_sheet`; it is now a decision the type demands.
+    ///
+    /// There are 358 reads and SEVEN writers, which is the whole argument for
+    /// gating this field rather than trusting the convention. The pure switch
+    /// (`set_active_sheet`) writes under `CleanReason::Navigation`. The other
+    /// six ride an effect that is already `mutates` for a different reason --
+    /// add / delete / move / copy sheet and pivot drill-through all change
+    /// WHICH SHEETS EXIST, so the index landing somewhere new is a consequence
+    /// of a real document change, not a navigation of the old document. The
+    /// load path writes under `LoadingFromDisk`.
+    pub active_sheet: document_effect::Persisted<usize>,
     /// The active sheet's grid, mirroring `grids[active_sheet]`.
     ///
     /// PERSISTED for the same reason `grids` is -- it is the same cells. It is a
@@ -249,15 +267,15 @@ pub struct AppState {
     /// leaving one half of the pair ungated would have made the guarantee a
     /// half-guarantee that reads as a whole one.
     pub grid: document_effect::Persisted<Grid>,
-    pub style_registry: Mutex<StyleRegistry>,
+    pub style_registry: document_effect::Persisted<StyleRegistry>,
     /// Column widths for the currently active sheet (swapped on sheet switch)
-    pub column_widths: Mutex<HashMap<u32, f64>>,
+    pub column_widths: document_effect::Persisted<HashMap<u32, f64>>,
     /// Row heights for the currently active sheet (swapped on sheet switch)
-    pub row_heights: Mutex<HashMap<u32, f64>>,
+    pub row_heights: document_effect::Persisted<HashMap<u32, f64>>,
     /// Per-sheet column widths storage (indexed by sheet index)
-    pub all_column_widths: Mutex<Vec<HashMap<u32, f64>>>,
+    pub all_column_widths: document_effect::Persisted<Vec<HashMap<u32, f64>>>,
     /// Per-sheet row heights storage (indexed by sheet index)
-    pub all_row_heights: Mutex<Vec<HashMap<u32, f64>>>,
+    pub all_row_heights: document_effect::Persisted<Vec<HashMap<u32, f64>>>,
     /// Rows the USER hid by hand on the currently active sheet (swapped on
     /// sheet switch, exactly like `row_heights`).
     ///
@@ -268,17 +286,17 @@ pub struct AppState {
     /// rule is a union, never an overwrite:
     ///   effectiveHidden(row) = userHidden OR filterHidden OR outlineHidden
     /// (see `commands::nav::collect_hidden_rows_for_sheet`).
-    pub user_hidden_rows: Mutex<HashSet<u32>>,
+    pub user_hidden_rows: document_effect::Persisted<HashSet<u32>>,
     /// Columns the user hid by hand on the active sheet (see `user_hidden_rows`).
-    pub user_hidden_cols: Mutex<HashSet<u32>>,
+    pub user_hidden_cols: document_effect::Persisted<HashSet<u32>>,
     /// Per-sheet user-hidden rows storage (indexed by sheet index)
-    pub all_user_hidden_rows: Mutex<Vec<HashSet<u32>>>,
+    pub all_user_hidden_rows: document_effect::Persisted<Vec<HashSet<u32>>>,
     /// Per-sheet user-hidden columns storage (indexed by sheet index)
-    pub all_user_hidden_cols: Mutex<Vec<HashSet<u32>>>,
+    pub all_user_hidden_cols: document_effect::Persisted<Vec<HashSet<u32>>>,
     /// Default row height for rows without custom heights (pixels)
-    pub default_row_height: Mutex<f64>,
+    pub default_row_height: document_effect::Persisted<f64>,
     /// Default column width for columns without custom widths (pixels)
-    pub default_column_width: Mutex<f64>,
+    pub default_column_width: document_effect::Persisted<f64>,
     pub dependents: Mutex<DependencyMap>,
     pub dependencies: Mutex<DependencyMap>,
     /// Calculation mode: "automatic" or "manual"
@@ -305,7 +323,7 @@ pub struct AppState {
     /// Freeze pane configurations per sheet
     pub freeze_configs: document_effect::Persisted<Vec<FreezeConfig>>,
     /// Split window configurations per sheet
-    pub split_configs: Mutex<Vec<SplitConfig>>,
+    pub split_configs: document_effect::Persisted<Vec<SplitConfig>>,
     /// Per-sheet zoom as a REAL PERCENT (100 = 100%) — Excel's `zoomScale`.
     ///
     /// A per-sheet Vec kept parallel to `sheet_names`, exactly like
@@ -320,7 +338,7 @@ pub struct AppState {
     /// factor is a rendering detail converted at the UI boundary, and storing
     /// it here is what produced the factor-vs-percent split-brain that Wave 4
     /// had to heal.
-    pub sheet_zooms: Mutex<Vec<f64>>,
+    pub sheet_zooms: document_effect::Persisted<Vec<f64>>,
     /// Per-sheet gridlines visibility (default true)
     pub show_gridlines: document_effect::Persisted<Vec<bool>>,
     /// Per-sheet DISPLAY FLAGS (display-zeros, show-formulas, view mode, headings).
@@ -330,9 +348,9 @@ pub struct AppState {
     /// and four vectors would be four chances to forget to resize on sheet insert.
     pub sheet_display_flags: document_effect::Persisted<Vec<api_types::SheetDisplayFlags>>,
     /// Merged cell regions for the current (active) sheet
-    pub merged_regions: Mutex<HashSet<MergedRegion>>,
+    pub merged_regions: document_effect::Persisted<HashSet<MergedRegion>>,
     /// Merged cell regions for ALL sheets (swapped on sheet switch)
-    pub all_merged_regions: Mutex<Vec<HashSet<MergedRegion>>>,
+    pub all_merged_regions: document_effect::Persisted<Vec<HashSet<MergedRegion>>>,
     /// Protected regions - cells in these regions cannot be edited directly.
     /// Registered by extensions (e.g., pivot tables, charts).
     pub protected_regions: Mutex<Vec<ProtectedRegion>>,
@@ -347,13 +365,13 @@ pub struct AppState {
     /// Notes per sheet: sheet_index -> (row, col) -> Note
     pub notes: document_effect::Persisted<notes::NoteStorage>,
     /// AutoFilters per sheet: sheet_index -> AutoFilter
-    pub auto_filters: Mutex<autofilter::AutoFilterStorage>,
+    pub auto_filters: document_effect::Persisted<autofilter::AutoFilterStorage>,
     /// Hyperlinks per sheet: sheet_index -> (row, col) -> Hyperlink
     pub hyperlinks: document_effect::Persisted<hyperlinks::HyperlinkStorage>,
     /// Sheet protection settings per sheet
-    pub sheet_protection: Mutex<protection::ProtectionStorage>,
+    pub sheet_protection: document_effect::Persisted<protection::ProtectionStorage>,
     /// Workbook-level structural protection (prevents add/delete/rename/move sheets)
-    pub workbook_protection: Mutex<protection::WorkbookProtection>,
+    pub workbook_protection: document_effect::Persisted<protection::WorkbookProtection>,
     /// Row/column grouping (outlines) per sheet
     pub outlines: document_effect::Persisted<grouping::OutlineStorage>,
     /// Conditional formatting rules per sheet.
@@ -459,7 +477,7 @@ pub struct AppState {
     /// typed file-format field — see persistence::Workbook::extension_data.
     pub extension_data: document_effect::Persisted<std::collections::HashMap<String, serde_json::Value>>,
     /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
-    pub sheet_ids: Mutex<Vec<identity::SheetId>>,
+    pub sheet_ids: document_effect::Persisted<Vec<identity::SheetId>>,
     /// Subscription metadata for .calp packages linked to this workbook
     /// PERSISTED (user_files/subscriptions.json) -> `Persisted<T>`.
     pub subscriptions: crate::document_effect::Persisted<calp::manifest::SubscriptionManifest>,
@@ -510,8 +528,15 @@ pub struct AppState {
     pub gather_cache: Mutex<Option<(std::time::Instant, std::collections::HashMap<String, engine::GatherRegionData>)>>,
     /// Collected entries of model writeback COLUMNS (engine v21), keyed by
     /// writeback column id. Append-only history; persisted in .cala
-    /// user_files. See bi::writeback.
-    pub model_writeback: Mutex<crate::bi::writeback::ModelWritebackStore>,
+    /// user_files (`model_writeback_values.json`). See bi::writeback.
+    ///
+    /// PERSISTED -> `Persisted<T>`. It was the LAST store the save path
+    /// serialises that was still a bare `Mutex`, which is why it is here
+    /// rather than in the list of session state below: leaving one serialised
+    /// store ungated turns "every persisted store is gated" back into a
+    /// convention, and a convention with one known exception is the shape the
+    /// dirty-flag census started from.
+    pub model_writeback: document_effect::Persisted<crate::bi::writeback::ModelWritebackStore>,
     /// Session floor (ISO timestamp) for Blank-projection writeback columns:
     /// entries before it are hidden ("blank on reload"). Reset at workbook
     /// open/new.
@@ -561,24 +586,24 @@ pub fn create_app_state() -> AppState {
     let initial_grid = Grid::new();
     let app_state = AppState {
         grids: document_effect::Persisted::new(vec![initial_grid.clone()]),
-        sheet_names: Mutex::new(vec!["Sheet1".to_string()]),
-        active_sheet: Mutex::new(0),
+        sheet_names: document_effect::Persisted::new(vec!["Sheet1".to_string()]),
+        active_sheet: document_effect::Persisted::new(0),
         grid: document_effect::Persisted::new(initial_grid),
-        style_registry: Mutex::new(StyleRegistry::new()),
-        column_widths: Mutex::new(HashMap::new()),
-        row_heights: Mutex::new(HashMap::new()),
-        all_column_widths: Mutex::new(vec![HashMap::new()]),
-        all_row_heights: Mutex::new(vec![HashMap::new()]),
-        user_hidden_rows: Mutex::new(HashSet::new()),
-        user_hidden_cols: Mutex::new(HashSet::new()),
-        all_user_hidden_rows: Mutex::new(vec![HashSet::new()]),
-        all_user_hidden_cols: Mutex::new(vec![HashSet::new()]),
+        style_registry: document_effect::Persisted::new(StyleRegistry::new()),
+        column_widths: document_effect::Persisted::new(HashMap::new()),
+        row_heights: document_effect::Persisted::new(HashMap::new()),
+        all_column_widths: document_effect::Persisted::new(vec![HashMap::new()]),
+        all_row_heights: document_effect::Persisted::new(vec![HashMap::new()]),
+        user_hidden_rows: document_effect::Persisted::new(HashSet::new()),
+        user_hidden_cols: document_effect::Persisted::new(HashSet::new()),
+        all_user_hidden_rows: document_effect::Persisted::new(vec![HashSet::new()]),
+        all_user_hidden_cols: document_effect::Persisted::new(vec![HashSet::new()]),
         // ONE definition of these, in `persistence` -- see
         // DEFAULT_ROW_HEIGHT_PX. `new_file` used to re-type them as 24 / 100
         // and File > New silently handed out a differently-scaled grid than
         // app launch.
-        default_row_height: Mutex::new(::persistence::DEFAULT_ROW_HEIGHT_PX),
-        default_column_width: Mutex::new(::persistence::DEFAULT_COLUMN_WIDTH_PX),
+        default_row_height: document_effect::Persisted::new(::persistence::DEFAULT_ROW_HEIGHT_PX),
+        default_column_width: document_effect::Persisted::new(::persistence::DEFAULT_COLUMN_WIDTH_PX),
         dependents: Mutex::new(DependencyMap::default()),
         dependencies: Mutex::new(DependencyMap::default()),
         calculation_mode: Mutex::new("automatic".to_string()),
@@ -593,21 +618,21 @@ pub fn create_app_state() -> AppState {
         cross_sheet_dependencies: Mutex::new(CrossSheetDependenciesMap::default()),
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: document_effect::Persisted::new(vec![FreezeConfig::default()]),
-        split_configs: Mutex::new(vec![SplitConfig::default()]),
-        sheet_zooms: Mutex::new(vec![::persistence::DEFAULT_SHEET_ZOOM_PERCENT]),
+        split_configs: document_effect::Persisted::new(vec![SplitConfig::default()]),
+        sheet_zooms: document_effect::Persisted::new(vec![::persistence::DEFAULT_SHEET_ZOOM_PERCENT]),
         show_gridlines: document_effect::Persisted::new(vec![true]),
         sheet_display_flags: document_effect::Persisted::new(vec![api_types::SheetDisplayFlags::default()]),
-        merged_regions: Mutex::new(HashSet::new()),
-        all_merged_regions: Mutex::new(Vec::new()),
+        merged_regions: document_effect::Persisted::new(HashSet::new()),
+        all_merged_regions: document_effect::Persisted::new(Vec::new()),
         protected_regions: Mutex::new(Vec::new()),
         named_ranges: document_effect::Persisted::new(HashMap::new()),
         data_validations: document_effect::Persisted::new(HashMap::new()),
         comments: document_effect::Persisted::new(HashMap::new()),
         notes: document_effect::Persisted::new(HashMap::new()),
-        auto_filters: Mutex::new(HashMap::new()),
+        auto_filters: document_effect::Persisted::new(HashMap::new()),
         hyperlinks: document_effect::Persisted::new(HashMap::new()),
-        sheet_protection: Mutex::new(HashMap::new()),
-        workbook_protection: Mutex::new(protection::WorkbookProtection::default()),
+        sheet_protection: document_effect::Persisted::new(HashMap::new()),
+        workbook_protection: document_effect::Persisted::new(protection::WorkbookProtection::default()),
         outlines: document_effect::Persisted::new(HashMap::new()),
         conditional_formats: document_effect::Persisted::new(HashMap::new()),
         next_cf_rule_id: Mutex::new(1),
@@ -662,7 +687,7 @@ pub fn create_app_state() -> AppState {
         report_definitions: Mutex::new(Vec::new()),
         object_scripts: document_effect::Persisted::new(Vec::new()),
         extension_data: document_effect::Persisted::new(std::collections::HashMap::new()),
-        sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
+        sheet_ids: document_effect::Persisted::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: crate::document_effect::Persisted::new(calp::manifest::SubscriptionManifest::default()),
         override_layer: crate::document_effect::Persisted::new(calp::OverrideLayer::new()),
         audit_log: crate::document_effect::Persisted::new(calp::audit::AuditLog::new()),
@@ -675,7 +700,7 @@ pub fn create_app_state() -> AppState {
         id_registry: Mutex::new(identity::IdRegistry::new()),
         writeback_draft_regions: crate::document_effect::Persisted::new(Vec::new()),
         writeback_layer: crate::document_effect::Persisted::new(calp::writeback::WritebackLayer::new()),
-        model_writeback: Mutex::new(crate::bi::writeback::ModelWritebackStore::default()),
+        model_writeback: document_effect::Persisted::new(crate::bi::writeback::ModelWritebackStore::default()),
         model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
         calc_cancel: engine::CancelToken::new(),
         pending_recalc: Mutex::new(None),
@@ -683,8 +708,8 @@ pub fn create_app_state() -> AppState {
 
     // Register the initial sheet in the IdRegistry
     {
-        let sheet_ids = app_state.sheet_ids.lock().unwrap();
-        let sheet_names = app_state.sheet_names.lock().unwrap();
+        let sheet_ids = app_state.sheet_ids.read().unwrap();
+        let sheet_names = app_state.sheet_names.read().unwrap();
         let mut id_reg = app_state.id_registry.lock().unwrap();
         for (i, &sid) in sheet_ids.iter().enumerate() {
             if let Some(name) = sheet_names.get(i) {
@@ -725,17 +750,44 @@ pub fn format_cell_value(value: &CellValue, style: &CellStyle, locale: &engine::
 
 /// Render a `CellError` the way the GRID renders it.
 ///
-/// THE ONE APP-SIDE AUTHORITY on that spelling. It mirrors `Cell::display_value`
-/// in core/engine/src/cell.rs exactly, including that engine's convention of
-/// special-casing the literals whose Debug name is wrong and letting the rest
-/// fall through to `#{Debug}` (so `Div0` still reads "#DIV0" here, as it always
-/// has — this helper is not the place to change that).
+/// THE ONE APP-SIDE AUTHORITY on that spelling.
 ///
-/// The special case that matters: `Limit` MUST be listed. The Debug fallback
-/// would render "#LIMIT" without the trailing "!", which
-/// `normalizeCellErrorLiteral` on the frontend does not recognise and therefore
-/// collapses to "#VALUE!" — turning the one error a user most needs to find
-/// back into the one it was given its own variant to be distinguished from.
+/// IT DOES NOT MIRROR `Cell::display_value`. This doc comment used to claim it
+/// did "exactly", and described the engine as special-casing a few literals and
+/// letting the rest fall through to `#{Debug}`. The engine has no Debug
+/// fallback: `Cell::display_value` delegates to `CellError::as_literal`, an
+/// explicit table of the canonical Excel literals. The claim was stale, and a
+/// stale claim of agreement is worse than a recorded disagreement, because it
+/// invites the next author to "restore" a symmetry that was never there.
+///
+/// The disagreement, measured rather than asserted, is pinned by
+/// `cell_error_display_divergence_from_the_engine_is_pinned` in
+/// `error_display_tests.rs`. Four of the ten variants agree; six do not,
+/// because they take the `#{Debug}` arm below:
+///
+/// | variant    | this helper | engine `as_literal` |
+/// |------------|-------------|---------------------|
+/// | `Div0`     | `#DIV0`     | `#DIV/0!`           |
+/// | `Ref`      | `#REF`      | `#REF!`             |
+/// | `Name`     | `#NAME`     | `#NAME?`            |
+/// | `Value`    | `#VALUE`    | `#VALUE!`           |
+/// | `Circular` | `#CIRCULAR` | `#CIRCULAR!`        |
+/// | `Parse`    | `#PARSE`    | `#VALUE!`           |
+///
+/// `Parse` is the one worth a second look and is NOT merely cosmetic: the
+/// Debug arm leaks an internal enum name into the grid. The engine
+/// deliberately gives `Parse` no distinct literal (it shares `#VALUE!`, and
+/// `from_literal` therefore reloads it as `Value`), so `#PARSE` is a spelling
+/// no other layer in the product can parse back. Whether to close any of this
+/// is an owner decision — it moves grid goldens — and is written up in the
+/// register's owner-decision section.
+///
+/// The special case that matters and must stay: `Limit` MUST be listed
+/// explicitly. The Debug fallback would render "#LIMIT" without the trailing
+/// "!", which `normalizeCellErrorLiteral` on the frontend does not recognise
+/// and therefore collapses to "#VALUE!" — turning the one error a user most
+/// needs to find back into the one it was given its own variant to be
+/// distinguished from. The same argument applies to `Blocked` and `Conflict`.
 ///
 /// NOTE the deliberate asymmetry with `scripting::udf::cell_error_to_str`: that
 /// one produces the canonical EXCEL literals ("#DIV/0!") because it is a wire

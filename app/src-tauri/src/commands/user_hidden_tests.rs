@@ -25,13 +25,13 @@ use std::collections::HashSet;
 fn two_sheet_state() -> AppState {
     let state = crate::create_app_state();
     state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap().push(engine::Grid::new());
-    state.sheet_names.lock().unwrap().push("Sheet2".to_string());
+    state.sheet_names.write(&crate::document_effect::test_seed_effect()).unwrap().push("Sheet2".to_string());
     state
         .sheet_ids
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
-    ensure_user_hidden_len(&state, 2);
+    ensure_user_hidden_len(&state, &crate::document_effect::test_seed_effect(), 2);
     state
 }
 
@@ -115,7 +115,7 @@ fn undo_restores_the_previous_hidden_set_and_redo_re_applies_it() {
     for change in &transaction.changes {
         if let engine::undo::CellChange::CustomRestore { kind, data } = change {
             assert_eq!(kind, crate::undo_commands::USER_HIDDEN_RESTORE_KIND);
-            crate::undo_commands::apply_user_hidden_restore(&state, data, &mut inverse);
+            crate::undo_commands::apply_user_hidden_restore(&state, &crate::document_effect::test_seed_effect(), data, &mut inverse);
         }
     }
     assert!(
@@ -127,7 +127,7 @@ fn undo_restores_the_previous_hidden_set_and_redo_re_applies_it() {
     let mut inverse2 = engine::undo::Transaction::new("inverse2");
     for change in &inverse.changes {
         if let engine::undo::CellChange::CustomRestore { data, .. } = change {
-            crate::undo_commands::apply_user_hidden_restore(&state, data, &mut inverse2);
+            crate::undo_commands::apply_user_hidden_restore(&state, &crate::document_effect::test_seed_effect(), data, &mut inverse2);
         }
     }
     assert_eq!(
@@ -149,7 +149,7 @@ fn hiding_a_row_on_sheet1_leaves_sheet2_alone_and_survives_the_round_trip_back()
 
     // Switch to Sheet2 (what sheets::set_active_sheet does).
     stash_active_user_hidden(&state, 0);
-    *state.active_sheet.lock().unwrap() = 1;
+    *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 1;
     load_active_user_hidden(&state, 1);
 
     assert!(
@@ -159,7 +159,7 @@ fn hiding_a_row_on_sheet1_leaves_sheet2_alone_and_survives_the_round_trip_back()
 
     // ...and back to Sheet1.
     stash_active_user_hidden(&state, 1);
-    *state.active_sheet.lock().unwrap() = 0;
+    *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 0;
     load_active_user_hidden(&state, 0);
 
     assert_eq!(
@@ -173,7 +173,7 @@ fn hiding_a_row_on_sheet1_leaves_sheet2_alone_and_survives_the_round_trip_back()
 #[test]
 fn a_background_sheets_hidden_set_is_readable_without_switching_to_it() {
     let state = two_sheet_state();
-    set_user_hidden_for_sheet(&state, 1, set_of(&[2, 3]), set_of(&[8]));
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 1, set_of(&[2, 3]), set_of(&[8]));
 
     assert_eq!(user_hidden_rows_for_sheet(&state, 1), set_of(&[2, 3]));
     assert_eq!(user_hidden_cols_for_sheet(&state, 1), set_of(&[8]));
@@ -183,11 +183,11 @@ fn a_background_sheets_hidden_set_is_readable_without_switching_to_it() {
 #[test]
 fn deleting_a_sheet_drops_its_slot_and_renumbers_the_rest() {
     let state = two_sheet_state();
-    crate::commands::dimensions::ensure_user_hidden_len(&state, 3);
-    set_user_hidden_for_sheet(&state, 1, set_of(&[1]), HashSet::new());
-    set_user_hidden_for_sheet(&state, 2, set_of(&[2]), HashSet::new());
+    crate::commands::dimensions::ensure_user_hidden_len(&state, &crate::document_effect::test_seed_effect(), 3);
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 1, set_of(&[1]), HashSet::new());
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 2, set_of(&[2]), HashSet::new());
 
-    crate::commands::dimensions::remove_user_hidden_sheet(&state, 1);
+    crate::commands::dimensions::remove_user_hidden_sheet(&state, &crate::document_effect::test_seed_effect(), 1);
 
     assert_eq!(
         user_hidden_rows_for_sheet(&state, 1),
@@ -199,17 +199,17 @@ fn deleting_a_sheet_drops_its_slot_and_renumbers_the_rest() {
 #[test]
 fn reordering_sheets_carries_the_hidden_sets_with_them() {
     let state = two_sheet_state();
-    crate::commands::dimensions::ensure_user_hidden_len(&state, 3);
-    *state.active_sheet.lock().unwrap() = 2; // keep the mirror out of the way
-    set_user_hidden_for_sheet(&state, 0, set_of(&[10]), HashSet::new());
-    set_user_hidden_for_sheet(&state, 1, set_of(&[11]), HashSet::new());
+    crate::commands::dimensions::ensure_user_hidden_len(&state, &crate::document_effect::test_seed_effect(), 3);
+    *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 2; // keep the mirror out of the way
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 0, set_of(&[10]), HashSet::new());
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 1, set_of(&[11]), HashSet::new());
 
     // Move sheet 0 to position 2.
-    crate::commands::dimensions::rotate_user_hidden_sheet(&state, 0, 2, 3);
+    crate::commands::dimensions::rotate_user_hidden_sheet(&state, &crate::document_effect::test_seed_effect(), 0, 2, 3);
 
     // Read the per-sheet slots directly (park the active index outside the
     // range so no read is answered from the active-sheet mirror).
-    *state.active_sheet.lock().unwrap() = 9;
+    *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 9;
     assert_eq!(user_hidden_rows_for_sheet(&state, 0), set_of(&[11]));
     assert_eq!(user_hidden_rows_for_sheet(&state, 2), set_of(&[10]));
 }
@@ -217,12 +217,12 @@ fn reordering_sheets_carries_the_hidden_sets_with_them() {
 #[test]
 fn duplicating_a_sheet_copies_its_hidden_sets() {
     let state = two_sheet_state();
-    *state.active_sheet.lock().unwrap() = 1;
-    set_user_hidden_for_sheet(&state, 0, set_of(&[4]), set_of(&[6]));
+    *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 1;
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 0, set_of(&[4]), set_of(&[6]));
 
-    crate::commands::dimensions::duplicate_user_hidden_sheet(&state, 0, 1);
+    crate::commands::dimensions::duplicate_user_hidden_sheet(&state, &crate::document_effect::test_seed_effect(), 0, 1);
 
-    *state.active_sheet.lock().unwrap() = 9; // no mirror involvement
+    *state.active_sheet.write(&crate::document_effect::test_seed_effect()).unwrap() = 9; // no mirror involvement
     assert_eq!(user_hidden_rows_for_sheet(&state, 1), set_of(&[4]));
     assert_eq!(user_hidden_cols_for_sheet(&state, 1), set_of(&[6]));
 }
@@ -473,7 +473,7 @@ fn the_shift_is_undoable() {
     for change in &transaction.changes {
         if let engine::undo::CellChange::CustomRestore { kind, data } = change {
             if kind == crate::undo_commands::USER_HIDDEN_RESTORE_KIND {
-                crate::undo_commands::apply_user_hidden_restore(&state, data, &mut inverse);
+                crate::undo_commands::apply_user_hidden_restore(&state, &crate::document_effect::test_seed_effect(), data, &mut inverse);
             }
         }
     }
@@ -496,7 +496,7 @@ fn user_hidden_survives_a_cala_save_and_reload_per_sheet() {
     set_rows_hidden_inner(&state, &file_state, &[5], true).unwrap();
     set_cols_hidden_inner(&state, &file_state, &[2], true).unwrap();
     // Sheet2 (background): hand-hidden row 8.
-    set_user_hidden_for_sheet(&state, 1, set_of(&[8]), HashSet::new());
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 1, set_of(&[8]), HashSet::new());
 
     // ---- Save: collect state onto the Workbook, then through the archive. ----
     let mut workbook = persistence::Workbook::new();
@@ -516,7 +516,7 @@ fn user_hidden_survives_a_cala_save_and_reload_per_sheet() {
 
     // ---- Load: re-hydrate AppState from the reloaded workbook. ----
     let fresh = two_sheet_state();
-    crate::persistence::restore_user_hidden_from_workbook(&fresh, &reloaded, 0).unwrap();
+    crate::persistence::restore_user_hidden_from_workbook(&fresh, &crate::document_effect::test_seed_effect(), &reloaded, 0).unwrap();
 
     assert_eq!(
         user_hidden_rows_for_sheet(&fresh, 0),
@@ -570,7 +570,7 @@ fn hidden_info_reads_a_background_sheet_without_an_activate_dance() {
     let file_state = FileState::default();
     // Sheet1 (active) hides row 5; Sheet2 (background) hides row 8 and column 3.
     set_rows_hidden_inner(&state, &file_state, &[5], true).unwrap();
-    set_user_hidden_for_sheet(&state, 1, set_of(&[8]), set_of(&[3]));
+    set_user_hidden_for_sheet(&state, &crate::document_effect::test_seed_effect(), 1, set_of(&[8]), set_of(&[3]));
 
     let rows = crate::commands::dimensions::hidden_rows_info_inner(&state, Some(1)).unwrap();
     assert_eq!(rows.user, vec![8]);

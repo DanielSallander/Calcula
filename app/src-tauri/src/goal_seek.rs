@@ -141,7 +141,7 @@ pub fn goal_seek(
     // Sheet protection on the CHANGING cell, before acquiring other locks.
     // Goal Seek writes that cell permanently, so a locked cell refuses the run.
     {
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if let Err(e) = crate::protection::check_sheet_protection_range(
             &state,
             active_sheet,
@@ -158,8 +158,8 @@ pub fn goal_seek(
     {
         let wb_index = state.writeback_index.lock().unwrap();
         if !wb_index.is_empty() {
-            let active_sheet = *state.active_sheet.lock().unwrap();
-            let sheet_ids = state.sheet_ids.lock().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
+            let sheet_ids = state.sheet_ids.read().unwrap();
             if let Some(&sid) = sheet_ids.get(active_sheet) {
                 if wb_index.contains(sid, params.variable_row, params.variable_col) {
                     return error_result(&format!(
@@ -174,13 +174,13 @@ pub fn goal_seek(
     // Acquire locks (same order as update_cell to avoid deadlocks)
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let target_pos = (params.target_row, params.target_col);

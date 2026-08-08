@@ -696,6 +696,15 @@ export { freezePanes, loadFreezePanesConfig } from "./grid";
 export { splitWindow, loadSplitWindowConfig, removeSplitWindow } from "./grid";
 export { navigateToCell, navigateToRange } from "./grid";
 export { goToSpecial } from "./grid";
+// The header-gutter rule, for extensions that paint overlays in grid coordinates.
+export {
+  rowHeaderGutter,
+  colHeaderGutter,
+  resolveHeaderSizes,
+  effectiveGridConfig,
+  FALLBACK_ROW_HEADER_WIDTH,
+  FALLBACK_COL_HEADER_HEIGHT,
+} from "./grid";
 export { borderAround } from "./grid";
 export { fillDown, fillRight, fillUp, fillLeft } from "./grid";
 export type { GoToSpecialResult, GoToSpecialCriteria } from "./grid";

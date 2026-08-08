@@ -560,7 +560,7 @@ pub fn create_table(
     state: State<AppState>,
     params: CreateTableParams,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
@@ -652,7 +652,7 @@ pub fn create_table(
     // Create an AutoFilter for the table range if show_filter_button is enabled
     let mut autofilter_prev: Option<Option<AutoFilter>> = None;
     if table.style_options.show_filter_button {
-        let mut auto_filters = state.auto_filters.lock().unwrap();
+        let mut auto_filters = state.auto_filters.write(&effect).unwrap();
         autofilter_prev = Some(auto_filters.get(&active_sheet).cloned());
         let auto_filter = AutoFilter::new(min_row, min_col, max_row, max_col);
         // Record the filter's OWN id, so this table (and only this table) can
@@ -710,7 +710,7 @@ pub fn delete_table(
     file_state: State<crate::persistence::FileState>,
     table_id: identity::EntityId,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -759,7 +759,7 @@ pub fn delete_table(
     drop(grids);
     drop(grid);
 
-    let removed_filter = clear_table_auto_filter(&state, &table, active_sheet);
+    let removed_filter = clear_table_auto_filter(&state, &effect, &table, active_sheet);
 
     // C10 cleanup: prune any object scripts attached to this table so a deleted
     // table leaves no dangling scripts behind. instanceId == the table id.
@@ -844,7 +844,7 @@ pub fn rename_table(
         );
     }
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1010,7 +1010,7 @@ pub fn update_table_style(
     state: State<AppState>,
     params: UpdateTableStyleParams,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1048,7 +1048,7 @@ pub fn add_table_column(
     column_name: String,
     position: Option<usize>,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1098,7 +1098,7 @@ pub fn remove_table_column(
     table_id: identity::EntityId,
     column_name: String,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
 
@@ -1137,7 +1137,7 @@ pub fn rename_table_column(
     old_name: String,
     new_name: String,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1183,7 +1183,7 @@ pub fn set_totals_row_function(
     state: State<AppState>,
     params: SetTotalsRowFunctionParams,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1256,7 +1256,7 @@ pub fn toggle_totals_row(
     table_id: identity::EntityId,
     show: bool,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1328,7 +1328,7 @@ pub fn resize_table(
     state: State<AppState>,
     params: ResizeTableParams,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1443,7 +1443,7 @@ pub fn resize_table(
     // one table drag another table's filter (and its criteria) onto itself.
     let mut filter_undo: Option<crate::autofilter::AutoFilter> = None;
     if claims_filter {
-        if let Ok(mut auto_filters) = state.auto_filters.lock() {
+        if let Ok(mut auto_filters) = state.auto_filters.write(&effect) {
             if let Some(af) = auto_filters.get_mut(&active_sheet) {
                 let is_ours = previous.auto_filter_id == Some(af.id);
                 if is_ours {
@@ -1631,11 +1631,12 @@ fn rewrite_table_refs_to_ranges(
 /// Returns the removed filter so the caller can make the removal undoable.
 fn clear_table_auto_filter(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     table: &Table,
     sheet_index: usize,
 ) -> Option<crate::autofilter::AutoFilter> {
     let af_id = table.auto_filter_id?;
-    let Ok(mut auto_filters) = state.auto_filters.lock() else {
+    let Ok(mut auto_filters) = state.auto_filters.write(&effect) else {
         return None;
     };
     // Exact ownership: clear the sheet's filter only when it is the very filter
@@ -1661,7 +1662,7 @@ pub fn convert_to_range(
     state: State<AppState>,
     table_id: identity::EntityId,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -1704,7 +1705,7 @@ pub fn convert_to_range(
     drop(table_names);
     drop(grids);
     drop(grid);
-    clear_table_auto_filter(&state, &table, active_sheet);
+    clear_table_auto_filter(&state, &effect, &table, active_sheet);
 
     TableResult::ok_empty()
 }
@@ -1718,7 +1719,7 @@ pub fn check_table_auto_expand(
     row: u32,
     col: u32,
 ) -> Option<Table> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // CONDITIONAL MUTATION. This is the tail of a cell edit the user just made:
     // `update_cell` has already marked the document dirty, so the token here adds no
     // dirtiness the edit did not already imply -- but the paths below DO rewrite the
@@ -1768,7 +1769,7 @@ pub fn check_table_auto_expand(
             // other's filter over rows it does not own.
             if table.style_options.show_filter_button {
                 let owned = table.auto_filter_id;
-                let mut auto_filters = state.auto_filters.lock().unwrap();
+                let mut auto_filters = state.auto_filters.write(&effect).unwrap();
                 if let Some(af) = auto_filters.get_mut(&active_sheet) {
                     if owned == Some(af.id) {
                         af.end_row = table.end_row;
@@ -1817,7 +1818,7 @@ pub fn check_table_auto_expand(
             // Same ownership rule as the row branch above.
             if table.style_options.show_filter_button {
                 let owned = table.auto_filter_id;
-                let mut auto_filters = state.auto_filters.lock().unwrap();
+                let mut auto_filters = state.auto_filters.write(&effect).unwrap();
                 if let Some(af) = auto_filters.get_mut(&active_sheet) {
                     if owned == Some(af.id) {
                         af.end_col = table.end_col;
@@ -1843,7 +1844,7 @@ pub fn enforce_table_header(
     column_index: u32,
     new_value: String,
 ) -> TableResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // CONDITIONAL MUTATION. This is the tail of a cell edit the user just made:
     // `update_cell` has already marked the document dirty, so the token here adds no
     // dirtiness the edit did not already imply -- but the paths below DO rewrite the
@@ -1885,7 +1886,7 @@ pub fn get_table(
     state: State<AppState>,
     table_id: identity::EntityId,
 ) -> Option<Table> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let tables = state.tables.read().unwrap();
 
     tables
@@ -1932,7 +1933,7 @@ pub fn add_table_row(
                 let sheet_index = table.sheet_index;
                 let new_end = table.end_row;
                 let owned = table.auto_filter_id;
-                let mut auto_filters = state.auto_filters.lock().unwrap();
+                let mut auto_filters = state.auto_filters.write(&effect).unwrap();
                 if let Some(af) = auto_filters.get_mut(&sheet_index) {
                     if owned == Some(af.id) {
                         af.end_row = new_end;
@@ -1967,7 +1968,7 @@ pub fn get_table_at_cell(
     row: u32,
     col: u32,
 ) -> Option<Table> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let tables = state.tables.read().unwrap();
 
     tables.get(&active_sheet).and_then(|sheet_tables| {
@@ -1983,7 +1984,7 @@ pub fn get_table_at_cell(
 pub fn get_all_tables(
     state: State<AppState>,
 ) -> Vec<Table> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let tables = state.tables.read().unwrap();
 
     tables
@@ -2093,7 +2094,7 @@ pub fn set_calculated_column(
     let control_values = crate::control_values::build_control_values(
         &state, &pane_control_state, &ribbon_filter_state,
     );
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
     if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
@@ -2140,10 +2141,10 @@ pub fn set_calculated_column(
 
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let table_names = state.table_names.read().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
-        let styles = state.style_registry.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
         let locale = state.locale.lock().unwrap();
 
         for row in data_start..=data_end {
@@ -2231,7 +2232,7 @@ pub fn convert_formula_to_table_refs(
     formula: String,
     formula_row: u32,
 ) -> String {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let tables = state.tables.read().unwrap();
 
     let table = match tables

@@ -3,7 +3,7 @@
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // REFACTOR: Removed legacy Find/Replace event listeners (logic moved to Extensions)
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
 import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, setFreezeConfig, updateConfig, setDisplayGridlines, setDisplayZeros, setShowFormulas, setViewMode, setDisplayHeadings, scrollToPosition } from "../../state/gridActions";
@@ -58,6 +58,7 @@ import type { GridMenuContext } from "../../lib/gridCommands";
 // Styles
 import * as S from "./Spreadsheet.styles";
 import { alertAsync } from "../../lib/dialogs";
+import { rowHeaderGutter, colHeaderGutter, effectiveGridConfig } from "../../lib/gridRenderer/layout/headerVisibility";
 
 const SCROLLBAR_SIZE = 14;
 const SPLIT_BAR_SIZE = 4;
@@ -119,7 +120,7 @@ function SpreadsheetContent({
 
   // 4. Extract State
   const {
-    config,
+    config: rawConfig,
     styleCache,
     viewport,
     selection,
@@ -137,24 +138,50 @@ function SpreadsheetContent({
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
   const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle } = gridState;
 
+  // THE config every consumer below sees: the stored one with the header rule
+  // applied. `View > Headings` off collapses both gutters to zero, and the
+  // painter has always honoured that (`gridRenderer/layout/headerVisibility.ts`)
+  // while everything answering "what is at this pixel" read the stored 22/20 —
+  // so on a headings-off canvas the paint and the hit rectangles sat one header
+  // apart. Applying the rule ONCE, here, is what closes that: hit-testing, the
+  // fill handle, floating controls and the inline editor all take their config
+  // from this line.
+  //
+  // It only became possible when 0 became a legal gutter width. Ninety call
+  // sites used to recover a gutter with `config.rowHeaderWidth || 50`, which
+  // cannot tell "collapsed" from "missing"; they read through
+  // `rowHeaderGutter`/`colHeaderGutter` (`??`) now.
+  //
+  // `rawConfig` survives for exactly one caller — see the auto-widen effect.
+  const config = useMemo(
+    () => effectiveGridConfig(rawConfig, displayHeadings),
+    [rawConfig, displayHeadings],
+  );
+
   // Excel-style row-header gutter: auto-widen to fit the largest visible row
   // number (more digits => wider), narrowing back when scrolled up. The row
   // range depends only on scroll/height (not on rowHeaderWidth), so this can't
-  // feedback-loop. All rowHeaderWidth consumers read config, so updating it here
-  // repositions headers, cells, hit-testing, and the editor consistently.
+  // feedback-loop.
+  //
+  // THIS IS THE ONE PLACE THAT MUST READ `rawConfig`. It compares its computed
+  // width against the STORED one and dispatches when they differ; handed the
+  // effective config it would compare 22 against a collapsed 0 on every render
+  // with the headings hidden, dispatch, read 0 again, and never settle. What it
+  // writes is the width to use when the headings are shown, so the stored value
+  // is both what it should read and what it should update.
   useEffect(() => {
     const vpW = gridState.viewportDimensions.width;
     const vpH = gridState.viewportDimensions.height;
     if (vpW <= 0 || vpH <= 0) return;
     const zoom = gridState.zoom || 1;
-    const range = calculateVisibleRange(viewport, config, vpW / zoom, vpH / zoom, dimensions);
+    const range = calculateVisibleRange(viewport, rawConfig, vpW / zoom, vpH / zoom, dimensions);
     // Reserve space for the grouping outline bar (if any) on top of the gutter,
     // so this hook and the Grouping extension agree on the total header width.
-    const desired = computeRowHeaderWidth(range.endRow + 1) + (config.outlineBarWidth ?? 0);
-    if (desired !== config.rowHeaderWidth) {
+    const desired = computeRowHeaderWidth(range.endRow + 1) + (rawConfig.outlineBarWidth ?? 0);
+    if (desired !== rawConfig.rowHeaderWidth) {
       dispatch(updateConfig({ rowHeaderWidth: desired }));
     }
-  }, [viewport, config, dimensions, gridState.viewportDimensions, gridState.zoom, dispatch]);
+  }, [viewport, rawConfig, dimensions, gridState.viewportDimensions, gridState.zoom, dispatch]);
 
   // -------------------------------------------------------------------------
   // Split bar drag state
@@ -179,8 +206,8 @@ function SpreadsheetContent({
       freezeCol: splitConfig.splitCol ?? null,
     };
     const layout = calculateFreezePaneLayout(splitFreezeConfig, config, dimensions);
-    const rowHeaderWidth = config.rowHeaderWidth || 50;
-    const colHeaderHeight = config.colHeaderHeight || 24;
+    const rowHeaderWidth = rowHeaderGutter(config);
+    const colHeaderHeight = colHeaderGutter(config);
 
     return {
       horizontalBarY: hasSplitRows ? colHeaderHeight + layout.frozenRowsHeight : null,
@@ -220,7 +247,7 @@ function SpreadsheetContent({
    * Convert a pixel Y position to the nearest row index for split repositioning.
    */
   const pixelYToSplitRow = useCallback((pixelY: number): number => {
-    const colHeaderHeight = config.colHeaderHeight || 24;
+    const colHeaderHeight = colHeaderGutter(config);
     let accHeight = 0;
     let row = 0;
     const targetY = pixelY - colHeaderHeight;
@@ -238,7 +265,7 @@ function SpreadsheetContent({
    * Convert a pixel X position to the nearest col index for split repositioning.
    */
   const pixelXToSplitCol = useCallback((pixelX: number): number => {
-    const rowHeaderWidth = config.rowHeaderWidth || 50;
+    const rowHeaderWidth = rowHeaderGutter(config);
     let accWidth = 0;
     let col = 0;
     const targetX = pixelX - rowHeaderWidth;
@@ -376,6 +403,26 @@ function SpreadsheetContent({
     hydrateSheetDisplayFlags();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // -------------------------------------------------------------------------
+  // The BACKEND moved the display flags: re-read them
+  // -------------------------------------------------------------------------
+  //
+  // Mount and sheet-switch hydration only covers the routes the FRONTEND drives.
+  // The flags are backend state, and everything else that writes them --
+  // `set_sheet_display_flags` called by a script / an MCP tool / a package pull /
+  // an E2E spec, and the whole-document replacements `new_file` and `open_file` --
+  // used to leave the renderer describing the previous document. Both announce on
+  // SHEET_DISPLAY_FLAGS_CHANGED now (the Rust event via shell's bridge, the
+  // document replacements via `announceBackendStateReplaced()`), and this is the
+  // one place that answers.
+  useEffect(() => {
+    const handler = () => { void hydrateSheetDisplayFlags(); };
+    window.addEventListener(AppEvents.SHEET_DISPLAY_FLAGS_CHANGED, handler);
+    return () => {
+      window.removeEventListener(AppEvents.SHEET_DISPLAY_FLAGS_CHANGED, handler);
+    };
+  }, [hydrateSheetDisplayFlags]);
 
   // -------------------------------------------------------------------------
   // Dimensions Refresh Listener (from context menu column width / row height)
@@ -928,7 +975,7 @@ function SpreadsheetContent({
       const mouseY = (event.clientY - rect.top) / z;
 
       // Check if right-click is on the corner (select-all area)
-      const isCornerClick = mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24);
+      const isCornerClick = mouseX < (rowHeaderGutter(config)) && mouseY < (colHeaderGutter(config));
 
       if (isCornerClick) {
         // Build context with all-cells selection directly to avoid stale state

@@ -19,6 +19,7 @@ import {
   checkRowGutterClick,
   ROW_GUTTER_WIDTH,
 } from "../../../../api/rowHeaderOverrides";
+import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
 
 interface HeaderSelectionDependencies {
   config: GridConfig;
@@ -127,8 +128,8 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
 
     // Check column header click interceptor (e.g., filter button, table-scoped selection)
     // Compute the column's canvas X position for hit-testing
-    const rowHeaderWidth = config.rowHeaderWidth || 50;
-    const colHeaderHeight = config.colHeaderHeight || 24;
+    const rowHeaderWidth = rowHeaderGutter(config);
+    const colHeaderHeight = colHeaderGutter(config);
     const scrollX = viewport.scrollX || 0;
     let colX = rowHeaderWidth - scrollX;
     for (let c = 0; c < headerCol; c++) {

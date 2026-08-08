@@ -168,16 +168,18 @@ async function allowScripts(page: Page): Promise<void> {
 /**
  * Put the FRONTEND view flags back to normal before anything is measured.
  *
- * This is not defensive padding — it is repair. `dirty-flag.spec.ts` runs
- * earlier in this project and restores the view flags with
- * `set_sheet_display_flags`, which writes the BACKEND only: the renderer reads
- * Core state, which is fed by `DISPLAY_*_TOGGLED` events, and neither that
- * command nor the `new_file` that follows re-syncs it. So the rest of the
- * journey run renders with the row/column headings switched OFF while the
- * backend reports them ON — and a control clicked at its painted position on
- * that canvas is not selected at all (measured, not inferred; the cause was not
- * chased further here because it belongs to the headings feature, not to this
- * one). Anything that clicks or samples the grid has to normalise first.
+ * This USED to be repair. `dirty-flag.spec.ts` runs earlier in this project and
+ * restores the view flags with `set_sheet_display_flags`, which writes the
+ * BACKEND only — and until 2026-08-08 nothing told the renderer, so the rest of
+ * the journey run painted with the row/column headings switched OFF while the
+ * backend reported them ON. Both halves are closed now: the Rust setter emits
+ * `sheet:display-flags-changed` and `announceBackendStateReplaced()` fires for
+ * `new_file` / `open_file`, and Core re-reads the authority on either.
+ *
+ * It is kept as a NORMALISER, not as a repair: zoom and the view mode are
+ * per-sheet state a previous spec can legitimately have left non-default, and
+ * this suite measures canvas pixels. Keeping the headings line costs one event
+ * and makes the starting state explicit rather than inherited.
  */
 async function normalizeViewState(page: Page): Promise<void> {
   await page.evaluate(async () => {
@@ -425,11 +427,13 @@ type Pixel = [number, number, number];
  * That last one is not hypothetical and it is not this spec's own doing: the
  * headings are a persisted per-sheet view flag, so a document another journey
  * spec saved with `displayHeadings: false` and this suite later reopens brings
- * them back switched off. `gs.config` keeps reporting 22/20 when that happens —
- * the renderer substitutes 0/0 itself (`gridRenderer/core.ts`) — so a probe that
- * trusts the config samples 22px left and 20px above the truth and reports ~0.80
- * for a shape that is painted perfectly. Same rule as the renderer, read from
- * the same live state.
+ * them back switched off. `gs.config` keeps reporting 22/20 when that happens.
+ *
+ * This function used to apply that rule itself, because the shared helper
+ * trusted the config. It no longer has to: `readGridGeometry` returns the
+ * gutters as PAINTED, by calling the renderer's own `resolveHeaderSizes`. The
+ * local copy is gone rather than kept as a belt-and-braces second opinion —
+ * two spellings of one rule is how they start to disagree.
  */
 async function anchorOrigin(
   page: Page,
@@ -437,11 +441,8 @@ async function anchorOrigin(
   col: number,
 ): Promise<{ x: number; y: number; zoom: number }> {
   const geo = await readGridGeometry(page);
-  const headingsShown = await page.evaluate(
-    () => (window as any).__CALCULA_GRID_STATE__?.displayHeadings !== false,
-  );
-  const rowHeaderWidth = headingsShown ? geo.rowHeaderWidth : 0;
-  const colHeaderHeight = headingsShown ? geo.colHeaderHeight : 0;
+  const rowHeaderWidth = geo.rowHeaderWidth;
+  const colHeaderHeight = geo.colHeaderHeight;
   const hiddenCols = new Set(geo.hiddenCols);
   const hiddenRows = new Set(geo.hiddenRows);
   let xOffset = 0;

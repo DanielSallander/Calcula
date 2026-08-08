@@ -595,7 +595,7 @@ fn the_progress_event_serialises_with_camel_case_keys() {
 #[test]
 fn staleness_from_a_cancelled_recalc_survives_a_save_and_reload() {
     let state = state_with_formulas(6);
-    let sheet_id = state.sheet_ids.lock().unwrap()[0];
+    let sheet_id = state.sheet_ids.read().unwrap()[0];
     *state.pending_recalc.lock().unwrap() = Some(PendingRecalc {
         sheet_index: 0,
         cells: vec![PendingCell { row: 2, col: 0 }, PendingCell { row: 5, col: 0 }],

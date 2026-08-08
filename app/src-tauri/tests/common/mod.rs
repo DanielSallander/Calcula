@@ -42,14 +42,15 @@ impl TestHarness {
     pub fn with_multiple_sheets(sheet_count: usize) -> Self {
         let harness = Self::new();
         {
-            let mut names = harness.state.sheet_names.lock().unwrap();
-            let mut grids = harness.state.grids.write(&app_lib::document_effect::DocumentEffect::deliberately_clean(app_lib::document_effect::CleanReason::LoadingFromDisk)).unwrap();
             // Harness seeding of per-sheet view state; not a document edit, and no
-            // save follows. `freeze_configs` is a `Persisted<T>` because freeze panes
-            // ARE written into the .cala -- see `app_lib::document_effect`.
+            // save follows. `freeze_configs` and `sheet_names` are `Persisted<T>`
+            // because both are written into the .cala -- see
+            // `app_lib::document_effect`.
             let seed = app_lib::document_effect::DocumentEffect::deliberately_clean(
                 app_lib::document_effect::CleanReason::LoadingFromDisk,
             );
+            let mut names = harness.state.sheet_names.write(&seed).unwrap();
+            let mut grids = harness.state.grids.write(&seed).unwrap();
             let mut freeze_configs = harness.state.freeze_configs.write(&seed).unwrap();
 
             for i in 1..sheet_count {
@@ -71,11 +72,6 @@ impl TestHarness {
         }
     }
 
-    /// Get cell value (raw).
-    pub fn get_cell_value(&self, row: u32, col: u32) -> Option<CellValue> {
-        let grid = self.state.grid.read().unwrap();
-        grid.get_cell(row, col).map(|c| c.value.clone())
-    }
 }
 
 impl Default for TestHarness {

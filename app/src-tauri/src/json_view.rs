@@ -124,14 +124,14 @@ pub fn get_object_json(
             // The active sheet's live column/row dimensions live in the primary
             // maps; other sheets are held in the per-sheet vectors. Read the
             // freshest source so the inspector never shows stale widths/heights.
-            let active = *state.active_sheet.lock().unwrap();
+            let active = *state.active_sheet.read().unwrap();
             let layout = if idx == active {
-                let cw = state.column_widths.lock().unwrap();
-                let rh = state.row_heights.lock().unwrap();
+                let cw = state.column_widths.read().unwrap();
+                let rh = state.row_heights.read().unwrap();
                 calcula_format::sheet_layout::SheetLayout::from_dimensions(&cw, &rh)
             } else {
-                let all_cw = state.all_column_widths.lock().unwrap();
-                let all_rh = state.all_row_heights.lock().unwrap();
+                let all_cw = state.all_column_widths.read().unwrap();
+                let all_rh = state.all_row_heights.read().unwrap();
                 if idx >= all_cw.len() || idx >= all_rh.len() {
                     return Err(format!("Sheet {} not found", idx));
                 }
@@ -147,7 +147,7 @@ pub fn get_object_json(
             // other sheets are held in the per-sheet grids vector (the active
             // slot there is stale). Read the freshest source, then reuse the
             // .cala serializer so the shape matches the on-disk data.json.
-            let active = *state.active_sheet.lock().unwrap();
+            let active = *state.active_sheet.read().unwrap();
             let cells: std::collections::HashMap<(u32, u32), ::persistence::SavedCell> =
                 if idx == active {
                     let grid = state.grid.read().unwrap();
@@ -382,18 +382,23 @@ pub fn set_object_json(
             // Write into the per-sheet vectors (growing them if needed) so the
             // change survives a sheet switch, and mirror the active sheet into
             // the live primary maps.
+            // `lock_pending` because the bounds check can still REFUSE: minting
+            // the effect first would leave a rejected edit with a dirty flag.
+            let all_cw = state.all_column_widths.lock_pending().unwrap();
+            let all_rh = state.all_row_heights.lock_pending().unwrap();
+            if idx >= all_cw.len() || idx >= all_rh.len() {
+                return Err(format!("Sheet {} not found", idx));
+            }
+            let effect = DocumentEffect::mutates(fs);
             {
-                let mut all_cw = state.all_column_widths.lock().unwrap();
-                let mut all_rh = state.all_row_heights.lock().unwrap();
-                if idx >= all_cw.len() || idx >= all_rh.len() {
-                    return Err(format!("Sheet {} not found", idx));
-                }
+                let mut all_cw = all_cw.authorize(&effect);
+                let mut all_rh = all_rh.authorize(&effect);
                 all_cw[idx] = col_widths.clone();
                 all_rh[idx] = row_heights.clone();
             }
-            if idx == *state.active_sheet.lock().unwrap() {
-                *state.column_widths.lock().unwrap() = col_widths;
-                *state.row_heights.lock().unwrap() = row_heights;
+            if idx == *state.active_sheet.read().unwrap() {
+                *state.column_widths.write(&effect).unwrap() = col_widths;
+                *state.row_heights.write(&effect).unwrap() = row_heights;
             }
             Ok(())
         }
@@ -614,7 +619,7 @@ pub fn get_workbook_tree(
 
     // Sheets
     {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let mut sheets_node = TreeNode {
             label: format!("Sheets ({})", sheet_names.len()),
             object_type: None,

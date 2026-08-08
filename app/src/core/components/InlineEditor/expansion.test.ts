@@ -6,7 +6,13 @@
 //          as failures, not as happy paths.
 
 import { describe, it, expect } from "vitest";
-import { computeExpandedEditorWidth, measureEditorTextWidth } from "./expansion";
+import {
+  computeExpandedEditorWidth,
+  computeExpandedEditorHeight,
+  countEditorLines,
+  editorLineHeight,
+  measureEditorTextWidth,
+} from "./expansion";
 
 /** The real default: 64.29px columns, the width that exposed the gap. */
 const W = 64.29;
@@ -106,5 +112,80 @@ describe("measureEditorTextWidth", () => {
   it("measures the WIDEST line of a multi-line entry", () => {
     const w = measureEditorTextWidth("ab\nabcdefgh\nabc", "12px sans-serif", 8);
     expect(w).toBe(measureEditorTextWidth("abcdefgh", "12px sans-serif", 8));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vertical expansion (Alt+Enter)
+// ---------------------------------------------------------------------------
+
+/** The real default row height. */
+const H = 20;
+
+describe("countEditorLines", () => {
+  it("counts an empty entry as one line", () => {
+    expect(countEditorLines("")).toBe(1);
+  });
+
+  it("counts a single-line entry as one line", () => {
+    expect(countEditorLines("hello")).toBe(1);
+  });
+
+  it("counts hard breaks, not soft wraps", () => {
+    expect(countEditorLines("a\nb\nc")).toBe(3);
+  });
+
+  it("counts a trailing newline as opening a new line", () => {
+    // The caret really is on a third line after two Alt+Enters.
+    expect(countEditorLines("a\n\n")).toBe(3);
+  });
+});
+
+describe("computeExpandedEditorHeight", () => {
+  function vbase(overrides: Partial<Parameters<typeof computeExpandedEditorHeight>[0]> = {}) {
+    return {
+      y: 24,
+      baseHeight: H,
+      lineCount: 1,
+      maxBottom: 800,
+      ...overrides,
+    };
+  }
+
+  it("is exactly the cell height for a single-line entry", () => {
+    expect(computeExpandedEditorHeight(vbase())).toBe(H);
+  });
+
+  it("adds one line height per hard break", () => {
+    // 20 + 2 * (20 - 4) = 52
+    expect(computeExpandedEditorHeight(vbase({ lineCount: 3 }))).toBeCloseTo(52, 5);
+  });
+
+  it("collapses back to the cell height when the breaks are removed", () => {
+    expect(computeExpandedEditorHeight(vbase({ lineCount: 4 }))).toBeGreaterThan(H);
+    expect(computeExpandedEditorHeight(vbase({ lineCount: 1 }))).toBe(H);
+  });
+
+  it("clamps at the viewport bottom rather than running off-screen", () => {
+    const h = computeExpandedEditorHeight(vbase({ lineCount: 100, y: 700, maxBottom: 800 }));
+    expect(h).toBe(100);
+    expect(700 + h).toBeLessThanOrEqual(800);
+  });
+
+  it("never shrinks below the edited cell, even hard against the viewport bottom", () => {
+    // The row is already past the bottom edge: the box stays cell-sized rather
+    // than collapsing to nothing (or going negative).
+    expect(computeExpandedEditorHeight(vbase({ lineCount: 5, y: 795, maxBottom: 800 }))).toBe(H);
+  });
+
+  it("uses a per-line height that leaves one line filling an unexpanded box", () => {
+    // This is the invariant that keeps a single-line edit looking identical to
+    // the painted cell: line height + the 2px borders == the row height.
+    expect(editorLineHeight(H) + 4).toBe(H);
+  });
+
+  it("grows a TALL row by that row's own line height, not a constant", () => {
+    // A 40px row: 40 + 1 * 36 = 76. A hardcoded 16 would give 56.
+    expect(computeExpandedEditorHeight(vbase({ baseHeight: 40, lineCount: 2 }))).toBeCloseTo(76, 5);
   });
 });

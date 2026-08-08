@@ -720,7 +720,7 @@ pub fn get_computed_properties(
     index: u32,
     index2: Option<u32>,
 ) -> Vec<ComputedPropertyData> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let props_storage = state.computed_properties.read().unwrap();
 
     let sheet_props = match props_storage.get(&active_sheet) {
@@ -776,13 +776,13 @@ pub fn add_computed_property(
     let control_values = crate::control_values::build_control_values(
         &state, &pane_control_state, &ribbon_filter_state,
     );
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let grids = state.grids.read().unwrap();
     let grid = state.grid.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let row_heights_snapshot = state.row_heights.lock().unwrap().clone();
-    let col_widths_snapshot = state.column_widths.lock().unwrap().clone();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let row_heights_snapshot = state.row_heights.read().unwrap().clone();
+    let col_widths_snapshot = state.column_widths.read().unwrap().clone();
 
     // Generate new ID
     let mut next_id = state.next_computed_prop_id.lock().unwrap();
@@ -862,11 +862,11 @@ pub fn add_computed_property(
     drop(rev_deps);
 
     // Apply the computed value to the target
-    let mut rh = state.row_heights.lock().unwrap();
-    let mut cw = state.column_widths.lock().unwrap();
+    let mut rh = state.row_heights.write(&effect).unwrap();
+    let mut cw = state.column_widths.write(&effect).unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut style_reg = state.style_registry.lock().unwrap();
+    let mut style_reg = state.style_registry.write(&effect).unwrap();
 
     let (dimension_changes, needs_style_refresh) = apply_property_value(
         &attribute,
@@ -915,13 +915,13 @@ pub fn update_computed_property(
     let control_values = crate::control_values::build_control_values(
         &state, &pane_control_state, &ribbon_filter_state,
     );
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let grids = state.grids.read().unwrap();
     let grid = state.grid.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let row_heights_snapshot = state.row_heights.lock().unwrap().clone();
-    let col_widths_snapshot = state.column_widths.lock().unwrap().clone();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let row_heights_snapshot = state.row_heights.read().unwrap().clone();
+    let col_widths_snapshot = state.column_widths.read().unwrap().clone();
 
     // Resolve under a READ guard, then decide, then take the write guard: an
     // unresolvable prop_id returns `success: false` having changed nothing, and must
@@ -1005,11 +1005,11 @@ pub fn update_computed_property(
     drop(rev_deps);
 
     // Apply effect
-    let mut rh = state.row_heights.lock().unwrap();
-    let mut cw = state.column_widths.lock().unwrap();
+    let mut rh = state.row_heights.write(&effect).unwrap();
+    let mut cw = state.column_widths.write(&effect).unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
-    let mut style_reg = state.style_registry.lock().unwrap();
+    let mut style_reg = state.style_registry.write(&effect).unwrap();
 
     let (dimension_changes, needs_style_refresh) = apply_property_value(
         &attribute,
@@ -1049,7 +1049,7 @@ pub fn remove_computed_property(
     file_state: State<FileState>,
     prop_id: u64,
 ) -> ComputedPropertyResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Resolve under a READ guard first (see `update_computed_property`).
     let (target_type, index, index2) = {
@@ -1102,7 +1102,7 @@ pub fn remove_computed_property(
 
     if target_type == "column" && !has_width {
         // Revert column width to default
-        let mut cw = state.column_widths.lock().unwrap();
+        let mut cw = state.column_widths.write(&effect).unwrap();
         cw.remove(&index);
         dimension_changes.push(DimensionData {
             index,
@@ -1111,7 +1111,7 @@ pub fn remove_computed_property(
         });
     }
     if target_type == "row" && !has_height {
-        let mut rh = state.row_heights.lock().unwrap();
+        let mut rh = state.row_heights.write(&effect).unwrap();
         rh.remove(&index);
         dimension_changes.push(DimensionData {
             index,

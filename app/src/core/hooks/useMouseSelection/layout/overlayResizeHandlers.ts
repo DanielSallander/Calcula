@@ -9,6 +9,7 @@ import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../
 import { createEmptyDimensionOverrides } from "../../../types";
 import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
+import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
 
 /** Size of the resize handle hit area in pixels */
 const HANDLE_HIT_SIZE = 10;
@@ -87,8 +88,8 @@ function getOverlayBottomRightPixel(
 ): { x: number; y: number } | null {
   if (region.floating) return null; // Use floating-specific logic instead
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const defaultCellWidth = config.defaultCellWidth || 100;
   const defaultCellHeight = config.defaultCellHeight || 20;
   const dims = dimensions || createEmptyDimensionOverrides();

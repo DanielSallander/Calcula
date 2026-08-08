@@ -308,7 +308,7 @@ pub fn set_cell_type(
     type_id: String,
     params: Option<serde_json::Value>,
 ) -> CellTypeEntry {
-    let sheet_index = *state.active_sheet.lock().unwrap();
+    let sheet_index = *state.active_sheet.read().unwrap();
     // Cell-type assignments are persisted (`workbook.cell_types`) and written
     // only by the save path. These commands already record undo -- recording
     // undo is a declaration that the change is user-meaningful and persistent.
@@ -359,7 +359,7 @@ pub fn set_cell_type_range(
         ));
     }
 
-    let sheet_index = *state.active_sheet.lock().unwrap();
+    let sheet_index = *state.active_sheet.read().unwrap();
     let params = params.unwrap_or_else(|| serde_json::json!({}));
     // Cell-type assignments are persisted (`workbook.cell_types`) and written
     // only by the save path. These commands already record undo -- recording
@@ -392,7 +392,7 @@ pub fn clear_cell_type(
     row: u32,
     col: u32,
 ) -> bool {
-    let sheet_index = *state.active_sheet.lock().unwrap();
+    let sheet_index = *state.active_sheet.read().unwrap();
     // Cell-type assignments are persisted (`workbook.cell_types`) and written
     // only by the save path. These commands already record undo -- recording
     // undo is a declaration that the change is user-meaningful and persistent.
@@ -425,7 +425,7 @@ pub fn clear_cell_type_range(
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
 
-    let sheet_index = *state.active_sheet.lock().unwrap();
+    let sheet_index = *state.active_sheet.read().unwrap();
     // Cell-type assignments are persisted (`workbook.cell_types`) and written
     // only by the save path. These commands already record undo -- recording
     // undo is a declaration that the change is user-meaningful and persistent.
@@ -452,7 +452,7 @@ pub fn clear_cell_type_range(
 /// Get the cell-type assignment for a specific cell on the active sheet.
 #[tauri::command]
 pub fn get_cell_type(state: State<AppState>, row: u32, col: u32) -> Option<CellTypeAssignment> {
-    let sheet_index = *state.active_sheet.lock().unwrap();
+    let sheet_index = *state.active_sheet.read().unwrap();
     let cell_types = state.cell_types.read().unwrap();
     cell_types.get(&(sheet_index, row, col)).cloned()
 }
@@ -465,7 +465,7 @@ pub fn get_all_cell_types(
     sheet_index: Option<usize>,
 ) -> Vec<CellTypeEntry> {
     let sheet_index =
-        sheet_index.unwrap_or_else(|| *state.active_sheet.lock().unwrap());
+        sheet_index.unwrap_or_else(|| *state.active_sheet.read().unwrap());
     let cell_types = state.cell_types.read().unwrap();
     entries_for_sheet(&cell_types, sheet_index)
 }

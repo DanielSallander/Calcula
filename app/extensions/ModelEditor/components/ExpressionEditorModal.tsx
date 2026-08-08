@@ -8,6 +8,7 @@
 import React, { useEffect, useState } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
+import { enforceLfLineEndings } from "../../_shared/lib/monacoLineEndings";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { biModelFunctionCatalog } from "@api";
 import type { ModelOverview } from "@api";
@@ -27,6 +28,10 @@ self.MonacoEnvironment = {
   },
 };
 loader.config({ monaco });
+// Stored text is LF on every platform. Monaco defaults a model created from
+// EMPTY text to the OS ending (CRLF here), and @monaco-editor/react creates the
+// model before an async document arrives — see _shared/lib/monacoLineEndings.ts.
+enforceLfLineEndings(monaco);
 
 export function ExpressionEditorModal({
   title,

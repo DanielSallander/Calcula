@@ -212,7 +212,7 @@ pub(crate) fn add_note_impl(
     file_state: &FileState,
     params: AddNoteParams,
 ) -> NoteResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let key = (params.row, params.col);
 
     // Mutual exclusivity: check if cell has a comment
@@ -303,7 +303,7 @@ pub(crate) fn update_note_impl(
     file_state: &FileState,
     params: UpdateNoteParams,
 ) -> NoteResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -365,7 +365,7 @@ pub fn delete_note(
     file_state: State<FileState>,
     note_id: String,
 ) -> NoteResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -428,7 +428,7 @@ pub fn get_note(
     row: u32,
     col: u32,
 ) -> Option<Note> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let notes = state.notes.read().unwrap();
 
     notes
@@ -443,7 +443,7 @@ pub fn get_note_by_id(
     state: State<AppState>,
     note_id: String,
 ) -> Option<Note> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let notes = state.notes.read().unwrap();
 
     notes
@@ -458,7 +458,7 @@ pub fn get_note_by_id(
 pub fn get_all_notes(
     state: State<AppState>,
 ) -> Vec<Note> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let notes = state.notes.read().unwrap();
 
     notes
@@ -472,7 +472,7 @@ pub fn get_all_notes(
 pub fn get_note_indicators(
     state: State<AppState>,
 ) -> Vec<NoteIndicator> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let notes = state.notes.read().unwrap();
 
     notes
@@ -499,7 +499,7 @@ pub fn get_note_indicators_in_range(
     end_row: u32,
     end_col: u32,
 ) -> Vec<NoteIndicator> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let notes = state.notes.read().unwrap();
 
     notes
@@ -528,7 +528,7 @@ pub fn resize_note(
     file_state: State<FileState>,
     params: ResizeNoteParams,
 ) -> NoteResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -582,7 +582,7 @@ pub fn toggle_note_visibility(
     note_id: String,
     visible: bool,
 ) -> NoteResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -637,7 +637,7 @@ pub fn show_all_notes(
     file_state: State<FileState>,
     visible: bool,
 ) -> usize {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     let effect = DocumentEffect::mutates(&file_state);
@@ -668,7 +668,7 @@ pub fn move_note(
     new_row: u32,
     new_col: u32,
 ) -> NoteResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     // REFUSAL FIRST. `DocumentEffect::mutates` sets the dirty flag in its own
@@ -754,7 +754,7 @@ pub fn has_note(
     row: u32,
     col: u32,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let notes = state.notes.read().unwrap();
 
     notes
@@ -769,7 +769,7 @@ pub fn clear_all_notes(
     state: State<AppState>,
     file_state: State<FileState>,
 ) -> usize {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     let effect = DocumentEffect::mutates(&file_state);
@@ -795,7 +795,7 @@ pub fn clear_notes_in_range(
     end_row: u32,
     end_col: u32,
 ) -> usize {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
     let effect = DocumentEffect::mutates(&file_state);
@@ -832,7 +832,7 @@ pub fn convert_note_to_comment(
     note_id: String,
     author_email: String,
 ) -> crate::comments::CommentResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     // Deletes a Note AND creates a Comment: two persisted stores, both written
     // only by the save path. The census flagged this as a miss on both counts.

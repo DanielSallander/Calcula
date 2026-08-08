@@ -145,10 +145,10 @@ pub fn data_table_one_var(
 
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
@@ -383,10 +383,10 @@ pub fn data_table_two_var(
 
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let merged_regions = state.merged_regions.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;

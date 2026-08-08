@@ -578,25 +578,25 @@ pub(crate) fn check_sheet_protection_cells<'a>(
     // Probe and release. The overwhelmingly common case is an unprotected
     // sheet, and this runs on every batch write — not worth locking the grid.
     let protected = {
-        let p = state.sheet_protection.lock().unwrap();
+        let p = state.sheet_protection.read().unwrap();
         p.get(&sheet_index).map(|s| s.protected).unwrap_or(false)
     };
     if !protected {
         return Ok(());
     }
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // `state.grid` is the authoritative mirror for the ACTIVE sheet;
     // `grids[active_sheet]` is documented as stale.
     if sheet_index == active_sheet {
         let grid = state.grid.read().unwrap();
-        let styles = state.style_registry.lock().unwrap();
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         check_sheet_protection_cells_in(&protection_storage, &grid, &styles, sheet_index, cells)
     } else {
         let grids = state.grids.read().unwrap();
-        let styles = state.style_registry.lock().unwrap();
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         let Some(grid) = grids.get(sheet_index) else {
             return Ok(());
         };
@@ -628,26 +628,26 @@ pub(crate) fn check_sheet_protection_range(
     // Probe and release, then acquire in canonical order — see the lock-order
     // note on `check_sheet_protection_cells`.
     let protected = {
-        let p = state.sheet_protection.lock().unwrap();
+        let p = state.sheet_protection.read().unwrap();
         p.get(&sheet_index).map(|s| s.protected).unwrap_or(false)
     };
     if !protected {
         return Ok(());
     }
 
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     if sheet_index == active_sheet {
         let grid = state.grid.read().unwrap();
-        let styles = state.style_registry.lock().unwrap();
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         check_sheet_protection_range_in(
             &protection_storage, &grid, &styles, sheet_index,
             start_row, start_col, end_row, end_col,
         )
     } else {
         let grids = state.grids.read().unwrap();
-        let styles = state.style_registry.lock().unwrap();
-        let protection_storage = state.sheet_protection.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
+        let protection_storage = state.sheet_protection.read().unwrap();
         let Some(grid) = grids.get(sheet_index) else {
             return Ok(());
         };
@@ -777,7 +777,7 @@ pub(crate) fn check_sheet_action(
     action: &str,
     what: &str,
 ) -> Result<(), String> {
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
     let Some(protection) = protection_storage.get(&sheet_index) else {
         return Ok(());
     };
@@ -804,7 +804,7 @@ pub(crate) fn check_sheet_action(
 /// change the settings, protect again. That keeps the password check in exactly
 /// one place instead of threading a password through every settings command.
 pub(crate) fn require_sheet_unprotected(state: &AppState, sheet_index: usize, what: &str) -> Result<(), String> {
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
     match protection_storage.get(&sheet_index) {
         Some(p) if p.protected => Err(format!(
             "Cannot change {} while the sheet is protected. \
@@ -829,9 +829,15 @@ pub(crate) fn require_sheet_unprotected(state: &AppState, sheet_index: usize, wh
 /// MUST be called after the `sheet_protection` guard is dropped — this takes the
 /// undo-stack lock, and holding both invites a lock-order inversion with the
 /// restore path, which takes the store lock while replaying.
+///
+/// Takes the caller's `DocumentEffect` rather than a `FileState`: onboarding
+/// `sheet_protection` to `Persisted<T>` forced every command here to mint the
+/// effect BEFORE the store write, which is upstream of this call. Minting a
+/// second one here would be harmless but would put two `mutates` on one user
+/// action and hide which write actually owns the flag.
 fn record_protection_undo(
     state: &AppState,
-    file_state: &crate::persistence::FileState,
+    _effect: &crate::document_effect::DocumentEffect,
     sheet_index: usize,
     previous: Option<SheetProtection>,
     description: &str,
@@ -842,7 +848,6 @@ fn record_protection_undo(
         previous,
         description,
     );
-    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
     record_protection_audit(state, description, Some(sheet_index));
 }
 
@@ -881,8 +886,10 @@ pub fn protect_sheet(
     file_state: State<crate::persistence::FileState>,
     params: ProtectSheetParams,
 ) -> ProtectionResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // `lock_pending`: the already-protected check below still refuses, and it
+    // reads the very store it guards.
+    let protection_storage = state.sheet_protection.lock_pending().unwrap();
 
     // Capture the record as it stands BEFORE any mutation, including its
     // absence, so undo can put the sheet back exactly as it was.
@@ -911,10 +918,12 @@ pub fn protect_sheet(
         protection.options = options;
     }
 
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut protection_storage = protection_storage.authorize(&effect);
     protection_storage.insert(active_sheet, protection.clone());
     drop(protection_storage);
 
-    record_protection_undo(&state, &file_state, active_sheet, previous, "Protect sheet");
+    record_protection_undo(&state, &effect, active_sheet, previous, "Protect sheet");
     ProtectionResult::ok(protection)
 }
 
@@ -925,8 +934,8 @@ pub fn unprotect_sheet(
     file_state: State<crate::persistence::FileState>,
     password: Option<String>,
 ) -> ProtectionResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let protection_storage = state.sheet_protection.lock_pending().unwrap();
 
     let protection = match protection_storage.get(&active_sheet) {
         Some(p) => p.clone(),
@@ -953,12 +962,14 @@ pub fn unprotect_sheet(
     new_protection.password_hash = None;
     new_protection.password_salt = None;
 
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut protection_storage = protection_storage.authorize(&effect);
     protection_storage.insert(active_sheet, new_protection.clone());
     drop(protection_storage);
 
     record_protection_undo(
         &state,
-        &file_state,
+        &effect,
         active_sheet,
         Some(protection),
         "Unprotect sheet",
@@ -973,12 +984,14 @@ pub fn update_protection_options(
     file_state: State<crate::persistence::FileState>,
     options: SheetProtectionOptions,
 ) -> ProtectionResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     if let Err(e) = require_sheet_unprotected(&state, active_sheet, "protection options") {
         return ProtectionResult::err(&e);
     }
 
-    let mut protection_storage = state.sheet_protection.lock().unwrap();
+    // `require_sheet_unprotected` above is the last refusal in this command.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut protection_storage = state.sheet_protection.write(&effect).unwrap();
 
     let previous = protection_storage.get(&active_sheet).cloned();
 
@@ -992,7 +1005,7 @@ pub fn update_protection_options(
 
     record_protection_undo(
         &state,
-        &file_state,
+        &effect,
         active_sheet,
         previous,
         "Change protection options",
@@ -1007,7 +1020,7 @@ pub fn add_allow_edit_range(
     file_state: State<crate::persistence::FileState>,
     params: AddAllowEditRangeParams,
 ) -> ProtectionResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // An allow-edit range is a hole in the protection boundary. Punching one
     // while the sheet is protected would let anything that can reach this
     // command open up the whole sheet without the password.
@@ -1015,7 +1028,9 @@ pub fn add_allow_edit_range(
         return ProtectionResult::err(&e);
     }
 
-    let mut protection_storage = state.sheet_protection.lock().unwrap();
+    // `lock_pending`: the duplicate-title check below still refuses, and it
+    // reads the very store it guards.
+    let protection_storage = state.sheet_protection.lock_pending().unwrap();
 
     let previous = protection_storage.get(&active_sheet).cloned();
 
@@ -1028,6 +1043,8 @@ pub fn add_allow_edit_range(
         }
     }
 
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut protection_storage = protection_storage.authorize(&effect);
     let protection = protection_storage
         .entry(active_sheet)
         .or_insert_with(SheetProtection::default);
@@ -1057,7 +1074,7 @@ pub fn add_allow_edit_range(
 
     record_protection_undo(
         &state,
-        &file_state,
+        &effect,
         active_sheet,
         previous,
         "Add allow-edit range",
@@ -1072,32 +1089,41 @@ pub fn remove_allow_edit_range(
     file_state: State<crate::persistence::FileState>,
     title: String,
 ) -> ProtectionResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     if let Err(e) = require_sheet_unprotected(&state, active_sheet, "allow-edit ranges") {
         return ProtectionResult::err(&e);
     }
 
-    let mut protection_storage = state.sheet_protection.lock().unwrap();
+    // `lock_pending`: BOTH remaining refusals ("no settings" and "range not
+    // found") are decided from this store's contents.
+    let protection_storage = state.sheet_protection.lock_pending().unwrap();
 
-    let protection = match protection_storage.get_mut(&active_sheet) {
-        Some(p) => p,
+    let previous = match protection_storage.get(&active_sheet) {
+        Some(p) => p.clone(),
         None => return ProtectionResult::err("No protection settings for this sheet"),
     };
 
-    let previous = protection.clone();
-    let initial_len = protection.allow_edit_ranges.len();
-    protection.allow_edit_ranges.retain(|r| r.title != title);
-
-    if protection.allow_edit_ranges.len() == initial_len {
+    // Decided BEFORE authorising. `retain` used to run first and the "not
+    // found" error returned after it -- the removal was a no-op in that case,
+    // but the order now makes that a property of the code rather than of the
+    // data.
+    if !previous.allow_edit_ranges.iter().any(|r| r.title == title) {
         return ProtectionResult::err("Range not found");
     }
+
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut protection_storage = protection_storage.authorize(&effect);
+    let Some(protection) = protection_storage.get_mut(&active_sheet) else {
+        return ProtectionResult::err("No protection settings for this sheet");
+    };
+    protection.allow_edit_ranges.retain(|r| r.title != title);
 
     let updated = protection.clone();
     drop(protection_storage);
 
     record_protection_undo(
         &state,
-        &file_state,
+        &effect,
         active_sheet,
         Some(previous),
         "Remove allow-edit range",
@@ -1108,8 +1134,8 @@ pub fn remove_allow_edit_range(
 /// Get all allow-edit ranges for the current sheet
 #[tauri::command]
 pub fn get_allow_edit_ranges(state: State<AppState>) -> Vec<AllowEditRange> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
 
     protection_storage
         .get(&active_sheet)
@@ -1120,8 +1146,8 @@ pub fn get_allow_edit_ranges(state: State<AppState>) -> Vec<AllowEditRange> {
 /// Get protection status for the current sheet
 #[tauri::command]
 pub fn get_protection_status(state: State<AppState>) -> ProtectionStatus {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
 
     let protection = protection_storage.get(&active_sheet);
 
@@ -1144,8 +1170,8 @@ pub fn get_protection_status(state: State<AppState>) -> ProtectionStatus {
 /// Check if the current sheet is protected
 #[tauri::command]
 pub fn is_sheet_protected(state: State<AppState>) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
 
     protection_storage
         .get(&active_sheet)
@@ -1160,12 +1186,12 @@ pub fn can_edit_cell(
     row: u32,
     col: u32,
 ) -> ProtectionCheckResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     // Canonical order: grid -> style_registry -> sheet_protection. See the
     // lock-order note on `check_sheet_protection_cells`.
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
 
     // Routed through the SAME decision procedure the backend gates use, so the
     // frontend's answer and the backend's answer cannot drift. This used to be a
@@ -1195,8 +1221,8 @@ pub fn can_perform_action(
     state: State<AppState>,
     action: String,
 ) -> ProtectionCheckResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
 
     let protection = match protection_storage.get(&active_sheet) {
         Some(p) => p,
@@ -1228,7 +1254,7 @@ pub fn set_cell_protection(
     file_state: State<crate::persistence::FileState>,
     params: SetCellProtectionParams,
 ) -> ProtectionResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
 
     let min_row = params.start_row.min(params.end_row);
     let max_row = params.start_row.max(params.end_row);
@@ -1286,7 +1312,7 @@ pub fn set_cell_protection(
 
     let plan = {
         let grid = state.grid.read().unwrap();
-        let styles = state.style_registry.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
 
         if whole_columns || whole_rows {
             let is_column = whole_columns;
@@ -1416,7 +1442,7 @@ pub fn set_cell_protection(
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let mut styles = state.style_registry.lock().unwrap();
+        let mut styles = state.style_registry.write(&effect).unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         undo_stack.begin_transaction("Change cell protection".to_string());
 
@@ -1484,7 +1510,7 @@ pub fn set_cell_protection(
                     if active_sheet < grids.len() {
                         grids[active_sheet].set_cell(row, col, cell);
                     }
-                    undo_stack.record_cell_change(row, col, previous_cell);
+                    undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
                 }
             }
             Plan::Cells(changes) => {
@@ -1506,7 +1532,7 @@ pub fn set_cell_protection(
                     if active_sheet < grids.len() {
                         grids[active_sheet].set_cell(row, col, cell);
                     }
-                    undo_stack.record_cell_change(row, col, previous_cell);
+                    undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
                 }
             }
         }
@@ -1531,7 +1557,7 @@ pub fn get_cell_protection(
     col: u32,
 ) -> CellProtection {
     let grid = state.grid.read().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let styles = state.style_registry.read().unwrap();
 
     // Lock state is a cell FORMAT attribute, resolved through the row/column
     // style tiers. A cell that is absent, or whose style_index is 0 with no
@@ -1550,8 +1576,8 @@ pub fn verify_edit_range_password(
     title: String,
     password: String,
 ) -> bool {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let protection_storage = state.sheet_protection.read().unwrap();
 
     let protection = match protection_storage.get(&active_sheet) {
         Some(p) => p,
@@ -1658,12 +1684,11 @@ pub struct WorkbookProtectionStatus {
 /// MUST be called after the `workbook_protection` guard is dropped.
 fn record_workbook_protection_undo(
     state: &AppState,
-    file_state: &crate::persistence::FileState,
+    _effect: &crate::document_effect::DocumentEffect,
     previous: WorkbookProtection,
     description: &str,
 ) {
     crate::undo_commands::record_workbook_protection_undo(state, previous, description);
-    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
     record_protection_audit(state, description, None);
 }
 
@@ -1674,13 +1699,15 @@ pub fn protect_workbook(
     file_state: State<crate::persistence::FileState>,
     password: Option<String>,
 ) -> WorkbookProtectionResult {
-    let mut wb_protection = state.workbook_protection.lock().unwrap();
+    let wb_protection = state.workbook_protection.lock_pending().unwrap();
 
     if wb_protection.protected {
         return WorkbookProtectionResult::err("Workbook is already protected");
     }
 
     let previous = wb_protection.clone();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut wb_protection = wb_protection.authorize(&effect);
     wb_protection.protected = true;
 
     if let Some(pwd) = password {
@@ -1692,7 +1719,7 @@ pub fn protect_workbook(
     }
     drop(wb_protection);
 
-    record_workbook_protection_undo(&state, &file_state, previous, "Protect workbook");
+    record_workbook_protection_undo(&state, &effect, previous, "Protect workbook");
     WorkbookProtectionResult::ok()
 }
 
@@ -1703,7 +1730,7 @@ pub fn unprotect_workbook(
     file_state: State<crate::persistence::FileState>,
     password: Option<String>,
 ) -> WorkbookProtectionResult {
-    let mut wb_protection = state.workbook_protection.lock().unwrap();
+    let wb_protection = state.workbook_protection.lock_pending().unwrap();
 
     if !wb_protection.protected {
         return WorkbookProtectionResult::err("Workbook is not protected");
@@ -1718,25 +1745,27 @@ pub fn unprotect_workbook(
     }
 
     let previous = wb_protection.clone();
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut wb_protection = wb_protection.authorize(&effect);
     wb_protection.protected = false;
     wb_protection.password_hash = None;
     wb_protection.password_salt = None;
     drop(wb_protection);
 
-    record_workbook_protection_undo(&state, &file_state, previous, "Unprotect workbook");
+    record_workbook_protection_undo(&state, &effect, previous, "Unprotect workbook");
     WorkbookProtectionResult::ok()
 }
 
 /// Check if the workbook is protected
 #[tauri::command]
 pub fn is_workbook_protected(state: State<AppState>) -> bool {
-    state.workbook_protection.lock().unwrap().protected
+    state.workbook_protection.read().unwrap().protected
 }
 
 /// Get workbook protection status
 #[tauri::command]
 pub fn get_workbook_protection_status(state: State<AppState>) -> WorkbookProtectionStatus {
-    let wb_protection = state.workbook_protection.lock().unwrap();
+    let wb_protection = state.workbook_protection.read().unwrap();
     WorkbookProtectionStatus {
         is_protected: wb_protection.protected,
         has_password: wb_protection.password_hash.is_some(),
@@ -2404,7 +2433,7 @@ mod tests {
 /// from a script, an MCP tool, a keyboard shortcut, or any surface that did not
 /// route via that menu.
 pub(crate) fn check_workbook_structure(state: &AppState, what: &str) -> Result<(), String> {
-    let wb = state.workbook_protection.lock().unwrap();
+    let wb = state.workbook_protection.read().unwrap();
     if !wb.protected {
         return Ok(());
     }

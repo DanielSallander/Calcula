@@ -70,7 +70,7 @@ fn collect_cell_type_custom_objects(
     state: &AppState,
     sheet_indices: &[usize],
 ) -> Result<Vec<calp::publish::PublishCustomObject>, String> {
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     let selected: std::collections::HashSet<identity::SheetId> = sheet_indices
         .iter()
         .filter_map(|&i| sheet_ids.get(i).copied())
@@ -364,7 +364,7 @@ fn assemble_publish_workbook(
     // from the published data — only hard-coded cell values go into the package.
     let excluded_regions = {
         let regions = state.protected_regions.lock().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         regions.iter()
             .filter(|r| r.region_type == "pivot")
             .filter_map(|r| {
@@ -541,7 +541,7 @@ fn compute_publish_report(
     // and therefore already travels inside the published styles.json — claiming
     // otherwise here would be a false statement in the fidelity report, which is
     // exactly the kind of drift this report exists to prevent.
-    let protected = state.sheet_protection.lock().map(|p| p.len()).unwrap_or(0);
+    let protected = state.sheet_protection.read().map(|p| p.len()).unwrap_or(0);
     item(&mut excluded, "protection", protected,
         "sheet protection policy is not carried (a governance feature, not yet distributed); \
          per-cell locked/hidden DO travel, as cell formatting");
@@ -1374,7 +1374,7 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut v = state.split_configs.lock().map_err(|e| e.to_string())?;
+        let mut v = state.split_configs.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, crate::sheets::SplitConfig::default());
             v[*idx] = crate::sheets::SplitConfig {
@@ -1384,7 +1384,7 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut v = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+        let mut v = state.sheet_zooms.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut v, *idx, persistence::DEFAULT_SHEET_ZOOM_PERCENT);
             v[*idx] = p.zoom;
@@ -1425,6 +1425,7 @@ fn materialize_pulled_sheet_state(
         for (idx, p) in &targets {
             crate::commands::dimensions::set_user_hidden_for_sheet(
                 state,
+                effect,
                 *idx,
                 p.user_hidden_rows.clone(),
                 p.user_hidden_cols.clone(),
@@ -1432,7 +1433,7 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
-        let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
+        let mut all_merged = state.all_merged_regions.write(effect).map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut all_merged, *idx, std::collections::HashSet::new());
             let merges: std::collections::HashSet<crate::api_types::MergedRegion> = p
@@ -1448,7 +1449,7 @@ fn materialize_pulled_sheet_state(
             // The active sheet's merges live in the mirror (source of truth
             // while active); a refreshed active sheet must sync it too.
             if *idx == active_sheet {
-                let mut mirror = state.merged_regions.lock().map_err(|e| e.to_string())?;
+                let mut mirror = state.merged_regions.write(effect).map_err(|e| e.to_string())?;
                 *mirror = merges.clone();
             }
             all_merged[*idx] = merges;
@@ -1610,7 +1611,7 @@ fn resolve_publish_sheet_indices(
     if !requested.is_empty() {
         return Ok(requested);
     }
-    let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let names = state.sheet_names.read().map_err(|e| e.to_string())?;
     Ok((0..names.len()).collect())
 }
 
@@ -2233,7 +2234,7 @@ pub fn calp_pull(
     let sheet_rename_map: std::collections::HashMap<String, String> = {
         let original_names: Vec<String> =
             result.sheets.iter().map(|ps| ps.name.clone()).collect();
-        let mut taken = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
+        let mut taken = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
         calp::pull::resolve_sheet_name_collisions(
             &mut result.sheets,
             &mut result.subscription.sheets,
@@ -2253,11 +2254,11 @@ pub fn calp_pull(
     // the shared registry and remap cell style_index values accordingly.
     let (chart_sheet_index, pkg_to_index) = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
 
         // Workbook index where pulled sheets land — a chart (keyed by its local
         // sheet id) remaps to this for ChartEntry.sheet_index.
@@ -2305,7 +2306,7 @@ pub fn calp_pull(
     // color, visibility, gridlines, page setup, notes, hyperlinks) and keep the
     // index-aligned per-sheet stores aligned for the appended sheets.
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         let pairs: Vec<(SheetId, &persistence::Sheet)> = result
             .sheets
             .iter()
@@ -2789,7 +2790,7 @@ pub fn calp_pull(
     // before the pull (since pulled sheets are appended).
     if !result.pivot_definitions.is_empty() {
         let sheet_offset = {
-            let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+            let names = state.sheet_names.read().map_err(|e| e.to_string())?;
             names.len() - sheets_pulled
         };
         restore_pulled_pivots(
@@ -3409,8 +3410,8 @@ pub fn calp_get_package_objects(
         return Err(format!("No subscription named '{}'", package_name));
     };
 
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
 
     let sheets: Vec<PackageSheetObjectInfo> = sub
         .sheets
@@ -3619,7 +3620,7 @@ fn write_override_value(grid: &mut engine::Grid, row: u32, col: u32, value: &cal
 
 /// Resolve a sheet id to its current workbook index.
 fn sheet_index_for_id(state: &AppState, sheet_id: SheetId) -> Option<usize> {
-    state.sheet_ids.lock().ok()?.iter().position(|id| *id == sheet_id)
+    state.sheet_ids.read().ok()?.iter().position(|id| *id == sheet_id)
 }
 
 /// Write an OverrideValue into the workbook grids at the cell's current
@@ -3640,7 +3641,7 @@ fn apply_override_value_to_grid(
         .unwrap_or(fallback_position);
 
     let sheet_index = {
-        let sheet_ids = match state.sheet_ids.lock() {
+        let sheet_ids = match state.sheet_ids.read() {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -3662,7 +3663,7 @@ fn apply_override_value_to_grid(
     }
 
     // Keep the active-sheet mirror in sync.
-    let active = state.active_sheet.lock().map(|a| *a).unwrap_or(usize::MAX);
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
     if active == sheet_index {
         if let Ok(mut grid) = state.grid.write(effect) {
             write_override_value(&mut grid, position.0, position.1, value);
@@ -3951,7 +3952,7 @@ pub(crate) fn record_subscription_override_edits(
 
     // Resolve the local sheet id for this index.
     let sheet_id = {
-        let sheet_ids = match state.sheet_ids.lock() {
+        let sheet_ids = match state.sheet_ids.read() {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -4190,7 +4191,7 @@ pub fn calp_refresh_apply(
     // taken — no lock-order coupling with the materialization block below.)
     let mut payloads = payloads;
     {
-        let mut taken = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
+        let mut taken = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         for payload in payloads.iter_mut() {
             let skip: std::collections::HashSet<SheetId> = subs
@@ -4210,11 +4211,11 @@ pub fn calp_refresh_apply(
     // Materialize new/updated sheets into grids.
     let active_grid_after_materialize = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
 
         for payload in &payloads {
@@ -4270,7 +4271,7 @@ pub fn calp_refresh_apply(
         // grids[active] can legitimately lag behind it (BUG-0016) — an
         // unconditional sync would regress unrefreshed active-sheet content.
         // (sheet_ids and subs are the guards already held by this block.)
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         let active_was_refreshed = sheet_ids.get(active).map_or(false, |active_sid| {
             payloads.iter().any(|payload| {
                 let sub = match subs.subscriptions.get(payload.subscription_index) {
@@ -4307,7 +4308,7 @@ pub fn calp_refresh_apply(
     // and BEFORE apply_refresh moves `payloads`.
     let cfdv_pkg_to_index: std::collections::HashMap<SheetId, usize> = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         let mut map = std::collections::HashMap::new();
         for payload in &payloads {
             let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
@@ -4508,7 +4509,7 @@ pub fn calp_refresh_apply(
     // and keep the index-aligned per-sheet stores aligned for sheets this
     // refresh appended. The refresh analog of the calp_pull materialization.
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         for payload in &payloads {
             let pairs: Vec<(SheetId, &persistence::Sheet)> = payload
                 .pull_result
@@ -4657,8 +4658,8 @@ pub fn calp_refresh_apply(
             // the sheet locks for their per-sheet HashMap-store remap, so
             // sheet-then-controls is the canonical order — taking controls
             // first here would be an AB/BA inversion against them.
-            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-            let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+            let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+            let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
             // Same order as first pull: media in before the controls that name
             // it. Additive — the save-time sweep, not this path, decides what a
             // refresh made unreachable.
@@ -5362,13 +5363,13 @@ pub fn calp_refresh_apply(
     // including non-active ones that calculate_now never touches.
     {
         let refreshed_indices: Vec<usize> = {
-            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+            let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
             sheet_ids.iter().enumerate()
                 .filter(|(_, sid)| refreshed_sheet_ids.contains(sid))
                 .map(|(i, _)| i)
                 .collect()
         };
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if refreshed_indices.contains(&active) {
             crate::undo_commands::rebuild_all_dependencies(&state);
         }
@@ -5532,11 +5533,11 @@ pub fn calp_dev_subscribe(
     // Materialize pulled sheets into the workbook.
     let dev_map: std::collections::HashMap<SheetId, usize> = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
 
         let mut map = std::collections::HashMap::new();
         for pulled in &result.sheets {
@@ -5561,7 +5562,7 @@ pub fn calp_dev_subscribe(
     // controls materialize exactly like a real pull (controls sanitized the
     // same way), so the author's fast loop previews what subscribers get.
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         let pairs: Vec<(SheetId, &persistence::Sheet)> = result
             .sheets
             .iter()
@@ -5633,8 +5634,8 @@ fn materialize_dev_controls(
         dev_map.get(&sid).copied()
     });
     drop(controls);
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
     for entry in &result.controls {
         if let Some(&idx) = dev_map.get(&entry.sheet_id) {
             if let Some(local_sid) = sheet_ids.get(idx) {
@@ -5696,11 +5697,11 @@ pub fn calp_dev_refresh(
     // Replace sheets already tracked by this subscription; append any new ones.
     let dev_map: std::collections::HashMap<SheetId, usize> = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let mut sheet_names_state = state.sheet_names.lock().map_err(|e| e.to_string())?;
-        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names_state = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let sub = &subs.subscriptions[sub_index];
 
@@ -5742,7 +5743,7 @@ pub fn calp_dev_refresh(
     // source's, this subscription's own tables are replaced with the new set,
     // and controls reset (sanitized) on the refreshed sheets.
     {
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         let pairs: Vec<(SheetId, &persistence::Sheet)> = result
             .sheets
             .iter()
@@ -5924,7 +5925,7 @@ pub fn calp_get_writeback_regions(
 ) -> Result<Vec<calp::WritebackRegionEntry>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     let id_to_index: std::collections::HashMap<identity::SheetId, usize> = sheet_ids
         .iter()
         .enumerate()
@@ -6291,7 +6292,7 @@ pub fn calp_get_sheet_id(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     sheet_ids
         .get(sheet_index)
         .map(|id| id.to_string())
@@ -8274,8 +8275,8 @@ pub(crate) fn require_model_writeback_publisher(
 /// any "is this cell claimed?" question asked on its behalf must be asked about
 /// exactly this sheet.
 pub(crate) fn active_sheet_id(state: &AppState) -> Result<identity::SheetId, String> {
-    let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     sheet_ids
         .get(active)
         .copied()
@@ -8382,7 +8383,7 @@ pub(crate) fn ensure_writeback_draft_before_write_on_sheets(
         return Ok(());
     }
     let targets: Vec<identity::SheetId> = {
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         sheet_indices
             .iter()
             .filter_map(|i| sheet_ids.get(*i).copied())
@@ -8419,7 +8420,7 @@ pub(crate) fn ensure_writeback_draft_before_grid_install(
         return Ok(());
     }
     let sheet_ids: Vec<identity::SheetId> = {
-        let ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         ids.clone()
     };
     for (sheet_index, cells) in writes {
@@ -8577,7 +8578,7 @@ pub(crate) fn ensure_range_unclaimed_on_sheets(
         col_end: start_col.max(end_col),
     };
     let targets: Vec<identity::SheetId> = {
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         sheet_indices
             .iter()
             .filter_map(|i| sheet_ids.get(*i).copied())
@@ -8629,7 +8630,7 @@ pub(crate) fn ensure_cells_unclaimed_on_sheet(
     }
     let Some(sheet_id) = state
         .sheet_ids
-        .lock()
+        .read()
         .map_err(|e| e.to_string())?
         .get(sheet_index)
         .copied()
@@ -8754,7 +8755,7 @@ mod writeback_claim_tests {
     /// (0,0) on the active sheet.
     fn state_with_region() -> (crate::AppState, identity::SheetId) {
         let state = crate::create_app_state();
-        let sheet_id = *state.sheet_ids.lock().unwrap().first().unwrap();
+        let sheet_id = *state.sheet_ids.read().unwrap().first().unwrap();
         let decl = WritebackRegionDeclaration {
             id: "r1".to_string(),
             selector: RegionSelector {
@@ -12402,12 +12403,12 @@ fn restore_pulled_pivots(
         Err(_) => return,
     };
 
-    let sheet_names = match state.sheet_names.lock() {
+    let sheet_names = match state.sheet_names.read() {
         Ok(sn) => sn,
         Err(_) => return,
     };
 
-    let mut shared_styles = match state.style_registry.lock() {
+    let mut shared_styles = match state.style_registry.write(effect) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -12657,7 +12658,7 @@ fn capture_bi_data_sources(
             for wb in &wb_columns {
                 model_writebacks.push(model_writeback_declaration(wb, &ds_id));
             }
-            let store = state.model_writeback.lock().map_err(|e| e.to_string())?;
+            let store = state.model_writeback.read().map_err(|e| e.to_string())?;
             let baseline: std::collections::HashMap<
                 String,
                 Vec<crate::bi::writeback::ModelWritebackEntry>,
@@ -13243,7 +13244,7 @@ pub fn calp_reset_subscription(
     let pkg_to_local: std::collections::HashMap<SheetId, SheetId> =
         tracked.iter().cloned().collect();
     let targets: Vec<(usize, SheetId, &calp::pull::PulledSheet)> = {
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         result
             .sheets
             .iter()
@@ -13264,15 +13265,15 @@ pub fn calp_reset_subscription(
     // sheet's widths/heights live in the mirrors (set_active_sheet uses
     // take-semantics; its all_* slot is empty while active), so capture from
     // the mirrors for that sheet.
-    let active_idx = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let active_idx = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let snapshot = {
         let mut sheets = Vec::with_capacity(targets.len());
         {
             let grids = state.grids.read().map_err(|e| e.to_string())?;
-            let mirror_cw = state.column_widths.lock().map_err(|e| e.to_string())?;
-            let mirror_rh = state.row_heights.lock().map_err(|e| e.to_string())?;
-            let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-            let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+            let mirror_cw = state.column_widths.read().map_err(|e| e.to_string())?;
+            let mirror_rh = state.row_heights.read().map_err(|e| e.to_string())?;
+            let all_cw = state.all_column_widths.read().map_err(|e| e.to_string())?;
+            let all_rh = state.all_row_heights.read().map_err(|e| e.to_string())?;
             for (idx, _, _) in &targets {
                 let Some(grid) = grids.get(*idx) else { continue };
                 let (column_widths, row_heights) = if *idx == active_idx {
@@ -13325,7 +13326,7 @@ pub fn calp_reset_subscription(
     // to the LOCAL sheet name (the pull may have renamed sheets at subscribe
     // time), and only touch pivots that still exist in this workbook.
     let pkg_name_to_local: std::collections::HashMap<String, String> = {
-        let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
         targets
             .iter()
             .filter_map(|(idx, _, ps)| {
@@ -13424,9 +13425,9 @@ pub fn calp_reset_subscription(
     let mut active_affected = false;
     {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
         for (idx, _, pulled) in &targets {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
             // Remap local style indices (cells AND row/column tiers) to the
@@ -13463,9 +13464,9 @@ pub fn calp_reset_subscription(
                 *state.grid.write(&mirror_effect).map_err(|e| e.to_string())? = grid.clone();
             }
         }
-        *state.column_widths.lock().map_err(|e| e.to_string())? =
+        *state.column_widths.write(&mirror_effect).map_err(|e| e.to_string())? =
             pulled.sheet.column_widths.clone();
-        *state.row_heights.lock().map_err(|e| e.to_string())? =
+        *state.row_heights.write(&mirror_effect).map_err(|e| e.to_string())? =
             pulled.sheet.row_heights.clone();
         active_affected = true;
     }
@@ -13481,7 +13482,7 @@ pub fn calp_reset_subscription(
                 end_col: mr.end_col,
             })
             .collect();
-        crate::report::with_sheet_merges(&state, *idx, |m| {
+        crate::report::with_sheet_merges_mut(&state, &effect, *idx, |m| {
             *m = merges.clone();
         });
     }

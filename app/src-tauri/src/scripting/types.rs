@@ -123,7 +123,7 @@ pub fn build_host_state(
     // writeback automation) used to get a hardcoded 100 no matter what the
     // workbook was zoomed to; they now get the real value, and an interactive
     // run that carries a fresher UI value still overrides it.
-    if let Ok(zooms) = state.sheet_zooms.lock() {
+    if let Ok(zooms) = state.sheet_zooms.read() {
         if let Some(z) = zooms.get(active_sheet) {
             host.zoom = *z;
         }

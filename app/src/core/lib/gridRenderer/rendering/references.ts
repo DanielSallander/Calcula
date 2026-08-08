@@ -7,6 +7,7 @@
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 /**
  * Check if a reference should be drawn on the current sheet.
@@ -45,8 +46,8 @@ export function drawFormulaReferences(state: RenderState): void {
   if (!formulaReferences || formulaReferences.length === 0) {
     return;
   }
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const range = calculateVisibleRange(viewport, config, width, height, dimensions);
   for (const ref of formulaReferences) {
     // FIX: Skip references that belong to a different sheet

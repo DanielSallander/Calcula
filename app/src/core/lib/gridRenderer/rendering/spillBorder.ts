@@ -7,6 +7,7 @@ import type { RenderState } from "../types";
 import type { FreezeConfig, DimensionOverrides, GridConfig, Viewport } from "../../../types";
 import { calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 /** Excel-style blue for spill borders */
 const SPILL_BORDER_COLOR = "#4472C4";
@@ -22,7 +23,7 @@ function getColumnXWithFreeze(
   freezeConfig?: FreezeConfig,
   splitBarSize: number = 0
 ): number {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const rowHeaderWidth = rowHeaderGutter(config);
   const freezeCol = freezeConfig?.freezeCol ?? 0;
 
   if (freezeCol > 0 && col < freezeCol) {
@@ -61,7 +62,7 @@ function getRowYWithFreeze(
   freezeConfig?: FreezeConfig,
   splitBarSize: number = 0
 ): number {
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const colHeaderHeight = colHeaderGutter(config);
   const freezeRow = freezeConfig?.freezeRow ?? 0;
 
   if (freezeRow > 0 && row < freezeRow) {
@@ -134,8 +135,8 @@ export function drawSpillBorders(state: RenderState): void {
     return;
   }
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   for (const range of spillRanges) {
     if (!selectionOverlapsSpill(selection, range)) {

@@ -420,10 +420,10 @@ pub fn add_slicer_computed_property(
 
     // Evaluate formula
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let row_heights = state.row_heights.lock().unwrap();
-    let column_widths = state.column_widths.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let row_heights = state.row_heights.read().unwrap();
+    let column_widths = state.column_widths.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
 
     let mut prop = SlicerComputedProperty {
         id,
@@ -591,10 +591,10 @@ pub fn update_slicer_computed_property(
 
     // Re-evaluate
     let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let row_heights = state.row_heights.lock().unwrap();
-    let column_widths = state.column_widths.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let row_heights = state.row_heights.read().unwrap();
+    let column_widths = state.column_widths.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
 
     let value = {
         let props = slicer_state.computed_properties.read().unwrap();

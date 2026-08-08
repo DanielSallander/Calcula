@@ -604,8 +604,8 @@ pub(crate) fn apply_script_modified_grids_core(
         // std::sync::Mutex is not reentrant, so the locking wrapper would
         // deadlock here. Acquire the rest in canonical order
         // (grids -> style_registry -> sheet_protection).
-        let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let protection_storage = state.sheet_protection.lock().map_err(|e| e.to_string())?;
+        let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+        let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
         let empty_grid = Grid::new();
         for (idx, after_grid) in modified_grids.iter().enumerate() {
             if idx >= app_grids.len() {
@@ -1009,9 +1009,9 @@ pub fn run_script(
 
     // 1. Clone data from AppState for isolated execution
     let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
-    let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
     // 2. Run the script with the REAL application info + live workbook state,
     //    under the one-off runtime limits (memory + stack + wall-clock budget).
@@ -1725,17 +1725,17 @@ mod script_apply_tests {
         // and a missing id would make every claim unresolvable (fail-open).
         state
             .sheet_ids
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
-            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
-        state.sheet_names.lock().unwrap().push("Sheet2".to_string());
+        .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        state.sheet_names.write(&crate::document_effect::test_seed_effect()).unwrap().push("Sheet2".to_string());
         // Test-harness seeding of per-sheet state; not a document edit.
         let seed = crate::document_effect::DocumentEffect::deliberately_clean(
             crate::document_effect::CleanReason::LoadingFromDisk,
         );
         state.sheet_visibility.write(&seed).unwrap().push("visible".to_string());
-        state.all_column_widths.lock().unwrap().push(Default::default());
-        state.all_row_heights.lock().unwrap().push(Default::default());
+        state.all_column_widths.write(&seed).unwrap().push(Default::default());
+        state.all_row_heights.write(&seed).unwrap().push(Default::default());
         state.show_gridlines.write(&seed).unwrap().push(true);
         Harness {
             state,
@@ -2107,7 +2107,7 @@ mod script_apply_tests {
         let mut sheet1 = Grid::new();
         sheet1.set_cell(0, 0, Cell::new_number(5.0));
         let h = harness(sheet1.clone());
-        h.state.sheet_protection.lock().unwrap().insert(
+        h.state.sheet_protection.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
             1,
             crate::protection::SheetProtection {
                 protected: true,
@@ -2142,7 +2142,7 @@ mod script_apply_tests {
     /// Register a published writeback region over a rectangle of SHEET 1 (the
     /// non-active sheet these tests own).
     fn claim_on_sheet1(h: &Harness, region_id: &str, r0: u32, r1: u32, c0: u32, c1: u32) {
-        let sheet_id = h.state.sheet_ids.lock().unwrap()[1];
+        let sheet_id = h.state.sheet_ids.read().unwrap()[1];
         let decl = calp::writeback::WritebackRegionDeclaration {
             id: region_id.to_string(),
             selector: calp::writeback::RegionSelector {

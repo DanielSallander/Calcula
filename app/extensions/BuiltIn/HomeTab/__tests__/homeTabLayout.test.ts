@@ -9,7 +9,7 @@
 //          so customizing once froze a user out of every command shipped
 //          afterwards.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ALL_ITEMS,
   DEFAULT_LAYOUT,
@@ -325,5 +325,55 @@ describe("migrateLayout", () => {
       groups: [{ id: "font", label: "Font", items: ["bold", "retiredCommand", "italic"] }],
     };
     expect(migrateLayout(saved, CURRENT_CATALOG).groups[0].items).toEqual(["bold", "italic"]);
+  });
+});
+
+// ============================================================================
+// saveLayout reports failure instead of swallowing it
+// ============================================================================
+
+describe("saveLayout reports whether the write landed", () => {
+  /** Reject every write, the way a full quota or a private-mode store does.
+   *  Patched on `Storage.prototype`, NOT on the `localStorage` instance: jsdom
+   *  serves the instance through a proxy that drops own-property assignment,
+   *  so `localStorage.setItem = ...` silently keeps the real implementation and
+   *  the test passes for the wrong reason. */
+  const rejectWrites = () =>
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns true when localStorage accepts the write", () => {
+    expect(saveLayout({ version: LAYOUT_VERSION, groups: [] })).toBe(true);
+  });
+
+  it("returns false when localStorage throws, and does not rethrow", () => {
+    rejectWrites();
+    expect(saveLayout({ version: LAYOUT_VERSION, groups: [] })).toBe(false);
+  });
+
+  it("a failed save leaves no half-written entry behind", () => {
+    rejectWrites();
+    saveLayout({ version: LAYOUT_VERSION, groups: [] });
+    vi.restoreAllMocks();
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("loadLayout still returns a correct migrated layout when the re-stamp fails", () => {
+    // The one caller that deliberately ignores the return value: the write is
+    // a version stamp, not the user's edit, and losing it costs only a repeat
+    // of an idempotent migration.
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ version: 1, groups: [{ id: "font", label: "Font", items: ["bold"] }] })
+    );
+    rejectWrites();
+    const loaded = loadLayout();
+    expect(loaded.groups.some((g) => g.id === "font")).toBe(true);
+    expect(loaded.groups[0].items).toContain("bold");
   });
 });

@@ -8,6 +8,7 @@ import type { RenderState } from "../types";
 import type { FreezeConfig, DimensionOverrides, GridConfig, Viewport } from "../../../types";
 import { calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 // ─── Split Zone Helpers ─────────────────────────────────────────────
 
@@ -29,8 +30,8 @@ function computeSplitZones(state: RenderState): SplitZoneInfo[] | null {
 
   if (!splitBarSize || !splitViewport || !freezeConfig) return null;
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const layout = calculateFreezePaneLayout(freezeConfig, config, dimensions);
 
   const hasSplitCols = freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
@@ -132,7 +133,7 @@ function getColumnXWithFreeze(
   freezeConfig?: FreezeConfig,
   splitBarSize: number = 0
 ): number {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const rowHeaderWidth = rowHeaderGutter(config);
   const freezeCol = freezeConfig?.freezeCol ?? 0;
 
   if (freezeCol > 0 && col < freezeCol) {
@@ -180,7 +181,7 @@ function getRowYWithFreeze(
   freezeConfig?: FreezeConfig,
   splitBarSize: number = 0
 ): number {
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const colHeaderHeight = colHeaderGutter(config);
   const freezeRow = freezeConfig?.freezeRow ?? 0;
 
   if (freezeRow > 0 && row < freezeRow) {
@@ -326,8 +327,8 @@ export function drawSelection(state: RenderState): void {
   }
 
   // ─── Non-split mode: existing freeze-pane-aware rendering ─────────
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   const minRow = Math.min(selection.startRow, selection.endRow);
   const maxRow = Math.max(selection.startRow, selection.endRow);
@@ -549,8 +550,8 @@ export function drawClipboardSelection(state: RenderState): void {
   }
 
   // ─── Non-split mode ───
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   const x1 = getColumnXWithFreeze(minCol, config, dimensions, viewport, freezeConfig, splitBarSize);
   const y1 = getRowYWithFreeze(minRow, config, dimensions, viewport, freezeConfig, splitBarSize);
@@ -613,8 +614,8 @@ export function drawActiveCell(state: RenderState): void {
   }
 
   // ─── Non-split mode ───
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   const x = getColumnXWithFreeze(activeCol, config, dimensions, viewport, freezeConfig, splitBarSize);
   const y = getRowYWithFreeze(activeRow, config, dimensions, viewport, freezeConfig, splitBarSize);
@@ -682,8 +683,8 @@ export function drawActiveCellBackground(state: RenderState): void {
   }
 
   // ─── Non-split mode ───
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   const x = getColumnXWithFreeze(activeCol, config, dimensions, viewport, freezeConfig, splitBarSize);
   const y = getRowYWithFreeze(activeRow, config, dimensions, viewport, freezeConfig, splitBarSize);
@@ -713,8 +714,8 @@ export function drawFillPreview(state: RenderState): void {
     return;
   }
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   const minRow = Math.min(fillPreviewRange.startRow, fillPreviewRange.endRow);
   const maxRow = Math.max(fillPreviewRange.startRow, fillPreviewRange.endRow);
@@ -762,8 +763,8 @@ export function drawSelectionDragPreview(state: RenderState): void {
   }
 
   const isCopy = selectionDragMode === "copy";
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   const minRow = Math.min(selectionDragPreview.startRow, selectionDragPreview.endRow);
   const maxRow = Math.max(selectionDragPreview.startRow, selectionDragPreview.endRow);

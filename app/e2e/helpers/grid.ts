@@ -35,7 +35,12 @@ const FALLBACK_CELL_HEIGHT = 20;
 
 /** Live grid geometry, in LOGICAL (pre-zoom) pixels plus the zoom factor. */
 export interface GridGeometry {
+  /**
+   * The row-number gutter as PAINTED — 0 when the headings are hidden, which is
+   * not what `config.rowHeaderWidth` reports. See `readGridGeometry`.
+   */
   rowHeaderWidth: number;
+  /** The column-letter band as PAINTED — 0 when the headings are hidden. */
   colHeaderHeight: number;
   defaultCellWidth: number;
   defaultCellHeight: number;
@@ -88,11 +93,50 @@ export function parseCellRef(ref: string): { row: number; col: number } {
  * this logic.
  */
 export async function readGridGeometry(page: Page): Promise<GridGeometry> {
-  const geo = await page.evaluate(() => {
+  const geo = await page.evaluate(async () => {
     const gs = (window as any).__CALCULA_GRID_STATE__;
     if (!gs) return null;
     const cfg = gs.config ?? {};
     const dims = gs.dimensions ?? {};
+
+    // THE HEADER GUTTERS ARE 0/0 WHEN THE HEADINGS ARE HIDDEN, and this helper
+    // used to take `cfg.rowHeaderWidth` at its word. `View > Headings` off is not
+    // hypothetical and it is not a spec's own doing: the flag is per-sheet state
+    // that round-trips the `.cala`, so a document saved with the headings hidden
+    // brings them back hidden. Every coordinate this helper produced was then
+    // one header size (22px left, 20px above) off the pixels the renderer had
+    // actually painted -- clicks landed in the neighbouring cell and canvas
+    // probes sampled the wrong patch, silently.
+    //
+    // The rule is IMPORTED, not re-spelled: `resolveHeaderSizes` is the same
+    // function `renderGrid` calls, so this helper cannot drift away from the
+    // thing it is measuring. `__calcImport` is main.tsx's
+    // dev-only dynamic-import bridge (the CSP forbids `new Function`), which is
+    // how every other spec reaches app modules from inside the page.
+    const calcImport = (window as any).__calcImport as
+      | ((u: string) => Promise<unknown>)
+      | undefined;
+    if (!calcImport) {
+      throw new Error(
+        "readGridGeometry: window.__calcImport is missing, so the renderer's " +
+        "header-visibility rule cannot be applied. It is installed by " +
+        "app/src/main.tsx under import.meta.env.DEV -- E2E must run against the " +
+        "dev server. Refusing to guess the header sizes: guessing is the bug " +
+        "this code path exists to fix.",
+      );
+    }
+    const { resolveHeaderSizes } = (await calcImport(
+      new URL(
+        "/src/core/lib/gridRenderer/layout/headerVisibility.ts",
+        document.baseURI,
+      ).href,
+    )) as {
+      resolveHeaderSizes: (
+        c: { rowHeaderWidth?: number; colHeaderHeight?: number },
+        displayHeadings?: boolean,
+      ) => { rowHeaderWidth: number; colHeaderHeight: number };
+    };
+    const headers = resolveHeaderSizes(cfg, gs.displayHeadings);
     const toRecord = (m: unknown): Record<number, number> => {
       const out: Record<number, number> = {};
       if (m instanceof Map) {
@@ -110,8 +154,8 @@ export async function readGridGeometry(page: Page): Promise<GridGeometry> {
       return [];
     };
     return {
-      rowHeaderWidth: cfg.rowHeaderWidth,
-      colHeaderHeight: cfg.colHeaderHeight,
+      rowHeaderWidth: headers.rowHeaderWidth,
+      colHeaderHeight: headers.colHeaderHeight,
       defaultCellWidth: cfg.defaultCellWidth,
       defaultCellHeight: cfg.defaultCellHeight,
       columnWidths: toRecord(dims.columnWidths),

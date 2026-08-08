@@ -451,7 +451,7 @@ pub(crate) fn recalc_control_dependents_core(
     let (control_sheets, prepass_active_sheet) = {
         let grid = state.grid.read().unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();
         }
@@ -476,7 +476,7 @@ pub(crate) fn recalc_control_dependents_core(
     // pass). Brief locks, canonical order (sheet_names before the map, no
     // grid lock held).
     let (sheet_edges, active_deps_by_source) = {
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let cross = state.cross_sheet_dependents.lock().unwrap();
         let mut edges: HashMap<usize, HashSet<usize>> = HashMap::new();
         let mut active_deps: HashMap<usize, Vec<(u32, u32)>> = HashMap::new();
@@ -540,10 +540,10 @@ pub(crate) fn recalc_control_dependents_core(
     // and releases its own).
     let updated_cells = {
         let user_files = user_files_state.files.lock().unwrap();
-        let sheet_names = state.sheet_names.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
-        let active_sheet = *state.active_sheet.lock().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
 
         // The active-sheet mirror (state.grid) is the source of truth; grids[i]
         // can lag behind it (BUG-0016, see calculate_now). Sync before scanning
@@ -552,14 +552,14 @@ pub(crate) fn recalc_control_dependents_core(
             grids[active_sheet] = grid.clone();
         }
 
-        let styles = state.style_registry.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
         let dependents_map = state.dependents.lock().unwrap();
         let column_dependents_map = state.column_dependents.lock().unwrap();
         let row_dependents_map = state.row_dependents.lock().unwrap();
         // Read-only here; position in the sequence mirrors update_cell's
         // canonical lock order (after the row/column dependency maps).
         let cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
-        let merged_regions = state.merged_regions.lock().unwrap();
+        let merged_regions = state.merged_regions.read().unwrap();
         let locale = state.locale.lock().unwrap();
         let cascade_tables = state.tables.read().unwrap();
         let cascade_table_names = state.table_names.read().unwrap();

@@ -226,8 +226,8 @@ pub fn get_workbook_state_digest(
     let opts = options.unwrap_or_default();
     log_info!("DIGEST", "get_workbook_state_digest cells_only={}", opts.cells_only);
 
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let sheet_count = sheet_names.len();
     let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
 
@@ -238,21 +238,21 @@ pub fn get_workbook_state_digest(
     {
         let grids = state.grids.read().map_err(|e| e.to_string())?;
         let active_grid = state.grid.read().map_err(|e| e.to_string())?;
-        let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-        let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
-        let active_cw = state.column_widths.lock().map_err(|e| e.to_string())?;
-        let active_rh = state.row_heights.lock().map_err(|e| e.to_string())?;
-        let all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
-        let active_merged = state.merged_regions.lock().map_err(|e| e.to_string())?;
+        let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+        let all_cw = state.all_column_widths.read().map_err(|e| e.to_string())?;
+        let all_rh = state.all_row_heights.read().map_err(|e| e.to_string())?;
+        let active_cw = state.column_widths.read().map_err(|e| e.to_string())?;
+        let active_rh = state.row_heights.read().map_err(|e| e.to_string())?;
+        let all_merged = state.all_merged_regions.read().map_err(|e| e.to_string())?;
+        let active_merged = state.merged_regions.read().map_err(|e| e.to_string())?;
         let freeze_configs = state.freeze_configs.read().map_err(|e| e.to_string())?;
-        let split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
+        let split_configs = state.split_configs.read().map_err(|e| e.to_string())?;
         let tab_colors = state.tab_colors.read().map_err(|e| e.to_string())?;
         let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
         let gridlines = state.show_gridlines.read().map_err(|e| e.to_string())?;
         let page_setups = state.page_setups.read().map_err(|e| e.to_string())?;
         let scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
-        let sheet_zooms = state.sheet_zooms.lock().map_err(|e| e.to_string())?;
+        let sheet_zooms = state.sheet_zooms.read().map_err(|e| e.to_string())?;
 
         for i in 0..sheet_count {
             // The active-sheet mirror is authoritative for the active sheet.
@@ -543,7 +543,7 @@ pub fn get_workbook_state_digest(
             }
         }
     }
-    if let Ok(auto_filters) = state.auto_filters.lock() {
+    if let Ok(auto_filters) = state.auto_filters.read() {
         for (sheet, af) in auto_filters.iter() {
             let mut value = to_value_or_null(af);
             // hidden_rows is a HashSet — its JSON order is nondeterministic.
@@ -613,14 +613,14 @@ pub fn get_workbook_state_digest(
             );
         }
     }
-    if let Ok(protection) = state.sheet_protection.lock() {
+    if let Ok(protection) = state.sheet_protection.read() {
         for (sheet, p) in protection.iter() {
             digest
                 .sheet_protection
                 .insert(sheet.to_string(), to_value_or_null(p));
         }
     }
-    if let Ok(wp) = state.workbook_protection.lock() {
+    if let Ok(wp) = state.workbook_protection.read() {
         digest.workbook_protection = to_value_or_null(&*wp);
     }
     if let Ok(hidden) = state.advanced_filter_hidden_rows.lock() {
@@ -661,8 +661,8 @@ pub fn get_workbook_state_digest(
         digest.theme = to_value_or_null(&*theme);
     }
 
-    let default_row_height = *state.default_row_height.lock().map_err(|e| e.to_string())?;
-    let default_column_width = *state.default_column_width.lock().map_err(|e| e.to_string())?;
+    let default_row_height = *state.default_row_height.read().map_err(|e| e.to_string())?;
+    let default_column_width = *state.default_column_width.read().map_err(|e| e.to_string())?;
     let reference_style = state.reference_style.lock().map_err(|e| e.to_string())?.clone();
     digest.defaults = serde_json::json!({
         "defaultRowHeight": default_row_height,

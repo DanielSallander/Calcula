@@ -8,6 +8,7 @@ import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, FreezeZone
 import { ensureDimensions } from "../styles/styleUtils";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
+import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 // =============================================================================
 // SELECTION THRESHOLDS
@@ -71,8 +72,8 @@ export function getZoneFromPixel(
   dimensions?: DimensionOverrides,
   splitBarSize: number = 0
 ): FreezeZone {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   // If no freeze, everything is in bottomRight (main scrollable)
   if ((freezeConfig.freezeRow === null || freezeConfig.freezeRow <= 0) &&
@@ -122,8 +123,8 @@ export function getCellFromPixel(
   dimensions?: DimensionOverrides,
   options?: GetCellOptions
 ): { row: number; col: number } | null {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   
@@ -296,8 +297,8 @@ export function getColumnResizeHandle(
   viewport: Viewport,
   dimensions?: DimensionOverrides
 ): number | null {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const outlineBarHeight = config.outlineBarHeight ?? 0;
   const totalCols = config.totalCols || 100;
   const handleWidth = 6;
@@ -329,8 +330,8 @@ export function getRowResizeHandle(
   viewport: Viewport,
   dimensions?: DimensionOverrides
 ): number | null {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const handleHeight = 6;
   const outlineBarWidth = config.outlineBarWidth ?? 0;
@@ -363,8 +364,8 @@ export function getColumnFromHeader(
   viewport: Viewport,
   dimensions?: DimensionOverrides
 ): number | null {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const outlineBarHeight = config.outlineBarHeight ?? 0;
   const totalCols = config.totalCols || 100;
 
@@ -399,8 +400,8 @@ export function getRowFromHeader(
   viewport: Viewport,
   dimensions?: DimensionOverrides
 ): number | null {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
   const totalRows = config.totalRows || 1000;
   const outlineBarWidth = config.outlineBarWidth ?? 0;
 
@@ -480,8 +481,8 @@ export function getFormulaReferenceBorderAtPixel(
     return null;
   }
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   // Skip if click is on headers
   if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
@@ -573,8 +574,8 @@ export function getFormulaReferenceCornerAtPixel(
     return null;
   }
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   // Skip if click is on headers
   if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
@@ -701,8 +702,8 @@ export function getSelectionBorderAtPixel(
     return null;
   }
 
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
 
   // All selection types check borders in the CELL AREA (not headers)
   // This avoids conflicts with resize handles in the header areas
