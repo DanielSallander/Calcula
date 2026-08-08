@@ -4,6 +4,7 @@
 import type { MenuDefinition } from '@api/ui';
 import { workspace } from '@api/system';
 import { IconNew, IconOpen, IconSave, IconSaveAs } from '@api';
+import { confirmAsync, alertAsync } from "@api/dialogs";
 
 export interface FileMenuHandlers {
   handleNew: () => Promise<void>;
@@ -21,14 +22,19 @@ export async function fileNew(): Promise<void> {
   try {
     const modified = await workspace.isModified();
     if (modified) {
-      const confirmed = window.confirm('You have unsaved changes. Create new file anyway?');
+      // AWAITED. `!confirmed` on a Promise was always false, so Cancel discarded
+      // the unsaved workbook and reloaded the window regardless.
+      const confirmed = await confirmAsync(
+        'You have unsaved changes. Create new file anyway?',
+        { title: 'Unsaved changes', kind: 'warning' },
+      );
       if (!confirmed) return;
     }
     await workspace.new();
     window.location.reload();
   } catch (error) {
     console.error('[FileMenu] handleNew error:', error);
-    alert('Failed to create new file: ' + String(error));
+    void alertAsync('Failed to create new file: ' + String(error));
   }
 }
 
@@ -40,7 +46,7 @@ export async function fileOpen(): Promise<void> {
     }
   } catch (error) {
     console.error('[FileMenu] handleOpen error:', error);
-    alert('Failed to open file: ' + String(error));
+    void alertAsync('Failed to open file: ' + String(error));
   }
 }
 
@@ -52,7 +58,7 @@ export async function fileSave(): Promise<void> {
     }
   } catch (error) {
     console.error('[FileMenu] handleSave error:', error);
-    alert('Failed to save file: ' + String(error));
+    void alertAsync('Failed to save file: ' + String(error));
   }
 }
 
@@ -64,7 +70,7 @@ export async function fileSaveAs(): Promise<void> {
     }
   } catch (error) {
     console.error('[FileMenu] handleSaveAs error:', error);
-    alert('Failed to save file: ' + String(error));
+    void alertAsync('Failed to save file: ' + String(error));
   }
 }
 

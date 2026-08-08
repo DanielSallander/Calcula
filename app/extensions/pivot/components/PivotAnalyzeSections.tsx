@@ -23,6 +23,7 @@ import { usePivotPanelState, refreshSourceRange } from '../lib/pivotPanelStore';
 import { ChangeDataSourceDialog } from './ChangeDataSourceDialog';
 import { CalculatedFieldDialog } from './CalculatedFieldDialog';
 import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
+import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
 // Styles
@@ -146,7 +147,7 @@ export function AnalyzeDataSection(_props: PanelSectionProps): React.ReactElemen
       const errStr = String(err);
       if (errStr.includes('Not connected') || errStr.includes('No connection')) {
         // BI pivot not connected — offer to open Connections pane
-        const shouldConnect = window.confirm(
+        const shouldConnect = await confirmAsync(
           'This pivot table is not connected to a data source.\n\n' +
           'Open the Connections panel to connect?'
         );

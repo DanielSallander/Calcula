@@ -9,6 +9,7 @@ import type { SelectionDragState, CellPosition, MousePosition } from "../types";
 import { getCellFromPixel, getSelectionBorderAtPixel, getRowFromHeader, getColumnFromHeader } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
 import { checkRangeGuards } from "../../../lib/editGuards";
+import { alertAsync } from "../../../lib/dialogs";
 
 interface SelectionDragDependencies {
   config: GridConfig;
@@ -133,7 +134,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     const srcMaxCol = Math.max(selection.startCol, selection.endCol);
     const sourceGuard = checkRangeGuards(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
     if (sourceGuard?.blocked) {
-      if (sourceGuard.message) alert(sourceGuard.message);
+      if (sourceGuard.message) void alertAsync(sourceGuard.message);
       return false;
     }
 
@@ -331,7 +332,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       if (!srcHasProtectedRegion) {
         const destGuard = checkRangeGuards(targetRow, targetCol, targetRow + rowSpan, targetCol + colSpan);
         if (destGuard?.blocked) {
-          if (destGuard.message) alert(destGuard.message);
+          if (destGuard.message) void alertAsync(destGuard.message);
           return;
         }
       }

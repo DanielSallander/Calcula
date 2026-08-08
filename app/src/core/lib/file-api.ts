@@ -1,6 +1,7 @@
 //! FILENAME: app/src/core/lib/file-api.ts
 import { tracedInvoke } from '../../utils/bridge';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { confirmAsync } from './dialogs';
 import type { CellData } from '../types/types';
 import { emitAppEvent, AppEvents } from './events';
 import { checkLifecycleGuards } from './lifecycleGuards';
@@ -119,10 +120,16 @@ export async function saveFileAs(password?: string): Promise<string | null> {
       if (path.toLowerCase().endsWith('.xlsx')) {
         const lost = await tracedInvoke<string[]>('xlsx_save_loss_report', {});
         if (lost.length > 0) {
-          const ok = window.confirm(
+          // AWAITED. The bare `window.confirm` this replaced returned a
+          // Promise under Tauri, so `if (!ok)` was `!Promise` — always false.
+          // Cancelling the lossy-save warning saved the .xlsx anyway and
+          // silently dropped every feature just listed, which is the exact
+          // trust-killer the warning exists to prevent.
+          const ok = await confirmAsync(
             `Saving as .xlsx will NOT include these Calcula features:\n\n` +
               lost.map((f) => `  • ${f}`).join('\n') +
               `\n\nSave as .xlsx anyway? (Use .cala to keep everything.)`,
+            { title: 'Save as .xlsx?', kind: 'warning' },
           );
           if (!ok) return null;
         }

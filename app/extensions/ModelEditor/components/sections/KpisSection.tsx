@@ -8,6 +8,7 @@ import { biModelDeleteKpi, biModelUpsertKpi } from "@api";
 import type { ModelKpiInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 const KPI_STATUSES = [
   { value: "offTrack", label: "Off track" },
@@ -20,7 +21,7 @@ export function KpisSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const [editing, setEditing] = useState<{ original: ModelKpiInfo | null } | null>(null);
 
   const handleDelete = async (k: ModelKpiInfo) => {
-    if (!window.confirm(`Delete KPI '${k.name}'?`)) return;
+    if (!(await confirmAsync(`Delete KPI '${k.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteKpi(connectionId, k.name));
     } catch (err: unknown) {

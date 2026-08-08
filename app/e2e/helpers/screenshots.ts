@@ -14,6 +14,7 @@
  */
 import { type Page, type Locator, expect } from "@playwright/test";
 import { readGridGeometry, cellRangeRectFrom, parseCellRef, type GridGeometry } from "./grid";
+import { SCREENSHOT_DEFAULTS } from "./screenshotGates";
 
 // ============================================================================
 // Selector resolution
@@ -69,46 +70,17 @@ async function resolveOne(
   );
 }
 
-// Default comparison options - tuned for Canvas rendering which can have
-// minor anti-aliasing differences between runs.
 // ============================================================================
 // Comparison gates
 //
-// `threshold` is pixelmatch's YIQ colour-distance gate: a pixel is only
-// COUNTED as different when its squared YIQ distance exceeds
-// 35215 * threshold^2. It is not a per-channel tolerance, and it is the
-// setting that decides whether the suite can see the grid at all.
-//
-// Measured on the default skin (see the numbers below — re-measure if the skin
-// changes): gridlines paint #f1f1f1 on white (ΔY 14) and the faintest hairline
-// #f5f5f5 (ΔY 10). pixelmatch stops seeing them above threshold 0.053 and
-// 0.038 respectively. At the old 0.2 an ENTIRE erased gridline scored
-// literally 0 differing pixels; at 0.02 the same defect scores 520 (vertical)
-// / 1193 (horizontal) / 1042 (shifted 1px). 0.02 keeps ~2x margin on the
-// faintest line the renderer paints.
-//
-// The pixel budget is the second half of the gate: min(maxDiffPixels,
-// maxDiffPixelRatio * imagePixels). The old 0.005 ratio allowed 3425 pixels on
-// a grid capture — six whole gridlines' worth — so a tighter threshold alone
-// would still have passed single-line defects. 200 sits at the geometric mean
-// of the measured noise ceiling (77 px: the marching-ants copy border, the
-// only non-deterministic thing in either suite over two cold runs of all 76
-// captures — everything else was bit-identical) and the smallest single-line
-// defect (520 px). On small captures the ratio is what binds: 15 px on a
-// status-bar strip, ~9 px on a region crop.
-//
-// Do not loosen these to make a shot pass. A shot that cannot hold this gate
-// is capturing something non-deterministic; fix the capture.
+// DEFINED ONCE, in ./screenshotGates.ts, which also records how each number was
+// measured and why it must not be loosened. playwright.config.ts imports the
+// same constant as its project-wide `expect.toHaveScreenshot` default, so a
+// capture written directly in a spec is held to exactly the gate a capture made
+// through this helper is. The numbers previously lived in both files, synced by
+// a comment — drift would have silently loosened one half of the suite.
 // ============================================================================
-const DEFAULT_SCREENSHOT_OPTIONS = {
-  // Pixel budget: min(200 px, 0.05% of the image).
-  maxDiffPixels: 200,
-  maxDiffPixelRatio: 0.0005,
-  // YIQ colour-distance gate — must stay below 0.038 to see a gridline.
-  threshold: 0.02,
-  // Animation settling time
-  animations: "disabled" as const,
-};
+const DEFAULT_SCREENSHOT_OPTIONS = SCREENSHOT_DEFAULTS;
 
 /**
  * WHY REGION CAPTURES DO NOT HAVE THEIR OWN GATE.

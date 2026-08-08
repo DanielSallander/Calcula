@@ -11,6 +11,7 @@ import {
 import { EDIT_DIALOG_ID, MANAGE_DIALOG_ID } from "../dialogIds";
 import { findReportAt, refreshReportRegions } from "./reportRegions";
 import { deleteReport, refreshOneReport } from "./reportRefresh";
+import { confirmAsync, alertAsync } from "@api/dialogs";
 
 const CONTEXT_ITEM_IDS = [
   "report:editQuery",
@@ -51,9 +52,9 @@ export function registerReportContextMenu(): () => void {
         if (!report) return;
         const result = await refreshOneReport(report);
         if (!result.ok) {
-          alert(`"${report.name}" was not refreshed:\n${result.message ?? "unknown error"}`);
+          void alertAsync(`"${report.name}" was not refreshed:\n${result.message ?? "unknown error"}`);
         } else if ((result.overwrittenCellCount ?? 0) > 0) {
-          alert(
+          void alertAsync(
             `${result.overwrittenCellCount} existing cell(s) outside the previous report area were overwritten (Ctrl+Z to undo).`,
           );
         }
@@ -69,13 +70,17 @@ export function registerReportContextMenu(): () => void {
       onClick: async (ctx) => {
         const report = clickedReport(ctx);
         if (!report) return;
-        if (!window.confirm(`Delete report "${report.name}"? Its cells are cleared (Ctrl+Z undoes).`)) {
+        if (
+          !(await confirmAsync(
+            `Delete report "${report.name}"? Its cells are cleared (Ctrl+Z undoes).`,
+          ))
+        ) {
           return;
         }
         try {
           await deleteReport(report.id);
         } catch (e) {
-          alert(String(e));
+          void alertAsync(String(e));
         }
         await refreshReportRegions();
       },

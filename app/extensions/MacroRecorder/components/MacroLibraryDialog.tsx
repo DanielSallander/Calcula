@@ -56,6 +56,7 @@ import {
 import { getAnchorCell, resolveAnchorSheetIndex } from "../lib/flow";
 import { formatA1, parseA1 } from "../lib/a1";
 import { disabledIf, styles } from "./styles";
+import { confirmAsync } from "@api/dialogs";
 
 interface LoadedModule {
   id: string;
@@ -220,13 +221,11 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
       // If the link scan fails, fall back to the plain confirm rather than
       // blocking a delete on a diagnostic query.
     }
-    // AWAIT the confirm. Under Tauri `window.confirm` is overridden to return a
-    // Promise<boolean> (it shows a NATIVE dialog); the synchronous form
-    // `if (!window.confirm(...))` tests `!Promise`, which is ALWAYS false, so the
-    // warning never gated the delete — Cancel was ignored and the macro was
-    // orphaned regardless. Awaiting works in both worlds: a real Promise resolves
-    // to the choice, and a plain boolean (jsdom/tests) is awaited to itself.
-    const confirmed = await window.confirm(confirmMessage);
+    // Via confirmAsync (awaits AND fails closed). This site was patched once
+    // already for the async-confirm defect; the wrapper is what keeps the fix
+    // from being undone by the next edit, because the raw global is now a lint
+    // error everywhere except the wrapper itself.
+    const confirmed = await confirmAsync(confirmMessage, { kind: "warning" });
     if (!confirmed) return;
     setBusy(true);
     setError(null);

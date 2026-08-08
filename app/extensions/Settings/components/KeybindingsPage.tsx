@@ -23,6 +23,7 @@ import {
   getAvailableCommands,
   type KeyBinding,
 } from "@api/keybindings";
+import { confirmAsync } from "@api/dialogs";
 
 const h = React.createElement;
 
@@ -261,8 +262,10 @@ export function KeybindingsPage(): React.ReactElement {
     resetUserKeybinding(id);
   }, []);
 
-  const handleResetAll = useCallback(() => {
-    if (confirm("Reset all keyboard shortcuts to their defaults?")) {
+  const handleResetAll = useCallback(async () => {
+    // AWAITED. The bare `confirm(...)` returned a truthy Promise, so Cancel
+    // wiped every custom shortcut just as OK did.
+    if (await confirmAsync("Reset all keyboard shortcuts to their defaults?")) {
       resetAllKeybindings();
     }
   }, []);
@@ -313,7 +316,7 @@ export function KeybindingsPage(): React.ReactElement {
         }, "+ Add Shortcut"),
         h("button", {
           style: pageStyles.resetAllBtn,
-          onClick: handleResetAll,
+          onClick: () => void handleResetAll(),
         }, "Reset All"),
       ),
     ),

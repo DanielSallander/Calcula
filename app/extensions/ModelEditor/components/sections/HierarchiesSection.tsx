@@ -8,13 +8,14 @@ import { biModelDeleteHierarchy, biModelUpsertHierarchy } from "@api";
 import type { ModelHierarchyInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 export function HierarchiesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [editing, setEditing] = useState<{ original: ModelHierarchyInfo | null } | null>(null);
 
   const handleDelete = async (h: ModelHierarchyInfo) => {
-    if (!window.confirm(`Delete hierarchy '${h.name}'?`)) return;
+    if (!(await confirmAsync(`Delete hierarchy '${h.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteHierarchy(connectionId, h.name));
     } catch (err: unknown) {

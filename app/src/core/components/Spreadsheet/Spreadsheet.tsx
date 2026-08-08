@@ -57,6 +57,7 @@ import type { GridMenuContext } from "../../lib/gridCommands";
 
 // Styles
 import * as S from "./Spreadsheet.styles";
+import { alertAsync } from "../../lib/dialogs";
 
 const SCROLLBAR_SIZE = 14;
 const SPLIT_BAR_SIZE = 4;
@@ -641,7 +642,7 @@ function SpreadsheetContent({
       await cancelUndoTransaction().catch(() => {});
       console.error("[Spreadsheet] Failed to clear all:", error);
       const msg = typeof error === "string" ? error : (error as Error)?.message;
-      if (msg) alert(msg);
+      if (msg) void alertAsync(msg);
     }
   }, [selection]);
 
@@ -682,7 +683,7 @@ function SpreadsheetContent({
       // Delete Row/Column already alerts; a silent insert refusal reads as a
       // dead button. Surface the backend's reason (protection, usually).
       const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      alert(msg);
+      void alertAsync(msg);
     }
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
@@ -721,7 +722,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert columns:", error);
       const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      alert(msg);
+      void alertAsync(msg);
     }
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
@@ -759,7 +760,7 @@ function SpreadsheetContent({
       canvasRef.current?.redraw();
     } catch (error) {
       const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      alert(msg);
+      void alertAsync(msg);
     }
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
@@ -797,7 +798,7 @@ function SpreadsheetContent({
       canvasRef.current?.redraw();
     } catch (error) {
       const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      alert(msg);
+      void alertAsync(msg);
     }
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 

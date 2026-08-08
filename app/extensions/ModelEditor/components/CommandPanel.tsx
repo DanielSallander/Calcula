@@ -17,6 +17,7 @@ import type { CliIo, CliSession, RunPlan } from "../cli/execute";
 import { createLiveGateway } from "../cli/gateway";
 import { CliError } from "../cli/lex";
 import { CLI_LANGUAGE_ID, registerCliLanguage, setCliLanguageContext } from "../cli/cliLanguage";
+import { confirmAsync, promptAsync } from "@api/dialogs";
 
 // Same defensive Monaco worker setup as ExpressionWorkspace (either module may
 // load first; never clobber a handler another editor installed).
@@ -304,8 +305,11 @@ export function CommandPanel({
 
   // ── Saved scripts ─────────────────────────────────────────────────────────
 
-  const saveScript = useCallback(() => {
-    const name = window.prompt("Script name:", selectedScript || "my-script");
+  const saveScript = useCallback(async () => {
+    const name = await promptAsync("Script name:", {
+      title: "Save script",
+      defaultValue: selectedScript || "my-script",
+    });
     if (!name) return;
     const next = { ...scripts, [name]: scriptText };
     setScripts(next);
@@ -321,8 +325,9 @@ export function CommandPanel({
     [scripts],
   );
 
-  const deleteScript = useCallback(() => {
-    if (!selectedScript || !window.confirm(`Delete saved script '${selectedScript}'?`)) return;
+  const deleteScript = useCallback(async () => {
+    if (!selectedScript) return;
+    if (!(await confirmAsync(`Delete saved script '${selectedScript}'?`))) return;
     const next = { ...scripts };
     delete next[selectedScript];
     setScripts(next);
@@ -425,10 +430,10 @@ export function CommandPanel({
                   </option>
                 ))}
             </select>
-            <button style={styles.btn} onClick={saveScript} title="Save the script text under a name">
+            <button style={styles.btn} onClick={() => void saveScript()} title="Save the script text under a name">
               Save…
             </button>
-            <button style={styles.btn} disabled={!selectedScript} onClick={deleteScript}>
+            <button style={styles.btn} disabled={!selectedScript} onClick={() => void deleteScript()}>
               Delete
             </button>
           </>

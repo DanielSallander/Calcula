@@ -14,6 +14,11 @@ per-object-type, brought to full fidelity, and made loudly transparent about
 anything they still cannot carry. See "Full-Fidelity Publish and
 Transparency (2026-07)" below.
 
+**August 2026 media round:** embedded pictures became content-addressed
+artifacts instead of base64 inside `controls.json`, and the pull path — the
+last unvalidated binary route into a subscriber's document — was closed. See
+"Binary Media in Packages (2026-08)" below.
+
 Backward compatibility with prior in-development formats is a non-goal.
 When this design conflicts with existing code or data structures, the
 existing code changes. No migration paths, no legacy-format readers,
@@ -392,8 +397,103 @@ instances:
   nothing after blob dedup — pivots were silently never pulled from real
   registries before this).
 
+## Binary Media in Packages (2026-08)
+
+Pictures used to travel as base64 data URLs inside the `controls.json`
+artifact. They now travel as their own content-addressed artifacts. The change
+is small in the format and large in what it fixes, and the interesting half is
+what happens to packages that were already published and already signed.
+
+### Media artifacts
+
+A picture's bytes are published at `media/{sha256}` — one raw artifact per
+distinct image — and the control property holds a `media:<sha256>` handle
+instead of the image. Only media that the PUBLISHED sheets actually reference
+travels; `publish.rs` walks each published sheet's controls with
+`calcula_format::media::visit_media_refs` and writes exactly the blobs it
+finds, so a picture on an unpublished sheet does not leak into the package.
+
+**This is what makes the content-addressed blob store work.**
+`commit_artifacts_as_blobs` keys on each ARTIFACT's SHA-256, and a media
+artifact's content IS the image, so the blob key is literally the media hash:
+the same corporate logo is one blob across every version of every package that
+carries it. Inline, the blob key was the SHA of the whole `controls.json`, so
+editing one caption minted a fresh multi-megabyte blob on every release. The
+dedup was already there; inlining defeated it.
+
+The integrity walk needed no change: `verify_version_artifacts_via` recurses
+into every directory except `submissions/` and `reviews/`, so `media/` entries
+are hashed and LISTED in the signed manifest automatically — which they must
+be, because that same walk rejects unlisted artifacts.
+
+Pulled blobs are re-validated host-side and re-keyed from their own bytes
+(`media::admit_foreign_media`). A signed manifest proves the publisher sent
+these bytes; it does not prove they are a picture. A correctly-signed
+decompression bomb is refused by the same gate as any other file.
+
+Dev-mode pulls carry media too (`DevPullResult.media`). A dev pull exists to
+show an author what a subscriber will get, and without the bytes every picture
+in the preview painted "Image Unavailable".
+
+### The legacy-package contract: read tolerance, write strictness
+
+Packages published before media artifacts existed carry whole images base64'd
+inside `controls.json`, and that artifact is covered by the detached manifest
+signature. **A subscriber cannot re-sign someone else's package.** Two
+consequences follow and they pull in opposite directions:
+
+- Refusing the legacy shape would break every existing subscription to fix
+  nothing. The pull path must READ it. Non-negotiable.
+- But whatever it reads is written into the SUBSCRIBER's own document and saved
+  verbatim into their own `controls.json`. Reading it unchecked propagates the
+  original defect one hop further.
+
+The resolution is to migrate at the package boundary:
+`media::admit_distributed_controls` sanitizes AND migrates — decode,
+re-validate through `calcula_format::media::inspect_media` (magic bytes, 8 MiB
+byte cap, both pixel caps, PNG/JPEG/GIF/WebP allowlist), file under the content
+hash, rewrite the property to a handle. All three distributed materialization
+sites — first pull, refresh, dev pull — call it instead of the old
+`sanitize_distributed_controls`. It runs AFTER signature verification, on the
+way into the subscriber's document, so the package as published is untouched
+and its signature unaffected.
+
+A payload this build refuses (an SVG, or one over a cap) is **left inline, not
+dropped**: it keeps rendering from its data URL under the existing CSP `data:`
+allowance while the write door stays shut. Deleting it would silently destroy a
+picture the subscriber can see, which is a worse outcome than carrying a
+payload that can no longer spread.
+
+**What a subscriber sees: the same picture.** No consent prompt, no re-pull, no
+"package invalid". What changed is invisible and in their favour — the image is
+content-addressed, so the same logo across five packages is one blob, and their
+saved workbook holds a 70-character handle where it held a multi-megabyte
+string.
+
+### The hole this closed, and the general caution
+
+Pulled controls are materialized by `materialize_saved_controls`, which writes
+STRAIGHT into `ControlStorage`. It is not a `set_control_metadata` call, so the
+64 KiB property bound never saw it, and neither did any format or size check.
+**A legacy pull was therefore the last surviving route by which unvalidated
+binary entered a document**, and the claim that "every route converges on the
+two control commands" was wrong about exactly this one.
+
+The general form is worth recording, because it will recur: a
+*materialize*-shaped code path — one that reconstructs persisted state directly
+into a store rather than replaying the commands that would have created it —
+bypasses every gate that lives at the command layer. Publish/pull, `.cala`
+load, undo restore and package refresh are all this shape. When a validation
+rule is added to a command, ask which materializers reach the same store, and
+put the rule where they converge (here: one Rust function,
+`calcula_format::media::inspect_media`, called by all four doors) rather than
+at each command.
+
 ## Open Items Deferred Beyond v1
 
 - Promote-override-to-upstream mechanism (UI reserved; flow undefined)
 - Public registry discovery and trust model
 - Multi-user concurrent editing of a `.cala` (single-user assumed in v1)
+- **No artifact size cap exists at all.** A legacy inline payload that this
+  build refuses is left inline and is therefore unbounded — but that is a
+  special case of the general gap, not a media-specific one.

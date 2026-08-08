@@ -4,6 +4,7 @@
 
 import { sheetExtensions, showDialog } from "@api";
 import { isCurrentWorkbookProtected } from "../lib/protectionStore";
+import { promptAsync } from "@api/dialogs";
 
 const PROTECTION_WARNING_DIALOG_ID = "protection-warning";
 
@@ -24,7 +25,10 @@ export function registerSheetTabProtection(): void {
         });
         return;
       }
-      const newName = prompt("Enter new sheet name:", context.sheet.name);
+      const newName = await promptAsync("Enter new sheet name:", {
+        title: "Rename sheet",
+        defaultValue: context.sheet.name,
+      });
       if (newName && newName.trim() !== "" && newName !== context.sheet.name) {
         const event = new CustomEvent("sheet:requestRename", {
           detail: { index: context.index, newName: newName.trim() },

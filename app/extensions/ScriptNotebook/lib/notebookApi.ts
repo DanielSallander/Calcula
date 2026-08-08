@@ -12,6 +12,7 @@ import type {
   RunNotebookCellRequest,
   RewindNotebookRequest,
 } from "../types";
+import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
 // Notebook CRUD
@@ -63,10 +64,14 @@ async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("SCRIPT_PROMPT_REQUIRED")) {
-      const ok = window.confirm(
+      // AWAITED. This is Script Security's whole "prompt" mode for notebooks:
+      // the bare form made `ok` a truthy Promise, so Cancel granted the session
+      // approval and ran the cell.
+      const ok = await confirmAsync(
         "This notebook wants to run a script cell.\n\n" +
         "Allow script execution for this session?\n" +
         "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",
+        { title: "Script Security", kind: "warning" },
       );
       if (ok) {
         await notebookBackend.invoke<void>("grant_script_session_approval");

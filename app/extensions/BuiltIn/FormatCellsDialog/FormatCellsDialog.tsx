@@ -25,6 +25,7 @@ import { BorderTab } from "./tabs/BorderTab";
 import { FillTab } from "./tabs/FillTab";
 import { ProtectionTab } from "./tabs/ProtectionTab";
 import * as S from "./FormatCellsDialog.styles";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Tab Definitions
@@ -238,7 +239,7 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         formulaHidden: store.formulaHidden,
       });
       if (!protResult.success && protResult.error) {
-        alert(
+        void alertAsync(
           `Formatting was applied, but the cell locking change was not:\n\n${protResult.error}`
         );
       }

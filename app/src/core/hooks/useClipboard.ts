@@ -35,6 +35,7 @@ import { setClipboard, clearClipboard, setSelection } from "../state/gridActions
 import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
 import { checkRangeGuards } from "../lib/editGuards";
 import { captureClipboardCells, pasteRowDeltas } from "../lib/clipboardVisibility";
+import { alertAsync } from "../lib/dialogs";
 
 /**
  * Internal clipboard data structure.
@@ -521,7 +522,7 @@ export function useClipboard(): UseClipboardReturn {
       targetRow + actualPasteHeight - 1, targetCol + actualPasteWidth - 1
     );
     if (rangeGuard?.blocked) {
-      if (rangeGuard.message) alert(rangeGuard.message);
+      if (rangeGuard.message) void alertAsync(rangeGuard.message);
       return;
     }
 
@@ -618,7 +619,7 @@ export function useClipboard(): UseClipboardReturn {
         // user's NEXT edits would silently merge into one undo entry.
         await cancelUndoTransaction().catch(() => {});
         const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
-        alert(msg);
+        void alertAsync(msg);
         return;
       }
 
@@ -780,14 +781,14 @@ export function useClipboard(): UseClipboardReturn {
       // Check if destination overlaps a protected range (e.g., pivot table)
       const destGuard = checkRangeGuards(targetRow, targetCol, destEndRow, destEndCol);
       if (destGuard?.blocked) {
-        if (destGuard.message) alert(destGuard.message);
+        if (destGuard.message) void alertAsync(destGuard.message);
         return;
       }
 
       // Also check if source overlaps a protected range
       const srcGuard = checkRangeGuards(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
       if (srcGuard?.blocked) {
-        if (srcGuard.message) alert(srcGuard.message);
+        if (srcGuard.message) void alertAsync(srcGuard.message);
         return;
       }
 
@@ -886,7 +887,7 @@ export function useClipboard(): UseClipboardReturn {
               // sheet protection, so this path went from near-unreachable to
               // routine.
               await cancelUndoTransaction().catch(() => {});
-              alert(msg);
+              void alertAsync(msg);
               return;
             }
           }
@@ -974,7 +975,7 @@ export function useClipboard(): UseClipboardReturn {
       } catch (error) {
         console.error("[Clipboard] Move cells failed:", error);
         await cancelUndoTransaction().catch(() => {});
-        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
+        void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalRows, config.totalCols, dispatch]
@@ -1001,9 +1002,9 @@ export function useClipboard(): UseClipboardReturn {
       // Check if source or destination rows overlap a protected range
       const targetEndRow = targetRow + count - 1;
       const srcRowGuard = checkRangeGuards(minRow, 0, maxRow, config.totalCols - 1);
-      if (srcRowGuard?.blocked) { if (srcRowGuard.message) alert(srcRowGuard.message); return; }
+      if (srcRowGuard?.blocked) { if (srcRowGuard.message) void alertAsync(srcRowGuard.message); return; }
       const destRowGuard = checkRangeGuards(targetRow, 0, targetEndRow, config.totalCols - 1);
-      if (destRowGuard?.blocked) { if (destRowGuard.message) alert(destRowGuard.message); return; }
+      if (destRowGuard?.blocked) { if (destRowGuard.message) void alertAsync(destRowGuard.message); return; }
 
       const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (hasContent) {
@@ -1112,7 +1113,7 @@ export function useClipboard(): UseClipboardReturn {
         // edit silently joins it and collapses into one Ctrl+Z step.
         await cancelUndoTransaction().catch(() => {});
         const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-        alert(msg);
+        void alertAsync(msg);
       }
     },
     [config.totalCols, dispatch]
@@ -1139,9 +1140,9 @@ export function useClipboard(): UseClipboardReturn {
       // Check if source or destination columns overlap a protected range
       const targetEndCol = targetCol + count - 1;
       const srcColGuard = checkRangeGuards(0, minCol, config.totalRows - 1, maxCol);
-      if (srcColGuard?.blocked) { if (srcColGuard.message) alert(srcColGuard.message); return; }
+      if (srcColGuard?.blocked) { if (srcColGuard.message) void alertAsync(srcColGuard.message); return; }
       const destColGuard = checkRangeGuards(0, targetCol, config.totalRows - 1, targetEndCol);
-      if (destColGuard?.blocked) { if (destColGuard.message) alert(destColGuard.message); return; }
+      if (destColGuard?.blocked) { if (destColGuard.message) void alertAsync(destColGuard.message); return; }
 
       const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
       if (hasContent) {
@@ -1248,7 +1249,7 @@ export function useClipboard(): UseClipboardReturn {
       } catch (error) {
         await cancelUndoTransaction().catch(() => {});
         const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-        alert(msg);
+        void alertAsync(msg);
       }
     },
     [config.totalRows, dispatch]
@@ -1276,7 +1277,7 @@ export function useClipboard(): UseClipboardReturn {
       // Check if destination overlaps a protected range (e.g., pivot table)
       const destGuard = checkRangeGuards(targetRow, targetCol, destEndRow, destEndCol);
       if (destGuard?.blocked) {
-        if (destGuard.message) alert(destGuard.message);
+        if (destGuard.message) void alertAsync(destGuard.message);
         return;
       }
 
@@ -1339,7 +1340,7 @@ export function useClipboard(): UseClipboardReturn {
               // sheet protection, so this path went from near-unreachable to
               // routine.
               await cancelUndoTransaction().catch(() => {});
-              alert(msg);
+              void alertAsync(msg);
               return;
             }
           }
@@ -1364,7 +1365,7 @@ export function useClipboard(): UseClipboardReturn {
       } catch (error) {
         console.error("[Clipboard] Copy cells (drag) failed:", error);
         await cancelUndoTransaction().catch(() => {});
-        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
+        void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalRows, config.totalCols, dispatch]
@@ -1389,7 +1390,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const targetEndRow = targetRow + count - 1;
       const destRowGuard = checkRangeGuards(targetRow, 0, targetEndRow, config.totalCols - 1);
-      if (destRowGuard?.blocked) { if (destRowGuard.message) alert(destRowGuard.message); return; }
+      if (destRowGuard?.blocked) { if (destRowGuard.message) void alertAsync(destRowGuard.message); return; }
 
       const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (hasContent) {
@@ -1449,7 +1450,7 @@ export function useClipboard(): UseClipboardReturn {
       } catch (error) {
         console.error("[Clipboard] Copy rows (drag) failed:", error);
         await cancelUndoTransaction().catch(() => {});
-        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
+        void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalCols, dispatch]
@@ -1474,7 +1475,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const targetEndCol = targetCol + count - 1;
       const destColGuard = checkRangeGuards(0, targetCol, config.totalRows - 1, targetEndCol);
-      if (destColGuard?.blocked) { if (destColGuard.message) alert(destColGuard.message); return; }
+      if (destColGuard?.blocked) { if (destColGuard.message) void alertAsync(destColGuard.message); return; }
 
       const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
       if (hasContent) {
@@ -1534,7 +1535,7 @@ export function useClipboard(): UseClipboardReturn {
       } catch (error) {
         console.error("[Clipboard] Copy columns (drag) failed:", error);
         await cancelUndoTransaction().catch(() => {});
-        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
+        void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalRows, dispatch]

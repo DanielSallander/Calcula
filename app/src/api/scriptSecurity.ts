@@ -84,6 +84,7 @@
 //   revoke surface (Settings > Script Security) — not because they share a
 //   meaning. Every read path below reads exactly one of them.
 
+import { confirmAsync } from "./dialogs";
 import { invokeBackend } from "./backend";
 import { emitAppEvent, onAppEvent, AppEvents } from "./events";
 import { sha256Hex, diffScriptSets, declaredCapabilitySet } from "./distributedConsent";
@@ -1190,7 +1191,13 @@ export async function ensureScriptsAllowed(
     (lapse ? `${lapse}\n\n` : "") +
     `${promptMessage}\n\n` +
     `(Script Security is set to 'Ask'. Change it in Settings > Script Security.)`;
-  if (!window.confirm(message)) return false;
+  // AWAITED, and via the wrapper. Under Tauri `window.confirm` returns a
+  // Promise, so the bare `if (!window.confirm(m))` this replaced tested
+  // `!Promise` — always false. The gate never fired: pressing Cancel fell
+  // straight through to grantScriptSessionApproval() and every user script in
+  // the workbook ran. `confirmAsync` awaits and fails CLOSED, so a refusal (or
+  // a dialog that cannot be shown at all) is a genuine "no".
+  if (!(await confirmAsync(message, { title: "Script Security", kind: "warning" }))) return false;
 
   await grantScriptSessionApproval();
 
@@ -1206,7 +1213,11 @@ export async function ensureScriptsAllowed(
       `for separately), lapses automatically if the code changes, and can be ` +
       `revoked any time in Settings > Script Security.` +
       (already ? `\n\nChoosing OK re-trusts the CHANGED code shown above.` : "");
-    if (window.confirm(trustPrompt)) {
+    // Same defect, worse blast radius: this one wrote a PERSISTENT trust record.
+    // `if (window.confirm(...))` was always true, so declining "always run this
+    // workbook's scripts" silently trusted the workbook anyway — including
+    // re-trusting code that had just CHANGED under a lapsed record.
+    if (await confirmAsync(trustPrompt, { title: "Trust this workbook?" })) {
       await trustCurrentWorkbook();
     }
   }

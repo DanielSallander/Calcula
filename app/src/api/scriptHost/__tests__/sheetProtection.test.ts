@@ -45,11 +45,19 @@ describe("vProtectSheet", () => {
     expect(vProtectSheet([{}, 0])).toBe(true);
   });
 
-  it("REFUSES scriptsCanEdit with the deferral spelled out", () => {
+  // The refusal message is the ONLY place a script author meets Calcula's
+  // deliberate divergence from VBA here, so its wording is under test: it must
+  // present the decision as MADE (it once said "not supported YET", which reads
+  // as a backlog item) and it must name the shipped alternative.
+  it("REFUSES scriptsCanEdit as a settled decision, naming api.withUnprotected", () => {
     const verdict = vProtectSheet([{ scriptsCanEdit: true }]);
     expect(verdict).not.toBe(true);
-    expect(String(verdict)).toContain("scriptsCanEdit");
-    expect(String(verdict)).toContain("not supported");
+    const message = String(verdict);
+    expect(message).toContain("scriptsCanEdit");
+    expect(message).toContain("by design and permanently");
+    expect(message).toContain("api.withUnprotected");
+    // Never again describe a made decision as pending.
+    expect(message).not.toContain("not supported yet");
   });
 
   it("rejects unknown flags (with the allowed set), non-boolean flags and bad passwords", () => {

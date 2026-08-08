@@ -36,6 +36,7 @@ import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
 import { WritebackColumnModal } from "./WritebackColumnModal";
 import { SqlEditorModal } from "../SqlEditorModal";
+import { confirmAsync } from "@api/dialogs";
 
 export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -88,7 +89,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   // Static and dynamic calculated columns live in different model stores —
   // the row's isDynamic flag routes the delete.
   const deleteCalcColumn = async (col: ModelColumnInfo) => {
-    if (!window.confirm(`Delete calculated column '${col.name}'?`)) return;
+    if (!(await confirmAsync(`Delete calculated column '${col.name}'?`))) return;
     try {
       applyOverview(
         col.isDynamic
@@ -102,9 +103,9 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
 
   const deleteWritebackColumn = async (col: ModelWritebackColumnInfo) => {
     if (
-      !window.confirm(
+      !(await confirmAsync(
         `Delete writeback column '${col.name}'? Its history/current store tables are removed from the model; collected entries stay in the workbook store.`,
-      )
+      ))
     )
       return;
     try {
@@ -554,9 +555,9 @@ function TableMetaForm({
 
   const deleteTable = async () => {
     if (
-      !window.confirm(
+      !(await confirmAsync(
         `Delete table '${table.name}' from the model? Any relationships that reference it are also removed.`,
-      )
+      ))
     )
       return;
     setBusy(true);

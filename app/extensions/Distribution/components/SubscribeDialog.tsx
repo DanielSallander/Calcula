@@ -34,6 +34,7 @@ import { openPackageInspectorWindow } from "../lib/openPackageInspectorWindow";
 import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-api";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 import { pivot } from "@api/pivot";
+import { promptAsync } from "@api/dialogs";
 
 /**
  * Short human phrase for a declared capability id (R19), for the review box —
@@ -223,7 +224,11 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const handleSaveRegistry = async () => {
     const location = registryPath.trim();
     if (!location) return;
-    const name = window.prompt("Name this registry", location) ?? location;
+    const name =
+      (await promptAsync("Name this registry", {
+        title: "Save registry",
+        defaultValue: location,
+      })) ?? location;
     try {
       const id = crypto.randomUUID();
       setSaved(await addRegistry({ id, name, location }));

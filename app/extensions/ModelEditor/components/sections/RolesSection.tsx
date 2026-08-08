@@ -8,6 +8,7 @@ import { biModelDeleteRole, biModelUpsertRole } from "@api";
 import type { ModelOverview, ModelRoleInfo } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 const OPERATORS = ["=", "!=", ">", ">=", "<", "<="];
 
@@ -22,7 +23,7 @@ export function RolesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const [editing, setEditing] = useState<{ original: ModelRoleInfo | null } | null>(null);
 
   const handleDelete = async (r: ModelRoleInfo) => {
-    if (!window.confirm(`Delete security role '${r.name}'?`)) return;
+    if (!(await confirmAsync(`Delete security role '${r.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteRole(connectionId, r.name));
     } catch (err: unknown) {

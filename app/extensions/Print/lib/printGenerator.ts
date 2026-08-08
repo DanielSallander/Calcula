@@ -4,6 +4,7 @@
 
 import type { PrintData, PageSetup } from "@api/lib";
 import { indexToCol, colToIndex } from "@api/lib";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Paper sizes in CSS (mm)
@@ -497,7 +498,7 @@ export function executePrint(data: PrintData): void {
 
   const printWindow = window.open("", "_blank", "width=900,height=700");
   if (!printWindow) {
-    alert("Could not open print window. Please allow pop-ups for this application.");
+    void alertAsync("Could not open print window. Please allow pop-ups for this application.");
     return;
   }
 

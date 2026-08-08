@@ -16,6 +16,7 @@ import {
 } from "@api";
 import type { SubtotalConfig } from "../types";
 import { SUBTOTAL_FUNCTIONS } from "../types";
+import { alertAsync } from "@api/dialogs";
 
 /** Represents a group of contiguous rows sharing the same value in the group-by column. */
 interface DataGroup {
@@ -143,7 +144,7 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
     // Commit closes the transaction so the partial result stays undoable;
     // the alert tells the user why it stopped (sheet protection, usually).
     await commitUndoTransaction();
-    alert(err instanceof Error ? err.message : String(err));
+    void alertAsync(err instanceof Error ? err.message : String(err));
   }
 }
 

@@ -9420,13 +9420,16 @@ export async function executeGetPanes(): Promise<ScriptPanes> {
 // get_protection_status commands the Review ribbon calls — active sheet only,
 // because that is all the backend addresses.
 //
-// DEFERRED, SAID LOUDLY: `scriptsCanEdit` (VBA's UserInterfaceOnly — "the
-// protection guards users, the owning workbook's scripts keep write access")
-// is NOT implemented. Script writes are checked against sheet protection by
-// the same authoritative Rust gates a keystroke hits, and exempting scripts
-// requires plumbing an origin flag through every backend write path — a
-// Rust-side change out of scope for this TS wave. vProtectSheet refuses the
-// key with exactly this reason, so no script author can believe it worked.
+// DECIDED AGAINST, SAID LOUDLY: `scriptsCanEdit` (VBA's UserInterfaceOnly —
+// "the protection guards users, the owning workbook's scripts keep write
+// access") is not implemented and will not be. Script writes are checked
+// against sheet protection by the same authoritative Rust gates a keystroke
+// hits; an exemption would have to thread a script-origin flag through every
+// backend write path, and — decisively — a bypass that writes through
+// protection leaves no trace of what it wrote. The shipped alternative is
+// api.withUnprotected (see below), which is auditable end to end.
+// vProtectSheet refuses the key and names withUnprotected in the refusal, so
+// no script author is left waiting for a flag that is never coming.
 
 /** api.protectSheet options: the SheetProtectionOptions flags (all optional)
  *  plus an optional password. */

@@ -10,6 +10,7 @@ import {
   setPageSetup,
 } from "@api/lib";
 import type { PageSetup } from "@api/lib";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Header/Footer Section Parsing
@@ -293,7 +294,7 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
       onClose();
     } catch (err) {
       console.error("[PageSetup] Failed to save:", err);
-      alert("Failed to save page setup: " + String(err));
+      void alertAsync("Failed to save page setup: " + String(err));
     }
   }, [setup, onClose]);
 

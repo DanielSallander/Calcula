@@ -29,6 +29,7 @@ import { CHART_DESIGN_TAB_ID, CHART_DIALOG_ID } from "../manifest";
 import { exportChartAsImage } from "../lib/chartExport";
 import { autoDetectSeriesForOrientation } from "../lib/chartDataReader";
 import { resolveDataSource } from "../lib/dataSourceResolver";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Styles (band-designed widgets kept from the former ChartDesignTab)
@@ -827,7 +828,7 @@ export function ActionsSection(_props: PanelSectionProps): React.ReactElement | 
             await exportChartAsImage(chartId);
           } catch (err) {
             console.error("[Charts] Export failed:", err);
-            alert("Failed to export chart: " + String(err));
+            void alertAsync("Failed to export chart: " + String(err));
           }
         }}
         title="Save chart as PNG image"

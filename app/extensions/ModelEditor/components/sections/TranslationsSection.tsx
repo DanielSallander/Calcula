@@ -10,13 +10,14 @@ import { biModelDeleteCulture, biModelUpsertCulture } from "@api";
 import type { ModelCultureInfo, ModelOverview, NameTranslationInfo } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 export function TranslationsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [editing, setEditing] = useState<{ original: ModelCultureInfo | null } | null>(null);
 
   const handleDelete = async (c: ModelCultureInfo) => {
-    if (!window.confirm(`Delete culture '${c.locale}'?`)) return;
+    if (!(await confirmAsync(`Delete culture '${c.locale}'?`))) return;
     try {
       applyOverview(await biModelDeleteCulture(connectionId, c.locale));
     } catch (err: unknown) {

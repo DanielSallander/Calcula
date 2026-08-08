@@ -10,6 +10,7 @@ import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { RelationshipDiagram } from "../diagram/RelationshipDiagram";
 import type { ColumnDropResult, DiagramLayoutMode } from "../diagram/RelationshipDiagram";
+import { confirmAsync } from "@api/dialogs";
 
 const CARDINALITIES = ["manyToOne", "oneToMany", "oneToOne", "manyToMany"];
 const JOIN_OPERATORS = ["=", ">", ">=", "<", "<="];
@@ -32,7 +33,7 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
   const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>("auto");
 
   const handleDelete = async (r: ModelRelationshipInfo) => {
-    if (!window.confirm(`Delete relationship '${r.name}'?`)) return;
+    if (!(await confirmAsync(`Delete relationship '${r.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteRelationship(connectionId, r.name));
     } catch (err: unknown) {

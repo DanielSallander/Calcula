@@ -132,6 +132,16 @@ user scripting never got it.
 Two columns: the grade at review time (2026-07-31) and the grade now (2026-08-01, after nine waves).
 The "now" column is the one to trust; each cell names the code that makes it true.
 
+> **Re-derived a third time on 2026-08-08, after the wiring/shapes/pictures batch (§7 items
+> 30–32).** Three cells moved, and none of them on a report's say-so. **Range/sheet mutation** gained
+> the protection RECOURSE it never had — this table and §2 both described protection as a wall a
+> script could only refuse to hit. **Object automation** gained the last two object kinds a script
+> could manipulate but never create (shapes, pictures). And **Security model** stays ✅ Beyond VBA
+> the same way it stayed there in Wave I — *by being fixed, not by being right*: the restricted
+> tier's "may reference existing media, never introduce bytes" rule was found VIOLATED in shipped
+> code, because `object.setState` is restricted and its validator accepted unbounded strings
+> (§7 item 32).
+
 > **Re-derived again on 2026-08-01 during the Wave I closing pass.** Three cells changed
 > (Code reuse / packaging, `.calp`/writeback automation, Security model) and one — Add-in
 > authoring — had its long-standing "disclosed but not gated" caveat closed. One cell that did NOT
@@ -151,13 +161,13 @@ The "now" column is the one to trust; each cell names the code that makes it tru
 | Dimension | Was | Now | What changed, and what still isn't there |
 |---|---|---|---|
 | Code reuse / packaging | ❌ Missing | ✅ Competitive | **New dimension, added by Wave H; the "half" was closed by Wave I.** VBA's answer was "copy the module into every workbook, or reference another .xls and inherit its whole trust". Calcula's is a real package manager: `// @uses <alias> <package>@<pin>` resolves against a **signed** .calp registry through the *existing* trust root (Ed25519 + TOFU, no second signer, no second key store), pins into a workbook lockfile (`.calcula/script-deps.json`) that **mount never re-resolves against the registry**, caches the exact bytes content-addressed and re-hashes them on every read. Each library runs in its **own** worker realm at `declared(library) INTERSECT declared(consumer)`, chained one level narrower for a library's own dependency. **What made it "half" is gone: authority is now caller identity, not a bearer token.** `base.callImport` (`allowlist.ts:83`) takes an ALIAS and nothing else; the host resolves it in `scriptImports` — a map keyed by the CALLING handle's mount id that only the linker writes (`host.ts:1210`) — and then caps the call against the caller's OWN grants at CALL time, per-origin for `net.fetch` (`host.ts:1315`). The realm's entry point moved into a host-only namespace `callExposed` refuses before it even looks up the target (`broker.ts:401`), which closes the same-trust hole `public: false` could not. The 128-bit token is deleted, and so is §7.18-C's residual: an ungranted-but-declared consumer is now JIT-prompted on first use through the library, with the library named in the prompt (`viaLibrary`). Also closed: `kind: "library"` is now a publishable package kind, so the manager is complete on the authoring side too.
-| Security model | ✅ Beyond VBA | ✅ Beyond VBA | QuickJS wall-clock deadline + memory cap (`core/script-engine/src/limits.rs:118,173`). **16-capability** vocabulary (`capabilityIds.ts:192-209`, mirrored `core/persistence/src/lib.rs:1343` as a compile-time-sized `[&str; 16]` that is also `include_str!`-diffed against the TypeScript source). Wave G added `file.picker` and `ui.shortcut`; **Wave I added three**: `grid.read` (the host-PUSH capability — see the Add-in row), `distribution.publish` and `distribution.subscribe`. The engine also gained a real recursion ceiling: `MAX_LAMBDA_DEPTH = 256` at the single choke point every lambda call funnels through (`core/engine/src/evaluator.rs:474,6171`), measured against a 1 MiB thread rather than guessed, and the one nested-`Evaluator` site (`eval_3d_ref`) now inherits the depth instead of resetting the budget. **Wave K closed the last wedge:** the evaluator itself now carries a deterministic WORK budget plus a user-reachable cancellation (`core/engine/src/budget.rs`, `app/src-tauri/src/eval_budget.rs`), so a shallow exponential or a million-cell array formula becomes `#LIMIT!` in one cell instead of hanging the application — measured at under the noise floor of the benchmark machine (§8). **What did not hold, and had to be fixed:** a `.calp`'s custom-function library ran with no consent at all (§7.19-A) and a package's module script could be executed by a package-supplied button (§7.19-B). Both are closed and both are now the reason §0 carries a seventh audit instruction.
+| Security model | ✅ Beyond VBA | ✅ Beyond VBA | QuickJS wall-clock deadline + memory cap (`core/script-engine/src/limits.rs:118,173`). **16-capability** vocabulary (`capabilityIds.ts:192-209`, mirrored `core/persistence/src/lib.rs:1343` as a compile-time-sized `[&str; 16]` that is also `include_str!`-diffed against the TypeScript source). Wave G added `file.picker` and `ui.shortcut`; **Wave I added three**: `grid.read` (the host-PUSH capability — see the Add-in row), `distribution.publish` and `distribution.subscribe`. The engine also gained a real recursion ceiling: `MAX_LAMBDA_DEPTH = 256` at the single choke point every lambda call funnels through (`core/engine/src/evaluator.rs:474,6171`), measured against a 1 MiB thread rather than guessed, and the one nested-`Evaluator` site (`eval_3d_ref`) now inherits the depth instead of resetting the budget. **Wave K closed the last wedge:** the evaluator itself now carries a deterministic WORK budget plus a user-reachable cancellation (`core/engine/src/budget.rs`, `app/src-tauri/src/eval_budget.rs`), so a shallow exponential or a million-cell array formula becomes `#LIMIT!` in one cell instead of hanging the application — measured at under the noise floor of the benchmark machine (§8). **What did not hold, and had to be fixed:** a `.calp`'s custom-function library ran with no consent at all (§7.19-A) and a package's module script could be executed by a package-supplied button (§7.19-B). Both are closed and both are now the reason §0 carries a seventh audit instruction. **2026-08-08 added a third of the same kind, and it was not in a `.calp` at all — it was in the tier model.** `object.setState` is RESTRICTED with no capability, and `vSetState` accepted the `shape.setProperty` aspect with no key allowlist and no length bound, so a distributed script could write an arbitrary multi-megabyte string — a whole `data:` image among them — into persisted control properties that travel in the saved workbook and in anything the user publishes. "A restricted script may reference existing media but never introduce bytes" was a sentence in a design note and a property of nothing; it is now `checkShapeSetProperty` (`src` = a `media:` handle or `""` and nothing else, keys allowlisted, values bounded at 8,192 chars, `onSelect`/`macroRef` refused outright), reached by both the own-object and cross-instance doors. The ingress it was covering for — Insert ▸ Image reading files through a hidden WebView `<input type="file">` and base64ing them into signed `.calp` artifacts — is now one Rust validator (`inspect_media`) on all four doors. §7 item 32.
 | Transparency/audit | ✅ Beyond VBA | ✅ Beyond VBA | §6.2 drift closed: `scriptSurfaces.ts` now has a two-directional completeness guard against the allowlist (`scriptSurfaces.test.ts` "no surface understates"/"overstates"). Scheduled jobs are listed and cancellable per workbook. **The named residual is closed:** the interpreter's reach is now DERIVED — `core/script-engine/src/manifest.rs` boots a real QuickJS runtime, enumerates the registered surface, diffs it against `OP_MANIFEST` in both directions, and proves `model.*` throws without a provider; `api/codeInventory.ts` mirrors it and `api/__tests__/interpreterReachDrift.test.ts` reads the Rust source. It is also SHOWN: the "Code in This File" panel no longer prints "Grid-only" for a notebook that can be granted `bi.query`/`bi.sql` on request. **Wave H closed three more holes:** the three script-held states that had no reader (keybindings, private clipboards, the submission watch) are joined and *revocable* in the panel (`codeInventory.ts:1030` `getScriptHeldState`); add-in installs are audited machine-side (`extension_audit.rs`); and **imported libraries are now code units** (`codeInventory.ts`, surface `script-library`) — third-party code that no script's source contains, but whose bytes live in the workbook, was previously invisible to the one panel whose job is "what code is in this file". |
 | Event observation | ✅ Competitive+ | ✅ Competitive+ | Unchanged, plus sheet-collection and recalculation-completed events. |
 | Event interception | ❌ Missing | ✅ Competitive | `core/lib/lifecycleGuards.ts`: onBeforeSave/onBeforeClose reply with a verdict (3s deadline, default-ALLOW). The last missing pair — onBeforeDoubleClick / onBeforeRightClick — shipped in idiom Wave 4 (item 29), cancellable with a 1.5s default-ALLOW deadline. |
-| Range/sheet mutation | ❌ Weakest | ✅ Competitive | Formatting, bulk typed I/O, row/col insert+delete, sheet add/delete/rename/visibility, row height / column width, freeze panes, merge, `api.sortRange`, `api.findAll`/`replaceAll`. **Wave G closed the whole "missing" list:** `api.moveSheet`/`api.copySheet` (`allowlist.ts:158,160`), `api.splitPanes` (`:147`), six `api.autoFilter*` rows (`:186-198`) through the feature-neutral `@api/autoFilterService` seam, and `api.copyRange`/`api.pasteRange` (`:249,251`) over a **script-private** buffer. The OS clipboard is refused, not gated — see §6.6. **Nothing named here is still missing.** |
+| Range/sheet mutation | ❌ Weakest | ✅ Competitive | Formatting, bulk typed I/O, row/col insert+delete, sheet add/delete/rename/visibility, row height / column width, freeze panes, merge, `api.sortRange`, `api.findAll`/`replaceAll`. **Wave G closed the whole "missing" list:** `api.moveSheet`/`api.copySheet` (`allowlist.ts:158,160`), `api.splitPanes` (`:147`), six `api.autoFilter*` rows (`:186-198`) through the feature-neutral `@api/autoFilterService` seam, and `api.copyRange`/`api.pasteRange` (`:249,251`) over a **script-private** buffer. The OS clipboard is refused, not gated — see §6.6. **Nothing named here is still missing.** **2026-08-08 (item 30): protection is no longer a wall with no recourse.** `api.withUnprotected(password, fn, sheet?)` lifts a sheet's protection for one block of work, and the HOST puts it back on every exit path — unmount, both fault paths, debugger stop, workbook replace — including a script killed mid-`beginUnprotected`, which a live probe caught leaving a sheet unprotected and ownerless for the whole session. VBA's `UserInterfaceOnly` was REJECTED, not deferred (item 30 carries the three reasons; the decisive one is that a silent bypass is invisible in the audit trail). Also here: multi-area `api.range("A1:B2,D4:E5")` with a return type resolved FROM the address, `cells`/`rows`/`columns`/`entireRow`/`entireColumn`, hidden rows/columns as a set + a two-way read (`userHidden` vs `effectiveHidden`), and pt/chars dimension units. |
 | Application/environment | ❌ Weakest | ✅ Competitive | `ui.dialog` (alert/confirm/prompt/form); `schedule` replaces `Application.OnTime`. **Wave G closed the rest:** `api.workbookSave`/`SaveAs`/`IsDirty`/`FileName` (`allowlist.ts:274-280`) delegating to the SAME `core/lib/file-api` Ctrl+S calls, so the Before-Save veto, the `.xlsx` loss-report consent and the dirty/title broadcasts are the originals; `cap.shortcutBind/Unbind/List` for OnKey (`:529-544`); `cap.filePrintPdf` (`:492`); `cap.fileExportText`/`ImportText` (`:471,475`); and `api.evaluate`/`evaluateAll` as the WorksheetFunction bridge (`:216`, backed by the new `evaluate_formula_typed` command). **Deliberately absent, not deferred: workbook open/close/new** — Calcula holds one document, so each would replace or discard the workbook the user is looking at, and a picker click means "open this file", not "let this running script read it". Pinned by test. |
-| Object automation | ⚠️ Half | ✅ Competitive | `api.createChart/createTable/createPivot/createNamedRange`, matching `delete*`, `api.listObjects`. **Corrected 2026-08-05:** this cell said pivot FIELD layout was still read-only from scripts, contradicting §2.9's own closure — the five-list trap again (pivot layout is an `object.setState` ASPECT, so no allowlist row exists to grep). In truth pivot field layout (`pivot.addField`/`moveField`/`removeField`/`setAggregation`/`setLayout`, §2.9) AND data-level control (`setFilter`/`clearFilter`/`setItemVisibility`/`sortField`/`setNumberFormat`, idiom Wave 3, item 28) are script-reachable via `object.setState` aspects. |
+| Object automation | ⚠️ Half | ✅ Competitive | `api.createChart/createTable/createPivot/createNamedRange`, matching `delete*`, `api.listObjects`. **Corrected 2026-08-05:** this cell said pivot FIELD layout was still read-only from scripts, contradicting §2.9's own closure — the five-list trap again (pivot layout is an `object.setState` ASPECT, so no allowlist row exists to grep). In truth pivot field layout (`pivot.addField`/`moveField`/`removeField`/`setAggregation`/`setLayout`, §2.9) AND data-level control (`setFilter`/`clearFilter`/`setItemVisibility`/`sortField`/`setNumberFormat`, idiom Wave 3, item 28) are script-reachable via `object.setState` aspects. **2026-08-08 (items 31–32): the last two kinds a script could manipulate but never CREATE are closed** — `api.createShape`/`api.deleteShape` over the new `@api/controlsService` seam, and `api.createPicture` over `@api/pictureControlService`. Both are unlocked / `mutate` / no capability (the only thing either names is a catalog id or an opaque `media:` handle — there is no bytes, path or source parameter to refuse), both are ACTIVE-SHEET only because control geometry comes from the live sheet and the overlay regions are sheet-blind, and **neither is undoable**, which their `desc:` says out loud rather than leaving a caller to discover: `controls.rs` writes under a `DocumentEffect` and records no cell change. |
 | Model automation | ✅ Category lead | ✅ Category lead | Plus `cap.biModelValidate`, `cap.biModelLineage`, `cap.biModelBatch` (one undo step), and the notebook `security_roles` leak closed (`bi/script_provider.rs:198-207` uses the same `sanitize_model_info` as the worker gateway). |
 | .calp/writeback automation | ❌ Zero | ✅ Competitive | `distribution.writeback` ships 7 methods (listRegions/getLayer/saveDraft/preview/submit/listSubmissions/review), Rust-enforced with an Ed25519 publisher gate, plus the poll-backed submission-received event. **Wave I closed the missing half: publish / pull / subscribe / refresh are now scriptable**, as TWO capabilities behind ONE Rust gateway (`scripting/distribution_gateway.rs`) — `distribution.publish` (outbound: your name on content other people run) and `distribution.subscribe` (inbound: other people's code in front of you), never one grant, because one consent sentence could then only describe the union. Four bounds make it grantable: **(1)** every `cap.pkg*` row is `tier: "unlocked"` while `calp::pull` forces every pulled object script to Restricted — so a package can never pull further packages or publish itself, structurally, and no prompt can grant it; **(2)** `require_configured_registry` (`:441`) refuses any location the user did not add, dev subscriptions excluded (`:409`); **(3)** `require_publish_identity` (`:486`) uses `load_existing`, never `load_or_create`, so a script can act as a publisher you already are but can never MINT the identity others TOFU-pin; **(4)** the gateway dispatches into the same `calp_*` commands the dialogs call, with a source-level guard that fails if it ever reimplements signature/TOFU/integrity/min_app_version. Eleven verbs are dispatchable and thirteen are refused as recorded decisions (detach, resetSubscription, the override family, devSubscribe/devRefresh, add/removeRegistry, the data-source family, exportPackageHtml).
 | Scheduling | ❌ Missing | ✅ Competitive | **The loop closes end to end as of 2026-08-01.** The `schedule` capability is Rust-authoritative (re-checked at registration and at every firing), jobs persist in the .cala against a source hash, local-script grants persist per workbook + script + source hash (§7.16) and are restored at mount BEFORE the mount spec is built (`host.ts:357`), and `grant_script_capability` now accepts `schedule` — it validates through `capability_store::is_grantable` instead of a private list that had drifted (§7.10). Pinned by a cross-language drift guard (`api/__tests__/crossLayerConstantDrift.test.ts` "capability grant mirror"). **Remaining: `has_scheduled_jobs()` warns only in the xlsx save-loss report; no headless runtime, which the consent string now says out loud.** |
@@ -717,7 +727,13 @@ half of the story is done; the outbound/automation half doesn't exist.
 ## 7. Ranked improvement roadmap
 
 Ordered by leverage; effort S/M/L. **Every item carries a status re-verified against the code on
-2026-08-02.** Summary: **23 SHIPPED, 2 PARTIAL, 0 DEFERRED** over 25 items.
+2026-08-02, and rows 26–32 against the code on 2026-08-08.** Summary: **30 SHIPPED, 2 PARTIAL,
+0 DEFERRED** over 32 items.
+
+**Rows 26–32 were appended on 2026-08-08.** The table had stopped at 25 while the body below it
+carried items 26–29 (the idiom waves, 2026-08-04/05) and then 30–32 (the wiring/shapes/pictures
+batch, 2026-08-06/08) — the exact rot this table's own regeneration note was written about. A
+roadmap table that ends before the roadmap does is a claim of completeness nobody made on purpose.
 
 **This table was regenerated on 2026-08-02, not patched.** The previous version summarised "11
 SHIPPED, 4 PARTIAL, 2 DEFERRED" while listing seventeen rows — it had been left behind by items
@@ -753,6 +769,13 @@ sorts and counts as nothing. Only three statuses are legal here: **SHIPPED**, **
 | 23 | Notebook Phase 2+3 (§7.5) | SHIPPED |
 | 24 | Security residuals | SHIPPED |
 | 25 | Closing integration pass (§7.18) | SHIPPED |
+| 26 | Idiom Wave 1 — the addressing foundation | SHIPPED |
+| 27 | Idiom Wave 2 — grid eyes | SHIPPED |
+| 28 | Idiom Wave 3 — the big walls | SHIPPED |
+| 29 | Idiom Wave 4 — breadth | SHIPPED |
+| 30 | Wiring batch — protection recourse, scenarios, consolidate, sugar | SHIPPED |
+| 31 | Shape creation and deletion from scripts | SHIPPED |
+| 32 | Pictures, and the script-host property lockdown | SHIPPED |
 
 Row 10 stays PARTIAL although §2.11 records the same subject as **CLOSED (fully)**. That is not a
 contradiction and is deliberately not reconciled away: §2 grades the *VBA parity gap* ("no OnTime /
@@ -1446,10 +1469,15 @@ this table are both wrong until someone re-derives from code.
     `onBeforeRightClick` (1.5s default-ALLOW — a hung script can never make the grid uneditable);
     and `cap.scheduleOnce` (a persisted one-shot riding the existing `schedule` capability,
     auto-removed after firing, server-audited) + `api.sleep`.
-    **Wave 5 stays DEFERRED**, and the list is written out so it cannot rot into an implied "done":
-    user-hidden row state, CenterAcrossSelection, shape creation, insert/delete CELLS with shift,
-    extended border styles, superscript/subscript, sparklines, scenarios rows, consolidate, and
-    long-tail sugar — plus `scriptsCanEdit` from item 28.
+    **Wave 5 was DEFERRED here**, and the list was written out so it could not rot into an implied
+    "done": user-hidden row state, CenterAcrossSelection, shape creation, insert/delete CELLS with
+    shift, extended border styles, superscript/subscript, sparklines, scenarios rows, consolidate,
+    and long-tail sugar — plus `scriptsCanEdit` from item 28. **Six of those eleven shipped in items
+    30–32 (2026-08-06/08)**: user-hidden rows/columns (set + read, with `userHidden` and
+    `effectiveHidden` answered separately so a script never has to guess which one it got), shape
+    creation, the scenarios rows, consolidate, the sugar tail — and `scriptsCanEdit`, which shipped
+    as its own REJECTION plus a supported alternative rather than as itself (item 30). The five that
+    remain are named at the close of item 32.
 
 **Sixteen sandbox exclusions were ADJUDICATED by the idiom audit, not skipped** — each is a
 recorded decision: `SendKeys` never (it is authority over the user's keyboard); `EnableEvents`
@@ -1466,6 +1494,238 @@ passed across 690 files** · core `cargo test` **1,206** · `script-engine` **10
 **876** · script typings **39 interfaces / 712 members** (545 at wave start) · **11 E2E specs /
 51 tests all green against the live app**, including the per-wave idiom specs
 (`vba-idioms-wave1..4.spec.ts`) driven through real Monaco keystrokes.
+
+30. **The wiring batch — protection recourse, scenarios, consolidate, sugar** — **SHIPPED
+    2026-08-06/07.** This is the wave-5 tail that had a real caller behind it, and its headline is
+    the one thing item 28 refused.
+
+    **`api.withUnprotected(passwordOrOptions, fn, sheet?)` is the sanctioned answer to
+    `UserInterfaceOnly`, and the REJECTION is the durable half.** VBA's
+    `Protect UserInterfaceOnly:=True` exempts code from the protection it just applied. Three
+    reasons against it, in increasing weight: it needs a script-ORIGIN flag threaded through dozens
+    of Rust write gates, so every gate becomes a place the exemption can be got wrong; Excel's own
+    version **does not survive save/reload**, so the exemption silently lapses and the macro that
+    depended on it starts failing on somebody else's machine; and — decisively — **a silent bypass
+    is invisible in the audit trail.** An unprotect a person can read in the transparency panel
+    beats an exemption nobody can see. The helper is a composite in the worker realm over two host
+    rows, `api.beginUnprotected` / `api.endUnprotected`, both **unlocked / `class: "mutate"` / no
+    capability** — the same tier as the protect/unprotect rows they compose, so a distributed
+    (restricted) script can no more BORROW a protection than lift one — and both are audited like
+    any other call, which is the point.
+
+    **The restore is a HOST debt, not a `finally` in the realm**, and that is what makes the helper
+    safe against code that never runs its own cleanup: `releaseUnprotectedSheets` fires on unmount,
+    on both fault paths, on debugger stop, and in the workbook-replaced / `BEFORE_CLOSE` sweep.
+    **A live probe found the one exit path that discipline could not cover**: a script killed while
+    its `beginUnprotected` was still in flight — permission checks passed, unprotect posted, backend
+    not yet answered — is swept BEFORE its hold exists, so nothing ever releases it and the sheet
+    stayed unprotected, **owned by nobody, for the rest of the session** — the exact failure that
+    made `UserInterfaceOnly` untrustworthy, reproduced by the alternative. The fix is a **monotonic
+    per-script departure epoch** (`scriptDepartures`, bumped by `hostUnmountScript` for EVERY script
+    whether or not it owes a restore) compared across each of `begin`'s awaits; a boolean or an
+    is-mounted check would compare EQUAL for a departure that did happen and un-happen, which is
+    precisely the orphan being caught. Begins and ends are serialized per sheet, or two of them read
+    "protected" before either acts. Contract, in check order: ACTIVE sheet only (`protect_sheet`
+    addresses no other); an already-unprotected sheet answers `{ token: null }` and STAYS
+    unprotected; a wrong password THROWS rather than returning the underlying command's `false`.
+
+    **Scenarios — six rows over the six `scenario_*` commands**, name-addressed like VBA's
+    `Worksheet.Scenarios` and sheet-addressable on all six: `scenarios` / `scenarioAdd` /
+    `scenarioShow` / `scenarioDelete` / `scenarioSummary` / `scenarioMerge`. **`scenarioShow` CALLS
+    `scenario_show`; it does not reimplement it.** That command is the transient-write precedent the
+    animation drivers are built on, and a second implementation would be a second set of rules for
+    the same act. Every mutating row is a `mutate` including Show and Summary, because both write
+    cells the user reads and the file keeps — and the typings say out loud where this differs from
+    Excel: **the values STAY** (there is no `scenario_restore`), so a script that wants them back
+    saves them itself.
+
+    **`api.consolidate`** — one row over `consolidate_data`, combining sources BY POSITION (equal
+    sizes) or BY CATEGORY when `useTopRow`/`useLeftColumn` is set, so sources may differ in size and
+    order. It writes, so it is a `mutate` at the tier its reach already sits at.
+
+    **The sugar batch**, which is where the VBA sentences a user actually types get their shape:
+    `cells(rowOffset, colOffset)` / `rows(i)` / `columns(i)` (offsets WITHIN the range — VBA's
+    semantics, so `api.range("B2:D5").rows(0)` is `B2:D2`), `entireRow()` / `entireColumn()`,
+    multi-area `api.range("A1:B2,D4:E5")`, `pt` and `chars` dimension units on
+    `setRowHeight`/`setColumnWidth` (96/72 and Excel's standard-font character width, converted
+    host-side so the script never carries the constant), `api.refreshAllPivots`, and
+    `LifecycleDetail.kind` — VBA's `SaveAsUI` as a WORD (`"save" | "saveAs"`) rather than a boolean,
+    so an `onBeforeSave` guard can stamp a version only on a real Save As. The detail is still
+    thinned to the file NAME before it crosses to a sandboxed handler, and the close detail is
+    reduced by the same function, so a path added to it later is dropped by default instead of
+    leaking by default.
+
+    **`api.range`'s return type is now resolved FROM THE ADDRESS**, which is the part worth copying:
+    `range<A extends string>(address: A): Promise<RangeShapeFor<A>>`, where `RangeShapeFor` maps a
+    literal containing a comma to `ScriptRangeAreas`, a plain literal to `ScriptRange`, and only a
+    RUNTIME-built `string` to the union (narrowed with `"areas" in r`). So `setValues` on a
+    comma address is a **compile error**, not a runtime surprise — and it is refused loudly at
+    runtime too, for callers with no compiler. The reason it must be refused at all: a multi-area
+    write has no defined cell order, and VBA answers that by writing only the FIRST area — the
+    silent-wrong-answer shape this document keeps finding. `format` / `clearFormat` DO fan across
+    every area, one call each, because they are order-free.
+
+    **Residual, and it is a live one:** `vProtectSheet`'s refusal of `scriptsCanEdit` still reads
+    *"is not supported yet"* and does not name `api.withUnprotected`. "Not supported yet" now
+    describes a decision that was MADE — the flag is rejected, not pending — and the message is the
+    one place a user meets it. The typings already carry both the refusal and the two supported ways
+    round it (`withUnprotected`, or marking the cells `locked: false` so they are never protected in
+    the first place); the validator string was not updated with them.
+
+31. **Shape creation and deletion from scripts** — **SHIPPED 2026-08-07.** Manipulating an EXISTING
+    shape already worked (`object.setState` → `shape.setProperty`, including `text`); what was
+    missing was creation, because `IControlStoreService` was **list-only**. Its doc comment claimed
+    read-only was a principle — *"creating a control is a canvas-placement gesture, not a data
+    operation"* — and that was never a principle. It was a description of a missing feature: placing
+    a shape writes persisted metadata that travels in the saved `.cala` and in published `.calp`
+    artifacts, which is a data operation by any definition.
+
+    **The seam is `@api/controlsService`, a SIBLING of `buttonControlService` /
+    `pictureControlService`, not a widening of either.** The three control types have disjoint
+    property sets, and the button options are behavioural contracts rather than extra fields:
+    `onSelect` is inline source the click path feeds to the QuickJS module runtime, and `macroRef`
+    is a LINK re-resolved on every click. Neither means anything for a rectangle, and putting them
+    in front of a caller that must never reach them is how a seam becomes a hazard.
+
+    **Two rows: `api.createShape(catalogId, anchor, {width?, height?, text?, name?})` and
+    `api.deleteShape(id)` — unlocked / `class: "mutate"` / NO capability**, matching
+    `api.createChart` and `api.createTable`. The reason is the SHAPE of the call: the only thing
+    named is a catalog id, so there is no bytes, path, URL or source-code parameter to refuse.
+    `onSelect` and `macroRef` are not options and never will be — a sandboxed script that could
+    write either would be AUTHORING code that later runs in a wider trust class than its own. The
+    123 catalog shapes stay out of the consent string entirely; discovery is
+    `listShapeCatalog()`, and an unknown id THROWS listing the accepted ones instead of returning.
+
+    **ACTIVE SHEET only**, for `api.createTable`'s reason and one worse one: geometry comes from the
+    live sheet's column widths and row heights, and `syncFloatingControlRegions` is **sheet-BLIND** —
+    it publishes an overlay region for every store entry with no sheet filter. `deleteShape`
+    enforces it by reading the sheet OUT of the id rather than taking a sheet argument. Sizes are
+    bounded 10..20,000 px, the same bound `checkChartPlacementProps` and `vCreatePicture` use — one
+    decision across three rows — and `text` at `MAX_SHAPE_PROPERTY_CHARS`, the same number a later
+    `shape.setProperty` gets.
+
+    **Both rows say plainly in their `desc:` that they are NOT undoable**, because they are not:
+    control create/delete records no undo entry at all (`controls.rs` writes under a
+    `DocumentEffect` — so the document is correctly marked dirty — and never calls
+    `record_cell_change`). That is the honest state, not a claim that it is fine, and closing it
+    means giving control mutations a real undo transaction in Rust.
+
+    **The sheet-blindness above was not theoretical.** Controls were loaded ONCE, at extension
+    activation, for whichever sheet happened to be active, so sheet 1's controls kept painting over
+    every other sheet and a click on one of those phantoms edited a control the user was not looking
+    at, while the other sheet's controls never appeared at all. `SHEET_CHANGED` now swaps the store
+    one sheet at a time, with the DEPARTING sheet tracked rather than derived (SHEET_CHANGED reports
+    the sheet being switched TO), and the startup load, the document reload and the sheet reload
+    share ONE promise queue so the outcome depends on ORDER rather than on which IPC round trip
+    returned first.
+
+    **And one defect the script door made reachable at scale:** a control's object script was
+    ORPHANED on delete, because the cleanup was gated on `controlType === "shape"`. An instanceId
+    derives from the ANCHOR, so a button deleted at B3 left `control-0-2-1`'s script behind and the
+    next control created at that anchor **silently inherited code its author never wrote, running on
+    their click**. The cleanup is now unconditional — deleting an absent entry is a no-op for every
+    one of those tables, so the honest gate is no gate — and an occupied anchor is REFUSED rather
+    than overwritten.
+
+32. **Pictures, and the script-host property lockdown that had to come with them** — **SHIPPED
+    2026-08-07.** The finding comes first, because it is the part that generalises. This was
+    written up as a green-field decision ("today only text crosses the file picker"). It was not:
+    **Insert ▸ Image had already shipped as an unvalidated binary ingress.** A hidden
+    `<input type="file">` **in the WebView** (not the Tauri dialog, so Rust never saw a path),
+    `FileReader.readAsDataURL`, and the base64 stored verbatim as the control property `src`. No
+    size cap, no format check, no dimension cap; `accept` is a dialog HINT and "All Files" was
+    always offered, so picking a non-image silently created a 200x150 placeholder over bytes that
+    were **already embedded in the document**. That base64 then travelled into published `.calp`,
+    was SHA-256'd, and was covered by the detached manifest signature.
+
+    **`cap.fileImportMedia` is a FOURTH ARM on the existing `file.picker` capability — no new
+    capability id.** `file.picker` already means "the user picks one file and the host does the
+    I/O", which is exactly this, so it needs no second consent decision. Restricted tier,
+    `class: "file"`, and the NARROWEST of the four: `cap.fileImportText` hands the script the file's
+    CONTENTS, while this arm returns `{ ref: "media:<sha256>", mimeType, width, height, byteLength }`
+    — an inert handle and four integers. **The bytes never enter the script realm and never cross
+    IPC**: `MediaRef` has no `data` field, a test asserts it never grows one, the host executor
+    re-projects the response field by field so a `data` member could not travel even if one appeared
+    upstream, and `read_media_file` / `resolve_media_ref` are both on the
+    `PRIVILEGED_BACKEND_COMMANDS` denylist. **There is deliberately no options object** — which
+    formats may be embedded is the host's decision, and letting a script widen the picker to "All
+    Files" would restore the old ingress under a nicer name.
+
+    **`api.createPicture(dataRef, anchor, options?)` — unlocked / `class: "mutate"` / no
+    capability**, matching `createChart` / `createTable`, because a picture the workbook already
+    holds is document content and nothing leaves the file. Active sheet only, for item 31's reason.
+    The only image argument is a HANDLE, so the row cannot become an ingress however it is called;
+    placement goes through `@api/pictureControlService`, and a handle THIS DOCUMENT CANNOT RESOLVE
+    creates nothing — a picture that can never paint is worse than an error, because it is a
+    permanent broken-image box produced by an operation that reported success.
+
+    **THE RULE WAS PREVIOUSLY VIOLATED, and that is the finding worth keeping — not the fix.**
+    "A restricted script may REFERENCE existing media but never INTRODUCE bytes" was a sentence in
+    a design note and a property of nothing. `object.setState` is **restricted tier with no
+    capability**, and `vSetState` accepted the `shape.setProperty` aspect **with no key allowlist
+    and no length bound** — so a script that arrived in a distributed package could write an
+    arbitrary multi-megabyte string, including a `data:` URI carrying a whole image, into persisted
+    control properties that then travel in the user's saved workbook and in anything they publish.
+    The tier boundary said one thing and the validator permitted another, for as long as both
+    existed.
+
+    It is now a property of the CODE (`validators.ts` `checkShapeSetProperty`, which `vObjectAspect`
+    delegates to, so the own-object door — `object.setState`, restricted, instance-pinned — and the
+    cross-instance door — `api.objectSetState`, unlocked — land on the same check):
+
+    - **`src` accepts `media:` + 64 lowercase hex, or `""` to clear it, and NOTHING else.** A
+      `data:` URI, a `blob:`/`https:` URL and a file path are refused BY SHAPE, with the fix named
+      in the error. This is the line that makes the tier rule mechanical: bytes can only enter
+      through `read_media_file`, which is MAIN-window gated and denylisted for scripts.
+    - **Every other key is allowlisted and every value is bounded** at 8,192 characters —
+      deliberately TIGHTER than the backend's 64 KiB `MAX_CONTROL_PROPERTY_CHARS`, which has to stay
+      looser because it also admits inline `onSelect` source written by trusted UI. The key list is
+      a literal with a drift test that reads the extension source, because policy must not import a
+      feature.
+    - **`onSelect` and `macroRef` are refused outright from the script door**, for item 31's reason:
+      both hold an ACTION, not an appearance.
+    - The unknown-key tail is **open by spelling, closed by everything else**, and that is forced
+      rather than chosen: `declareProperties` mints author-named keys and a validator is stateless
+      by contract, so a custom key must be identifier-shaped and bounded and can never collide with
+      `src` or a refused key, because those rules run first.
+
+    **The residual of the same rule, named because it is the same rule:** `resolve_control_properties`
+    still returns `src`, and for a legacy inline image this build refuses to migrate (an SVG the old
+    picker accepted) that is still the whole data URL — so a restricted script can READ those bytes.
+    It can neither write them back nor create new ones. Read tolerance and write strictness are
+    different questions, and the un-migratable corpus is left rendering rather than deleted.
+
+    **`format_version` deliberately did NOT move for media** (it went 3 → 6 this session for other
+    state). `manifest.rs`'s own test is that a version link is for state whose loss would make the
+    document LIE — a stale-but-clean recalc marker, resurrected hidden rows, values shown where the
+    author left formulas. A dropped picture does none of that: a picture that is simply not there is
+    the loudest possible signal. Media takes a manifest FEATURE ID with an unconditional read
+    instead, so an older build can still open a workbook that contains one image.
+
+    **Evidence for items 30–32** (2026-08-07/08, each suite from a COLD app launch): the live
+    specs are `app/e2e/tests/vba-wiring-batch.spec.ts` (6 tests — `withUnprotected` restoring after
+    a THROWING fn and refusing a wrong password; a scenario added, shown and deleted with the
+    rendered values and a dependent formula changing; a consolidate whose destination is read off
+    the canvas; `cells`/`rows`/`entireRow` plus a multi-area fan-out with `setValues` failing
+    loudly; pt/chars geometry; and "running a macro does not by itself dirty the document, but one
+    that calls `scenarioAdd` does"), `app/e2e/journeys/shapes-hometab.spec.ts` (8) and
+    `app/e2e/journeys/image-ingress.spec.ts` (7). All three drive the PRODUCT, not the seam, and
+    both journey files live in a new **`journey` Playwright project** because they wipe and reopen
+    the document, which the shared functional workbook cannot survive. Three traps from those runs
+    are worth carrying forward: **the native file dialog CAN be driven from outside** (find the
+    `#32770` window owned by `app.exe`, `WM_SETTEXT` the path into its `Edit`, post `IDOK`), which
+    defeats the "Tauri IPC is non-writable so the picker cannot be stubbed" wall that had left this
+    feature with no E2E at all; **a Vite HMR update to an extension file does not re-run extension
+    activation**, so an already-registered menu action keeps its OLD closure and a live check can
+    pass FALSELY — force a full reload after touching `app/extensions/**`; and the visual comparator
+    was retuned from `threshold: 0.2` to `0.02` after a **deleted gridline scored ZERO differing
+    pixels** at the old setting.
+
+    **What is left of wave 5, and it is left DEMAND-DRIVEN rather than scheduled:**
+    `CenterAcrossSelection` (the strongest of the five — it is what the "never merge cells" school
+    reaches for, and report titles want it), insert/delete CELLS with shift, extended border line
+    styles, superscript/subscript, and sparklines. Each is an engine project whose script API is the
+    last 5%.
 
 ### 7.17 Integration pass — what the wave reports got wrong
 
@@ -1929,6 +2189,41 @@ priced, not missed.
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Fifteenth entry (2026-08-06/08, the wiring/shapes/pictures session) — a claim of COVERAGE
+> decays exactly like a claim of absence, and neither of this session's two examples was findable
+> by reading.**
+>
+> The fourteenth entry's rule is about a promise in the typings. This one is about the sentence a
+> reviewer writes when they have finished checking: *"every route converges on these two commands."*
+> That sentence was this program's own, about control-property writes, and it was wrong about one
+> route. The `.calp` PULL path materializes controls with `materialize_saved_controls`, which writes
+> **straight into `ControlStorage`** — it is not a `set_control_metadata` call, so the 64 KiB
+> property bound never saw it, and whatever landed there was saved verbatim into the subscriber's
+> own `controls.json`. A legacy pull was the last surviving route by which unvalidated binary
+> entered a document (§7 item 32). Nothing had gone wrong with the checking; the convergence was
+> BELIEVED rather than enumerated. The fix ships the enumeration instead of the sentence — a table
+> of every route that can write a control property and what bounds it — which is falsifiable in a
+> way the sentence was not.
+>
+> **The second example is worse, because the artifact LOOKED like verification.**
+> `budget-model.scenario.ts` carried restored BUG-0019 assertions that read `B3`/`B4` through
+> `getCellDisplayValue` **while Sheet1 was active** — so they read `Sheet1!B3` = "Budget" and
+> **could never have passed, at any value, against any code**. The expected numbers (27800, -500)
+> were right the whole time and arithmetically forced; the read mechanism was structurally wrong. A
+> restored oracle that is never RUN is not weak evidence, it is not evidence — and it is worse than
+> no test, because its presence in the file is what stops anyone writing the real one. (The read
+> mechanism that works is `get_workbook_state_digest`: a pure read of the stored per-sheet grids, so
+> a cross-sheet assertion never has to activate the sheet it is testing — activating rebuilds the
+> very dependency state under test.)
+>
+> **The rule this adds.** A status may cite an enumeration only if that enumeration is written down
+> somewhere a test can read; "every route" is a claim about a set, and a set nobody has listed
+> cannot be checked. And a test may be cited as evidence only if it has been OBSERVED to run, and to
+> fail without the fix. This program already applies the second half to NEW tests — "shown to have
+> teeth by reinstating the defect, one at a time" is in half the wave reports. The gap was that a
+> test carried forward, restored or re-enabled was grandfathered past it, on the strength of having
+> once been written.
 
 > **Fourteenth entry (2026-08-04/05, the VBA-idiom audit — recorded at the close of waves 1–4) —
 > the 2026-07-31 review verified FEATURES, and never once verified a SIGNATURE.**
@@ -2974,6 +3269,16 @@ the code.
    document: the un-recalculated remainder is recorded, shown as "Calculate", resumed by the next
    F9, carried into the saved file, and refused by `.calp` publish. VBA's answer to "you stopped
    half way" was silence.
+10. **A protection bypass that is visible, and that survives the script dying.** VBA's answer to
+    "my macro must write to a protected sheet" is `Protect UserInterfaceOnly:=True` — an exemption
+    that leaves no trace anyone can read and, in Excel's own implementation, does not survive
+    save/reload, so it lapses silently on somebody else's machine. Calcula refuses the flag and
+    ships `api.withUnprotected` instead: the unprotect is an ordinary audited call a person can read
+    in the transparency panel, it is refused outright to distributed (restricted) scripts, and the
+    HOST owns putting the protection back — on unmount, on either fault path, on debugger stop, on
+    workbook replace, and even for a script killed while the unprotect was still in flight. The
+    difference is not convenience; it is that "the sheet is unprotected right now" is a fact
+    somebody can see, instead of a permission nobody can.
 
 ### Where Calcula still TRAILS VBA
 
@@ -3001,8 +3306,15 @@ better* on containment, transparency, audit, consent and distribution. It remain
 everything that reaches **outside** the one open document: the machine, other workbooks, custom UI
 surfaces, and headless operation. Three of those four are refusals with reasons rather than gaps;
 custom UI surfaces are the one genuinely unfinished frontier. The 2026-08-04/05 idiom waves (items
-26–29) then closed the SIGNATURE gap on top of the feature gap — what remains inside the document
-is the deferred wave-5 list under item 29 plus `scriptsCanEdit`, and nothing else.
+26–29) then closed the SIGNATURE gap on top of the feature gap, and the 2026-08-06/08 wiring batch
+(items 30–32) took six of the eleven items item 29 had deferred: protection now has a RECOURSE
+(`api.withUnprotected` — VBA's `UserInterfaceOnly` was rejected, not deferred), scenarios and
+consolidate ship, hidden rows/columns are settable and readable, shapes and pictures can be CREATED
+rather than only manipulated, and the sugar a VBA user types (`cells`/`rows`/`entireRow`, multi-area
+addresses, pt/chars units) is there. What remains inside the document is five long-tail engine
+projects — `CenterAcrossSelection`, insert/delete CELLS with shift, extended border styles,
+superscript/subscript, sparklines — each of which is an engine change whose script API is the last
+5%, and all of which are deliberately demand-driven.
 
 **And one closing note this program earned the hard way.** Nine waves in, the defect that mattered
 most was not a missing feature or a weak check — it was a payload kind nobody had listed. Every
@@ -3010,6 +3322,11 @@ enumeration in this document is a list of things somebody thought to write down.
 right on four of five reserved-library surfaces; the fifth was missed because no list contained it.
 When the next wave asks "is this property true?", the useful question is not "does the check exist?"
 but "what is the complete set of things the check must cover, and where is that set written down?"
+**That question was asked again on 2026-08-08 and answered wrongly again** — this time the set was
+"routes that can write a control property", the missing member was the `.calp` pull path, and the
+consequence was the last unvalidated binary ingress in the product (§8, fifteenth entry). The
+enumeration is now a table rather than a sentence, which is the only form of it that anyone can
+falsify.
 
 ---
 

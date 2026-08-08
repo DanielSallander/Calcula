@@ -32,6 +32,7 @@ import {
   getCalculateBeforeSave,
   setCalculateBeforeSave,
 } from "@api/lib";
+import { promptAsync, alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // State
@@ -158,20 +159,29 @@ export function registerCalculationMenuItems(): void {
     id: "formulas:calcOptions:iterationSettings",
     label: "Iteration Settings...",
     icon: IconOtherOptions,
-    action: () => {
-      const maxIterInput = window.prompt("Maximum Iterations:", String(iterationMaxIterations));
+    action: async () => {
+      const maxIterInput = await promptAsync("Maximum Iterations:", {
+        title: "Iteration Settings",
+        defaultValue: String(iterationMaxIterations),
+      });
       if (maxIterInput === null) return; // User cancelled
       const maxIter = parseInt(maxIterInput, 10);
       if (isNaN(maxIter) || maxIter < 1) {
-        window.alert("Maximum Iterations must be a positive integer.");
+        // AWAITED: the second prompt must not open on top of this validation
+        // message. Tauri's window.alert is fire-and-forget, so the old code
+        // raced the two dialogs.
+        await alertAsync("Maximum Iterations must be a positive integer.", { kind: "error" });
         return;
       }
 
-      const maxChangeInput = window.prompt("Maximum Change:", String(iterationMaxChange));
+      const maxChangeInput = await promptAsync("Maximum Change:", {
+        title: "Iteration Settings",
+        defaultValue: String(iterationMaxChange),
+      });
       if (maxChangeInput === null) return; // User cancelled
       const maxChg = parseFloat(maxChangeInput);
       if (isNaN(maxChg) || maxChg <= 0) {
-        window.alert("Maximum Change must be a positive number.");
+        await alertAsync("Maximum Change must be a positive number.", { kind: "error" });
         return;
       }
 

@@ -27,6 +27,7 @@ import {
   type FillDirection,
   type PendingFill,
 } from "../lib/fillEngine";
+import { alertAsync } from "../lib/dialogs";
 
 export type { FillDirection } from "../lib/fillEngine";
 
@@ -454,7 +455,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         Math.max(finalRange.startCol, finalRange.endCol)
       );
       if (rangeGuard?.blocked) {
-        if (rangeGuard.message) alert(rangeGuard.message);
+        if (rangeGuard.message) void alertAsync(rangeGuard.message);
         setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
         dragStartRef.current = null;
         return;
@@ -627,7 +628,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           // user's next Ctrl+Z reverts an unbounded amount of unrelated work.
           // Sheet protection can now refuse this batch, making that routine.
           await cancelUndoTransaction().catch(() => {});
-          alert(msg);
+          void alertAsync(msg);
           setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
           dragStartRef.current = null;
           return;
@@ -855,7 +856,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           // Same leak as completeFill above: without this the transaction
           // opened at "Auto-fill to edge" stays open and swallows later edits.
           await cancelUndoTransaction().catch(() => {});
-          alert(msg);
+          void alertAsync(msg);
           return;
         }
         const perfAutoT2 = performance.now();

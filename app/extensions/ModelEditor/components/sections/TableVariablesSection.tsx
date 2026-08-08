@@ -17,13 +17,14 @@ import {
   styles,
 } from "../editorShared";
 import type { FilterDraft, SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 export function TableVariablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [editing, setEditing] = useState<{ original: ModelTableVariableInfo | null } | null>(null);
 
   const handleDelete = async (v: ModelTableVariableInfo) => {
-    if (!window.confirm(`Delete table variable '${v.name}'?`)) return;
+    if (!(await confirmAsync(`Delete table variable '${v.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteTableVariable(connectionId, v.name));
     } catch (err: unknown) {

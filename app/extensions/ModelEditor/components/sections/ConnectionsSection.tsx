@@ -21,6 +21,7 @@ import {
 import type { ModelSourceInfo, ModelTableInfo } from "@api";
 import { Badge, Field, Modal, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 const KINDS = [
   { value: "postgres", label: "PostgreSQL" },
@@ -180,10 +181,10 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
   const sourceName = (id: string) =>
     sources.find((s) => s.id === id)?.displayName ?? id;
 
-  const deleteSource = (s: ModelSourceInfo) => {
+  const deleteSource = async (s: ModelSourceInfo) => {
     const n = s.tableCount;
     const warn = n > 0 ? ` ${n} table${n === 1 ? "" : "s"} bound to it will become unbound.` : "";
-    if (!window.confirm(`Delete data source '${s.displayName ?? s.id}'?${warn}`)) return;
+    if (!(await confirmAsync(`Delete data source '${s.displayName ?? s.id}'?${warn}`))) return;
     void run(async () => applyOverview(await biModelDeleteSource(connectionId, s.id)));
   };
 
@@ -311,7 +312,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                 <button
                   style={{ ...styles.smallBtn, color: "#a4262c" }}
                   disabled={readOnly || busy}
-                  onClick={() => deleteSource(s)}
+                  onClick={() => void deleteSource(s)}
                 >
                   Delete
                 </button>

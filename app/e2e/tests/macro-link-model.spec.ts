@@ -27,8 +27,11 @@
  * LOCALE. Every recorded/seeded value is an integer with no separators, so the
  * spec is identical whether the machine's list separator is ';' (sv-SE) or ','.
  */
-import type { Page } from "@playwright/test";
+import type { Page, Locator } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { execFileSync } from "child_process";
+import * as os from "os";
+import * as path from "path";
 
 const SHEET = 0;
 
@@ -501,27 +504,107 @@ test.describe("Macro link model", () => {
     await clearCell(page, DATA.row, DATA.col);
     await ensureDesignModeOff(page, grid);
 
-    // Under Tauri `window.confirm` is overridden to show a NATIVE dialog and
-    // return a Promise<boolean>; Playwright cannot drive a native OS dialog. So
-    // we replace it in-page with a recorder that returns a value WE choose — this
-    // proves both that the app raises the warning with the right text AND that it
-    // now AWAITS the choice (Cancel must actually cancel).
-    async function setConfirmBehavior(answer: boolean): Promise<void> {
-      await page.evaluate((answer) => {
-        const w = window as any;
-        if (!w.__origConfirm) w.__origConfirm = w.confirm;
-        w.__confirmMessages = [];
-        w.confirm = (message?: string) => {
-          w.__confirmMessages.push(String(message ?? ""));
-          return Promise.resolve(answer);
-        };
-      }, answer);
+    // THE DIALOG IS NATIVE, AND IT CANNOT BE STUBBED FROM THE PAGE.
+    //
+    // This test used to overwrite `window.confirm` in-page with a recorder. That
+    // stopped working the moment the delete gate moved to `confirmAsync`
+    // (@api/dialogs), which is the fix for the async-confirm defect class: under
+    // Tauri it calls the dialog PLUGIN directly rather than the global, so the
+    // override intercepted nothing, `__confirmMessages` stayed empty and this
+    // test hung on its own poll. Restubbing the global would only re-hide that.
+    //
+    // Tauri defines its whole IPC surface with non-writable, non-configurable
+    // properties, so `plugin:dialog|confirm` cannot be intercepted either. The
+    // dialog is therefore driven from OUTSIDE the app over Win32 — the same way
+    // `consent-refusal.spec.ts` drives the consent prompts, and the same way a
+    // user's mouse would. The helper reads the message via UI Automation (the
+    // TaskDialog body is DirectUI, invisible to GetWindowText) and clicks a real
+    // button.
+    const DIALOG_DRIVER = path.join(
+      os.homedir(),
+      "AppData",
+      "Local",
+      "Temp",
+      "claude",
+      "c--Dropbox-Projekt-Calcula",
+      "ffc06ccd-ce77-42f8-bee3-71899bcec1e9",
+      "scratchpad",
+      "answer-native-dialog.ps1",
+    );
+
+    /** Answer the pending native dialog. Returns { text, clicked }. */
+    function answerNativeDialog(
+      action: "ok" | "cancel",
+      waitMs = 20_000,
+    ): { text: string; clicked: string } {
+      let out = "";
+      try {
+        out = execFileSync(
+          "powershell",
+          [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            DIALOG_DRIVER,
+            // confirmAsync is called here without a `title`, so the window title
+            // is the app name.
+            "-TitleLike",
+            "Calcula",
+            "-Action",
+            action,
+            "-TimeoutMs",
+            String(waitMs),
+          ],
+          { encoding: "utf-8", timeout: 60_000 },
+        );
+      } catch (e) {
+        out = `DRIVERERROR:${String(e)}`;
+      }
+      const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      return {
+        text: lines.filter((l) => l.startsWith("TEXT:")).map((l) => l.slice(5)).join(" "),
+        clicked: lines.find((l) => l.startsWith("CLICKED:")) ?? lines.join("|"),
+      };
     }
-    async function lastConfirmMessage(): Promise<string> {
-      return page.evaluate(() => {
-        const list = (window as any).__confirmMessages as string[] | undefined;
-        return list && list.length ? list[list.length - 1] : "";
-      });
+
+    /**
+     * Dismiss any native dialog left over from an earlier test or a crashed run.
+     *
+     * These are app-modal and they ACCUMULATE: one app instance serves every
+     * spec, so a dialog nobody answered is still on screen when the next spec
+     * starts. The driver would then read THAT dialog's text and report a
+     * confident CLICKED — this test failed exactly that way, asserting against a
+     * message from a previous run. A stale dialog is also why a later spec can
+     * appear to hang for no reason.
+     */
+    /**
+     * Press the library's Delete button IN-PAGE and return immediately.
+     *
+     * `locator.click()` cannot be used here. The driver below is `execFileSync`,
+     * which BLOCKS Node's event loop — so a `click()` promise started but not
+     * awaited never gets the round trips it needs, the dialog is never raised,
+     * and the driver reports NOTFOUND. (Observed exactly that way.) Dispatching
+     * from inside the page needs one round trip that completes before the block,
+     * and the React handler returns at its first `await`, so the dialog appears
+     * without the test holding the loop.
+     */
+    async function pressDeleteInPage(scope: Locator): Promise<void> {
+      const handle = await scope
+        .locator("button")
+        .filter({ hasText: /^Delete$/ })
+        .first()
+        .elementHandle();
+      if (!handle) throw new Error("Delete button not found in the macro library");
+      await handle.evaluate((el) => (el as HTMLButtonElement).click());
+    }
+
+    function drainNativeDialogs(): void {
+      for (let i = 0; i < 5; i++) {
+        // Short wait: this is a drain, not a wait-for-dialog.
+        const r = answerNativeDialog("cancel", 1_200);
+        if (!r.clicked.startsWith("CLICKED:")) return;
+      }
     }
 
     try {
@@ -550,14 +633,23 @@ test.describe("Macro link model", () => {
 
         // -- CANCEL first: the warning must NAME the button AND actually gate ---
         await test.step("delete warns by naming the linking button, and Cancel cancels", async () => {
-          await setConfirmBehavior(false); // user clicks Cancel
-          await library.locator("button").filter({ hasText: /^Delete$/ }).first().click();
-          await expect.poll(() => lastConfirmMessage(), { timeout: 10_000 }).not.toBe("");
-          const msg = await lastConfirmMessage();
-          expect(msg).toContain("links the macro");
-          expect(msg).toContain(BUTTON.ref); // e.g. Sheet1!D20
-          // Cancel was honoured: the macro is still here (before the fix, the
-          // synchronous `!window.confirm(...)` ignored Cancel and deleted anyway).
+          drainNativeDialogs();
+          await pressDeleteInPage(library);
+
+          const answered = answerNativeDialog("cancel");
+          // The driver must actually have pressed a button. Without this, a
+          // dialog that never appeared would leave the macro undeleted and the
+          // "Cancel was honoured" assertions below would pass for the wrong
+          // reason.
+          expect(answered.clicked).toMatch(/^CLICKED:/);
+          // The warning names what will be orphaned. (The exact wording is
+          // pinned by extensions/MacroRecorder/__tests__/linkedButtons.test.ts;
+          // this asserts the real dialog actually carries it.)
+          expect(answered.text).toContain("links the macro");
+          expect(answered.text).toContain(BUTTON.ref); // e.g. Sheet1!D20
+
+          // Cancel was honoured: the macro is still here. Before the fix the
+          // guard tested `!Promise` — always false — and deleted anyway.
           await page.waitForTimeout(500);
           expect(await macroIdByName(page, macroName)).toBe(macroId);
           await expect(
@@ -567,8 +659,9 @@ test.describe("Macro link model", () => {
 
         // -- CONFIRM: now the delete goes through ------------------------------
         await test.step("confirming the warning deletes the macro", async () => {
-          await setConfirmBehavior(true); // user clicks OK
-          await library.locator("button").filter({ hasText: /^Delete$/ }).first().click();
+          await pressDeleteInPage(library);
+          const answered = answerNativeDialog("ok");
+          expect(answered.clicked).toMatch(/^CLICKED:/);
           await expect(
             library.locator("[data-macro-library-item]").filter({ hasText: macroName }),
           ).toHaveCount(0, { timeout: 10_000 });

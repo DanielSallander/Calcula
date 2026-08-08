@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { SCREENSHOT_DEFAULTS } from "./e2e/helpers/screenshotGates";
 
 /**
  * Playwright E2E configuration for Calcula (Tauri + WebView2).
@@ -25,26 +26,12 @@ export default defineConfig({
   timeout: 30_000,
   expect: {
     timeout: 10_000,
-    toHaveScreenshot: {
-      // Comparison gates. Keep in sync with DEFAULT_SCREENSHOT_OPTIONS in
-      // e2e/helpers/screenshots.ts, which explains how they were measured.
-      //
-      // `threshold` is pixelmatch's YIQ colour-distance gate, NOT a per-channel
-      // tolerance: a pixel counts as different only when its squared YIQ
-      // distance exceeds 35215 * threshold^2. Calcula's gridlines are #f1f1f1
-      // on white (ΔY 14), which pixelmatch stops seeing above 0.053 — at the
-      // former 0.2 an entirely erased gridline scored 0 differing pixels and
-      // no grid-geometry change could ever fail. Anything above ~0.038 blinds
-      // the suite to the grid; measured run-to-run noise at 0.02 is 0 pixels
-      // on 74 of 76 captures.
-      //
-      // Effective pixel budget is min(maxDiffPixels, maxDiffPixelRatio * px):
-      // 200 px on a full grid capture, ~15 px on a status-bar strip.
-      maxDiffPixels: 200,
-      maxDiffPixelRatio: 0.0005,
-      threshold: 0.02,
-      animations: "disabled",
-    },
+    // Comparison gates: ONE definition, in e2e/helpers/screenshotGates.ts, which
+    // also records how the numbers were measured. This is the value that governs
+    // any toHaveScreenshot() written directly in a spec — i.e. every assertion
+    // that does NOT go through e2e/helpers/screenshots.ts, which spreads the
+    // same constant. Do not inline the numbers here again.
+    toHaveScreenshot: { ...SCREENSHOT_DEFAULTS },
   },
   fullyParallel: false,          // serial — single app instance
   retries: 0,

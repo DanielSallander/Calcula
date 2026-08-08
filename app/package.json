@@ -17,6 +17,8 @@
     "check:script-typings": "node scripts/gen-script-typings.mjs --check",
     "lint": "eslint .",
     "lint:boundaries": "eslint --no-config-lookup -c eslint.config.boundaries.js .",
+    "check:line-endings": "node scripts/check-line-endings.mjs",
+    "fix:line-endings": "node scripts/check-line-endings.mjs --fix",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

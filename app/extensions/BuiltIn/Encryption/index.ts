@@ -14,6 +14,7 @@ import { EncryptFileDialog } from "./EncryptFileDialog";
 import type { EncryptDialogResult } from "./EncryptFileDialog";
 import { UnlockFileDialog } from "./UnlockFileDialog";
 import type { UnlockDialogResult } from "./UnlockFileDialog";
+import { confirmAsync, alertAsync } from "@api/dialogs";
 
 const ENCRYPT_DIALOG_ID = "encrypt-file";
 const UNLOCK_DIALOG_ID = "unlock-file";
@@ -56,8 +57,11 @@ async function openEncryptDialog(): Promise<void> {
       if (!result) return;
       try {
         if (result.remove) {
-          const ok = window.confirm(
-            "Remove the password and save this workbook unencrypted?"
+          // AWAITED. `!ok` on a Promise was always false, so Cancel stripped
+          // the password and rewrote the workbook in plaintext anyway.
+          const ok = await confirmAsync(
+            "Remove the password and save this workbook unencrypted?",
+            { title: "Remove encryption?", kind: "warning" },
           );
           if (!ok) return;
           await workspace.removePassword();
@@ -66,7 +70,7 @@ async function openEncryptDialog(): Promise<void> {
         }
       } catch (error) {
         console.error("[Encryption] action failed:", error);
-        alert("Failed to update workbook encryption: " + String(error));
+        void alertAsync("Failed to update workbook encryption: " + String(error));
       }
     },
   });

@@ -1427,6 +1427,86 @@ So the headline number overstates the number of distinct defects. Fixing the few
 (the chart title error, and whatever leaves `dimensions` residue) should collapse a large part of
 the tail — which is a better first move than re-recording 34 goldens.
 
+### 3ac. The `window.confirm` defect class — CLOSED 2026-08-08, and proved live
+
+**The defect.** `tauri-plugin-dialog` replaces `window.confirm` with an ASYNC shim, so it returns a
+Promise. `if (!window.confirm(msg)) return;` therefore tests `!Promise` — an object, always truthy —
+so the negation is always FALSE and the guard NEVER fires. Every such site ran as though the user had
+pressed OK. On a CONSENT gate that means **Cancel granted consent**. It shipped six times and was
+patched per-site each time.
+
+**Scope was ~17x the reported one.** The brief listed ~10 sites; a lint rule written to enumerate
+them found **171 across 63 files**. Two thirds were the BARE form (`confirm(...)`, no `window.`), which
+every prior `window.confirm` search missed. One file — `ModelEditor/.../MeasuresSection.tsx` — greps as
+BINARY because it embedded a literal NUL byte, so ripgrep skipped it entirely; it is now ` `
+and searchable. That single file is the empirical argument against ever policing this class with a
+grep-based drift test.
+
+**Six gates failed OPEN**, i.e. Cancel authorised the thing being refused:
+`scriptSecurity.ts` (running any script; and the persistent per-workbook trust record),
+`scriptHost/capabilities.ts` (lapsed-grant re-consent — the documented "re-consent after an edit is
+never blind" became exactly blind, with the diff consumed so it never showed again),
+`shell/registries/ExtensionManager.ts` (third-party extension TOFU — every unsigned extension on disk
+was consented and activated at startup while its dialog was still on screen), and two in
+`ScriptNotebook`.
+
+**Enforcement, not discipline.** `confirmAsync` / `alertAsync` / `promptAsync` in
+`src/core/lib/dialogs.ts` (re-exported by `@api/dialogs`) all fail CLOSED; the raw globals are banned by
+`dialogGuardConfigs` in `app/eslint.boundaries.js` under `npm run lint:boundaries`, using TWO rules
+because the hazard has two syntactic shapes (`no-restricted-globals` for the scope-aware bare form,
+`no-restricted-properties` for qualified and non-call references such as
+`typeof window.confirm === "function"`).
+
+**Verified by probe, not by assertion (2026-08-08).** A throwaway file containing all nine shapes was
+added to `src/` and `extensions/`; `lint:boundaries` failed with **exit 1 and 11 errors**, and the
+scope-aware negative control (a *parameter* named `alert`) was correctly NOT flagged. Probe deleted;
+gate clean again.
+
+**Proved live in `e2e/journeys/consent-refusal.spec.ts` (5 tests, all passing).** Both a refusal AND a
+positive control for each gate — without the positive case a refusal test passes just as happily
+against a feature that is broken outright.
+
+- Capability consent (in-app React dialog): Deny -> capability absent from the live grant set, deny
+  remembered, and the script's own storage write fails; Allow once -> granted and the write succeeds.
+- Native `confirmAsync`: Cancel resolves **false**, OK resolves **true**, asserted against the REAL
+  Win32 dialog.
+- Lapsed-grant re-consent: Cancel -> `"deny"` recorded and the permission dialog never reached;
+  OK -> proceeds to the permission dialog and grants.
+
+**Mutation-tested.** Reverting `capabilities.ts` to the pre-fix `window.confirm` shape makes the spec
+FAIL, and a direct probe showed the permission dialog being reached with the notice never answered —
+the blind re-approval, reproduced. Both mutations were reverted and `lint:boundaries` re-run clean.
+
+**A REGRESSION the class fix left behind, found and fixed 2026-08-08.**
+`MacroLibraryDialog` was converted to `confirmAsync`, but `e2e/tests/macro-link-model.spec.ts`
+still stubbed `window.confirm` in-page to answer the delete warning. `confirmAsync` calls the dialog
+PLUGIN, not the global, so the stub intercepted nothing: the spec's `__confirmMessages` stayed empty
+and test 4 hung on its own poll. It fails in ISOLATION, so it was not cascade — meaning the
+"macro/VBA 55 passed / 1 failed" baseline quoted with the class fix cannot have been re-measured
+after it. The spec now drives the real native dialog over Win32 and asserts the message via UI
+Automation, so it still proves what it was written to prove (the warning NAMES the linking button,
+and Cancel really cancels) against the real dialog rather than a stub. Its unattended failure also
+left an app-modal dialog on screen, which then knocked out `vba-idioms-wave3` — that spec passes
+9/9 in isolation. Both specs now DRAIN stale native dialogs before they start.
+
+**Three traps worth keeping, each hit for real while building that spec:**
+
+1. **Vite HMR splits module identity.** After any source edit the app loads
+   `capabilities.ts?t=<ts>`, while a test importing the unversioned path gets a **different module
+   instance** with its own `deniedThisSession` map and grant sets. Every "not granted" assertion then
+   passes vacuously against a phantom. The spec now resolves the URL the app actually loaded (from
+   resource timing) and additionally asserts a mounted script has a NON-EMPTY grant set, so a split
+   instance fails loudly instead of passing green.
+2. **Native dialogs are locale-rendered.** Tauri's IPC surface is non-writable/non-configurable, so
+   these dialogs can only be driven from OUTSIDE over Win32 (`scratchpad/answer-native-dialog.ps1`).
+   On this sv-SE machine the Cancel button reads **"Avbryt"**, and `rfd` raises a TaskDialog whose
+   buttons return control id 0 — so neither a literal "Cancel" match nor the IDOK/IDCANCEL trick
+   works. The driver matches an OK-like label and treats the other button as Cancel, and **echoes
+   which button it pressed** so the test can assert a button was pressed at all.
+3. **The global script-security session approval is app-lifetime state with no revoke.** A gate built
+   on it can only be tested once per launch, so the live proof deliberately targets the per-script
+   lapse notice instead, which re-arms with a fresh script id.
+
 ### 3b. Shared-workbook contamination between specs
 
 The functional specs share one accumulating workbook, and `resetGrid` clears only `A1:Z1000`, so
@@ -1540,53 +1620,104 @@ not, and the same mechanical recipe applies to each.
 
 ## Suggested order
 
-2b, 2c, 2d, 2e, 2f, 2g (four of five), 2i and 3c are all done (2026-08-07). **The golden item that
-stood at the head of this list is closed** — see immediately below. What remains, in order:
+**Rewritten 2026-08-08.** The previous version of this list still had `1a` shapes and `2a` at its
+head, both of which their own section headings record as complete — a to-do list that outlives its
+items stops being read, so it is restated here from the sections rather than amended.
 
-0. ~~**Re-record the four known-stale goldens**~~ — **DONE / N-A 2026-08-07, and the triage
-   changed the answer.** Each was checked before being touched, per the rule that an unattributable
-   diff is a possible regression:
-   - The **three `comments-notes` goldens were already current** and were NOT re-recorded. They
-     pass 7/7 on a cold functional run against HEAD; they had been re-recorded together with the
-     `announceAnnotationsChanged` addition to the spec, which §2d's prediction predates. Detail and
-     the decoding trap that made them look empty are in §2d.
-   - **`scenario-budget-model-title.png` was stale and IS re-recorded**, from the actual frame of an
-     ordered `--project=scenario` pass (not `--update-snapshots`, so no sibling golden was touched).
-     The diff is entirely chrome and geometry from dated changes: the 2026-07-30 ribbon SVG icon set,
-     the 2026-07-20 point-size/row-height geometry — and two the earlier triage had not named, the
-     top-level **Model** menu (order 44) and the **Filters -> Controls** ribbon-tab rename, both of
-     which also postdate the 2026-06-11 recording. **Every cell value is identical across the two
-     frames, including the BUG-0019 numbers** (27300 / 27800 / -500, F3 = 27300), which is what makes
-     it a chrome diff rather than a regression. `--project=scenario` went 22 passed / 1 failed /
-     1 did not run -> **24 passed**.
-1. **1a** shapes — cheap, unblocks report annotation.
-2. **2a** — decide it either way; leaving 839 lines of unreachable code is the worst option.
-3. `clear_range` recalculates nothing (§2c), cross-sheet cycles are undetected (§2c), and the
-   three residual undo gaps listed at the end of §2i (`report_restore` / `calp_reset` report no
-   coordinates, named-range undo triggers no recalc, `SetCell` has no sheet dimension).
-4. **Vertical inline-editor expansion** (§2g) — the horizontal case shipped; multi-line entries
-   still render on one line because the editor is an `<input>`. Needs an `<input>`-to-`<textarea>`
-   swap plus caret/commit handling.
-5. **`macro-live-edit` test 6** (§3y) — a pre-existing whitespace/EOL normalisation between the
-   Monaco buffer and `save_script` that makes an untouched macro report phantom unsaved work.
-   Small, self-contained, and it un-stales a baseline everything else is measured against.
-6. ~~**1b pictures**~~ — **DONE 2026-08-07, all four halves.** Backend (ingress, storage, GC,
-   `.calp`, migration), script host (`vSetState` key allowlist, `cap.fileImportMedia`,
-   `api.createPicture`) and frontend (`insertImage` on `importImageViaPicker`, handle-resolving
-   renderer, read-only `src`, `PictureControlProvider` registered, `AFTER_OPEN` reload) all shipped
-   — plus **the existing corpus**, which the original proposal had not separated into its two
-   halves: saved `.cala` files (migrate on load, now verified through a real file) and
-   already-published SIGNED `.calp` packages (accept the legacy inline shape, migrate it at the
-   package boundary, so no subscription breaks and no unvalidated binary reaches the subscriber's
-   own `controls.json`).
-   **E2E coverage is now closed too** (2026-08-07, a fifth half): `app/e2e/journeys/image-ingress.spec.ts`,
-   7 tests, driving the real menu item and the real native picker. It was worth saying plainly that
-   Insert > Image had never had an E2E test, which is part of why an ingress with no validation of
-   any kind shipped and stayed — and the spec was verified to catch the original defect by
-   reinstating it (the placeholder fallback reproduces as a `200x150` control at the anchor). See
-   §1b for what it asserts and how attributability is guarded.
-7. **The persisted `AppState` fields 3c did not reach** — `sheet_names`, `active_sheet`,
-   `style_registry`, the width/height stores, `merged_regions`, `user_hidden_*`, `sheet_zooms`,
-   `split_configs`, `auto_filters`, `sheet_protection`, `sheet_ids`. Same mechanical recipe as
-   3c (`.lock()` -> `.read()`, then let the compiler list the mutating sites); each is smaller
-   than the grid was.
+**Closed since the list was first written:** `1a` (shapes), `1b` (pictures, all five halves),
+`2a` (the Customize entry point), `2b`, `2c` (four causes plus `sort_range`), `2d`, `2e`, `2f`,
+`2g` (four of five), `2i`, `2j`, `3ab` (the `named_ranges.rs` abort) and `3c` (the flag's
+sole-writer guarantee). The one fact from that older list not recorded in a section of its own:
+**`scenario-budget-model-title.png` was stale and was re-recorded** from the frame of an ordered
+`--project=scenario` pass (not `--update-snapshots`, so no sibling golden moved). The diff is
+entirely chrome and geometry from dated changes — the 2026-07-30 ribbon SVG icons, the 2026-07-20
+point-size/row-height geometry, the top-level **Model** menu and the **Filters -> Controls** tab
+rename. Every cell value is identical across the two frames, **including the BUG-0019 numbers**
+(27300 / 27800 / -500, F3 = 27300), which is what makes it a chrome diff and not a regression.
+`--project=scenario` went 22 passed / 1 failed / 1 did not run -> **24 passed**. The three
+`comments-notes` goldens were checked and were already current; they were NOT re-recorded (§2d).
+
+What remains, in order. The ordering is: answers that are silently wrong first, then the things
+that make the test signal trustworthy, then structural debt, then the unowned and the unreproduced.
+
+1. **Recalculation holes that still return a wrong number in silence (§2c).**
+   - `clear_range` performs no dependent recalculation at all — not even same-sheet. Same class as
+     the `sort_range` defect that §2c fixed, and it should be closed the same way, through the one
+     shared walk.
+   - A dependency cycle that crosses a sheet boundary is detected nowhere: `partition_formula_cells`
+     runs Kahn over one sheet's local map and the edit path has no cross-sheet check, so the cycle
+     terminates with an order-dependent number instead of `#CIRCULAR!`. This needs a genuinely
+     sheet-dimensioned dependency graph — the same underlying gap as §2c's cause 2, and the real
+     follow-on from BUG-0019 rather than a separate bug.
+
+2. **The three residual undo gaps (§2i).** `report_restore` and `calp_reset` write active-sheet
+   cells but report no coordinates, so another sheet's formula reading into them stays stale
+   (closing it is a signature change across the `CustomRestore` registry); undoing a named-range
+   definition triggers no recalculation of the formulas that resolve through it (needs a
+   whole-workbook trigger, not a cell cascade); and `SetCell` carries no sheet dimension, so undo
+   after a sheet switch applies to the wrong sheet.
+
+3. **Undo/redo announces nothing for the non-cell domains (§2e), and control mutations have no
+   undo transaction at all (§1a).** These are one work item: `MUTATION_REFRESH` domains come from
+   Rust undo-result flags, so grouping / hyperlinks / tracing need new flags plus the
+   `MutationDomain` union and the shell translator — and shape create/delete are not undoable for
+   the same missing reason. Both are pre-existing (`DATA_CHANGED` was never emitted on undo
+   either); the consent text says so meanwhile, which is a disclosure and not a fix.
+
+4. **`macro-live-edit` test 6 (§3y)** — the whitespace/EOL normalisation between the Monaco buffer
+   and `save_script` that makes an untouched macro report phantom unsaved work. Proved pre-existing
+   on HEAD three ways, including with this pass's changes reverted. Small, self-contained, and it
+   un-stales the one baseline everything in the macro suite is measured against. Nothing in the
+   editor sets the model's EOL, which is where to start.
+
+5. **The functional-suite cascade roots (§3a).** 495 passed / 34 failed / 11 skipped, and most of
+   that count is cascade, not distinct defects — `editing.spec.ts` fails 3/3 in the ordered run and
+   passes 12/12 cold. Two roots are named and worth an owner each: **a chart that paints its own
+   exception** into the shared workbook (`Chart data error — Cannot read properties of undefined
+   (reading 'title')`, ~11.5k differing pixels, which is a real symptom independent of the golden
+   it breaks), and whatever leaves the `dimensions` residue that `editing` then reads. Fixing these
+   is a better first move than re-recording 34 goldens.
+
+6. **Spec self-containment (§3b)** — one accumulating workbook and a `resetGrid` that clears only
+   `A1:Z1000`, so goldens are valid only for the exact ordered cold pass that recorded them, and the
+   macro debugger specs go 10-failures-contaminated versus 60/60 cold. Costs a pass; ends a
+   recurring class of false signal. Do it after 5, so the cascade roots are not chased twice.
+
+7. **The headings-off pair, found on the last journey run (§1b).** `set_sheet_display_flags` does
+   not drive the renderer and `new_file` does not reset it — the frontend's Core state is fed by
+   `DISPLAY_*_TOGGLED` events and hears about neither, so a journey run continues with headings
+   rendered OFF while the backend reports them ON. On that same canvas **a floating control could
+   not be selected by clicking it**, at its painted position or at the config-offset one; measured,
+   not characterised, and the throttled design-mode toast makes "no toast" suggestive rather than
+   conclusive. Both belong to the headings feature. Related and in the same neighbourhood:
+   `readGridGeometry` in `e2e/helpers/grid.ts` still trusts `config.rowHeaderWidth` when headings
+   are hidden, which is the trap that scored a perfectly painted shape at 0.80.
+
+8. **The persisted `AppState` fields §3c did not reach** — `sheet_names`, `active_sheet`,
+   `style_registry`, `column_widths` / `row_heights` and their `all_*` companions, `merged_regions`
+   / `all_merged_regions`, `user_hidden_rows` / `user_hidden_cols`, `sheet_zooms`, `split_configs`,
+   `auto_filters`, `sheet_protection`, `sheet_ids`. The flag's sole-writer guarantee is complete;
+   the STORE coverage is not, so a command touching only these can still mutate without deciding.
+   Same mechanical recipe as §3c (`.lock()` -> `.read()`, then let the compiler list the mutating
+   sites), each smaller than the grid was. **The 61 `let _ = ...mutates(...)` sites across 15 files
+   are a fairly precise map of this item** — they are the honest marker of a command that dirties
+   while its store is still a bare `Mutex` — so that list should shrink as stores are onboarded
+   rather than being swept as a cleanup of its own.
+
+9. **Two unowned leftovers, cheap to close and easy to lose.** `protection.rs:487
+   sheet_is_protected` is `pub(crate)`, dead, warned on, and documented as a lock-amortising
+   helper that was written and never wired (§3ab) — delete it or wire it, but it belongs to whoever
+   owns the protection gates. And the app **hard-crashed twice** during visual workflow specs
+   (`app.exe` exit `0xffffffff`, no panic in the tauri log, §2g); not reproduced deliberately, so it
+   is recorded rather than scheduled — but §3ab is the standing proof that a crash seen once during
+   a suite run can be a real abort with an ordinary input behind it.
+
+10. **Vertical inline-editor expansion (§2g)** — the horizontal case shipped; Alt+Enter content is
+    measured but still rendered on one line because the editor is an `<input>`. Needs an
+    `<input>`-to-`<textarea>` swap plus caret and commit handling. Last because it is a cosmetic
+    gap in a feature that otherwise works, and it is the only item here that changes no answer.
+
+**Deliberately not on this list: the rest of Wave 5 (§1c).** `CenterAcrossSelection`, insert/delete
+cells with shift, extended border styles, superscript/subscript and sparklines are each an engine
+project whose script API is the last 5%. The recommendation stands that real user demand should
+pull them rather than a schedule pushing them.

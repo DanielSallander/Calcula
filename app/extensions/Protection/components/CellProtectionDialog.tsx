@@ -9,6 +9,7 @@ import {
   setCellProtection,
   useGridState,
 } from "@api";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Styles
@@ -150,14 +151,14 @@ export function CellProtectionDialog(props: DialogProps) {
         formulaHidden,
       });
       if (!result.success) {
-        alert(result.error || "Could not change cell protection.");
+        void alertAsync(result.error || "Could not change cell protection.");
         return;
       }
       onClose();
     } catch (err) {
       console.error("[Protection] Failed to set cell protection:", err);
       const msg = typeof err === "string" ? err : (err as Error)?.message;
-      if (msg) alert(msg);
+      if (msg) void alertAsync(msg);
     } finally {
       setIsSubmitting(false);
     }

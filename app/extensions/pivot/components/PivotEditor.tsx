@@ -39,6 +39,7 @@ import { CALC_GROUP_TABLE } from './types';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
+import { confirmAsync } from "@api/dialogs";
 
 type EditorTab = 'fields' | 'design';
 
@@ -448,7 +449,7 @@ export function PivotEditor({
         // Only show the connect prompt for user-initiated changes,
         // not the auto-triggered mount update
         if (hasUserInteracted.current) {
-          const shouldConnect = window.confirm(
+          const shouldConnect = await confirmAsync(
             "This pivot table is not connected to a data source.\n\n" +
             "Open the Connections panel to connect?"
           );

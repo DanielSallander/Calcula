@@ -4,6 +4,8 @@
 // custom actions, and event handlers.
 // NOTE: Moved from core/registry to shell/registries per microkernel architecture.
 
+import { alertAsync, promptAsync } from "@api/dialogs";
+
 // ============================================================================
 // Types for Sheet Extensions
 // ============================================================================
@@ -196,7 +198,10 @@ export function registerCoreSheetContextMenu(): void {
     id: "core:rename",
     label: "Rename",
     onClick: async (context) => {
-      const newName = prompt("Enter new sheet name:", context.sheet.name);
+      const newName = await promptAsync("Enter new sheet name:", {
+        title: "Rename sheet",
+        defaultValue: context.sheet.name,
+      });
       if (newName && newName.trim() !== "" && newName !== context.sheet.name) {
         window.dispatchEvent(new CustomEvent("sheet:requestRename", {
           detail: { index: context.index, newName: newName.trim() },
@@ -297,8 +302,9 @@ export function registerCoreSheetContextMenu(): void {
     label: "Tab Color",
     onClick: async (context) => {
       const colorNames = TAB_COLORS.map((c, i) => `${i + 1}. ${c.label}`).join("\n");
-      const choice = prompt(
+      const choice = await promptAsync(
         `Select tab color for "${context.sheet.name}":\n\n${colorNames}\n\nEnter number (or hex color):`,
+        { title: "Tab Color" },
       );
       if (choice === null) return;
 
@@ -312,7 +318,7 @@ export function registerCoreSheetContextMenu(): void {
       } else if (trimmed === "") {
         color = "";
       } else {
-        alert("Invalid color. Use a number from the list or a hex color like #ff0000.");
+        void alertAsync("Invalid color. Use a number from the list or a hex color like #ff0000.");
         return;
       }
 

@@ -30,6 +30,7 @@
 import type { CapabilityId } from "./allowlist";
 import { CAPABILITY_ID_SET } from "./capabilityIds";
 import { invokeBackend } from "../backend";
+import { confirmAsync } from "../dialogs";
 import { emitAppEvent } from "../events";
 
 // ============================================================================
@@ -526,7 +527,7 @@ function rememberDenied(scriptId: string, cap: CapabilityId, origin: string | nu
  * dialog appears — re-consent after an edit is never a blind re-approval, and
  * declining the notice is a deny (remembered for the session like any other).
  */
-export function requestCapabilityGrant(args: {
+export async function requestCapabilityGrant(args: {
   scriptId: string;
   scriptName: string;
   capability: CapabilityId;
@@ -537,15 +538,31 @@ export function requestCapabilityGrant(args: {
   viaLibrary?: string | null;
 }): Promise<CapabilityDecision> {
   const lapse = consumeLapsedGrantNotice(args.scriptId);
-  if (lapse && typeof window !== "undefined" && typeof window.confirm === "function") {
-    const proceed = window.confirm(
+  if (lapse) {
+    // THE ACKNOWLEDGEMENT IS THE POINT. This notice is shown when a script that
+    // held a persisted "Allow always" grant has been EDITED since, so the grant
+    // lapsed. The docs above promise "declining the notice is a deny".
+    //
+    // It did not deny. `const proceed = window.confirm(...)` captured the
+    // PROMISE the Tauri shim returns; `if (!proceed)` tested `!Promise`, always
+    // false. The deny branch was unreachable, so Cancel fell through to the
+    // permission dialog exactly like OK — turning "re-consent after an edit is
+    // never a blind re-approval" into precisely a blind re-approval, with the
+    // diff already consumed and therefore never shown again.
+    //
+    // The old `typeof window.confirm === "function"` probe made it worse: with
+    // no window (or no dialog surface) the notice was skipped ENTIRELY and the
+    // request proceeded silently. confirmAsync fails closed instead, so an
+    // unshowable notice is a deny.
+    const proceed = await confirmAsync(
       `${lapse}\n\n` +
         `It is asking again now. Continue to the permission request?\n` +
         `(Cancel denies it for this session.)`,
+      { title: "Permission changed", kind: "warning" },
     );
     if (!proceed) {
       rememberDenied(args.scriptId, args.capability, args.origin);
-      return Promise.resolve("deny");
+      return "deny";
     }
   }
   const requestId = `cap-${++requestSeq}`;

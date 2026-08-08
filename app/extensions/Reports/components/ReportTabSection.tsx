@@ -18,6 +18,7 @@ import {
   getActiveReport,
 } from "../lib/reportSelectionHandler";
 import type { ReportInfo } from "../types";
+import { confirmAsync, alertAsync } from "@api/dialogs";
 
 const styles = {
   button: css`
@@ -123,9 +124,9 @@ export function ReportActionsSection(_props: PanelSectionProps): React.ReactElem
     try {
       const result = await refreshOneReport(report);
       if (!result.ok) {
-        alert(`"${report.name}" was not refreshed:\n${result.message ?? "unknown error"}`);
+        void alertAsync(`"${report.name}" was not refreshed:\n${result.message ?? "unknown error"}`);
       } else if ((result.overwrittenCellCount ?? 0) > 0) {
-        alert(
+        void alertAsync(
           `${result.overwrittenCellCount} existing cell(s) outside the previous report area were overwritten (Ctrl+Z to undo).`,
         );
       }
@@ -137,7 +138,9 @@ export function ReportActionsSection(_props: PanelSectionProps): React.ReactElem
 
   const onDelete = useCallback(async () => {
     if (!report || busy) return;
-    if (!window.confirm(`Delete report "${report.name}"? Its cells are cleared (Ctrl+Z undoes).`)) {
+    if (
+      !(await confirmAsync(`Delete report "${report.name}"? Its cells are cleared (Ctrl+Z undoes).`))
+    ) {
       return;
     }
     setBusy(true);
@@ -145,7 +148,7 @@ export function ReportActionsSection(_props: PanelSectionProps): React.ReactElem
       await deleteReport(report.id);
       await refreshReportRegions();
     } catch (e) {
-      alert(String(e));
+      void alertAsync(String(e));
     } finally {
       setBusy(false);
     }

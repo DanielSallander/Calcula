@@ -5,6 +5,7 @@
 import React, { useState, useCallback } from "react";
 import { useNotebookStore } from "../lib/useNotebookStore";
 import { MODEL_QUERY_TEMPLATE } from "../lib/cellTemplates";
+import { confirmAsync } from "@api/dialogs";
 
 const PlayAllIcon = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -156,9 +157,14 @@ export function NotebookToolbar(): React.ReactElement {
           <button
             style={{ ...styles.button, color: "var(--error-text, #c00)" }}
             onClick={() => {
-              if (confirm(`Delete notebook "${activeNotebook.name}"?`)) {
-                deleteNotebook(activeNotebook.id);
-              }
+              // AWAITED (in an IIFE — the handler itself stays sync). The bare
+              // `confirm(...)` returned a truthy Promise, so Cancel deleted the
+              // notebook exactly like OK.
+              void (async () => {
+                if (await confirmAsync(`Delete notebook "${activeNotebook.name}"?`)) {
+                  deleteNotebook(activeNotebook.id);
+                }
+              })();
             }}
             title="Delete notebook"
           >

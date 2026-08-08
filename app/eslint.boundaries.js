@@ -92,7 +92,83 @@ const RAW_TAURI_EVENT_PATH = {
     'Use ctx.events or a typed @api event channel.',
 }
 
+// =============================================================================
+// DIALOG GLOBALS — the async-confirm defect class
+// =============================================================================
+// tauri-plugin-dialog replaces window.alert/window.confirm in every webview
+// (see src/api/dialogs.ts for the verbatim shim and the full rationale):
+//
+//   window.confirm returns a PROMISE, so `if (!window.confirm(m)) return;` tests
+//   `!Promise` — always false. The guard never fires and the code runs as though
+//   the user pressed OK. On a CONSENT gate that means Cancel grants consent.
+//
+//   window.alert is fire-and-forget and NOT async, so awaiting it does not help
+//   either; execution continues past a message nobody has read.
+//
+//   window.prompt is not replaced at all and depends on the embedder's
+//   script-dialog policy.
+//
+// This shipped six times, patched at the call site each time, and returned each
+// time. A per-site fix cannot stop the seventh — only refusing to compile the
+// construct can. Every caller uses confirmAsync / alertAsync / promptAsync from
+// @api/dialogs, which await properly and fail CLOSED.
+//
+// Enforced with TWO rules because the hazard has two syntactic shapes and each
+// rule sees only one of them:
+//   - no-restricted-globals   catches the BARE `alert(msg)` / `confirm(msg)`.
+//     It is scope-aware, so a local variable or parameter named `alert` is
+//     correctly left alone — a text search cannot make that distinction, and
+//     bare calls are the majority shape in src/core.
+//   - no-restricted-properties catches the QUALIFIED `window.confirm(msg)`,
+//     including non-call references like `typeof window.confirm === "function"`,
+//     which is how one site smuggled the global past review as a feature probe.
+// Together they cover globalThis/self/window-qualified and unqualified use.
+const DIALOG_GLOBAL_MESSAGE =
+  'Banned: the browser dialog globals are broken under Tauri (confirm returns a Promise, ' +
+  'so `if (!confirm(...))` NEVER fires; alert is fire-and-forget; prompt is not implemented). ' +
+  'Use confirmAsync / alertAsync / promptAsync from @api/dialogs and AWAIT the result.'
+
+const DIALOG_GLOBAL_NAMES = ['confirm', 'alert', 'prompt']
+const DIALOG_GLOBAL_HOSTS = ['window', 'globalThis', 'self']
+
+export const dialogGuardConfigs = [
+  {
+    files: ['src/**/*.{ts,tsx}', 'extensions/**/*.{ts,tsx}'],
+    ignores: [
+      // The single sanctioned wrapper: it must touch the raw globals to provide
+      // the non-Tauri (jsdom / browser-smoke) fallback. It also carries inline
+      // disables so the rule is still visible there rather than silently off.
+      // Its @api/dialogs re-export needs no exemption — it touches no global.
+      'src/core/lib/dialogs.ts',
+      // Tests legitimately stub the globals (`window.confirm = vi.fn()`), and
+      // jsdom has none of the Tauri hazards. Excluded so the gate reports only
+      // shipping code. New PRODUCTION sites are still caught.
+      '**/__tests__/**',
+      '**/*.test.{ts,tsx}',
+      '**/*.spec.{ts,tsx}',
+    ],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        ...DIALOG_GLOBAL_NAMES.map((name) => ({ name, message: DIALOG_GLOBAL_MESSAGE })),
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...DIALOG_GLOBAL_HOSTS.flatMap((object) =>
+          DIALOG_GLOBAL_NAMES.map((property) => ({
+            object,
+            property,
+            message: DIALOG_GLOBAL_MESSAGE,
+          })),
+        ),
+      ],
+    },
+  },
+]
+
 export const boundaryConfigs = [
+  ...dialogGuardConfigs,
+
   // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell),
   // and must NOT reach the raw @api/backend invokeBackend door (A3).
   {

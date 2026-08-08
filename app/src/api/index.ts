@@ -2432,6 +2432,12 @@ export type {
   BackendInvokeArgs,
   RawBackendInvoke,
 } from "./backendCommands";
+// User-facing dialog primitives. The RAW window.confirm/alert/prompt globals are
+// banned repo-wide (they are broken under Tauri — confirm returns a Promise, so
+// `if (!window.confirm(m))` never fires); these are the sanctioned replacements
+// and they fail CLOSED. See src/core/lib/dialogs.ts.
+export { confirmAsync, alertAsync, promptAsync, PROMPT_DIALOG_ATTR } from "./dialogs";
+export type { DialogTextOptions, ConfirmOptions, PromptOptions } from "./dialogs";
 // Shared script-security gate (honors the global Script Security setting before
 // mounting/executing user scripts — used by the object-script surface too).
 export {

@@ -26,6 +26,7 @@ import {
 } from "../lib/tableStore";
 import { TableStylesGallery, DEFAULT_TABLE_STYLE_ID } from "./TableStylesGallery";
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
+import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
 // Styles
@@ -321,11 +322,14 @@ export function ToolsSection(_props: PanelSectionProps): React.ReactElement | nu
     });
   }, [table]);
 
-  const handleConvertToRange = useCallback(() => {
+  const handleConvertToRange = useCallback(async () => {
     if (!table) return;
-    const confirmed = window.confirm(
+    // AWAITED. `!confirmed` on a Promise was always false, so Cancel converted
+    // the table anyway and rewrote every structured reference to A1 form.
+    const confirmed = await confirmAsync(
       "Do you want to convert the table to a normal range?\n\n" +
         "Structured references in formulas will be converted to cell references.",
+      { title: "Convert to range" },
     );
     if (!confirmed) return;
     convertToRangeAsync(table.id).then((success) => {
@@ -361,7 +365,7 @@ export function ToolsSection(_props: PanelSectionProps): React.ReactElement | nu
       </ControlRow>
       <ControlRow gap={4}>
         <Button onClick={handleEditScript}>Edit Script...</Button>
-        <Button onClick={handleConvertToRange}>Convert to Range</Button>
+        <Button onClick={() => void handleConvertToRange()}>Convert to Range</Button>
         <Button className={sectionStyles.dangerButton} onClick={handleDeleteTable}>
           Delete Table
         </Button>

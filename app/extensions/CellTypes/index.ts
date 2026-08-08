@@ -20,6 +20,7 @@ import { checkboxCellType, CHECKBOX_TYPE_ID } from "./types/checkbox";
 import { progressCellType, PROGRESS_TYPE_ID } from "./types/progress";
 import { buttonCellType, BUTTON_TYPE_ID, type ButtonAction } from "./types/button";
 import { ButtonActionDialog } from "./components/ButtonActionDialog";
+import { alertAsync } from "@api/dialogs";
 
 const BUTTON_DIALOG_ID = "cellTypes.buttonAction";
 
@@ -86,7 +87,7 @@ async function applyTypeToRange(
   } catch (err) {
     // Surface backend refusals (sheet protection, most commonly); the commit
     // in `finally` still closes the transaction so nothing is left open.
-    alert(err instanceof Error ? err.message : String(err));
+    void alertAsync(err instanceof Error ? err.message : String(err));
     throw err;
   } finally {
     await commitUndoTransaction();

@@ -50,6 +50,7 @@ import {
   setPageBreakPreviewEnabled,
   refreshPageBreakData,
 } from "./lib/pageBreakOverlay";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // State
@@ -89,7 +90,7 @@ async function handlePrint(): Promise<void> {
     executePrint(data);
   } catch (err) {
     console.error("[Print] Failed to get print data:", err);
-    alert("Failed to prepare print data: " + String(err));
+    void alertAsync("Failed to prepare print data: " + String(err));
   }
 }
 
@@ -125,7 +126,7 @@ async function handleExportPdf(): Promise<void> {
     console.log("[Print] PDF exported to:", filePath);
   } catch (err) {
     console.error("[Print] PDF export failed:", err);
-    alert("Failed to export PDF: " + String(err));
+    void alertAsync("Failed to export PDF: " + String(err));
   }
 }
 
@@ -137,7 +138,7 @@ async function handleInsertRowPageBreak(): Promise<void> {
   try {
     const row = getSelectedRow();
     if (row === null || row <= 0) {
-      alert("Select a row below row 1 to insert a page break.");
+      void alertAsync("Select a row below row 1 to insert a page break.");
       return;
     }
     await insertRowPageBreak(row);
@@ -164,7 +165,7 @@ async function handleInsertColPageBreak(): Promise<void> {
   try {
     const col = getSelectedCol();
     if (col === null || col <= 0) {
-      alert("Select a column after column A to insert a page break.");
+      void alertAsync("Select a column after column A to insert a page break.");
       return;
     }
     await insertColPageBreak(col);
@@ -238,7 +239,7 @@ async function handleSetPrintArea(): Promise<void> {
   try {
     const bounds = getSelectionBounds();
     if (!bounds) {
-      alert("Select a range of cells first to set as print area.");
+      void alertAsync("Select a range of cells first to set as print area.");
       return;
     }
     const rangeStr = await setPrintArea(
@@ -249,7 +250,7 @@ async function handleSetPrintArea(): Promise<void> {
     window.dispatchEvent(new Event("app:grid-refresh"));
   } catch (err) {
     console.error("[Print] Set print area failed:", err);
-    alert("Failed to set print area: " + String(err));
+    void alertAsync("Failed to set print area: " + String(err));
   }
 }
 
@@ -268,7 +269,7 @@ async function handleSetPrintTitleRows(): Promise<void> {
   try {
     const bounds = getSelectionBounds();
     if (!bounds) {
-      alert("Select one or more rows first to set as title rows.");
+      void alertAsync("Select one or more rows first to set as title rows.");
       return;
     }
     const titleStr = await setPrintTitleRows(bounds.startRow, bounds.endRow);
@@ -277,7 +278,7 @@ async function handleSetPrintTitleRows(): Promise<void> {
     window.dispatchEvent(new Event("app:grid-refresh"));
   } catch (err) {
     console.error("[Print] Set title rows failed:", err);
-    alert("Failed to set title rows: " + String(err));
+    void alertAsync("Failed to set title rows: " + String(err));
   }
 }
 
@@ -296,7 +297,7 @@ async function handleSetPrintTitleCols(): Promise<void> {
   try {
     const bounds = getSelectionBounds();
     if (!bounds) {
-      alert("Select one or more columns first to set as title columns.");
+      void alertAsync("Select one or more columns first to set as title columns.");
       return;
     }
     const titleStr = await setPrintTitleCols(bounds.startCol, bounds.endCol);
@@ -305,7 +306,7 @@ async function handleSetPrintTitleCols(): Promise<void> {
     window.dispatchEvent(new Event("app:grid-refresh"));
   } catch (err) {
     console.error("[Print] Set title cols failed:", err);
-    alert("Failed to set title columns: " + String(err));
+    void alertAsync("Failed to set title columns: " + String(err));
   }
 }
 

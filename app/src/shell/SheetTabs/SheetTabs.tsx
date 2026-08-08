@@ -44,6 +44,7 @@ import type {
   SheetContextMenuItem,
 } from "../../api";
 import * as S from './SheetTabs.styles';
+import { alertAsync, promptAsync } from "@api/dialogs";
 
 export interface SheetTabsProps {
   onSheetChange?: (sheetIndex: number, sheetName: string) => void;
@@ -208,7 +209,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         await applySheetsResultRef.current(result, { backendHandledSwitch: true });
       } catch (err) {
         console.error("[SheetTabs] moveSheet error:", err);
-        alert("Failed to move sheet: " + String(err));
+        void alertAsync("Failed to move sheet: " + String(err));
       }
     };
 
@@ -222,7 +223,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         await applySheetsResultRef.current(result, { backendHandledSwitch: true });
       } catch (err) {
         console.error("[SheetTabs] copySheet error:", err);
-        alert("Failed to copy sheet: " + String(err));
+        void alertAsync("Failed to copy sheet: " + String(err));
       }
     };
 
@@ -233,7 +234,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         await applySheetsResultRef.current(result, { backendHandledSwitch: true });
       } catch (err) {
         console.error("[SheetTabs] hideSheet error:", err);
-        alert("Failed to hide sheet: " + String(err));
+        void alertAsync("Failed to hide sheet: " + String(err));
       }
     };
 
@@ -242,14 +243,14 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         const current = await getSheets();
         const hiddenSheets = current.sheets.filter(s => s.visibility === "hidden");
         if (hiddenSheets.length === 0) {
-          alert("No hidden sheets to unhide.");
+          void alertAsync("No hidden sheets to unhide.");
           return;
         }
         // Open the unhide dialog
         setUnhideDialog({ hiddenSheets, selectedIndex: hiddenSheets[0].index });
       } catch (err) {
         console.error("[SheetTabs] unhideSheet error:", err);
-        alert("Failed to unhide sheet: " + String(err));
+        void alertAsync("Failed to unhide sheet: " + String(err));
       }
     };
 
@@ -260,7 +261,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setSheets(result.sheets);
       } catch (err) {
         console.error("[SheetTabs] setTabColor error:", err);
-        alert("Failed to set tab color: " + String(err));
+        void alertAsync("Failed to set tab color: " + String(err));
       }
     };
 
@@ -515,7 +516,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         console.error("[SheetTabs] setActiveSheet error:", err);
         // Clear the prevent flag on error
         emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, false);
-        alert("Failed to switch sheet: " + String(err));
+        void alertAsync("Failed to switch sheet: " + String(err));
       }
     },
     [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch, dragState, groupedSheets]
@@ -561,7 +562,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       });
     } catch (err) {
       console.error("[SheetTabs] addSheet error:", err);
-      alert("Failed to add sheet: " + String(err));
+      void alertAsync("Failed to add sheet: " + String(err));
     }
   }, [onSheetChange, isInFormulaMode]);
 
@@ -611,7 +612,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         });
       } catch (err) {
         console.error("[SheetTabs] deleteSheet error:", err);
-        alert("Failed to delete sheet: " + String(err));
+        void alertAsync("Failed to delete sheet: " + String(err));
       }
     },
     [onSheetChange, activeIndex, dispatch]
@@ -629,7 +630,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setSheets(result.sheets);
       } catch (err) {
         console.error("[SheetTabs] renameSheet error:", err);
-        alert("Failed to rename sheet: " + String(err));
+        void alertAsync("Failed to rename sheet: " + String(err));
       }
     },
     [isInFormulaMode]
@@ -663,13 +664,21 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   );
 
   const handleDoubleClick = useCallback(
-    (index: number) => {
+    async (index: number) => {
       // Don't allow rename while in formula mode
       if (isInFormulaMode) {
         return;
       }
       const currentName = sheets[index]?.name || "";
-      const newName = prompt("Enter new sheet name:", currentName);
+      // window.prompt is the one dialog global Tauri does NOT replace, so
+      // whether it appears at all is up to the WebView2 embedder's script-dialog
+      // policy — and a suppressed prompt returns null, which is
+      // indistinguishable from the user cancelling. promptAsync renders the
+      // modal itself, so double-click-to-rename behaves the same in every window.
+      const newName = await promptAsync("Enter new sheet name:", {
+        title: "Rename sheet",
+        defaultValue: currentName,
+      });
       if (newName && newName.trim() !== "" && newName !== currentName) {
         handleRenameSheet(index, newName.trim());
       }
@@ -726,7 +735,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       setActiveIndex(result.activeIndex);
     } catch (err) {
       console.error("[SheetTabs] unhideSheet error:", err);
-      alert("Failed to unhide sheet: " + String(err));
+      void alertAsync("Failed to unhide sheet: " + String(err));
     }
     setUnhideDialog(null);
   }, [unhideDialog]);
@@ -988,7 +997,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 }}
                 onClick={(e) => handleSheetClick(sheet.index, e)}
                 onContextMenu={(e) => handleContextMenu(e, sheet.index)}
-                onDoubleClick={() => handleDoubleClick(sheet.index)}
+                onDoubleClick={() => void handleDoubleClick(sheet.index)}
                 style={dragState?.dragging && dragState.sourceIndex === sheet.index
                   ? { opacity: 0.5 }
                   : undefined

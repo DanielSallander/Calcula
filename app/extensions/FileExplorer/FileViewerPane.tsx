@@ -7,6 +7,7 @@ import type { TaskPaneViewProps } from "@api/uiTypes";
 import { readVirtualFile, createVirtualFile } from "@api/backend";
 import { MarkdownView, getViewMode } from "./FileRenderer";
 import { resolveTemplates, hasTemplates } from "./TemplateResolver";
+import { confirmAsync } from "@api/dialogs";
 
 const h = React.createElement;
 
@@ -135,13 +136,18 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     }
   }, [activeTab, activeTabId]);
 
-  const handleCloseTab = useCallback((tabFilePath: string, e?: React.MouseEvent) => {
+  const handleCloseTab = useCallback(async (tabFilePath: string, e?: React.MouseEvent) => {
     if (e) {
       e.stopPropagation();
     }
     const tab = tabsRef.current.find(t => t.filePath === tabFilePath);
     if (tab?.dirty) {
-      const confirmed = window.confirm(`"${getFileName(tabFilePath)}" has unsaved changes. Close anyway?`);
+      // AWAITED. `!confirmed` on a Promise was always false, so Cancel closed
+      // the tab and dropped the unsaved edits anyway.
+      const confirmed = await confirmAsync(
+        `"${getFileName(tabFilePath)}" has unsaved changes. Close anyway?`,
+        { title: "Unsaved changes", kind: "warning" },
+      );
       if (!confirmed) return;
     }
 
@@ -207,7 +213,7 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
       e.preventDefault();
       e.stopPropagation();
       if (activeTab) {
-        handleCloseTab(activeTab.filePath);
+        void handleCloseTab(activeTab.filePath);
       }
     }
   }, [handleSave, handleCloseTab, activeTab]);
@@ -255,7 +261,7 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         ),
         h("button", {
           style: styles.tabClose,
-          onClick: (e: React.MouseEvent) => handleCloseTab(tab.filePath, e),
+          onClick: (e: React.MouseEvent) => void handleCloseTab(tab.filePath, e),
           title: "Close",
         }, "\u00D7"),
       );

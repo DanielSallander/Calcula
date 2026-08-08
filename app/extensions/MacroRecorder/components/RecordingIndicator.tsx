@@ -21,6 +21,7 @@ import React, { useSyncExternalStore } from "react";
 import { CommandRegistry } from "@api";
 import { getRecorderSnapshot, subscribeToRecorder } from "../lib/actionRecorder";
 import { COMMANDS } from "../lib/ids";
+import { confirmAsync } from "@api/dialogs";
 
 /** Run a recorder command and surface a failure rather than swallowing it. */
 function run(commandId: string): void {
@@ -108,11 +109,10 @@ export function RecordingIndicator(): React.ReactElement | null {
           // The confirm stays HERE, not in the command: a script calling
           // `macroRecorder.cancel` must not be able to raise a modal.
           //
-          // AWAIT it: under Tauri `window.confirm` returns a Promise<boolean>
-          // (native dialog), so the synchronous `if (window.confirm(...))` tests
-          // a truthy Promise and discards even when the user clicks Cancel.
+          // Via confirmAsync (awaits AND fails closed). Previously patched in
+          // place for the async-confirm defect; the wrapper makes it stick.
           void (async () => {
-            const confirmed = await window.confirm(
+            const confirmed = await confirmAsync(
               "Discard this recording? Nothing is saved — Stop instead if you want to keep it. " +
                 "The actions already taken stay in the workbook either way.",
             );

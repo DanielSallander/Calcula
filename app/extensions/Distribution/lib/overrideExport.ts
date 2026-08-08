@@ -9,9 +9,10 @@ export interface OverrideExportDeps {
   getSubscriptions: () => Promise<{ subscriptions: { packageName: string }[] }>;
   exportOverrides: (packageName: string) => Promise<unknown>;
   saveJsonPatch: (json: string, suggestedName: string) => Promise<string | null>;
-  /** Pick a package when more than one subscription exists. Return null to cancel. */
-  prompt: (message: string, defaultValue: string) => string | null;
-  alert: (message: string) => void;
+  /** Pick a package when more than one subscription exists. Resolve null to
+   *  cancel. ASYNC because every real dialog under Tauri is. */
+  prompt: (message: string, defaultValue: string) => Promise<string | null> | string | null;
+  alert: (message: string) => Promise<void> | void;
 }
 
 /**
@@ -23,13 +24,13 @@ export interface OverrideExportDeps {
 export async function runOverrideExport(deps: OverrideExportDeps): Promise<string | null> {
   const subs = (await deps.getSubscriptions()).subscriptions;
   if (subs.length === 0) {
-    deps.alert("No active subscription to export overrides for.");
+    await deps.alert("No active subscription to export overrides for.");
     return null;
   }
 
   let pkg = subs[0].packageName;
   if (subs.length > 1) {
-    const choice = deps.prompt(
+    const choice = await deps.prompt(
       `Export overrides for which package?\n\n${subs.map((s) => s.packageName).join("\n")}`,
       pkg,
     );

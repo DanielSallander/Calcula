@@ -9,13 +9,14 @@ import { biModelDeletePerspective, biModelUpsertPerspective } from "@api";
 import type { ModelOverview, ModelPerspectiveInfo } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 export function PerspectivesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [editing, setEditing] = useState<{ original: ModelPerspectiveInfo | null } | null>(null);
 
   const handleDelete = async (p: ModelPerspectiveInfo) => {
-    if (!window.confirm(`Delete perspective '${p.name}'?`)) return;
+    if (!(await confirmAsync(`Delete perspective '${p.name}'?`))) return;
     try {
       applyOverview(await biModelDeletePerspective(connectionId, p.name));
     } catch (err: unknown) {

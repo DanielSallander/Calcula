@@ -22,6 +22,7 @@ import {
 } from "../homeTabConfig";
 import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
 import { FONT_SIZES } from "../../../_shared/lib/fontList";
+import { alertAsync } from "@api/dialogs";
 
 export function useHomeTabState() {
   const gridState = useGridState();
@@ -207,7 +208,7 @@ export function useHomeTabState() {
       } catch (err) {
         // Backend refusals (sheet protection, most commonly) must reach the
         // user, not the console — the message says which cell and why.
-        alert(err instanceof Error ? err.message : String(err));
+        void alertAsync(err instanceof Error ? err.message : String(err));
       }
     },
     [applyFormat, currentStyle, gridState.selection]

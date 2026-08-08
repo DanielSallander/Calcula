@@ -8,6 +8,7 @@ import { biModelDeleteScriptFunction, biModelUpsertScriptFunction } from "@api";
 import type { ModelOverview, ModelScriptFunctionInfo, ScriptParamDto } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { confirmAsync } from "@api/dialogs";
 
 const PARAM_TYPES = ["Int", "Float", "Bool", "String"];
 
@@ -21,7 +22,7 @@ export function ScriptFunctionsSection({ ctx }: { ctx: SectionCtx }): React.Reac
   const [editing, setEditing] = useState<{ original: ModelScriptFunctionInfo | null } | null>(null);
 
   const handleDelete = async (fn: ModelScriptFunctionInfo) => {
-    if (!window.confirm(`Delete script function '${fn.name}'?`)) return;
+    if (!(await confirmAsync(`Delete script function '${fn.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteScriptFunction(connectionId, fn.name));
     } catch (err: unknown) {

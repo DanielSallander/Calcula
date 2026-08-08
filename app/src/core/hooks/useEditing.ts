@@ -56,6 +56,7 @@ import {
   updateFormulaReference,
   type FormulaReferenceWithPosition,
 } from "../lib/formulaRefParser";
+import { alertAsync } from "../lib/dialogs";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -1506,7 +1507,7 @@ export function useEditing(): UseEditingReturn {
             // divergent, which is the one outcome grouping exists to prevent.
             console.error("[commitEdit] Failed to replicate to grouped sheets:", err);
             const msg = typeof err === "string" ? err : (err as Error)?.message;
-            alert(
+            void alertAsync(
               `The edit was applied to this sheet but NOT to the other grouped sheets.` +
                 (msg ? `\n\n${msg}` : "")
             );
@@ -1597,7 +1598,7 @@ export function useEditing(): UseEditingReturn {
       setLastError(errorMessage);
 
       // Show spill protection (or other backend) errors to the user
-      alert(errorMessage);
+      void alertAsync(errorMessage);
 
       // FIX: Clear global flag and arrow reference state on error too
       setGlobalIsEditing(false);
@@ -1709,7 +1710,13 @@ export function useEditing(): UseEditingReturn {
       const guardResult = await checkEditGuards(selection.endRow, selection.endCol);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");
-        window.alert(guardResult.message || "This cell cannot be edited.");
+        // AWAITED: this one runs in an async handler and the message explains
+        // why the keystroke did nothing. Tauri's window.alert is fire-and-forget
+        // (not even async), so the old call returned before the box appeared and
+        // left its IPC promise floating.
+        await alertAsync(guardResult.message || "This cell cannot be edited.", {
+          kind: "warning",
+        });
         return;
       }
 

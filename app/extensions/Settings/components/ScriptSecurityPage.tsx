@@ -51,6 +51,7 @@ import {
 } from "@api/codeInventory";
 import { openPanel } from "@api/ui";
 import type { CapabilityId } from "@api";
+import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
 // Helpers
@@ -645,17 +646,23 @@ export function ScriptSecurityPage(): React.ReactElement {
             type="button"
             style={styles.dangerButton}
             onClick={() => {
-              if (
-                window.confirm(
-                  "Forget every trusted workbook and every remembered capability grant " +
-                    "(scripts and notebooks)?\n\n" +
-                    "You will be asked again the next time any workbook wants to run its " +
-                    "scripts, and again the next time any script uses a capability.",
-                )
-              ) {
-                revokeAllWorkbookTrust();
-                refresh();
-              }
+              // AWAITED (in an IIFE — the JSX handler stays sync). The bare
+              // form made this destructive action unconditional: Cancel also
+              // forgot every trusted workbook and every remembered grant.
+              void (async () => {
+                if (
+                  await confirmAsync(
+                    "Forget every trusted workbook and every remembered capability grant " +
+                      "(scripts and notebooks)?\n\n" +
+                      "You will be asked again the next time any workbook wants to run its " +
+                      "scripts, and again the next time any script uses a capability.",
+                    { title: "Clear all trust decisions", kind: "warning" },
+                  )
+                ) {
+                  revokeAllWorkbookTrust();
+                  refresh();
+                }
+              })();
             }}
           >
             Clear all trust decisions

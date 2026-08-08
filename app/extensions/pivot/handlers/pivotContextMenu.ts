@@ -53,6 +53,7 @@ import {
   PIVOT_DRILL_BEHAVIOR_DIALOG_ID,
   PIVOT_PANE_ID,
 } from "../manifest";
+import { confirmAsync, promptAsync } from "@api/dialogs";
 
 // ============================================================================
 // Context Menu Item IDs
@@ -123,7 +124,7 @@ export function registerPivotContextMenuItems(): () => void {
         } catch (err) {
           const errStr = String(err);
           if (errStr.includes("Not connected") || errStr.includes("No connection")) {
-            const shouldConnect = window.confirm(
+            const shouldConnect = await confirmAsync(
               "This pivot table is not connected to a data source.\n\n" +
               "Open the Connections panel to connect?"
             );
@@ -206,7 +207,9 @@ export function registerPivotContextMenuItems(): () => void {
       onClick: async (ctx) => {
         const pivotId = getPivotIdFromContext(ctx);
         if (pivotId === null) return;
-        const newName = window.prompt("Enter a new name for this PivotTable:");
+        const newName = await promptAsync("Enter a new name for this PivotTable:", {
+          title: "Rename PivotTable",
+        });
         if (newName === null || newName.trim() === "") return;
         await updatePivotProperties({ pivotId, name: newName.trim() });
         window.dispatchEvent(new Event("pivot:refresh"));

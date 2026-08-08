@@ -10,6 +10,7 @@ import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUn
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
 import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
+import { alertAsync } from "../../lib/dialogs";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -320,7 +321,7 @@ export function useSpreadsheetEditing({
       await cancelUndoTransaction().catch(() => {});
       console.error("[useSpreadsheetEditing] Ctrl+Enter fill failed:", error);
       const msg = typeof error === "string" ? error : (error as Error)?.message;
-      if (msg) alert(msg);
+      if (msg) void alertAsync(msg);
     }
 
     focusContainerRef.current?.focus();

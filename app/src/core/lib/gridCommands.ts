@@ -5,6 +5,7 @@
 // Shell and Extensions import these through the API layer.
 
 import type { Selection, DimensionOverrides } from "../types";
+import { alertAsync } from "./dialogs";
 
 // ============================================================================
 // Grid Menu Context Type
@@ -129,7 +130,7 @@ class GridCommandRegistry {
       for (const guard of guards) {
         const result = guard(this.currentSelection);
         if (typeof result === "string") {
-          alert(result);
+          void alertAsync(result);
           return false;
         }
       }

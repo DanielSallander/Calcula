@@ -94,6 +94,7 @@ import {
 import type { ScriptDraft } from "../lib/crossWindowEvents";
 import { draftToScriptDefinition } from "../lib/scriptDrafts";
 import { readRequestedDocumentId } from "../lib/editorTarget";
+import { promptAsync } from "@api/dialogs";
 
 // ============================================================================
 // Monaco Worker Setup
@@ -1791,7 +1792,10 @@ export function ObjectScriptEditorApp(): React.ReactElement {
 
   const handleSaveAsTemplate = useCallback(async () => {
     if (!activeScript) return;
-    const name = prompt("Template name:", `${activeScript.name} Template`);
+    const name = await promptAsync("Template name:", {
+      title: "Save as template",
+      defaultValue: `${activeScript.name} Template`,
+    });
     if (!name) return;
     // A template is stamped straight into a new script, so it is subject to the
     // same rule: only JavaScript that compiles may be stored.

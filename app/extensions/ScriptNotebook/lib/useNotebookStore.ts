@@ -18,6 +18,7 @@ import {
   emptySourceForKind,
   type NotebookCellKind,
 } from "./cellKind";
+import { confirmAsync } from "@api/dialogs";
 
 /** Check if the last response in a batch has screenUpdating=false (suppressed). */
 function shouldSuppressRefresh(responses: NotebookCellResponse[]): boolean {
@@ -69,11 +70,15 @@ async function promptAndGrantBiCapability(
     capability === "bi.sql"
       ? "run read-only SQL against its data sources"
       : "run read-only queries against this workbook's Calcula models";
-  const ok = window.confirm(
+  // AWAITED. A capability consent that failed OPEN: `ok` was a truthy Promise,
+  // so declining still called grantNotebookBiCapability AND persisted the grant
+  // for this notebook on this machine.
+  const ok = await confirmAsync(
     `This notebook wants to ${what}.\n\n` +
       `Capability: ${capability} (read-only; every call is recorded in the audit log)\n\n` +
       `Allow? This is remembered for this notebook on THIS COMPUTER only ` +
       `(never stored in the file) and can be revoked in Settings > Script Security.`,
+    { title: "Capability request", kind: "warning" },
   );
   if (!ok) return false;
   await api.grantNotebookBiCapability(notebookId, capability);

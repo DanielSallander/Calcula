@@ -8,7 +8,7 @@ Calcula exists to bring back the customizability that made Excel great -- formul
 
 At the same time, Calcula must fix the legitimate downsides that got VBA shunned and Excel files distrusted. These are requirements every feature is held to:
 
-- **Security:** Custom code must run sandboxed, with tiered access levels -- never with full machine access like VBA macros. (Current state: DONE through Wave 3. Object scripts run in per-script hardened Worker realms; distributed extensions that opt in run sandboxed too; all privileged reach is broker-mediated behind a capability model -- net.fetch, bi.query, bi.sql, storage, ui.html, formula.udf -- with a declared-capability ceiling, consent, and audit. Notebooks/one-off scripts run in an isolated Rust QuickJS interpreter over cloned grid state. See docs/design/wave3-scripting-security.md.)
+- **Security:** Custom code must run sandboxed, with tiered access levels -- never with full machine access like VBA macros. (Current state: DONE through Wave 3. Object scripts run in per-script hardened Worker realms; distributed extensions that opt in run sandboxed too; all privileged reach is broker-mediated behind a capability model -- the canonical id list is `ALL_CAPABILITY_IDS` in `app/src/api/scriptHost/capabilityIds.ts`, never re-typed elsewhere -- with a declared-capability ceiling, consent, and audit. Notebooks/one-off scripts run in an isolated Rust QuickJS interpreter over cloned grid state. See docs/design/wave3-scripting-security.md.)
 - **Transparency:** Custom code must be visible and auditable. The user must always know where code resides and what it can touch -- never hidden inside a binary file. Scripts arriving in distributed packages must not run without explicit consent. (Current state: DONE through Wave 3. Consent + a per-script audit ring + a transparency panel; Ed25519 signing/TOFU for .calp packages AND distributed extensions via signed sidecar manifests verified at scan; a single queryable script-surface taxonomy. One per-workbook audit trail now spans all script activity: the Rust QuickJS surfaces (notebook/one-off/MCP) record always-on, structured grid-mutation entries (surface + id + sheet + range), and capability calls also persist -- net.fetch/bi.query/bi.sql authoritatively server-side in their Rust gates, and the rest (storage/ui.html/formula.udf + broker-policy denials) via a write-through from the broker ring -- so capability use survives reload too. Surfaced as "Scripts"/"Capabilities" categories in the audit viewer. Residual: the codeInventory "reach" for grid-only surfaces is asserted, not verified against the interpreter.)
 - **Distribution:** Excel's model of emailing copies of files is replaced by `.calp` packages: publish/subscribe report distribution, plus two-way data collection via writeback
 
@@ -56,7 +56,7 @@ Calcula/
 │   │   └── api/            # The "Sandpit"
 │   │                       # The ONLY interfaces extensions are allowed to touch
 │   │
-│   └── extensions/         # MOVED OUTSIDE 'src'. ~58 feature extensions, flat:
+│   └── extensions/         # MOVED OUTSIDE 'src'. ~68 feature extensions, flat:
 │       ├── Charts/          #   Charts, Pivot, Sorting, Slicer, Table, ... (one dir each)
 │       ├── Pivot/
 │       ├── ...              #   (full list registered in extensions/manifest.ts)
@@ -125,6 +125,7 @@ Extensions interact with Core exclusively through the API Facade:
 4. **Inversion of Control:** The Core does not call Extensions. The Core emits events/hooks (via the API), and Extensions respond
 5. **Primitive vs. Logic:** If a feature requires new logic (e.g., Sorting), implement generic primitives in Core (e.g., read/write range) and specific business logic in an Extension
 6. **Feature Location:** Default to building features as Extensions (`app/extensions/`; built-in dialogs/menus live under `app/extensions/BuiltIn/`) unless they are foundational primitives (like Rendering or Undo/Redo). Features that *preview* or *simulate* without persisting must follow the **transient-write pattern**: snapshot the model, apply writes that never enter the undo stack or dirty the document, and restore on stop/cancel. Animation demonstrates this — each frame advances a driver, recalculates dependents, and repaints without touching the undo graph; stopping restores the original state (backend precedent: `scenario_show`; see `docs/design/animation-simulation.md`)
+7. **The Seam Rule:** When one extension needs another's domain, reach it through a feature-neutral `@api` seam — `autoFilterService`, `printService`, `macroRunService`, `buttonControlService`, `pictureControlService`, `controlsService`, `groupingService`, `tracingService`, `textToColumnsService`, plus `rendering` (frame/grid capture) and `chartParams`. Never import the owning extension, and never hand-roll its domain by calling the backend directly. The Macro Recorder wrote button metadata itself as `{ label }` and got an **invisible button while the backend reported success**: the rendered caption key is `text`, geometry must be WALKED from the anchor cell's actual column widths (never multiplied), `pinToGrid` must be written explicitly as `"false"` because an absent value defaults to "moves", and nothing paints at all until the control is registered in the floating-control store and the overlay regions re-synced. A shape's recipe is seventeen keys long. A copied recipe is a second source of truth that drifts on the owner's first default change — so callers say WHAT they want and the owning extension decides HOW. If no seam exists, add one (`app/src/api/controlsService.ts` is the newest worked example). Seams point one way only: `@api` must never import from `app/extensions`.
 
 ### Naming Conventions (Rust <-> TypeScript API Boundary)
 
@@ -159,6 +160,63 @@ export interface CellData {
 - All Tauri API types must live in `api_types.rs` (Rust) and `types.ts` (TS)
 - TypeScript interfaces in `types.ts` must exactly mirror Rust structs in `api_types.rs`
 
+### Document Mutation -- `DocumentEffect` (Rust backend)
+
+`FileState::is_modified` is **private** (`app/src-tauri/src/persistence.rs`) and
+`app/src-tauri/src/document_effect.rs` is its **sole writer**. That one flag gates BOTH the
+close-without-saving prompt and AutoRecover, so a command that changes saved state without setting
+it loses the user's work twice over and in silence. The census in `document_effect.rs`'s own header
+found 256 of the then-746 Tauri commands mutating without setting it, which is why the rule is
+enforced by the compiler, not by review.
+
+- **Persisted backend state is `Persisted<T>`, never a bare `Mutex<T>`.** `read()` is free;
+  `write(&effect)` requires a `DocumentEffect`. 36 `AppState` fields are converted, `grids` /
+  `grid` among them (a test in `document_effect.rs` pins those two declarations by their exact
+  text, so a silent revert to a bare `Mutex` fails the build). The rest are mid-migration and are
+  listed as a work item in `docs/design/open-decisions-2026-08.md` — a command touching only those
+  can still mutate without deciding. Declare any NEW persisted store `Persisted<T>` from the start.
+- **Every mutating command constructs exactly one arm:**
+  - `DocumentEffect::mutates(&FileState)` — dirties **at construction**, so possession of the value
+    is proof the flag is set (no early `return` can skip it). Construct it AFTER every gate that can
+    still refuse, and inside the branch that actually changes something.
+  - `DocumentEffect::transient(&TransientScope)` — the preview/simulation exemption that keeps the
+    transient-write pattern legal. A `TransientScope` can only be built by presenting a snapshot
+    registry that ALREADY holds the restore token, so Animation qualifies and `scenario_show`, which
+    registers no restore, structurally cannot claim it.
+  - `DocumentEffect::deliberately_clean(CleanReason::…)` — a **closed** enum: `LoadingFromDisk`,
+    `Navigation`, `DerivedCache`, `RecalcCompanion`, `AutoRecoverProbe`, `AuditTrail`. The whole
+    audit is `rg deliberately_clean app/src-tauri/src`. A case that fits no variant is a signal to
+    think, not to add a variant in passing.
+- `mark_saved(&FileState)` is the only clear (save / open / new). `DirtyFlag` emits
+  `document:dirty-changed` on the clean<->dirty **transition only**, so the title-bar asterisk needs
+  no per-command event and a 10,000-cell paste produces one message; reads announce nothing.
+- Gated commands use `lock_pending()` then `.authorize(&effect)`, which keeps the gate and the
+  mutation in ONE critical section. Never `read()`, drop the lock, then `write()` — Tauri dispatches
+  on a thread pool, so that is a TOCTOU window in every protection-checked command.
+
+### `.cala` Format Versioning
+
+One `format_version` lives in `manifest.json` and is currently at **6**
+(`CALA_MAX_SUPPORTED_FORMAT_VERSION`, `core/calcula-format/src/manifest.rs`). The writer stamps the
+highest minimum any feature ACTUALLY PRESENT requires (`stamp_feature_format_version`, raise never
+lower); the reader refuses anything higher rather than half-understanding it.
+
+- **Bump explicitly** when the saved shape changes — nothing infers it.
+- **Stamp conditionally.** `USER_HIDDEN_MIN_FORMAT_VERSION` (4), `SHEET_VIEW_MIN_FORMAT_VERSION` (5)
+  and `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6) are written only when a sheet actually carries
+  that state, so an ordinary workbook keeps the lowest version that can express it and stays
+  openable by older builds.
+- **The test for whether a section deserves a version link at all:** would an older reader
+  MISHANDLE the document, or merely lose something? Ignoring an unknown section is usually fine — it
+  is dropped on the next save and the user loses cosmetic state. A link is warranted when the drop
+  is a *lie*: schedules silently disarmed, a stale workbook that comes back looking calculated,
+  rows hidden to keep working data out of a distributed report coming back VISIBLE.
+- Otherwise declare a **manifest feature id** with an unconditional read and leave the version
+  alone. Embedded media did exactly that — pictures are content-addressed under `media/{sha256}`,
+  and an older reader that drops them loses images, which is visible loss rather than
+  misinterpretation (pinned by `media_declares_a_feature_id_but_never_raises_the_format_version`
+  in `core/calcula-format/src/zip_io.rs`).
+
 ### Coding Standards
 
 1. **No Placeholders:** Write full implementation code. Do not use placeholders like `// ... rest of code`
@@ -178,7 +236,12 @@ export interface CellData {
 - Importing from `extensions/` in core code (core must never depend on extensions)
 - Importing deep into `src/core/...` from extensions (use `src/api` only)
 - Creating backdoor access for built-in extensions (they must use the same API as 3rd party extensions)
-- Importing Core/Shell grid-capture or another extension's internals to drive it — use the feature-neutral facades instead (`@api/rendering` for frame/grid capture, `@api/chartParams` for cross-extension param control); the transient-write discipline lives behind the facade, not in the extension
+- Importing another extension's internals — or calling the backend to hand-roll its domain — instead of using the `@api` seam for it (see the Seam Rule); the transient-write discipline lives behind the seam, not in the caller
+- Reaching for `window.confirm` / `window.alert` / `window.prompt` (or the bare `confirm(...)` / `alert(...)` / `prompt(...)` globals). All three are broken under Tauri: `confirm` returns a **`Promise<boolean>`**, so `if (!window.confirm(m))` tests `!Promise` — always false — and the guard NEVER fires; `alert` is fire-and-forget and not even async, so awaiting it does not wait either; `prompt` is not replaced by the plugin at all. This shipped six times, patched at the call site each time. **The globals are now a lint error repo-wide** (`dialogGuardConfigs` in `app/eslint.boundaries.js`, gated by `npm run lint:boundaries`, self-tested by `app/src/api/__tests__/dialogGlobalsBan.test.ts`). Use `confirmAsync` / `alertAsync` / `promptAsync` from `@api/dialogs` and **await** them — they fail CLOSED, so a dialog that cannot be shown is a refusal, never consent. When unit-testing a gate, double the **Tauri** shape (`mockReturnValue(Promise.resolve(false))`); a synchronous boolean double is what let this defect pass review for so long. Proved live end-to-end in `app/e2e/journeys/consent-refusal.spec.ts` (refusal AND positive control for each gate; the native dialog is driven over Win32 because Tauri's IPC cannot be stubbed from the page)
+- Adding an `object.setState` aspect without a matching row in `vSetState` (`app/src/api/scriptHost/validators.ts`) — the validator ends in `return true`, so a new aspect defaults to **unvalidated at restricted tier with no capability**. That is how `shape.setProperty` became a route for a distributed script to persist a multi-megabyte `data:` URI into a signed `.calp`. The standing rule is "a script may REFERENCE media already in the document, never INTRODUCE bytes": `src` accepts a `media:{sha256}` handle or `""`, and bytes enter only through the Rust validator (`inspect_media`) behind `cap.fileImportMedia`
+- Registering a cross-sheet dependency from the AST's spelling. `CrossSheetDependentsMap` is keyed by the workbook's OFFICIAL sheet name, but the lexer uppercases bare identifiers (`core/parser/src/lexer.rs`), so `=Sheet1!A2` is stored as `SHEET1!A2` while quoted `='Sheet1'!A2` keeps its case. Go through `normalize_cross_sheet_refs` (`app/src-tauri/src/lib.rs`) — one raw registration froze a revisited sheet's cross-sheet recalculation for the whole session
+- Writing a command that permutes or clears a range without recalculating dependents. `sort_range` shipped recalculating nothing at all, and `clear_range` still does. Call the shared `cascade_cross_sheet_dependents` / `recalc_after_active_sheet_bulk_rewrite` (`app/src-tauri/src/commands/data.rs`) rather than hand-copying the walk — three copies had already drifted apart
+- Editing one of the handful of files with MIXED line endings (e.g. `app/src/api/grid.ts`, `core/engine/src/undo.rs`, `core/parser/src/tests.rs`) without checking first — an exact-match edit against the wrong ending silently fails to apply
 
 ## The "Calcula" Decision Matrix
 
@@ -220,6 +283,12 @@ When developing a new feature, ask these three questions:
 ## Development environment
 In order for Rust environment to work it must first be set using the script:
 core\setup-rust-env.ps1
+
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers ~750 commands. Its debug-build
+dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
+larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
+to hold it. Adding commands in bulk eats that headroom -- the symptom is
+`thread 'main' has overflowed its stack` at startup or first invoke.
 
 The BI/model engine lives in `model-engine-lib/` (its own Cargo workspace, in
 this repo since 2026-07-24). Build/test it with `cargo` from that directory;

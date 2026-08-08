@@ -53,6 +53,7 @@ import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry, CoreCommands } from "../../../api/commands";
 import { emitAppEvent, AppEvents, type MutationDomain } from "../../../api/events";
 import type { GridCanvasHandle } from "../Grid";
+import { alertAsync } from "../../lib/dialogs";
 
 type GridState = ReturnType<typeof useGridState>;
 type GridDispatch = ReturnType<typeof useGridContext>["dispatch"];
@@ -266,7 +267,7 @@ export function useSpreadsheetSelection({
           dispatch(setColumnWidth(col, actual));
           canvasRef.current?.redraw();
         } catch { /* keep the optimistic value if the re-read fails too */ }
-        alert(err instanceof Error ? err.message : String(err));
+        void alertAsync(err instanceof Error ? err.message : String(err));
       });
       canvasRef.current?.redraw();
       emitAppEvent(AppEvents.COLUMN_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, col, width });
@@ -286,7 +287,7 @@ export function useSpreadsheetSelection({
           dispatch(setRowHeight(row, actual));
           canvasRef.current?.redraw();
         } catch { /* keep the optimistic value if the re-read fails too */ }
-        alert(err instanceof Error ? err.message : String(err));
+        void alertAsync(err instanceof Error ? err.message : String(err));
       });
       canvasRef.current?.redraw();
       emitAppEvent(AppEvents.ROW_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, row, height });
@@ -466,7 +467,7 @@ export function useSpreadsheetSelection({
         // surface the refusal — the optimistic dispatches above are re-synced
         // by the redraw path on the next dimension fetch.
         try { await cancelUndoTransaction(); } catch { /* already closed */ }
-        alert(err instanceof Error ? err.message : String(err));
+        void alertAsync(err instanceof Error ? err.message : String(err));
       }
       canvasRef.current?.redraw();
     },
@@ -485,7 +486,7 @@ export function useSpreadsheetSelection({
       } catch (err) {
         console.error("Failed to batch resize rows:", err);
         try { await cancelUndoTransaction(); } catch { /* already closed */ }
-        alert(err instanceof Error ? err.message : String(err));
+        void alertAsync(err instanceof Error ? err.message : String(err));
       }
       canvasRef.current?.redraw();
     },
@@ -523,7 +524,7 @@ export function useSpreadsheetSelection({
           }
         } catch (err) {
           console.error("Failed to hide columns:", err);
-          alert(err instanceof Error ? err.message : String(err));
+          void alertAsync(err instanceof Error ? err.message : String(err));
         }
         canvasRef.current?.redraw();
       })();
@@ -549,7 +550,7 @@ export function useSpreadsheetSelection({
           }
         } catch (err) {
           console.error("Failed to hide rows:", err);
-          alert(err instanceof Error ? err.message : String(err));
+          void alertAsync(err instanceof Error ? err.message : String(err));
         }
         canvasRef.current?.redraw();
       })();
@@ -597,7 +598,7 @@ export function useSpreadsheetSelection({
           // A grouped sheet refusing (protection) means the sheets have now
           // DIVERGED: the active sheet cleared, that one did not. Silence here
           // would leave the user believing the group edit applied everywhere.
-          alert(err instanceof Error ? err.message : String(err));
+          void alertAsync(err instanceof Error ? err.message : String(err));
         }
       }
 
@@ -612,7 +613,7 @@ export function useSpreadsheetSelection({
     } catch (error) {
       // Show spill protection warning (or other backend errors) to the user
       const message = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      alert(message);
+      void alertAsync(message);
     }
   }, [selection]);
 

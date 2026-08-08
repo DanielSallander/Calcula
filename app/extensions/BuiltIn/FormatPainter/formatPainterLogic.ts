@@ -29,6 +29,7 @@ import {
   addCleanup,
   runAllCleanups,
 } from "./formatPainterState";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Paintbrush Cursor (SVG data URL)
@@ -123,7 +124,7 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
     // tell the user why the paint stopped — a sheet-protection refusal names
     // the cell and the remedy.
     try { await cancelUndoTransaction(); } catch { /* already closed */ }
-    alert(err instanceof Error ? err.message : String(err));
+    void alertAsync(err instanceof Error ? err.message : String(err));
   }
 
   // Deactivate in single-use mode

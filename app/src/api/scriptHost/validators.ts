@@ -857,11 +857,14 @@ const MAX_PROTECTION_PASSWORD = 255;
  * SheetProtectionOptions flag set (all optional; omitted flags take the same
  * defaults the Protect Sheet dialog uses) plus `password`.
  *
- * `scriptsCanEdit` (VBA's UserInterfaceOnly) is recognized and REFUSED with
- * the reason: the backend write gates check sheet protection for script
- * writes exactly as for keystrokes, and plumbing a scripts-exempt flag
- * through every write path is a Rust-side change this wave did not make.
- * Refusing loudly beats accepting a flag that silently does nothing.
+ * `scriptsCanEdit` (VBA's UserInterfaceOnly) is recognized and permanently
+ * REFUSED. This is a settled design decision, not a backlog item: a protection
+ * that exempts code leaves no trace of the writes it permitted, and an
+ * untraceable bypass is the one thing Calcula's scripting story exists to rule
+ * out. The shipped alternative is `api.withUnprotected(password, fn)` — the
+ * host lifts the protection, runs `fn`, and re-protects it even if the realm is
+ * killed, and every step appears in the audit ring. See host.ts
+ * "api.withUnprotected — the sanctioned answer to UserInterfaceOnly".
  */
 export const vProtectSheet: Validator = ([options, sheetIndex]) => {
   if (options !== undefined && options !== null) {
@@ -879,11 +882,23 @@ export const vProtectSheet: Validator = ([options, sheetIndex]) => {
         continue;
       }
       if (key === "scriptsCanEdit") {
+        // THE WORDING IS THE FEATURE. This message is the one place a script
+        // author meets Calcula's deliberate divergence from VBA, so it must say
+        // that the decision is MADE (not pending), why, and what to use instead.
+        // Calling it "not supported yet" invited authors to wait for a flag
+        // that is never coming, and named no alternative at all.
         return (
-          "scriptsCanEdit (UserInterfaceOnly) is not supported yet: sheet " +
-          "protection currently binds scripts exactly as it binds the user, " +
-          "so protecting a sheet also blocks this script's own writes to its " +
-          "locked cells"
+          "scriptsCanEdit (VBA's UserInterfaceOnly) is not supported, by design " +
+          "and permanently: sheet protection binds scripts exactly as it binds " +
+          "the user, so protecting a sheet also blocks this script's own writes " +
+          "to its locked cells. An exemption that let code write through " +
+          "protection would leave no trace of what it wrote, and Calcula will " +
+          "not ship an untraceable bypass. Use api.withUnprotected(password, fn) " +
+          "instead — it lifts the protection, runs your work, and always puts " +
+          "the protection back (the host restores it even if the script is " +
+          "killed), and every step is recorded in the audit trail. For cells a " +
+          "script writes routinely, the simpler answer is to leave them " +
+          "unlocked: setRangeFormat(..., { locked: false }) before protecting."
         );
       }
       if (!SHEET_PROTECTION_OPTION_KEYS.has(key)) {

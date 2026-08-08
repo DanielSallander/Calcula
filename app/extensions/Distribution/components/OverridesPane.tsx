@@ -19,6 +19,7 @@ import {
 } from "@api";
 import { saveJsonPatch } from "../lib/reportExport";
 import { runOverrideExport } from "../lib/overrideExport";
+import { promptAsync, alertAsync } from "@api/dialogs";
 
 type TabId = "overrides" | "conflicts" | "pending";
 
@@ -178,12 +179,12 @@ export function OverridesPane() {
         getSubscriptions,
         exportOverrides,
         saveJsonPatch,
-        prompt: (message, def) => window.prompt(message, def),
-        alert: (message) => window.alert(message),
+        prompt: (message, def) => promptAsync(message, { defaultValue: def }),
+        alert: (message) => alertAsync(message),
       });
     } catch (err) {
       console.error("[Distribution] Export overrides failed:", err);
-      window.alert(`Export overrides failed: ${err}`);
+      await alertAsync(`Export overrides failed: ${err}`, { kind: "error" });
     }
   };
 

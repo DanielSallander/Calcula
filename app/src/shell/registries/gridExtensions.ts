@@ -12,6 +12,7 @@ export type { GridCommand } from "../../core/lib/gridCommands";
 
 // Import GridMenuContext for use within this file
 import type { GridMenuContext } from "../../core/lib/gridCommands";
+import { alertAsync } from "@api/dialogs";
 
 /** A context menu item for the grid */
 export interface GridContextMenuItem {
@@ -403,7 +404,7 @@ export function registerCoreGridContextMenu(): void {
           } catch (err) {
             // A backend refusal (sheet protection) was an unhandled promise
             // rejection and a silent no-op — the dialog just closed.
-            alert(err instanceof Error ? err.message : String(err));
+            void alertAsync(err instanceof Error ? err.message : String(err));
           }
           window.dispatchEvent(new CustomEvent("dimensions:refresh"));
           window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -445,7 +446,7 @@ export function registerCoreGridContextMenu(): void {
               await setRowHeight(row, newPx);
             }
           } catch (err) {
-            alert(err instanceof Error ? err.message : String(err));
+            void alertAsync(err instanceof Error ? err.message : String(err));
           }
           window.dispatchEvent(new CustomEvent("dimensions:refresh"));
           window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -570,7 +571,7 @@ export function registerCoreGridContextMenu(): void {
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("open_devtools");
         } catch {
-          alert("Tip: Use Shift+Right-click to access browser DevTools");
+          void alertAsync("Tip: Use Shift+Right-click to access browser DevTools");
         }
       },
     });

@@ -9,6 +9,7 @@ import {
 } from "@api/lib";
 import type { SortRangeResult } from "@api";
 import { IconSortAZ, IconSortZA, IconCustomSort } from "@api";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // State
@@ -73,14 +74,14 @@ async function quickSort(ascending: boolean): Promise<void> {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     } else {
       console.error("[Sorting] Quick sort failed:", result.error);
-      if (result.error) alert(result.error);
+      if (result.error) void alertAsync(result.error);
     }
   } catch (err) {
     // sort_range rejects outright on a protected range, so a console-only
     // failure would make the A-Z / Z-A menu item look broken.
     console.error("[Sorting] Quick sort error:", err);
     const msg = typeof err === "string" ? err : (err as Error)?.message;
-    if (msg) alert(msg);
+    if (msg) void alertAsync(msg);
   }
 }
 

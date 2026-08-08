@@ -10,6 +10,7 @@
 import { invokeBackend, emitTauriEvent, listenTauriEvent } from "./backend";
 import type { UnlistenFn } from "./backend";
 import { getGridStateSnapshot } from "../core/state/GridContext";
+import { confirmAsync } from "./dialogs";
 
 /** Scope of a script: workbook-level or attached to a specific sheet. */
 export type ScriptScope =
@@ -579,14 +580,15 @@ async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("SCRIPT_PROMPT_REQUIRED")) {
-      // AWAITED, deliberately: under Tauri `window.confirm` returns a PROMISE,
-      // and a bare `if (window.confirm(...))` tests an object — always truthy —
-      // so pressing Cancel granted the session approval anyway. This gate is the
-      // whole of Script Security's "prompt" mode; it must fail CLOSED.
-      const ok = await window.confirm(
+      // Via confirmAsync, which awaits AND fails closed. (An earlier fix here
+      // already added the missing `await`; routing it through the wrapper is
+      // what stops the next author reintroducing the bare call — the raw global
+      // is now a lint error repo-wide.)
+      const ok = await confirmAsync(
         "This workbook wants to run a script.\n\n" +
         "Allow script execution for this session?\n" +
         "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",
+        { title: "Script Security", kind: "warning" },
       );
       if (ok) {
         await invokeBackend<void>("grant_script_session_approval");

@@ -25,6 +25,7 @@ import {
   pasteRowDeltas,
 } from "@api/lib";
 import { cellEvents } from "@api";
+import { alertAsync } from "@api/dialogs";
 
 // ============================================================================
 // Helpers
@@ -250,11 +251,11 @@ export async function executePasteSpecial(
     // Close the transaction — left open, every subsequent edit silently joins
     // it and collapses into one giant Ctrl+Z step.
     try { await cancelUndoTransaction(); } catch { /* already closed */ }
-    alert(error instanceof Error ? error.message : String(error));
+    void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }
   if (failedCells > 0) {
-    alert(
+    void alertAsync(
       `Paste Special skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`,
     );
   }
@@ -329,11 +330,11 @@ export async function executePasteLink(
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
     try { await cancelUndoTransaction(); } catch { /* already closed */ }
-    alert(error instanceof Error ? error.message : String(error));
+    void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }
   if (failedCells > 0) {
-    alert(
+    void alertAsync(
       `Paste Link skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`,
     );
   }
@@ -810,7 +811,7 @@ async function pasteColumnWidths(
   } catch (error) {
     console.error("[PasteSpecial] Column widths paste failed:", error);
     try { await cancelUndoTransaction(); } catch { /* already closed */ }
-    alert(error instanceof Error ? error.message : String(error));
+    void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

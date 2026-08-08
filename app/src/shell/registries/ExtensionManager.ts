@@ -58,6 +58,7 @@ import {
   getPanelPlacement,
   setPanelPlacement,
 } from "../../api/ui";
+import { confirmAsync } from "@api/dialogs";
 import { emitAppEvent, onAppEvent } from "../../api/events";
 import { showToast } from "../../api/notifications";
 import {
@@ -970,7 +971,14 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
         : "";
       let allow = false;
       try {
-        allow = window.confirm(
+        // AWAITED. This is the TOFU gate for third-party extension code found on
+        // disk, and it was the worst instance of the class: `window.confirm`
+        // returned a Promise, `if (allow)` saw a truthy object, and EVERY
+        // unsigned extension was consented and activated at startup while its
+        // dialog was still on screen. The `catch` below could not save it either
+        // — a Promise-returning shim throws nothing synchronously, so the
+        // fail-closed path was unreachable. confirmAsync awaits and fails closed.
+        allow = await confirmAsync(
           `Calcula found a third-party extension that was not installed by Calcula:\n\n` +
             `    "${name}"\n\n` +
             `Signature: ${signed ? (ext?.trustStatus ?? "signed") : "unsigned / unverified"}\n` +
@@ -1001,7 +1009,8 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
             `Allow "${name}" to load? (You can change this later in Extensions.)`,
         );
       } catch {
-        // No confirm available (headless/test) -> fail closed: leave un-mounted.
+        // confirmAsync already fails closed on its own; this stays as a belt for
+        // an unexpected throw while BUILDING the message above.
         allow = false;
       }
       if (allow) {

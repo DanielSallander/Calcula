@@ -17,6 +17,7 @@ import {
   type AuditLog,
   type AuditEntry,
 } from "@api/distribution";
+import { confirmAsync } from "@api/dialogs";
 
 type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "other";
 
@@ -170,7 +171,16 @@ export function AuditLogPane(): React.ReactElement {
   }, [reload, log]);
 
   const clear = useCallback(async () => {
-    if (!window.confirm("Discard ALL audit entries, including the always-on script and capability records? This cannot be undone.")) return;
+    // AWAITED. This wipes the workbook's whole transparency record — the
+    // always-on script + capability entries the audit trail exists to keep.
+    // With the guard dead, Cancel cleared it just as OK did, irreversibly.
+    if (
+      !(await confirmAsync(
+        "Discard ALL audit entries, including the always-on script and capability records? This cannot be undone.",
+        { title: "Clear audit log", kind: "warning" },
+      ))
+    )
+      return;
     setBusy(true);
     try {
       await clearAuditLog();

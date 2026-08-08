@@ -24,6 +24,7 @@ import {
   type RegionResponseStatus,
 } from "@api/distribution";
 import { saveCsvReport, saveParquetReport } from "../lib/reportExport";
+import { promptAsync } from "@api/dialogs";
 
 function colLetter(c: number): string {
   let s = "";
@@ -129,9 +130,9 @@ export function PublisherDashboardPane(): React.ReactElement {
       let reason: string | null = null;
       if (newState === "rejected") {
         // The reason is shown back to the contributor on their read-back.
-        reason = window.prompt(
+        reason = await promptAsync(
           "Reason for rejecting (optional — the contributor will see this):",
-          "",
+          { title: "Reject submission", defaultValue: "" },
         );
         if (reason === null) return; // publisher cancelled — abort the rejection
       }

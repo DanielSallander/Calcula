@@ -23,6 +23,7 @@ import { ACCENT, Badge, Field, Modal, SELECTION_BG, styles } from "../editorShar
 import type { SectionCtx } from "../editorShared";
 import { CalcGroupIcon, Chevron, treeStyles } from "../treeKit";
 import { ExpressionWorkspace } from "./ExpressionWorkspace";
+import { confirmAsync } from "@api/dialogs";
 
 /** What a modal save actually installed — for selection/alias reconciliation. */
 interface SavedGroup {
@@ -211,8 +212,8 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
       return next;
     });
 
-  const handleDeleteGroup = (name: string): void => {
-    if (!window.confirm(`Delete calculation group '${name}'?`)) return;
+  const handleDeleteGroup = async (name: string): Promise<void> => {
+    if (!(await confirmAsync(`Delete calculation group '${name}'?`))) return;
     enqueue(async () => {
       const target = resolveGroupName(name);
       try {
@@ -285,8 +286,8 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
     );
   };
 
-  const deleteItem = (groupName: string, itemName: string): void => {
-    if (!window.confirm(`Delete item '${itemName}'?`)) return;
+  const deleteItem = async (groupName: string, itemName: string): Promise<void> => {
+    if (!(await confirmAsync(`Delete item '${itemName}'?`))) return;
     enqueueGroupOp(
       groupName,
       (g) => {
@@ -487,7 +488,7 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
         <button
           style={styles.btn}
           disabled={readOnly || !selectedGroup}
-          onClick={() => selectedGroup && handleDeleteGroup(selectedGroup.name)}
+          onClick={() => void (selectedGroup && handleDeleteGroup(selectedGroup.name))}
         >
           Delete
         </button>
@@ -681,7 +682,7 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
             readOnly={readOnly}
             onRenameGroup={(n) => renameGroup(selectedGroup.name, n)}
             onRenameItem={(item, n) => renameItem(selectedGroup.name, item, n)}
-            onDeleteItem={(item) => deleteItem(selectedGroup.name, item)}
+            onDeleteItem={(item) => void deleteItem(selectedGroup.name, item)}
             onAddItem={() => addItem(selectedGroup.name)}
             onMoveItem={(item, d) => moveItem(selectedGroup.name, item, d)}
             onEditFormula={(item) => openModal(selectedGroup.name, item)}
@@ -714,8 +715,8 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
             setMenu(null);
           }}
           onDelete={() => {
-            if (menu.item !== null) deleteItem(menu.group, menu.item);
-            else handleDeleteGroup(menu.group);
+            if (menu.item !== null) void deleteItem(menu.group, menu.item);
+            else void handleDeleteGroup(menu.group);
             setMenu(null);
           }}
         />

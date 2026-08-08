@@ -22,6 +22,7 @@ import {
 import { createModelPivot } from "../lib/modelPivot";
 import { MODEL_DIALOG_ID } from "../manifest";
 import type { ConnectionInfo } from "../types";
+import { confirmAsync, promptAsync } from "@api/dialogs";
 
 // ============================================================================
 // Styles
@@ -233,11 +234,12 @@ export function ConnectionsPane(
           const db = conn.database || "mydb";
           // Backend will resolve the OS username as default;
           // user only provides the password
-          const password = window.prompt(
+          const password = await promptAsync(
             `Connect to ${conn.name}\n` +
             `Server: ${server}\n` +
             `Database: ${db}\n\n` +
             `Enter password:`,
+            { title: "Connect", password: true },
           );
           if (password === null) return; // cancelled
           await updateConnection({ id: connectionId, connectionString: `__PASSWORD_ONLY__:${password}` });
@@ -331,10 +333,11 @@ export function ConnectionsPane(
 
   const handleDelete = useCallback(
     async (connectionId: string, connectionName: string) => {
+      // AWAITED: the bare form deleted the connection AND its BI regions on Cancel.
       if (
-        !window.confirm(
+        !(await confirmAsync(
           `Delete connection "${connectionName}"? This will also remove any associated BI regions.`,
-        )
+        ))
       ) {
         return;
       }

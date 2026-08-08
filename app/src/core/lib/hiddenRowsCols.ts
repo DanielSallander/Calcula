@@ -21,6 +21,7 @@ import { setRowsHidden, setColsHidden, getUserHiddenRows, getUserHiddenCols } fr
 import { setManuallyHiddenRows, setManuallyHiddenCols } from "../state/gridActions";
 import type { GridAction } from "../state/gridActions";
 import { emitAppEvent, AppEvents } from "./events";
+import { alertAsync } from "./dialogs";
 
 /** Minimal dispatch shape — the grid reducer dispatch, or api/gridDispatch. */
 export type HiddenDispatch = (action: GridAction) => void;
@@ -44,7 +45,7 @@ export async function refreshUserHidden(dispatch: HiddenDispatch): Promise<void>
 /** Re-sync the mirror after a refused write, then surface the refusal. */
 async function resyncAndReport(dispatch: HiddenDispatch, error: unknown): Promise<void> {
   await refreshUserHidden(dispatch);
-  alert(error instanceof Error ? error.message : String(error));
+  void alertAsync(error instanceof Error ? error.message : String(error));
 }
 
 /**

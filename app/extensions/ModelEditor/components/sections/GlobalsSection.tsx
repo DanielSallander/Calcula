@@ -21,6 +21,7 @@ import { Badge, Field, Modal, SELECTION_BG, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { treeStyles } from "../treeKit";
 import { ExpressionWorkspace } from "./ExpressionWorkspace";
+import { confirmAsync, alertAsync } from "@api/dialogs";
 
 /** Human-readable list of what is bound to a materialized calculated table
  *  (null when nothing is). Shown in the cascade-confirm dialogs. */
@@ -59,9 +60,11 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
       const message = summary
         ? `Delete calculated table '${g.name}'?\n\nIts materialized table is removed from the model together with everything bound to it:\n\n${summary}`
         : `Delete calculated table '${g.name}'? (Its materialized table is removed from the model.)`;
-      if (!window.confirm(message)) return;
+      // This one also decided CASCADE. With the guard dead, Cancel deleted the
+      // calculated table AND everything bound to its materialized table.
+      if (!(await confirmAsync(message))) return;
       cascade = summary !== null;
-    } else if (!window.confirm(`Delete calculated table '${g.name}'?`)) {
+    } else if (!(await confirmAsync(`Delete calculated table '${g.name}'?`))) {
       return;
     }
     try {
@@ -225,7 +228,7 @@ function CalculatedTableModal({
           const action = dynamic
             ? "Making it dynamic removes its table from the model"
             : "Renaming it replaces its table in the model";
-          const ok = window.confirm(
+          const ok = await confirmAsync(
             `'${original.name}' is materialized. ${action}, together with everything bound to the table:\n\n${summary}\n\nContinue?`,
           );
           if (!ok) {
@@ -252,7 +255,12 @@ function CalculatedTableModal({
         try {
           await biModelMaterializeCalculatedTable(connectionId, name.trim());
         } catch (err: unknown) {
-          window.alert(`Calculated table saved, but materializing its data failed:\n${String(err)}`);
+          // AWAITED: the dialog closes right after this, so a fire-and-forget
+          // alert could be dismissed by the closing window before it was read.
+          await alertAsync(
+            `Calculated table saved, but materializing its data failed:\n${String(err)}`,
+            { kind: "warning" },
+          );
         }
       }
       onSaved(newOverview);

@@ -56,6 +56,7 @@ import {
   gateObjectScriptSave,
   type ScriptAuthoringLanguage,
 } from "../lib/authoringLanguage";
+import { promptAsync } from "@api/dialogs";
 
 // ============================================================================
 // Monaco Worker Setup
@@ -873,7 +874,10 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
   // Save current script as template
   const handleSaveAsTemplate = useCallback(async () => {
     if (!activeScript) return;
-    const name = prompt("Template name:", `${activeScript.name} Template`);
+    const name = await promptAsync("Template name:", {
+      title: "Save as template",
+      defaultValue: `${activeScript.name} Template`,
+    });
     if (!name) return;
 
     // A template is stamped straight into a new script, so it is subject to the

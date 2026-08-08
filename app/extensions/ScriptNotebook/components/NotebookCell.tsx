@@ -15,6 +15,7 @@ import {
   planPromotion,
   promoteCellToObjectScript,
 } from "../lib/promoteToObjectScript";
+import { confirmAsync, promptAsync } from "@api/dialogs";
 
 interface NotebookCellProps {
   cell: NotebookCellType;
@@ -89,10 +90,10 @@ async function promoteWithConsent(
 ): Promise<void> {
   const plan = planPromotion(cell.source);
   const defaultName = `${notebookName} — cell ${cellNumber}`;
-  const scriptName = window.prompt(
+  const scriptName = await promptAsync(
     "Promote this cell to an object script.\n\n" +
       "The analysis becomes a callable method on a workbook script. Name it:",
-    defaultName,
+    { title: "Promote to object script", defaultValue: defaultName },
   );
   if (scriptName === null || scriptName.trim() === "") return;
 
@@ -108,7 +109,9 @@ async function promoteWithConsent(
           .join("\n")}`
       : "";
 
-  const ok = window.confirm(
+  // AWAITED. This is the consent step for CREATING a script that declares
+  // capabilities; with the guard dead, Cancel created it anyway.
+  const ok = await confirmAsync(
     `Create the object script "${scriptName.trim()}"?\n\n` +
       `It will declare these capabilities, derived from the calls this cell made:\n${capLine}\n\n` +
       `The script is saved INACTIVE. Nothing runs until you start it in the Object ` +

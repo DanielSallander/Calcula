@@ -82,6 +82,7 @@ import {
 import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { ScriptableObjectEvents } from "../index";
+import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
 // Capability labels (short, human; the ids are the single vocabulary source)
@@ -430,8 +431,8 @@ function HeldByScriptsSection({
   const [error, setError] = useState<string | null>(null);
 
   const revokeShortcut = useCallback(
-    (id: string, combo: string, ownerName: string) => {
-      const ok = window.confirm(
+    async (id: string, combo: string, ownerName: string) => {
+      const ok = await confirmAsync(
         `Take ${combo} back from "${ownerName}"?\n\n` +
           "The script keeps running; it just stops receiving those keys. It can ask for the " +
           "shortcut again the next time it runs.",
@@ -452,8 +453,8 @@ function HeldByScriptsSection({
   );
 
   const clearClipboard = useCallback(
-    (scriptId: string, ownerName: string, cells: number) => {
-      const ok = window.confirm(
+    async (scriptId: string, ownerName: string, cells: number) => {
+      const ok = await confirmAsync(
         `Empty the private clipboard held by "${ownerName}"?\n\n` +
           `${cells} cell${cells === 1 ? "" : "s"} copied from this workbook are being held by ` +
           "that script. Emptying it changes nothing in the grid — the script simply finds its " +
@@ -523,7 +524,7 @@ function HeldByScriptsSection({
             <button
               style={dangerLinkBtnStyle}
               disabled={busy === s.id}
-              onClick={() => revokeShortcut(s.id, s.combo, s.ownerName)}
+              onClick={() => void revokeShortcut(s.id, s.combo, s.ownerName)}
             >
               Take back {s.combo}
             </button>
@@ -555,7 +556,7 @@ function HeldByScriptsSection({
             <button
               style={dangerLinkBtnStyle}
               disabled={busy === c.scriptId}
-              onClick={() => clearClipboard(c.scriptId, c.ownerName, c.cells)}
+              onClick={() => void clearClipboard(c.scriptId, c.ownerName, c.cells)}
             >
               Empty it
             </button>
@@ -895,11 +896,9 @@ function ScheduledJobRow({
   );
 
   const cancel = useCallback(async () => {
-    // AWAIT the confirm: under Tauri `window.confirm` is overridden to return a
-    // Promise<boolean> (native dialog). A synchronous `if (!ok) return` tests
-    // `!Promise`, which is ALWAYS false — the job was deleted even when the
-    // user pressed Cancel.
-    const ok = await window.confirm(
+    // Via confirmAsync (awaits AND fails closed). Patched once already for the
+    // async-confirm defect; the wrapper is what stops it regressing again.
+    const ok = await confirmAsync(
       `Stop this scheduled job for good?\n\n${job.target}\n${job.cadence}\nOwner: ${job.ownerName}\n\n` +
         "The schedule is deleted from this workbook. The script can create it again the next time it runs.",
     );

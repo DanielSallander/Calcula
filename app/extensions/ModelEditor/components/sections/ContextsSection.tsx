@@ -26,6 +26,7 @@ import {
   ExpressionWorkspace,
   type ExpressionWorkspaceHandle,
 } from "./ExpressionWorkspace";
+import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
 // Section
@@ -36,7 +37,7 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const [editingCtx, setEditingCtx] = useState<{ original: ModelContextInfo | null } | null>(null);
 
   const deleteContext = async (c: ModelContextInfo) => {
-    if (!window.confirm(`Delete context '${c.name}'?`)) return;
+    if (!(await confirmAsync(`Delete context '${c.name}'?`))) return;
     try {
       applyOverview(await biModelDeleteContext(connectionId, c.name));
     } catch (err: unknown) {

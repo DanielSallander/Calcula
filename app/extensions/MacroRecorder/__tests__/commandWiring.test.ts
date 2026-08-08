@@ -75,8 +75,17 @@ describe("the status-bar indicator drives the commands", () => {
 
   it("keeps the Discard confirmation in the UI, not in the command", () => {
     // A script calling `macroRecorder.cancel` must never be able to raise a
-    // modal, so the confirm() belongs to the button and not to the handler.
-    expect(indicatorSource).toContain("window.confirm(");
+    // modal, so the confirmation belongs to the button and not to the handler.
+    //
+    // The spelling is `confirmAsync` from @api/dialogs, not the raw global: the
+    // browser dialog globals are banned repo-wide because Tauri's window.confirm
+    // returns a Promise, which made every bare `if (!window.confirm(...))` guard
+    // dead (see docs/design/dialog-globals.md). This assertion is also the
+    // tripwire against reintroducing the raw call HERE, where it was already
+    // fixed once for exactly that defect.
+    expect(indicatorSource).toContain("await confirmAsync(");
+    expect(indicatorSource).not.toContain("window.confirm(");
+    expect(indexSource).not.toContain("confirmAsync(");
     expect(indexSource).not.toContain("window.confirm(");
   });
 });
