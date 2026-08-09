@@ -5732,6 +5732,27 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     );
     let user_files = user_files_state.files.lock().unwrap();
 
+    // SUBTOTAL/AGGREGATE ROW-VISIBILITY SNAPSHOT, built BEFORE any grid lock and
+    // held for the whole pass — the same guard `update_cell_impl` and
+    // `recalculate_sheet_values` install, and the reason they agree with each
+    // other about what is hidden.
+    //
+    // THIS ENTRY POINT WAS MISSING IT, and the omission did not merely leave a
+    // value stale, it WROTE A WRONG ONE. With no guard installed
+    // `row_visibility::active()` is None and the visibility-aware aggregates
+    // "behave as if nothing is hidden" (row_visibility.rs), so every cell this
+    // cascade re-evaluated was computed against a workbook with nothing hidden.
+    // Found in the D8 integration pass, by probe rather than by reading: hide a
+    // row, settle `=SUBTOTAL(109;A1:A5)` at the correct 130, insert a row, and
+    // this cascade re-evaluated it to 150 — it OVERWROTE a right answer with a
+    // wrong one, and saved it that way. Every caller was affected (`sort_range`,
+    // `relocate_cell_references`, D3's eight); D8 made it common by adding the
+    // four structural edits, which is how it finally showed up.
+    //
+    // The sibling `recalc_after_off_sheet_write` never had the bug: it delegates
+    // to `recalculate_sheet_values`, which installs the guard itself.
+    let _visibility_pass = crate::row_visibility::begin_pass(state);
+
     let sheet_names = state.sheet_names.read().unwrap();
     // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
     // themselves persisted (formulas, literals, locale, control values), so it
@@ -7031,3 +7052,11 @@ mod d3_cascade_seed_tests;
 #[cfg(test)]
 #[path = "d2_named_range_tests.rs"]
 mod d2_named_range_tests;
+
+/// D8 / §2s — a structural edit must recalculate, because a formula whose value
+/// depends on the SHAPE or POSITION of its reference (or of its own cell) goes
+/// stale when rows or columns move under it. A CHILD module of `data` for the
+/// same reason as above.
+#[cfg(test)]
+#[path = "d8_structural_recalc_tests.rs"]
+mod d8_structural_recalc_tests;

@@ -781,27 +781,30 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         // -- Rewrites formula REFERENCES, not values ------------------------
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; no value moves"),
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; no value moves"),
-        // -- KNOWN RESIDUAL, recorded not waived: see §2s in the register ---
-        // These four re-point every reference so that formulas keep meaning
-        // the same cells, and they move each cell's cached value along with
-        // the cell — which is why they look value-preserving and why nothing
-        // has caught them. It is not quite true. A range endpoint SHIFTS
-        // (`shift_formula_row_references`: A1:A5 becomes A1:A6 when a row is
-        // inserted inside it), so a formula whose result depends on the SHAPE
-        // or POSITION of its own reference — ROWS/COLUMNS, ROW/COLUMN,
-        // COUNTBLANK, OFFSET, CELL("row") — keeps a value its own rewritten
-        // AST no longer produces. Excel recalculates after a structural edit,
-        // so parity says these should seed the cascade.
-        //
-        // NOT DONE HERE, and deliberately: the seed set for a row insert is
-        // every cell below the insertion point, so this is a performance
-        // decision that needs the same measurement D1 and D3 got, not a
-        // 4 a.m. guess. Raised as D8 in docs/design/open-decisions-2026-08.md.
-        ("commands/structure.rs", "insert_rows", "re-points references and moves cached values with their cells; the shape-sensitive residual (ROWS/ROW/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
-        ("commands/structure.rs", "insert_columns", "re-points references and moves cached values with their cells; the shape-sensitive residual (COLUMNS/COLUMN/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
-        ("commands/structure.rs", "delete_rows", "re-points references and moves cached values with their cells; the shape-sensitive residual (ROWS/ROW/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
-        ("commands/structure.rs", "delete_columns", "re-points references and moves cached values with their cells; the shape-sensitive residual (COLUMNS/COLUMN/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
     ];
+    //
+    // D8 CLOSED THE "KNOWN RESIDUAL" BLOCK — the four structural edits.
+    // `insert_rows`, `insert_columns`, `delete_rows` and `delete_columns` sat
+    // here saying, honestly, that they re-point every reference and move each
+    // cached value with its cell and therefore LOOK value-preserving, but that
+    // a formula whose result depends on the SHAPE or POSITION of what it reads
+    // keeps a number its own rewritten AST no longer produces. They now
+    // recalculate, through the SAME shared entry points as everything else
+    // (`recalc_after_active_sheet_bulk_rewrite` for the active sheet,
+    // `recalc_after_off_sheet_write` for the sheets a cross-sheet rewrite
+    // touched, `recalc_after_name_change` for a re-pointed defined name), and
+    // the bodies now live in `*_impl` twins so the behaviour can be tested at
+    // all — a `#[tauri::command]` cannot be called from a unit test, which is
+    // why "it recalculates" had never been anything but an assertion about
+    // source text. Behaviour is pinned in `commands/d8_structural_recalc_tests.rs`.
+    //
+    // The seed set and its cost are in docs/design/open-decisions-2026-08.md D8.
+    // The measurement contradicted the register's own recommendation twice: its
+    // option 1 (seed only the rewritten ASTs) MISSES `=ROW()`, which has no
+    // argument to rewrite and still has to change when its cell moves; and its
+    // option 2 (seed every moved cell) measured WORSE than the whole-sheet pass
+    // it would replace (628.08 ms vs 392.76 ms on a 10 000-row insert), which is
+    // D3's finding recurring.
     //
     // D3 CLOSED THE "IN CLASS" BLOCK. Eight entries used to sit here saying the
     // pivot and table writes were somebody else's problem: create_pivot_inner,
@@ -1001,6 +1004,40 @@ pub fn write_table_formula_cell(grid: &mut Grid) {
         vec![("write_table_formula_cell".to_string(), false)],
         "the helper's own definition must be classified by its body"
     );
+
+    // 5. THE SECOND HOLE FOUND BY SABOTAGE, in the D8 integration pass. The
+    //    recalc call was "removed" from `insert_rows_impl` by COMMENTING IT
+    //    OUT, and the census passed: the text was still in the body and the
+    //    RECALC side read the raw lines. That is the likeliest shape of a real
+    //    removal — every one of these call sites is wrapped in a comment
+    //    explaining it, so the name survives a careless delete either way.
+    const COMMENTED_OUT: &str = "\
+pub fn writes_and_forgets(grid: &mut Grid) {
+    grid.set_cell(0, 0, cell);
+    // recalc_after_active_sheet_bulk_rewrite(state, files, pane, filters, seeds, out);
+}
+";
+    assert_eq!(
+        cell_writing_functions(COMMENTED_OUT),
+        vec![("writes_and_forgets".to_string(), false)],
+        "a COMMENTED-OUT recalculation call satisfied the census. Comments are \
+         not code: a function that only mentions the entry point does not reach \
+         it, and this is exactly what deleting one carelessly leaves behind."
+    );
+
+    // ...including the prose form, which is how every real call site here
+    // documents itself.
+    const MENTIONED_IN_PROSE: &str = "\
+pub fn writes_and_forgets(grid: &mut Grid) {
+    // Callers rely on recalc_after_active_sheet_bulk_rewrite(...) running later.
+    grid.set_cell(0, 0, cell);
+}
+";
+    assert_eq!(
+        cell_writing_functions(MENTIONED_IN_PROSE),
+        vec![("writes_and_forgets".to_string(), false)],
+        "a prose mention of the entry point satisfied the census"
+    );
 }
 
 /// The exemption list is a list of DECISIONS, so every entry must carry a
@@ -1137,8 +1174,22 @@ fn cell_writing_functions_with_helpers(text: &str, helpers: &[&str]) -> Vec<(Str
         if !writes {
             continue;
         }
-        let joined = body.join("\n");
-        let recalculates = RECALC.iter().any(|r| joined.contains(r));
+        // COMMENTS ARE NOT CODE, and this side of the census used to forget it.
+        // Found by sabotage during integration: the recalc call was "removed"
+        // from `insert_rows_impl` by commenting it out, and the census PASSED —
+        // the deleted line was still there as text, and this check read the raw
+        // body. Every function that documents WHY it recalculates does so by
+        // naming the entry point, so a body that only *mentions* the call is
+        // exactly the shape a careless removal leaves behind. No function in the
+        // crate relies on a comment today (verified when this line was added);
+        // this makes sure none ever can.
+        let code: String = body
+            .iter()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let recalculates = RECALC.iter().any(|r| code.contains(r));
         out.push((name.clone(), recalculates));
     }
     out

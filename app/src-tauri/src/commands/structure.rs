@@ -1273,6 +1273,163 @@ fn shift_col_dependencies_map(map: &mut crate::StripeDependenciesMap, from_col: 
     }
 }
 
+// ============================================================================
+// D8 / §2s — A STRUCTURAL EDIT RECALCULATES
+// ============================================================================
+
+/// The two off-cell triggers a structural edit leaves behind, run through the
+/// SHARED entry points rather than a walk of their own.
+///
+/// The seeded active-sheet cascade (`recalc_after_active_sheet_bulk_rewrite`,
+/// called by each command right after this) speaks one vocabulary: `(row, col)`
+/// on the active sheet. Two of the things a structural edit rewrites are not
+/// expressible in it, and both were measured stale:
+///
+/// * a formula on ANOTHER sheet whose qualified reference was re-pointed
+///   (`Sheet2!B1 = ROWS(Sheet1!A1:A5)` -> `ROWS(Sheet1!A1:A6)`, still showing 5);
+/// * a DEFINED NAME whose definition was re-pointed (`DATA` from `A1:A5` to
+///   `A1:A6`, leaving `=ROWS(DATA)` showing 5) — a name is resolved during
+///   evaluation and is an edge in `name_dependents`, not in any coordinate map,
+///   which is the same reason `apply_changes` takes a workbook-wide trigger when
+///   a name definition is undone.
+///
+/// Both are handed to entry points that already exist and already own that
+/// vocabulary: `recalc_after_off_sheet_write` (the one the OFF-sheet structural
+/// edit uses) and `recalc_after_name_change`. Neither is a new cascade.
+///
+/// MANUAL CALCULATION is gated HERE, not inside, for the reason
+/// `recalc_after_name_change` records: only one of the two helpers honours the
+/// mode, and half a recalculation is worse than none.
+///
+/// CALLERS MUST HOLD NO `AppState` LOCKS — every helper below takes its own.
+fn recalc_structural_side_effects(
+    state: &AppState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    cross_sheet_rewritten: &[usize],
+    names_rewritten: &[String],
+) {
+    if cross_sheet_rewritten.is_empty() && names_rewritten.is_empty() {
+        return;
+    }
+    if state
+        .calculation_mode
+        .lock()
+        .map(|m| *m != "automatic")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    // OFF-SHEET half first, mirroring `apply_changes` and
+    // `recalc_after_name_change`: the active-sheet cascade the caller runs next
+    // then reads values the other sheets have already settled on.
+    if !cross_sheet_rewritten.is_empty() {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            cross_sheet_rewritten,
+        );
+    }
+    if !names_rewritten.is_empty() {
+        crate::named_ranges::recalc_after_name_change(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            names_rewritten,
+        );
+    }
+}
+
+/// THE D8 SEED SET, accumulated in loops the structural edit ALREADY runs — no
+/// fourth walk. Every position it holds is a POST-edit coordinate.
+///
+/// Three kinds go in, and the measurement (D8 in
+/// `docs/design/open-decisions-2026-08.md`) decided each one:
+///
+///   1. **Every cell whose AST the edit REWROTE.** `=ROWS(A1:A5)` becomes
+///      `=ROWS(A1:A6)` and must stop saying 5. This is the register's option 1.
+///   2. **Every FORMULA cell that MOVED.** Option 1 is not sufficient, and the
+///      measurement is what says so rather than an argument: `=ROW()` takes no
+///      arguments, so nothing of its own is ever rewritten, and it still has to
+///      change when its cell slides down a row. Same for `=COLUMN()` and
+///      `=ADDRESS(ROW();COLUMN())`. The register's claim that "a shape-sensitive
+///      formula only goes stale if its own reference was rewritten" is FALSE.
+///   3. **One position per COLUMN, and one per ROW, whose content changed** —
+///      but only when the workbook actually holds a whole-column or whole-row
+///      reference. `=SUM(A:A)` has no endpoint for the shift to move and need
+///      not sit anywhere near the edit, so deleting the last populated row of
+///      column A leaves it stale with nothing moved and nothing rewritten. It is
+///      reachable only through `column_dependents[A]`, which
+///      `recalc_after_active_sheet_bulk_rewrite` expands from ANY seed in column
+///      A — so one seed per affected column is as good as all of them, and the
+///      same for rows.
+///
+/// **WHY NOT "seed every moved cell" (the register's option 2).** Measured, it
+/// is WORSE than the whole-sheet pass it would replace — 628.08 ms against
+/// 392.76 ms on a 10 000-row insert at the top — which is D3's finding
+/// recurring. D3's no-formula/no-dependents gate does not save it here: a moved
+/// literal in a real workbook usually IS read by something, so it passes the
+/// gate, is admitted as a graph member, and is then skipped by the evaluation
+/// loop for having no formula. Kind 3 buys the same coverage for the number of
+/// COLUMNS instead of the number of CELLS, and buys nothing at all in the
+/// overwhelming majority of workbooks, which hold no stripe reference.
+struct StructuralSeeds {
+    seeds: Vec<(u32, u32)>,
+    cover_cols: bool,
+    cover_rows: bool,
+    seen_cols: rustc_hash::FxHashSet<u32>,
+    seen_rows: rustc_hash::FxHashSet<u32>,
+}
+
+impl StructuralSeeds {
+    /// `column_dependents` / `row_dependents` are the maps the command already
+    /// holds in its first lock phase, so asking them costs nothing. Empty means
+    /// no formula in this sheet reads a whole column or a whole row, which makes
+    /// kind 3 provably unnecessary.
+    fn new(
+        column_dependents: &crate::StripeDependentsMap,
+        row_dependents: &crate::StripeDependentsMap,
+    ) -> Self {
+        StructuralSeeds {
+            seeds: Vec::new(),
+            cover_cols: !column_dependents.is_empty(),
+            cover_rows: !row_dependents.is_empty(),
+            seen_cols: rustc_hash::FxHashSet::default(),
+            seen_rows: rustc_hash::FxHashSet::default(),
+        }
+    }
+
+    /// Kind 1: this cell's AST was rewritten. `pos` is where it ends up.
+    fn rewritten(&mut self, pos: (u32, u32)) {
+        self.seeds.push(pos);
+    }
+
+    /// Kinds 2 and 3: the content of `pos` changed, because a cell moved into or
+    /// out of it. `has_formula` is whether the cell that now sits there holds
+    /// one — a moved LITERAL cannot itself be stale, so it is worth a seed only
+    /// as stripe coverage.
+    fn moved(&mut self, pos: (u32, u32), has_formula: bool) {
+        let new_col = self.cover_cols && self.seen_cols.insert(pos.1);
+        let new_row = self.cover_rows && self.seen_rows.insert(pos.0);
+        if has_formula || new_col || new_row {
+            self.seeds.push(pos);
+        }
+    }
+
+    fn finish(mut self) -> Vec<(u32, u32)> {
+        self.seeds.sort_unstable();
+        self.seeds.dedup();
+        self.seeds
+    }
+}
+
 /// Insert rows at the specified position, shifting existing rows down.
 /// Uses snapshot-based undo to restore the full grid state on undo.
 #[tauri::command]
@@ -1283,6 +1440,37 @@ pub fn insert_rows(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    row: u32,
+    count: u32,
+    sheet_index: Option<usize>,
+) -> Result<Vec<CellData>, String> {
+    insert_rows_impl(
+        &state,
+        &file_state,
+        &pivot_state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        row,
+        count,
+        sheet_index,
+    )
+}
+
+/// The body of the command above, over plain references.
+///
+/// WHY THE SPLIT. `tauri::State` has no public constructor, so a
+/// `#[tauri::command]` cannot be called from a unit test at all — and the D8
+/// seeding below is a BEHAVIOURAL claim (`=ROWS(A1:A5)` must become 6, `=ROW()`
+/// must follow its cell) that a source-scraping test cannot check. Same shape
+/// as `update_cell` / `update_cell_impl`.
+pub(crate) fn insert_rows_impl(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -1419,7 +1607,7 @@ pub fn insert_rows(
     // Named ranges hold their definition as a formula STRING, so they are
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
-    {
+    let names_rewritten = {
         let sheet_name = state
             .sheet_names
             .read()
@@ -1433,8 +1621,8 @@ pub fn insert_rows(
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::RowInsert { at: row, count },
-        );
-    }
+        )
+    };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
@@ -1477,7 +1665,7 @@ pub fn insert_rows(
     // its undo entries must join THIS transaction — recorded after commit they
     // became their own undo steps, so one Ctrl+Z reverted the cross-sheet
     // rewrites while the inserted row stayed.
-    shift_cross_sheet_formulas(
+    let cross_sheet_rewritten = shift_cross_sheet_formulas(
         &state,
         &mut undo_stack,
         &mut grids,
@@ -1487,6 +1675,10 @@ pub fn insert_rows(
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
     undo_stack.commit_transaction();
+
+    // D8 seeds, collected in the loops this command already runs (see
+    // `StructuralSeeds`). POST-edit coordinates throughout.
+    let mut seeds = StructuralSeeds::new(&column_dependents_map, &row_dependents_map);
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
@@ -1500,6 +1692,9 @@ pub fn insert_rows(
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
+                // Kind 1: rewritten AST, at the position it will hold after the
+                // move below.
+                seeds.rewritten((if *r >= row { *r + count } else { *r }, *c));
             }
         }
     }
@@ -1518,6 +1713,9 @@ pub fn insert_rows(
     // Remove old cells and insert at new positions
     for ((r, c), cell) in cells_to_move {
         grid.cells.remove(&(r, c));
+        // Kind 2: it MOVED, so `=ROW()` in it is now wrong even though nothing
+        // of its own was rewritten.
+        seeds.moved((r + count, c), cell.formula_string().is_some());
         grid.cells.insert((r + count, c), cell);
     }
     
@@ -1600,6 +1798,45 @@ pub fn insert_rows(
     // === UPDATE TABLE BOUNDARIES ===
     shift_table_boundaries_for_row_insert(&state, &effect, row, count, active_sheet);
 
+    // === D8 / §2s: RECALCULATE ===
+    //
+    // Everything above re-POINTED references and carried each cached value along
+    // with its cell, which is correct and free for almost every formula and
+    // WRONG for any whose result depends on the SHAPE or POSITION of what it
+    // reads: `=ROWS(A1:A5)` is now `=ROWS(A1:A6)` and still says 5, and `=ROW()`
+    // slid down a row without noticing. Excel recalculates after a structural
+    // edit; so does this. Seed set and cost: `StructuralSeeds` and D8 in
+    // docs/design/open-decisions-2026-08.md.
+    //
+    // SECOND LOCK PHASE, the same rule as `sort_range` and `apply_changes`: both
+    // entry points acquire everything themselves and std mutexes are not
+    // reentrant, so this runs after every guard above was dropped and before the
+    // result rows are read back below (which is what makes the reply carry the
+    // NEW values rather than the ones the edit invalidated).
+    recalc_structural_side_effects(
+        &state,
+        user_files_state,
+        &pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &cross_sheet_rewritten,
+        &names_rewritten,
+    );
+    let seeds = seeds.finish();
+    // The re-evaluated cells are DISCARDED on purpose: the reply this command
+    // builds below is the WHOLE grid (a structural edit renumbers everything on
+    // screen), so it already carries them, and appending them would send each
+    // twice.
+    let mut recalculated: Vec<CellData> = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
+
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
@@ -1641,6 +1878,37 @@ pub fn insert_columns(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    col: u32,
+    count: u32,
+    sheet_index: Option<usize>,
+) -> Result<Vec<CellData>, String> {
+    insert_columns_impl(
+        &state,
+        &file_state,
+        &pivot_state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        col,
+        count,
+        sheet_index,
+    )
+}
+
+/// The body of the command above, over plain references.
+///
+/// WHY THE SPLIT. `tauri::State` has no public constructor, so a
+/// `#[tauri::command]` cannot be called from a unit test at all — and the D8
+/// seeding below is a BEHAVIOURAL claim (`=ROWS(A1:A5)` must become 6, `=ROW()`
+/// must follow its cell) that a source-scraping test cannot check. Same shape
+/// as `update_cell` / `update_cell_impl`.
+pub(crate) fn insert_columns_impl(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -1768,7 +2036,7 @@ pub fn insert_columns(
     // Named ranges hold their definition as a formula STRING, so they are
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
-    {
+    let names_rewritten = {
         let sheet_name = state
             .sheet_names
             .read()
@@ -1782,8 +2050,8 @@ pub fn insert_columns(
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::ColInsert { at: col, count },
-        );
-    }
+        )
+    };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
@@ -1823,7 +2091,7 @@ pub fn insert_columns(
     // Every OTHER sheet may hold formulas pointing at the edited sheet. BEFORE
     // commit_transaction so its undo entries join THIS transaction (see the
     // row-insert twin).
-    shift_cross_sheet_formulas(
+    let cross_sheet_rewritten = shift_cross_sheet_formulas(
         &state,
         &mut undo_stack,
         &mut grids,
@@ -1834,7 +2102,11 @@ pub fn insert_columns(
     );
     undo_stack.commit_transaction();
 
-    // First, update formula references in ALL cells
+    // D8 seeds, collected in the loops this command already runs (see
+    // `StructuralSeeds`). POST-edit coordinates throughout.
+    let mut seeds = StructuralSeeds::new(&column_dependents_map, &row_dependents_map);
+
+    // First, update formula references in ALL cells that reference columns at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
@@ -1846,6 +2118,9 @@ pub fn insert_columns(
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
+                // Kind 1: rewritten AST, at the position it will hold after the
+                // move below.
+                seeds.rewritten((*r, if *c >= col { *c + count } else { *c }));
             }
         }
     }
@@ -1864,6 +2139,9 @@ pub fn insert_columns(
     // Remove old cells and insert at new positions
     for ((r, c), cell) in cells_to_move {
         grid.cells.remove(&(r, c));
+        // Kind 2: it MOVED, so `=COLUMN()` in it is now wrong even though
+        // nothing of its own was rewritten.
+        seeds.moved((r, c + count), cell.formula_string().is_some());
         grid.cells.insert((r, c + count), cell);
     }
     
@@ -1945,6 +2223,45 @@ pub fn insert_columns(
 
     // === UPDATE TABLE BOUNDARIES ===
     shift_table_boundaries_for_col_insert(&state, &effect, col, count, active_sheet);
+
+    // === D8 / §2s: RECALCULATE ===
+    //
+    // Everything above re-POINTED references and carried each cached value along
+    // with its cell, which is correct and free for almost every formula and
+    // WRONG for any whose result depends on the SHAPE or POSITION of what it
+    // reads: `=ROWS(A1:A5)` is now `=ROWS(A1:A6)` and still says 5, and `=ROW()`
+    // slid down a row without noticing. Excel recalculates after a structural
+    // edit; so does this. Seed set and cost: `StructuralSeeds` and D8 in
+    // docs/design/open-decisions-2026-08.md.
+    //
+    // SECOND LOCK PHASE, the same rule as `sort_range` and `apply_changes`: both
+    // entry points acquire everything themselves and std mutexes are not
+    // reentrant, so this runs after every guard above was dropped and before the
+    // result rows are read back below (which is what makes the reply carry the
+    // NEW values rather than the ones the edit invalidated).
+    recalc_structural_side_effects(
+        &state,
+        user_files_state,
+        &pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &cross_sheet_rewritten,
+        &names_rewritten,
+    );
+    let seeds = seeds.finish();
+    // The re-evaluated cells are DISCARDED on purpose: the reply this command
+    // builds below is the WHOLE grid (a structural edit renumbers everything on
+    // screen), so it already carries them, and appending them would send each
+    // twice.
+    let mut recalculated: Vec<CellData> = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
@@ -2385,6 +2702,37 @@ pub fn delete_rows(
     count: u32,
     sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    delete_rows_impl(
+        &state,
+        &file_state,
+        &pivot_state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        row,
+        count,
+        sheet_index,
+    )
+}
+
+/// The body of the command above, over plain references.
+///
+/// WHY THE SPLIT. `tauri::State` has no public constructor, so a
+/// `#[tauri::command]` cannot be called from a unit test at all — and the D8
+/// seeding below is a BEHAVIOURAL claim (`=ROWS(A1:A5)` must become 6, `=ROW()`
+/// must follow its cell) that a source-scraping test cannot check. Same shape
+/// as `update_cell` / `update_cell_impl`.
+pub(crate) fn delete_rows_impl(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    row: u32,
+    count: u32,
+    sheet_index: Option<usize>,
+) -> Result<Vec<CellData>, String> {
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
@@ -2544,7 +2892,7 @@ pub fn delete_rows(
     // Named ranges hold their definition as a formula STRING, so they are
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
-    {
+    let names_rewritten = {
         let sheet_name = state
             .sheet_names
             .read()
@@ -2558,8 +2906,8 @@ pub fn delete_rows(
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::RowDelete { at: row, count },
-        );
-    }
+        )
+    };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
@@ -2599,7 +2947,7 @@ pub fn delete_rows(
     // Every OTHER sheet may hold formulas pointing at the edited sheet. BEFORE
     // commit_transaction so its undo entries join THIS transaction (see the
     // row-insert twin).
-    shift_cross_sheet_formulas(
+    let cross_sheet_rewritten = shift_cross_sheet_formulas(
         &state,
         &mut undo_stack,
         &mut grids,
@@ -2610,6 +2958,10 @@ pub fn delete_rows(
     );
     undo_stack.commit_transaction();
 
+    // D8 seeds, collected in the loops this command already runs (see
+    // `StructuralSeeds`). POST-edit coordinates throughout.
+    let mut seeds = StructuralSeeds::new(&column_dependents_map, &row_dependents_map);
+
     // First, remove cells in the deleted rows
     let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
         .filter(|(r, _)| *r >= row && *r < row + count)
@@ -2618,6 +2970,12 @@ pub fn delete_rows(
 
     for pos in cells_to_delete {
         grid.cells.remove(&pos);
+        // Kind 3: the value VANISHED. Nothing moved and nothing was rewritten
+        // when the last populated row of a column goes, and `=SUM(A:A)` still
+        // has to drop -- it is reached only through this seed's column. The
+        // deleted cell's own formula is gone, so it is worth a seed only as
+        // stripe coverage.
+        seeds.moved(pos, false);
     }
 
     // Update formula references in remaining cells (shift up = negative delta)
@@ -2632,6 +2990,9 @@ pub fn delete_rows(
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
+                // Kind 1: rewritten AST, at the position it will hold after the
+                // move below.
+                seeds.rewritten((if *r >= row + count { *r - count } else { *r }, *c));
             }
         }
     }
@@ -2650,6 +3011,9 @@ pub fn delete_rows(
     // Remove old cells and insert at new positions
     for ((r, c), cell) in cells_to_move {
         grid.cells.remove(&(r, c));
+        // Kind 2: it MOVED, so `=ROW()` in it is now wrong even though nothing
+        // of its own was rewritten.
+        seeds.moved((r - count, c), cell.formula_string().is_some());
         grid.cells.insert((r - count, c), cell);
     }
     
@@ -2746,6 +3110,45 @@ pub fn delete_rows(
     // === UPDATE TABLE BOUNDARIES ===
     shift_table_boundaries_for_row_delete(&state, &effect, row, count, active_sheet);
 
+    // === D8 / §2s: RECALCULATE ===
+    //
+    // Everything above re-POINTED references and carried each cached value along
+    // with its cell, which is correct and free for almost every formula and
+    // WRONG for any whose result depends on the SHAPE or POSITION of what it
+    // reads: `=ROWS(A1:A5)` is now `=ROWS(A1:A6)` and still says 5, and `=ROW()`
+    // slid down a row without noticing. Excel recalculates after a structural
+    // edit; so does this. Seed set and cost: `StructuralSeeds` and D8 in
+    // docs/design/open-decisions-2026-08.md.
+    //
+    // SECOND LOCK PHASE, the same rule as `sort_range` and `apply_changes`: both
+    // entry points acquire everything themselves and std mutexes are not
+    // reentrant, so this runs after every guard above was dropped and before the
+    // result rows are read back below (which is what makes the reply carry the
+    // NEW values rather than the ones the edit invalidated).
+    recalc_structural_side_effects(
+        &state,
+        user_files_state,
+        &pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &cross_sheet_rewritten,
+        &names_rewritten,
+    );
+    let seeds = seeds.finish();
+    // The re-evaluated cells are DISCARDED on purpose: the reply this command
+    // builds below is the WHOLE grid (a structural edit renumbers everything on
+    // screen), so it already carries them, and appending them would send each
+    // twice.
+    let mut recalculated: Vec<CellData> = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
+
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
@@ -2787,6 +3190,37 @@ pub fn delete_columns(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    col: u32,
+    count: u32,
+    sheet_index: Option<usize>,
+) -> Result<Vec<CellData>, String> {
+    delete_columns_impl(
+        &state,
+        &file_state,
+        &pivot_state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        col,
+        count,
+        sheet_index,
+    )
+}
+
+/// The body of the command above, over plain references.
+///
+/// WHY THE SPLIT. `tauri::State` has no public constructor, so a
+/// `#[tauri::command]` cannot be called from a unit test at all — and the D8
+/// seeding below is a BEHAVIOURAL claim (`=ROWS(A1:A5)` must become 6, `=ROW()`
+/// must follow its cell) that a source-scraping test cannot check. Same shape
+/// as `update_cell` / `update_cell_impl`.
+pub(crate) fn delete_columns_impl(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -2943,7 +3377,7 @@ pub fn delete_columns(
     // Named ranges hold their definition as a formula STRING, so they are
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
-    {
+    let names_rewritten = {
         let sheet_name = state
             .sheet_names
             .read()
@@ -2957,8 +3391,8 @@ pub fn delete_columns(
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::ColDelete { at: col, count },
-        );
-    }
+        )
+    };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
         &state,
@@ -2997,7 +3431,7 @@ pub fn delete_columns(
     // Every OTHER sheet may hold formulas pointing at the edited sheet. BEFORE
     // commit_transaction so its undo entries join THIS transaction (see the
     // row-insert twin).
-    shift_cross_sheet_formulas(
+    let cross_sheet_rewritten = shift_cross_sheet_formulas(
         &state,
         &mut undo_stack,
         &mut grids,
@@ -3008,6 +3442,10 @@ pub fn delete_columns(
     );
     undo_stack.commit_transaction();
 
+    // D8 seeds, collected in the loops this command already runs (see
+    // `StructuralSeeds`). POST-edit coordinates throughout.
+    let mut seeds = StructuralSeeds::new(&column_dependents_map, &row_dependents_map);
+
     // First, remove cells in the deleted columns
     let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
         .filter(|(_, c)| *c >= col && *c < col + count)
@@ -3016,6 +3454,12 @@ pub fn delete_columns(
 
     for pos in cells_to_delete {
         grid.cells.remove(&pos);
+        // Kind 3: the value VANISHED. Nothing moved and nothing was rewritten
+        // when the last populated column of a row goes, and `=SUM(1:1)` still
+        // has to drop -- it is reached only through this seed's row. The deleted
+        // cell's own formula is gone, so it is worth a seed only as stripe
+        // coverage.
+        seeds.moved(pos, false);
     }
 
     // Update formula references in remaining cells (shift left = negative delta)
@@ -3030,6 +3474,9 @@ pub fn delete_columns(
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
+                // Kind 1: rewritten AST, at the position it will hold after the
+                // move below.
+                seeds.rewritten((*r, if *c >= col + count { *c - count } else { *c }));
             }
         }
     }
@@ -3048,6 +3495,9 @@ pub fn delete_columns(
     // Remove old cells and insert at new positions
     for ((r, c), cell) in cells_to_move {
         grid.cells.remove(&(r, c));
+        // Kind 2: it MOVED, so `=COLUMN()` in it is now wrong even though
+        // nothing of its own was rewritten.
+        seeds.moved((r, c - count), cell.formula_string().is_some());
         grid.cells.insert((r, c - count), cell);
     }
     
@@ -3143,6 +3593,45 @@ pub fn delete_columns(
 
     // === UPDATE TABLE BOUNDARIES ===
     shift_table_boundaries_for_col_delete(&state, &effect, col, count, active_sheet);
+
+    // === D8 / §2s: RECALCULATE ===
+    //
+    // Everything above re-POINTED references and carried each cached value along
+    // with its cell, which is correct and free for almost every formula and
+    // WRONG for any whose result depends on the SHAPE or POSITION of what it
+    // reads: `=ROWS(A1:A5)` is now `=ROWS(A1:A6)` and still says 5, and `=ROW()`
+    // slid down a row without noticing. Excel recalculates after a structural
+    // edit; so does this. Seed set and cost: `StructuralSeeds` and D8 in
+    // docs/design/open-decisions-2026-08.md.
+    //
+    // SECOND LOCK PHASE, the same rule as `sort_range` and `apply_changes`: both
+    // entry points acquire everything themselves and std mutexes are not
+    // reentrant, so this runs after every guard above was dropped and before the
+    // result rows are read back below (which is what makes the reply carry the
+    // NEW values rather than the ones the edit invalidated).
+    recalc_structural_side_effects(
+        &state,
+        user_files_state,
+        &pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &cross_sheet_rewritten,
+        &names_rewritten,
+    );
+    let seeds = seeds.finish();
+    // The re-evaluated cells are DISCARDED on purpose: the reply this command
+    // builds below is the WHOLE grid (a structural edit renumbers everything on
+    // screen), so it already carries them, and appending them would send each
+    // twice.
+    let mut recalculated: Vec<CellData> = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
@@ -3709,6 +4198,14 @@ pub(crate) fn shift_misc_coordinate_stores(
 /// alone rather than guessed at.
 ///
 /// Records one `obj_named_ranges` undo entry when anything moved.
+/// RETURNS THE NAMES IT REWROTE (D8). A defined name is resolved during
+/// EVALUATION — it is not an edge in `dependents`, `column_dependents`,
+/// `row_dependents` or `cross_sheet_dependents` — so no cell coordinate on the
+/// edited sheet describes "every formula that resolves through DATA". Moving
+/// `DATA` from `A1:A5` to `A1:A6` therefore leaves `=ROWS(DATA)` displaying 5
+/// with nothing in the document saying so, and the only seed vocabulary that
+/// reaches it is the name itself (`recalc_after_name_change`). Same reasoning
+/// `apply_changes` records for an undone name definition.
 fn shift_named_ranges(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -3716,20 +4213,20 @@ fn shift_named_ranges(
     sheet_index: usize,
     sheet_name: &str,
     edit: calp::writeback::StructuralEdit,
-) {
+) -> Vec<String> {
     use calp::writeback::StructuralEdit as SE;
 
     let mut store = match state.named_ranges.write(effect) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return Vec::new(),
     };
     if store.is_empty() {
-        return;
+        return Vec::new();
     }
     let previous: Vec<(String, crate::named_ranges::NamedRange)> =
         store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-    let mut changed = false;
+    let mut changed_names: Vec<String> = Vec::new();
     for nr in store.values_mut() {
         // SHEET-AWARE shifting, per reference. The old form decided once per
         // NAME (from the first qualifier it saw) and then ran the sheet-blind
@@ -3759,18 +4256,19 @@ fn shift_named_ranges(
         };
         if shifted != nr.refers_to {
             nr.refers_to = shifted;
-            changed = true;
+            changed_names.push(nr.name.clone());
         }
     }
     drop(store);
 
-    if changed {
+    if !changed_names.is_empty() {
         undo_stack.record_custom_restore(
             "obj_named_ranges".to_string(),
             crate::undo_commands::named_ranges_snapshot_bytes(previous),
             "Shift named ranges",
         );
     }
+    changed_names
 }
 
 #[cfg(test)]
@@ -4473,6 +4971,14 @@ mod sheet_aware_shift_tests {
 ///
 /// Records one `obj_cross_sheet_formulas` entry per affected sheet; the active
 /// sheet is already covered by the caller's `GridSnapshot`.
+///
+/// RETURNS THE SHEET INDICES IT REWROTE (D8). A rewritten AST that is never
+/// re-evaluated is a stale value, and these rewrites land on sheets the
+/// ACTIVE-sheet cascade cannot reach: its seed vocabulary is `(row, col)` on the
+/// active sheet, and `Sheet2!B1 = ROWS(Sheet1!A1:A5)` becoming
+/// `ROWS(Sheet1!A1:A6)` moves no active-sheet cell at all. The caller feeds these
+/// to `recalc_after_off_sheet_write`, which is the same entry point the OFF-sheet
+/// structural edit already uses.
 fn shift_cross_sheet_formulas(
     // Unused today: the shift is driven entirely by `grids` + `sheet_names`.
     // Kept (underscored) because all four callers already hold it and the
@@ -4484,9 +4990,10 @@ fn shift_cross_sheet_formulas(
     edited_sheet_name: &str,
     sheet_names: &[String],
     edit: calp::writeback::StructuralEdit,
-) {
+) -> Vec<usize> {
     use calp::writeback::StructuralEdit as SE;
 
+    let mut rewritten_sheets: Vec<usize> = Vec::new();
     for (idx, grid) in grids.iter_mut().enumerate() {
         if idx == active_sheet {
             continue; // Handled in-command against `state.grid`.
@@ -4544,8 +5051,10 @@ fn shift_cross_sheet_formulas(
                 crate::undo_commands::cross_sheet_formulas_snapshot_bytes(idx, previous),
                 "Shift cross-sheet formulas",
             );
+            rewritten_sheets.push(idx);
         }
     }
+    rewritten_sheets
 }
 
 /// The OFF-SHEET twin of `shift_cross_sheet_formulas`: the EDITED sheet is not
@@ -4563,9 +5072,10 @@ fn shift_cross_sheet_formulas_for_off_sheet_edit(
     edited_sheet_name: &str,
     sheet_names: &[String],
     edit: calp::writeback::StructuralEdit,
-) {
+) -> Vec<usize> {
     use calp::writeback::StructuralEdit as SE;
 
+    let mut rewritten_sheets: Vec<usize> = Vec::new();
     for (idx, grid) in grids.iter_mut().enumerate() {
         if idx == edited_sheet {
             continue; // Handled in-command against grids[edited_sheet].
@@ -4626,8 +5136,10 @@ fn shift_cross_sheet_formulas_for_off_sheet_edit(
                 crate::undo_commands::cross_sheet_formulas_snapshot_bytes(idx, previous),
                 "Shift cross-sheet formulas",
             );
+            rewritten_sheets.push(idx);
         }
     }
+    rewritten_sheets
 }
 
 /// Shift on-grid controls, moving their cell key and their object-script
@@ -4924,6 +5436,12 @@ pub(crate) fn off_sheet_structural_edit(
         SE::ColDelete { count, .. } => format!("Delete {} column(s) on sheet {}", count, target + 1),
     };
 
+    // D8: what the shifts below rewrote OUTSIDE the target sheet's own cells.
+    // Declared here so they outlive the lock block and can reach the shared
+    // recalculation entry points at the bottom (which must hold no locks).
+    let cross_sheet_rewritten: Vec<usize>;
+    let names_rewritten: Vec<String>;
+
     {
         // Canonical lock order (matches insert_rows): mirror, grids,
         // active_sheet, undo_stack. The per-store shift helpers take their own
@@ -4995,7 +5513,8 @@ pub(crate) fn off_sheet_structural_edit(
             .cloned()
             .unwrap_or_default();
 
-        shift_named_ranges(state, &effect, &mut undo_stack, target, &edited_sheet_name, edit);
+        names_rewritten =
+            shift_named_ranges(state, &effect, &mut undo_stack, target, &edited_sheet_name, edit);
         shift_sheet_range_strings(state, &effect, &mut undo_stack, target, edit);
         shift_controls(state, &effect, &mut undo_stack, target, edit);
         shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, edit);
@@ -5004,7 +5523,7 @@ pub(crate) fn off_sheet_structural_edit(
         // Every OTHER sheet (including the ACTIVE mirror) may reference the
         // edited sheet by name. BEFORE commit, so the rewrites join THIS
         // transaction.
-        shift_cross_sheet_formulas_for_off_sheet_edit(
+        cross_sheet_rewritten = shift_cross_sheet_formulas_for_off_sheet_edit(
             &mut undo_stack,
             &mut mirror,
             &mut grids,
@@ -5221,14 +5740,42 @@ pub(crate) fn off_sheet_structural_edit(
 
     // Dependents anywhere (the edited sheet, the active sheet, chains across
     // both) recalculate now — same recalc the off-sheet WRITE path uses.
+    //
+    // D8: the sheet list is the edited sheet PLUS every sheet whose formulas the
+    // cross-sheet rewrite above actually re-pointed. `recalc_after_off_sheet_write`
+    // always adds the ACTIVE sheet, so a rewritten third sheet was the one case
+    // left evaluating a reference it no longer holds.
+    let mut sheets_to_recalc: Vec<usize> = Vec::with_capacity(1 + cross_sheet_rewritten.len());
+    sheets_to_recalc.push(target);
+    for idx in &cross_sheet_rewritten {
+        if *idx != target {
+            sheets_to_recalc.push(*idx);
+        }
+    }
+    sheets_to_recalc.sort_unstable();
+    sheets_to_recalc.dedup();
     crate::commands::data::recalc_after_off_sheet_write(
         state,
         user_files_state,
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
-        &[target],
+        &sheets_to_recalc,
     );
+
+    // D8: a defined name whose definition moved is not an edge in any coordinate
+    // map, so its readers are reachable only through `name_dependents` — the
+    // same entry point the Name Manager uses.
+    if !names_rewritten.is_empty() {
+        crate::named_ranges::recalc_after_name_change(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &names_rewritten,
+        );
+    }
 
     // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 

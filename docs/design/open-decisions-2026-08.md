@@ -1937,7 +1937,7 @@ Also unchanged and still stale: the `editing mode - inline editor visible` visua
 `<input>`→`<textarea>` swap moved and which was never re-recorded. Nothing here changes the editor's
 appearance, and captures were out of scope for this batch.
 
-### 2s. Structural edits re-point references and never re-evaluate — FOUND 2026-08-09 by hardening the census, recorded not fixed (see D8)
+### 2s. Structural edits re-point references and never re-evaluate — FOUND 2026-08-09 by hardening the census, **FIXED 2026-08-09** (D8, decided by measurement)
 
 `insert_rows`, `insert_columns`, `delete_rows` and `delete_columns` shift every cell, every
 dependency map and every formula reference, then stop. No shared recalculation entry point is
@@ -1961,12 +1961,43 @@ decides what this register does not. So parity says these four should seed the c
 **Deliberately NOT done in the integration pass.** The seed set for a row insert is every cell below
 the insertion point, so this is a performance decision of exactly the kind D1 and D3 were made to
 settle with a measurement, and a row insert is one of the most frequent gestures in the product. It
-is raised as **D8** rather than guessed at.
+was raised as **D8** rather than guessed at.
+
+**FIXED, and the measurement changed the answer.** The staleness surface above was written from
+reading; the surface that was actually MEASURED is bigger, and it breaks the fix this section
+assumed. `=ROW()` takes no arguments, so no structural edit ever rewrites it, and it still has to
+change when its cell slides down a row — which means "seed the cells whose AST was rewritten" is not
+a complete fix. Nor is `COUNTBLANK`/`OFFSET`/`CELL("row")` the right list: this engine's
+`CELL("row")` with no reference is not position-sensitive at all, and `=OFFSET(A5;0;0)` follows its
+rewritten base perfectly well. The three that were missing from the list are `=ROW()`/`=COLUMN()`
+(position-only), `=SUM(A:A)` (a whole-column reference has no endpoint to shift, so a DELETE moves
+its answer with nothing moved and nothing rewritten) and `=ROWS(DATA)` / `Sheet2!B1 =
+ROWS(Sheet1!A1:A5)` (a defined name and a cross-sheet reference the edit itself re-pointed, neither
+of which is an edge any active-sheet coordinate map holds). Full table and cost in **D8**.
 
 **How it was found, which is the part worth keeping.** Not by reading the four functions — by
 sabotage. The census enumerates functions whose body textually contains `.set_cell(` / `.clear_cell(`,
 and these four write through `shift_per_sheet_cell_stores`, so the census had never enumerated them
 at all. See §3ap.
+
+**PROVED LIVE, 2026-08-09 (§3au).** `app/e2e/journeys/structural-recalc.spec.ts`, 10 tests, drives
+the REAL row/column-header context menu ("Insert Row", "Delete Row", "Insert Column", "Delete
+Column") and reads the value `get_viewport_cells` hands the canvas. The headline reproduces exactly:
+`=ROWS(E1:E5)` renders 5, a menu insert inside the range rewrites it to `=ROWS(E1:E6)` and the
+rendered cell says **6** — and the painted pixels change, so it is the canvas and not only the model.
+Teeth were shown by deleting the seeding from a running build: **8 of the 10 fail**, each with the
+stale value this section predicts (5 for 6, 10 for 11, 8 for 9, 4 for 3, 5 for 4). The two that
+survive the sabotage are the two that should — test 6 is the no-regression control, and test 7 is
+§2v, which is only reachable BECAUSE D8 recalculates.
+
+**VERIFIED AND CLOSED AT INTEGRATION, 2026-08-09 (§3at).** The measurement reproduced; the census
+names each of the four when its seeding is deleted, and the behavioural tests fail independently of
+the census; undo and redo both carry settled values. **The fix was not complete as delivered**: the
+shared cascade it seeds computed SUBTOTAL/AGGREGATE as if nothing were hidden, so a row insert
+overwrote a correct `=SUBTOTAL(109;…)` with a wrong one — a defect this fix made reachable rather than
+created. Found by asking what ELSE moves a formula or changes its inputs without writing a cell, and
+fixed here: **§2v**. Cut/paste, drag-move, sort, hide-rows and AutoFilter were checked in the same
+sweep and are all safe, each for a reason worth knowing (§3at).
 
 ### 2t. A stored name SHOUTS after save/reload — `BudgetTotal` -> `BUDGETTOTAL`. FOUND LIVE 2026-08-09 by the scenario oracle, a REGRESSION FROM D2 — **FIXED 2026-08-09** (the D1–D7 live-proof phase)
 
@@ -2120,6 +2151,60 @@ un-nest them") because the next person to tidy that function is the risk.
 cannot run in-process, so their coverage is split into a behavioural half and a source-wiring half
 (§4 D3). A source-wiring test can assert that the entry point is *called*; it cannot assert which
 guards are still alive when it is. The thing that found this was running the product.
+
+### 2v. The shared cascade re-evaluated SUBTOTAL/AGGREGATE as if nothing were hidden — FOUND 2026-08-09 by probing D8's NEIGHBOURS, **FIXED 2026-08-09**
+
+**This is a wrong answer written over a right one, not a stale value**, and D8 is what made it
+reachable. It was found by the D8 integration pass asking the question D8 itself did not: a
+structural edit is not the only thing that moves a formula, so what ELSE changes a formula's inputs
+without writing a cell?
+
+`recalc_after_active_sheet_bulk_rewrite` — the ONE shared active-sheet cascade that D3's eight and
+D8's four both seed — installed **no row-visibility pass**. `row_visibility.rs` is explicit about
+what that means: "No guard => `active()` is None => the aggregates behave as if nothing is hidden."
+SUBTOTAL 101–111 and AGGREGATE options 5–7 are the only functions in the set whose answer depends on
+something that is not a cell value, so they are the only way to observe it — and every cell this
+cascade re-evaluated was computed against a workbook with nothing hidden.
+
+**Measured, not read** (the probe is now `the_cascade_re_evaluates_a_hidden_row_aggregate_with_the_rows_still_hidden`):
+
+```
+hide the row holding 20, settle it:      =SUBTOTAL(109;A1:A5)  ->  130   correct
+insert a row well below the hidden one:  =SUBTOTAL(109;A1:A6)  ->  150   WRONG, and stored
+                                         =SUBTOTAL(9;A1:A6)    ->  150   correct (the control)
+```
+
+130 to 150. The cascade did not leave a stale number, it re-derived a wrong one and overwrote a right
+one — and the workbook would be SAVED that way.
+
+**D8 made it common; D8 did not create it.** Every caller of that entry point was affected —
+`sort_range`, `relocate_cell_references`, D3's eight — but before D8 the structural edit recalculated
+nothing at all, so this particular cell kept its correct 130. The fix that made insert/delete
+recalculate is what walked the gesture into the bug. That is the argument for probing a fix's
+neighbours instead of declaring it complete: D8's own 17 tests all passed, and so did the census.
+
+**THE FIX is the guard the two siblings already install** — one line plus its reason, in
+`recalc_after_active_sheet_bulk_rewrite`, before any grid lock, exactly where `update_cell_impl` puts
+it. `build_row_visibility` fast-bails when nothing is hidden anywhere, which is the overwhelming
+majority of workbooks, and the D8 benchmark is unchanged within noise (302.74 ms worst against
+302.55 ms for the same seed set immediately before the fix).
+
+`recalc_after_off_sheet_write` never had the bug: it delegates to `recalculate_sheet_values`, which
+installs the guard itself. That asymmetry is exactly the active/off-sheet shape that hid `sort_range`
+and `merge_cells_off_sheet` before it.
+
+**PROVED LIVE, 2026-08-09 (§3au) — and this is the first time it was reproduced anywhere but a unit
+test.** Test 7 of `structural-recalc.spec.ts` hides a row through the real header menu, checks that
+`SUBTOTAL(109)` and `SUBTOTAL(9)` really disagree (120 against 150 — the fixture hides 30, not the 20
+of the probe above), then inserts a row through the real menu and requires 120 to survive. Teeth:
+with the one-line guard commented out of a running build, the rendered cell reads **150** — the exact
+symptom, on the painted grid, through a gesture a user makes. Restored and re-run green.
+
+**Residual, named:** the same entry point also installs no `begin_lookup_pass()`, where
+`update_cell_impl` does. That one is a per-pass CACHE, so its absence costs speed and not
+correctness, and no caller holds an outer lookup pass that could go stale across the edit (checked).
+Left alone: adding a cache is a performance change and this register does not make those without a
+measurement.
 
 ## 3. Test-infrastructure decisions
 
@@ -3438,8 +3523,8 @@ a synthetic one:
   The hardening exposed six previously-unenumerated functions. Two were second-level helpers with
   clean stories (`apply_override_value_to_grid` — all three override commands run
   `recalculate_sheet_values`; `shift_per_sheet_cell_stores`). **Four were the structural edits, and
-  they are a real residual: §2s / D8.** `EXEMPT` is now **54 entries**; every one has a written
-  reason, and the four structural-edit entries say plainly that they are recorded, not waived.
+  they were a real residual: §2s / D8.** That residual is now CLOSED — the four recalculate, the four
+  entries are gone, and `EXEMPT` is **50 entries**, every one with a written reason.
 
 **Contract (b) — F9 vs Shift+F9, and the save path.** `calculate_now` → `CalcScope::Workbook`,
 `calculate_sheet` → `CalcScope::ActiveSheet`, both through the one `run_calculation_pass`.
@@ -3736,6 +3821,175 @@ for every spec after it. Flagged as a deliberate modelling choice, not hidden.
 predicted, `evaluate-formula`, `go-to-special`, `protection` and `scrolling`.
 
 
+### 3at. The D8 integration pass — contract verification, the reproduction, and the defect that probing the neighbours found (2026-08-09)
+
+D8 landed from a separate session. This pass integrated it, re-ran every unit suite, made each
+contract FAIL before trusting it, and reproduced the measurement rather than believing it.
+
+**Contract (a) — the four EXEMPT entries are gone, and the census still has teeth.** The list is
+**50** entries; `insert_rows`, `insert_columns`, `delete_rows` and `delete_columns` appear nowhere in
+it. Sabotage on two of the four, as asked — and the first attempt exposed a second hole:
+
+- **The first sabotage PASSED, and it was the sabotage that was wrong.** The recalc call was
+  "removed" from `insert_rows_impl` by commenting it out. The census passed. The RECALC half of the
+  detector read the function's RAW body, so the commented-out line still satisfied it. Deleting the
+  lines instead failed the census naming exactly `commands/structure.rs::insert_rows_impl`.
+- Deleting the call from `delete_columns_impl` failed the census naming exactly
+  `commands/structure.rs::delete_columns_impl` — reproducing the implementation's own report.
+- While sabotaged, the BEHAVIOURAL tests were run too, because the census only checks that a function
+  recalculates and not that it recalculates correctly: **5 of the 19 D8 tests failed**, all of them
+  the column cases. Both halves have teeth, independently.
+- Restored; app-lib green.
+
+**The comment hole is now closed**, the same way `DELEGATING_HELPERS` closed the delegation hole. The
+detector strips comment lines before looking for a shared entry point, and two cases pin it (a
+commented-out call and a prose mention). A sweep first confirmed that **no function in the crate was
+relying on a comment** — 90 cell-writing functions enumerated, 0 classified as recalculating on
+comment text alone — so this hardening changed no classification, it only removes a way to break one
+silently. Both real call sites of this class are wrapped in a comment that names the entry point,
+which is precisely why a careless deletion leaves the name behind.
+
+**Contract (b) — still ONE cascade, and no fourth walk.** Verified by reading all four commands. The
+seeds are accumulated in loops that already existed: the rewrite loop (`seeds.rewritten`), the
+move loop (`seeds.moved`), and for the deletes the removal loop. No loop was added. The two
+off-coordinate triggers go through `recalc_after_off_sheet_write` and `recalc_after_name_change` —
+both pre-existing entry points, neither a new cascade concept. The second-lock-phase pattern is
+preserved in all four: every guard is explicitly dropped before the recalc, and the result rows are
+read back afterwards, which is what makes the reply carry the new values.
+
+**Contract (c) — undo AND redo, not just the forward path.** Four tests drive the real
+`undo_commands::apply_changes` (the shared body `undo` and `redo` both run) and assert through the
+same `assert_settled` oracle, including a cross-sheet case. The implementation's reasoning holds up:
+both restore whole-grid snapshots, so undo was always safe and **redo was not** — it replays a
+snapshot captured at undo time from a workbook the forward path had left stale, which means fixing
+forward is what makes redo right.
+
+**Contract (d) — the measurement REPRODUCED.** Run twice on this machine, debug profile, same
+fixture. The load-bearing conclusion held both times.
+
+| case | rows | opt 1 | +moved | CHOSEN | opt 2 | whole-sheet | seeds |
+|---|---|---|---|---|---|---|---|
+| worst 10 000, as reported | 10 000 | 220.08 | 291.06 | **303.29** | 628.08 | 392.76 | 30 009 |
+| worst 10 000, run 1 here | 10 000 | 258.26 | 302.41 | **289.40** | 625.15 | 394.26 | 30 009 |
+| worst 10 000, run 2 here | 10 000 | 222.28 | 308.02 | **310.06** | 636.60 | 392.31 | 30 009 |
+| typical 10 000, run 2 here | 10 000 | 1.88 | 1.83 | **1.84** | 3.22 | 362.71 | 159 |
+
+**What reproduces:** option 2 is worse than the whole-sheet pass it would replace (625–637 ms against
+392–394 ms), the chosen set beats the whole-sheet pass at every size, and in the typical case
+recalculation is under 1% of the command. Seed counts are identical to the digit. **What does not
+survive the second run** is the claim that the chosen set costs "~25–55% more than option 1": against
+option 1 PLUS moved formulas it is inside the noise (289 vs 302 one run, 310 vs 308 the next), and
+only the bare option-1 comparison is real. That is a correction to the write-up, not to the decision
+— option 1 is incomplete at any price.
+
+**Contract (e) — every touched command still picks a `DocumentEffect` arm.** All four `*_impl` bodies
+construct `DocumentEffect::mutates(&file_state)` after their gates and before their mutation, as does
+`off_sheet_structural_edit`. The `#[tauri::command]` wrappers introduced by the `*_impl` split
+construct none and need none: they write nothing, and every `Persisted<T>` write in the body is
+type-gated on the token the body holds.
+
+**THE NEIGHBOURS — the question D8 did not ask.** A structural edit is not the only thing that moves
+a formula without rewriting it, nor the only thing that changes a formula's inputs without writing a
+cell. Each was checked by reading the path to the write, not by assuming:
+
+| neighbour | verdict |
+|---|---|
+| **cut/paste move, drag-move** (`useClipboard` + `relocate_cell_references`) | **SAFE, by a different mechanism.** The destination is not moved, it is REWRITTEN: the frontend calls `updateCell` per destination cell, which evaluates the formula at its new address. `=ROW()` cut from A5 to A20 is evaluated at A20. `relocate_cell_references` then repoints the OTHER formulas and seeds them. It skips the destination range deliberately, and that skip is correct only because of the `updateCell` above it |
+| **`sort_range`** | **SAFE.** It seeds every cell of the sorted range, so a moved `=ROW()` inside it is a seed. Nothing outside the range moves |
+| **insert/delete CELLS (shift right/down)** | **does not exist** — no such command in the crate. The four row/column edits are the whole class |
+| **hide/unhide rows** (`set_rows_hidden`) | **SAFE and already reasoned about**: it documents that row visibility is a formula input for SUBTOTAL/AGGREGATE, that hiding writes no cell, and that nothing in the dependency graph would dirty them — and cascades explicitly |
+| **AutoFilter** | **SAFE**: 12 call sites of `recalc_visibility_after_row_change_from_handle` in `autofilter.rs` |
+| **the shared cascade's own view of what is hidden** | **BROKEN — see §2v.** Found here, fixed here |
+
+**Suites at hand-off.** vitest **742 files / 106,165** (baseline, unchanged — no TypeScript was
+touched). core **1,285** (1,174 + script-engine 111). script-engine **111**. app-lib **1,171**
+(1,152 baseline + 17 D8 + 2 for §2v; ignored 2 -> 3, the third being the D8 benchmark). `test_pivot`
+**56**. `cargo check` clean on both workspaces, app crate **0 warnings**; the two core warnings are
+pre-existing, in `engine` and `pivot-engine` TEST code, untouched by this pass.
+`check-types`, `lint:boundaries`, `check:script-typings` (**39/736**) and `check:line-endings`
+(**0 mixed**) all clean. No E2E was run and no golden was re-recorded, as instructed.
+
+
+### 3au. Proved LIVE — `structural-recalc.spec.ts`, the sabotage that gave it teeth, and the two things writing it corrected (2026-08-09)
+
+§3at handed over one thing owed: neither **D8** nor **§2v** had been proved on a running app. This
+pass discharges it. `app/e2e/journeys/structural-recalc.spec.ts` — 10 tests, journey project — drives
+the REAL gesture end to end and reads the string `get_viewport_cells` hands the canvas.
+
+**THE GESTURE IS REAL, and that is the whole point of the spec.** `headerMenu` left-clicks the row or
+column header and ASSERTS the selection really became `rows`/`columns`, right-clicks the same pixel,
+waits for `[role="menu"][aria-label="Context menu"]`, and clicks the item whose text is exactly
+"Insert Row" / "Delete Row" / "Insert Column" / "Delete Column". The header pixel is found by asking
+the app's own `hitTesting` which pixel belongs to the line and skipping the resize handles — the
+pattern `flagged-defects.spec.ts` established. `invoke` appears only in fixtures and oracles, never
+in the thing under test.
+
+| # | claim | live result |
+|---|---|---|
+| 1 | `=ROWS(E1:E5)` renders 5; a menu insert inside the range makes it `=ROWS(E1:E6)` **and renders 6** | pass, 8.2 s — plus the painted G1 pixels change, so the canvas repainted |
+| 2 | `=ROW()`, `=ADDRESS(ROW();COLUMN())` follow a row insert with NO reference rewritten | pass, 6.6 s |
+| 2b | `=COLUMN()` follows a column insert the same way | pass, 6.7 s |
+| 3a | row DELETE: `ROWS` 5→4, `SUM` 150→120, `=ROW()` moves up | pass, 6.6 s |
+| 3b | column DELETE: `COLUMNS` 4→3, `SUM` 10→8, `=COLUMN()` moves left | pass, 6.7 s |
+| 3c | column INSERT: `COLUMNS` 4→5 | pass, 6.7 s |
+| 4 | Sheet2 reader into Sheet1's edited range follows — STORED first, then RENDERED | pass, 11.2 s |
+| 5 | Ctrl+Z restores rendered values and Ctrl+Y follows forward — for the insert AND the delete | pass, 19.2 s |
+| 6 | 44 ordinary formulas + a plain `=E2+E3` still correct after insert and delete | pass, 9.5 s |
+| 7 | §2v: a HIDDEN row stays ignored by `SUBTOTAL(109)` when the edit re-evaluates it | pass, 6.6 s |
+
+**TEETH, BY SABOTAGING A RUNNING BUILD — twice, because the two fixes need different sabotage.**
+
+- **D8 off** (`StructuralSeeds::finish` returns empty; `recalc_structural_side_effects` returns
+  early): **8 of the 10 tests fail**, each with exactly the stale value this register predicts —
+  ROWS 5 for 6, `=ROW()` 10 for 11, `=COLUMN()` 8 for 9, ROWS 5 for 4 on the delete, COLUMNS 4 for 3,
+  4 for 5, and the cross-sheet STORED read 5 for 6. **The two survivors are the two that should
+  survive**: test 6 is the no-regression control (those values were right before D8 — that is its
+  job), and test 7 is §2v, which with no seeds is never re-evaluated and therefore keeps its correct
+  answer. That is §2v's own thesis reproduced from the other side.
+- **§2v off** (the `begin_pass` guard commented out, D8 live): test 7 renders **150** where 120 is
+  correct. This is the first reproduction of §2v anywhere but a unit test, and it is a wrong answer
+  written over a right one on the painted grid.
+- Both files restored and verified **byte-identical by checksum** (`structure.rs`
+  `3da57f3a…`, `data.rs` `6664448f…`), zero sabotage markers left in the tree.
+
+**TWO THINGS THE SPEC GOT WRONG FIRST, and neither was the app.** Worth recording because both are
+the failure mode this register keeps warning about — writing the expectation from reading:
+
+1. The cross-sheet test asserted the re-pointed formula reads `=ROWS(Sheet1!E1:E6)`. It reads
+   `SHEET1!`. Probed on the running app before touching anything: the sheet name is stored uppercased
+   **at cell entry**, before any structural edit exists, on both sheets — entry-time normalisation,
+   orthogonal to D8. The assertion now pins the part under test (which ROW the range ends at) and is
+   deliberately case-insensitive about the name, with the probe recorded at the assertion so nobody
+   re-derives it. **A cosmetic residual, newly named: a user who types `Sheet1!` gets `SHEET1!` back
+   in the formula bar.** Not investigated further; it is not this program's.
+2. Two arithmetic errors of mine — a row inserted at 6 does not move row 2, and hiding a row holding
+   30 gives 120, not the 130 of §2v's differently-valued fixture. Both fixed in the spec.
+
+**MEASURED IN THE APP: does a row insert feel slow?** A/B on the same running build, frontend-timed,
+median of 5 — full table in **D8**. Empty sheet **9.2 → 11.0 ms**; 2 000 rows x 9 columns with 8 000
+formulas, worst-case insert at the top **219.4 → 319.4 ms**, typical insert near the bottom
+**181.7 → 189.9 ms**. Debug build. It does not read as a stall, and the common gesture is unchanged.
+
+**EVERY PROJECT RUN, each from a COLD app** (kill, relaunch, wait for CDP, `E2E_MANUAL=1`):
+
+| project | result | baseline | verdict |
+|---|---|---|---|
+| journey | **74 passed / 1 skipped** (13.0m) | 64 + 1 skipped | +10 = the new spec, nothing else moved |
+| functional | **543 passed / 2 failed / 11 skipped** (40.6m) | 542 / 3 / 11 | **one BETTER** |
+| macro (12 macro-/vba- specs) | **57 / 57** (12.8m) | 57 / 57 | unchanged |
+| scenario | **24 / 24** (1.7m) | 24 / 24 | unchanged |
+| visual | **18 / 18** (2.7m) | 18 / 18 | unchanged, no golden re-recorded |
+
+The functional run's two failures are the known baseline pair — `ribbon-tabs` Ctrl+F1 and
+`state-consistency` monkey. The third baseline failure, `inline-editor-live` "the word AND its Enter
+typed at full speed", **passed this time**; it is the documented full-speed typing race, so this is
+the flake resolving, not a fix. No new failure in any project, so nothing needed root-or-cascade
+classification.
+
+`check-types`, `lint:boundaries`, `check:script-typings` (**39/736**) and `check:line-endings`
+(**0 mixed**) all clean at hand-off.
+
+
 ## 4. OWNER DECISIONS — not work, product calls
 
 **These are for the owner. Nothing in this section is a defect awaiting a fix; each is a choice
@@ -3764,8 +4018,17 @@ decision legible — and gains a "what shipped" write-up.
 | **D6** | `cells: collapsePriority` 99 → 55 | demotion order `[10,20,30,40,50,55,60]` |
 | **D7** | Excel's exact literals; `CellError::Parse` deleted | 9 variants round-trip `from_literal(as_literal(v)) == v`; **3 more `#{Debug}` sites found at integration** — §3ap contract (d) |
 
-**Newly OPEN as of the integration pass: D8** (should a structural edit recalculate? — §2s), found by
-sabotaging the census rather than by reading it.
+| **D8** | a structural edit recalculates: rewritten ASTs + moved FORMULA cells + one seed per affected column/row when a stripe reference exists, plus the cross-sheet and defined-name triggers | the register's own option 2 measured **628.08 ms** against **392.76 ms** for the whole-sheet pass (10 000-row insert) — D3's finding recurring; the chosen set is **303.29 ms** worst and **1.83 ms** typical. Option 1 was incomplete: `=ROW()` has no argument to rewrite |
+
+**D8 was raised by the integration pass and is now CLOSED** (should a structural edit recalculate? —
+§2s), found by sabotaging the census rather than by reading it, and settled by measuring rather than
+by taking its own recommendation.
+
+**D8's own integration pass (§3at) reproduced the measurement and then found the fix incomplete.**
+The shared cascade it seeds knew nothing about hidden rows, so an insert re-derived
+`=SUBTOTAL(109;A1:A5)` from 130 to **150 and stored it** — a wrong answer written over a right one,
+in a gesture D8 itself had just made recalculate. Fixed as **§2v**. Every unit suite is green;
+neither D8 nor §2v has been proved on a running app, and no E2E was run in that pass.
 
 **ALL SEVEN ARE NOW PROVED ON A RUNNING APP — 2026-08-09.** Integration re-ran every unit suite; it
 did not launch the product. `app/e2e/journeys/owner-decisions.spec.ts` drives each decision through
@@ -4420,7 +4683,164 @@ lesson is the one `as_literal`'s own doc comment now carries: "the last one" is 
 grepped for, not remembered.
 
 
-### D8. Should a structural edit recalculate? (§2s) — **OPEN, raised 2026-08-09**
+### D8. Should a structural edit recalculate? (§2s) — **CLOSED 2026-08-09.** Yes, through the shared entry points, on a seed set neither of the register's own options got right
+
+**THE ANSWER: yes, and the register's recommended seed set was wrong.** Option 1 (seed only the
+formula cells whose AST was rewritten) is INCOMPLETE, and option 2 (seed every moved cell) is SLOWER
+than the whole-sheet pass it would replace. What shipped is neither: rewritten ASTs, plus every moved
+FORMULA cell, plus — only when the sheet actually holds a whole-column or whole-row reference — one
+seed per affected column and row. Plus two off-coordinate triggers the cascade cannot express.
+
+**THE STALENESS SURFACE, MEASURED.** `probe`s over one of every position- and shape-sensitive formula
+in the function set, with the oracle being "whatever LOADING this document would produce"
+(`assert_settled` re-evaluates every sheet and reports every cell whose value moves). Not a list of
+expected numbers: the question was precisely *which* formulas go stale, and a hand-written
+expectation can only confirm the ones somebody already thought of.
+
+| formula | row insert | row delete | col insert | col delete | reached by |
+|---|---|---|---|---|---|
+| `=ROWS(A1:A5)` | **stale** 5→6 | **stale** 5→4 | — | — | rewritten AST |
+| `=COLUMNS(A1:C1)` | — | — | **stale** 3→4 | **stale** 3→2 | rewritten AST |
+| `=COUNTA(A1:A5)` | **stale** 5→6 | (deleted) | — | — | rewritten AST |
+| `=SUM(A1:A5)` / `SUBTOTAL` / `AGGREGATE` | — (blank row adds 0) | **stale** 150→120 | — | — | rewritten AST |
+| `=ROW(A5)` / `=CELL("address";A5)` | **stale** | **stale** | — | — | rewritten AST |
+| **`=ROW()` / `=COLUMN()`** | **stale** 8→9 | **stale** 8→7 | **stale** 3→4 | **stale** 3→2 | **MOVED cell — option 1 misses it** |
+| **`=ADDRESS(ROW();COLUMN())`** | **stale** `$C$11`→`$C$12` | **stale** | **stale** | **stale** | **MOVED cell** |
+| **`=SUM(A:A)` / `=COUNTA(A:A)`** | — | **stale** 150→120 | — | — | **column dependents of a moved/deleted cell** |
+| **`=SUM(1:1)`** | **stale** | **stale** | — | **stale** 16→15 | **row dependents of a moved/deleted cell** |
+| **`=ROWS(DATA)`** (defined name) | **stale** 5→6 | not measured | not measured | not measured | **`name_dependents` — no coordinate seed reaches it** |
+| **`Sheet2!B1 = ROWS(Sheet1!A1:A5)`** | **stale** 5→6 | **stale** 5→4 | — | — | **another sheet — no active-sheet seed reaches it** |
+| `=CELL("row")` (no ref) | — | — | — | — | not position-sensitive in this engine |
+| `=OFFSET(A5;0;0)` | — | — | — | — | follows its rewritten base |
+| `=COUNTBLANK(A1:A5)` | — | — | — | — | §2s guessed this one; it does not move |
+
+Totals over the shape-sensitive fixture, before the fix: **7 stale on a row insert, 11 on a row
+delete, 4 on a column insert, 5 on a column delete**. After: **0** in every case.
+
+**§2s's own list was wrong in both directions.** It named `COUNTBLANK`, `OFFSET` and `CELL("row")`,
+none of which goes stale here, and it did not name `=ROW()`, `=SUM(A:A)`, a defined name or a
+cross-sheet reader — the four that break its recommended fix. That is the whole argument for
+measuring: the list you write from reading is not the list.
+
+**THE COST.** `d8_cost_of_recalculating_a_structural_edit` (`commands/d8_structural_recalc_tests.rs`,
+`#[ignore]`d; run with `--ignored --nocapture`). Debug profile, so read the RATIOS. Fixture: a tall
+sheet at realistic density — 5 literal columns, 3 formula columns with own-row references and a
+second hop, one `=ROW()` column, and three whole-range aggregates at the top. Every candidate is
+timed against the SAME settled post-edit state, so the columns differ only by their seed set.
+"worst" inserts at the top of the data (everything moves; also the COMMON gesture); "typical" inserts
+50 rows from the bottom.
+
+| case | rows | command total | of which NOT recalc | opt 1 (rewritten) | +moved formulas | **CHOSEN** | opt 2 (every moved cell) | whole-sheet pass | seeds |
+|---|---|---|---|---|---|---|---|---|---|
+| worst | 2 000 | 180.29 ms | 119.27 ms | 38.92 ms | 48.87 ms | **61.02 ms** | 115.58 ms | 69.10 ms | 6 009 |
+| typical | 2 000 | 75.51 ms | 73.92 ms | 1.49 ms | 1.59 ms | **1.59 ms** | 3.12 ms | 68.54 ms | 159 |
+| worst | 10 000 | 935.83 ms | 632.54 ms | 220.08 ms | 291.06 ms | **303.29 ms** | 628.08 ms | 392.76 ms | 30 009 |
+| typical | 10 000 | 358.80 ms | 356.97 ms | 2.11 ms | 1.84 ms | **1.83 ms** | 3.25 ms | 367.40 ms | 159 |
+
+**D3'S FINDING RECURRED, EXACTLY.** The register's option 2 — seed every moved cell — measured
+**628.08 ms against 392.76 ms for the whole-sheet pass** at 10 000 rows. Worse than the thing it
+replaces, which is what D3 measured for a naive pivot seeding. And D3's no-formula/no-dependents gate
+does NOT save it this time, which is the part worth keeping: that gate drops a seed that holds no
+formula AND has no dependents, and a moved literal in a real workbook usually IS read by something.
+It passes the gate, is admitted as a graph member, and is then skipped by the evaluation loop for
+having no formula — 12 500 pivot literals were unread, 90 000 moved spreadsheet cells are not.
+
+**The chosen set beats the whole-sheet pass at every size** (61 vs 69, 303 vs 393 worst; 1.6 vs 69,
+1.8 vs 367 typical) and beats option 2 by 2x. In the TYPICAL case recalculation is **0.5% of the
+command** — the command's own whole-grid result payload dominates by two orders of magnitude — so the
+frequent gesture pays essentially nothing.
+
+**MEASURED IN THE LIVE APP TOO, A/B, 2026-08-09 (§3au).** The table above is a Rust micro-benchmark;
+the question a user asks is what the GESTURE costs. Same running debug build, timed from the
+frontend around `tauri-api.insertRows` (so the number includes IPC and the command's whole-grid reply),
+median of 5, once with D8's seeding live and once with `StructuralSeeds::finish` returning empty:
+
+| sheet | gesture | no seeding | **with D8** | delta |
+|---|---|---|---|---|
+| empty | insert at top | 9.2 ms | **11.0 ms** | +1.8 ms |
+| 2 000 x 9, 8 000 formulas | insert at TOP (worst) | 219.4 ms | **319.4 ms** | +100 ms |
+| 2 000 x 9, 8 000 formulas | insert near BOTTOM (typical) | 181.7 ms | **189.9 ms** | +8 ms |
+| 2 000 x 9, 8 000 formulas | delete at TOP | 223.4 ms | **325.0 ms** | +102 ms |
+
+So on an ordinary sheet the gesture is unchanged, and on a formula-dense 2 000-row sheet the
+full-height insert pays ~100 ms — in a DEBUG build, where the un-seeded baseline is already ~220 ms
+for reasons that have nothing to do with recalculation. It does not read as a stall in the app. The
+honest summary is that D8 is free where the gesture is common and visible only at the worst case on a
+large sheet, which is the trade the measurement was run to price.
+
+> **CORRECTED AT INTEGRATION (§3at).** This paragraph originally ended "it costs ~25–55% more than
+> the incomplete option 1, which is the price of `=ROW()` being right". Two independent re-runs say
+> that is only true against BARE option 1. Against option 1 PLUS moved formulas — the honest
+> comparison, since that is the smallest COMPLETE seed set — the chosen set is inside the noise
+> (289.40 vs 302.41 ms one run, 310.06 vs 308.02 ms the next). Everything else in this table
+> reproduced, including the load-bearing 625–637 vs 392–394 for option 2, and the seed counts to the
+> digit. A debug-profile timing carries about ±20% here; single-run differences smaller than that are
+> not results.
+
+**WHAT SHIPPED.**
+
+1. `StructuralSeeds` (`commands/structure.rs`) accumulates seeds in the loops each command ALREADY
+   runs — no fourth walk. Three kinds, all in POST-edit coordinates: rewritten ASTs; every moved
+   FORMULA cell; and one seed per affected COLUMN and ROW, emitted only when `column_dependents` /
+   `row_dependents` are non-empty. That last gate is what keeps a whole-column reference from costing
+   the blast radius: the stripe maps are already locked by the command, so asking is free, and in a
+   workbook with no stripe reference kind 3 emits nothing at all.
+2. `recalc_structural_side_effects` runs the two triggers a `(row, col)` seed cannot express, through
+   entry points that already exist: `recalc_after_off_sheet_write` for the sheets
+   `shift_cross_sheet_formulas` actually re-pointed, and `recalc_after_name_change` for the names
+   `shift_named_ranges` actually re-pointed. Both helpers now RETURN what they changed instead of
+   dropping it. Manual calculation mode is gated here, for the reason `recalc_after_name_change`
+   already records: only one of the two honours the mode, and half a recalculation is worse than
+   none.
+3. The OFF-SHEET structural edit had the same two holes and now closes them the same way: its sheet
+   list is the edited sheet PLUS every cross-sheet-rewritten sheet (a rewritten THIRD sheet was
+   previously never re-evaluated), and it calls `recalc_after_name_change` too.
+4. **The four commands were split into `*_impl` twins.** `tauri::State` has no public constructor, so
+   a `#[tauri::command]` cannot be called from a unit test at all — which is why "the structural edit
+   recalculates" could only ever have been asserted about source text. The `_impl` bodies take plain
+   references and the 17 behavioural tests drive them. Same shape as `update_cell`/`update_cell_impl`.
+
+**UNDO AND REDO.** Both restore a whole-grid snapshot, so both carry cached values and are exactly as
+correct as the grid was when their snapshot was taken. Undo was always safe (its snapshot predates
+the edit); **redo was not** — it replays a snapshot captured at undo time, from a workbook the
+forward path had left stale. Fixing the forward path is therefore what makes redo right. Pinned by
+four tests, including a cross-sheet one, all asserting through the same `assert_settled` oracle.
+
+**THE CENSUS.** The four `EXEMPT` entries are GONE; the list is **50 entries**, down from 54. Teeth
+re-verified by sabotage as asked: the seeding call was deleted from `delete_columns_impl` and the
+census failed naming exactly `commands/structure.rs::delete_columns_impl`; then restored.
+
+**VERIFIED AT INTEGRATION, 2026-08-09 — and two things changed (§3at).**
+
+1. **The measurement REPRODUCED**, twice, on a second machine-run. Option 2 measured 625–637 ms
+   against 392–394 ms for the whole-sheet pass; the chosen set beat the whole-sheet pass at every
+   size; seed counts matched to the digit. **One claim above does not survive**: "it costs ~25–55%
+   more than the incomplete option 1" is true only against BARE option 1. Against option 1 plus moved
+   formulas the chosen set is inside the run-to-run noise (289 vs 302 one run, 310 vs 308 the next).
+   The decision is unaffected — option 1 is incomplete at any price — but the number was too
+   confident for a debug-profile timing.
+2. **The census sabotage found a second hole in the census**, not in D8: the first attempt "removed"
+   the call from `insert_rows_impl` by COMMENTING IT OUT and the census PASSED, because its RECALC
+   half read the raw function body. Comments are now stripped before that check. No function in the
+   crate had been relying on one (90 enumerated, 0 affected), so nothing was reclassified.
+
+**AND THE FIX ITSELF WAS INCOMPLETE, in a way only its NEIGHBOURS revealed — §2v.** The shared
+cascade D8 seeds installed no row-visibility pass, so every cell it re-evaluated was computed as if
+nothing were hidden. `=SUBTOTAL(109;A1:A5)` sitting correctly at 130 with a row hidden was re-derived
+as **150 and stored** by a row insert. Every caller of that entry point was affected, but before D8
+the structural edit recalculated nothing, so this cell had kept its correct value — **the D8 fix is
+what walked the gesture into the bug.** D8's own 17 tests passed, and so did the census. Fixed, with
+two tests; the benchmark is unchanged within noise.
+
+**Residual, named rather than hidden.** The dependency maps are SHIFTED by these commands rather than
+rebuilt, so a range that GREW keeps a hole (`=SUM(A1:A5)` → `=SUM(A1:A6)` leaves the map without an
+A3 edge after an insert at row 3). That is pre-existing and orthogonal to D8 — it costs a later edit
+to A3, not this one — and rebuilding here would add an O(formulas) walk to the most frequent gesture
+in the product. Left as a separate question.
+
+<!-- superseded framing kept below for the reasoning it records -->
+
+#### The question as it was raised, 2026-08-09
 
 **The question.** `insert_rows` / `insert_columns` / `delete_rows` / `delete_columns` re-point every
 reference and move every cached value with its cell, and never re-evaluate anything. For almost every
@@ -4509,9 +4929,40 @@ unambiguous and worth more than any single fix in this program:
 > of them as conclusions, and all four were wrong. Spend the number: open the file, run the command,
 > check the element, read the exit code.**
 
-What remains, in order. **Note the shape of what is left: there is no correctness work on this list.**
-Two test-signal items with owners to find, two pieces of structural debt, and the decisions in
-section 4.
+**A FOURTH CORRECTION, 2026-08-09 — and it is this section's own claim.** The sentence that used to
+follow this paragraph read: *"Note the shape of what is left: there is no correctness work on this
+list."* **It was falsified twice inside twenty-four hours**, and neither falsification came from
+running the list:
+
+- **§2s / D8.** The four structural edits re-pointed every reference and re-evaluated nothing, so
+  `=ROWS(A1:A5)` went on displaying 5 as `=ROWS(A1:A6)`. Found by HARDENING the census
+  (`DELEGATING_HELPERS`) — the four wrote through a helper, so the census had never enumerated them
+  and could not have failed for them.
+- **§2v.** The shared cascade re-evaluated SUBTOTAL/AGGREGATE as if nothing were hidden, overwriting
+  a correct 130 with 150. Found by PROBING D8's neighbours after D8's own 17 tests and the census had
+  both passed.
+
+So the honest form of the claim is narrower, and it is the form worth keeping:
+
+> **The tier is empty as far as every check in the tree can tell — and the last two things in it were
+> each found by ADDING a check, not by running one.** "No known correctness work" is a statement
+> about the checks, not about the product. The way to empty it again is to keep making guarantees
+> fail, and to probe the neighbours of every fix.
+
+With that said: as of 2026-08-09 the silently-wrong-answer tier is **again empty**, every unit suite
+is green, and what remains below is unchanged in shape — two test-signal items with owners to find,
+two pieces of structural debt, and the decisions in section 4.
+
+**The one thing that WAS owed is now paid (§3au).** Both **D8** and **§2v** have been proved on a
+running app — `structural-recalc.spec.ts`, 10 tests through the real row/column-header context menu,
+green, and given teeth by sabotaging a running build twice (D8 off: 8 of 10 fail with the exact stale
+values; §2v off: the hidden-row aggregate renders 150 for 120). Every project was re-run from a cold
+app and every number is at or better than baseline. **What that pass found was not a defect in either
+fix** — for the first time in this program the live proof confirmed the static work rather than
+contradicting it. It did find one cosmetic residual worth naming: a sheet name typed as `Sheet1!`
+is stored and shown as `SHEET1!`, normalised at cell entry and nothing to do with structural edits.
+
+What remains, in order.
 
 1. **`report_definitions`, the one store §3ai deliberately did not fold in.** Its persisted form
    (`extension_data`) IS gated, so nothing is lost by forgetting the dirty flag — but nothing forces
