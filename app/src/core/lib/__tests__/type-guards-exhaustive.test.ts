@@ -204,7 +204,7 @@ describe("isErrorValue", () => {
   //
   // isErrorValue drives the grid's error rendering (red + centred, in
   // gridRenderer/rendering/cells.ts). Four variants were added to the engine
-  // after this list was written — #LIMIT!, #BLOCKED!, #CIRCULAR!, #CONFLICT —
+  // after this list was written — #LIMIT!, #BLOCKED!, #CIRCULAR!, #CONFLICT! —
   // and every one of them rendered as ordinary left-aligned black text,
   // indistinguishable from a string the user typed. Reading cell.rs at test time
   // (the same technique interpreterReachDrift uses) is what makes "we covered

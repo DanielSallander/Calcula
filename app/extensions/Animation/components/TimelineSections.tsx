@@ -37,7 +37,7 @@ import { MonteCarloView } from "./MonteCarloView";
 import type { AnimationSpec } from "../types";
 import { parseA1 } from "../lib/a1";
 import { ANIMATION_DIALOG_ID } from "./AnimationDialog";
-import { PlayIcon, PauseIcon, StopIcon, StepBackIcon, StepFwdIcon, FilmIcon } from "./icons";
+import { PlayIcon, PauseIcon, StopIcon, StepBackIcon, StepFwdIcon, FilmIcon, EjectIcon } from "./icons";
 
 function useEngineState(): EngineState {
   const [state, setState] = useState<EngineState>(() => playbackEngine.getState());
@@ -207,6 +207,22 @@ export function TransportSection(_props: PanelSectionProps): React.ReactElement 
         </Button>
         <Button title="Step forward" disabled={!hasDriver} onClick={() => void playbackEngine.step(1)}>
           <StepFwdIcon />
+        </Button>
+        {/*
+          UNLOAD — the product's route out of owning a driver, and the second
+          half of D4. "Stop" restores the model but keeps the driver loaded
+          (correct: a user mid-iteration wants to press Play again), so before
+          this button there was no way to give the driver back at all and the
+          play pill stayed until the page reloaded. Deliberately separate from
+          Stop rather than folded into it, for that same reason.
+        */}
+        <Button
+          title="Unload driver (restores the model and hides the play pill)"
+          data-testid="anim-clear-driver"
+          disabled={!hasDriver}
+          onClick={() => void playbackEngine.clearDriver()}
+        >
+          <EjectIcon />
         </Button>
         <div
           style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", opacity: 0.85, fontSize: 12, whiteSpace: "nowrap" }}

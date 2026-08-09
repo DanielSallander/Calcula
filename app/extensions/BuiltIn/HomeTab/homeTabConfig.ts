@@ -227,12 +227,12 @@ export const DEFAULT_LAYOUT: HomeTabLayout = {
       id: "cells",
       label: "Cells",
       iconId: "cells",
-      // 99 is TODAY'S SHIPPED VALUE, not a considered choice: the old
-      // GROUP_ORDER table simply had no "cells" row, so it hit the fallback
-      // and Cells demotes LAST on a narrow band. It is written out here so it
-      // can no longer drift silently. Changing it changes narrow-window
-      // behaviour, which is a product call, so it is left as-is.
-      collapsePriority: 99,
+      // D6: was an accidental 99 -- the old GROUP_ORDER table had no "cells"
+      // row, so it hit the fallback and Cells demoted LAST on a narrow band.
+      // 55 places it where Excel places it: Cells collapses to a launcher
+      // before Editing (60) and after Styles (50), which is the Home-tab
+      // demotion order Excel shows as its ribbon narrows.
+      collapsePriority: 55,
       items: ["insertRow", "insertColumn", "rowBreak", "deleteRow", "deleteColumn"],
     },
     {

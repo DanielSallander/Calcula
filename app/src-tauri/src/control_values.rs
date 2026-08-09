@@ -705,6 +705,11 @@ pub(crate) fn recalc_control_dependents_core(
             &styles,
             &locale,
             &merge_lookup,
+            crate::name_resolution::NameTables {
+                named_ranges: &cascade_named_ranges,
+                tables: &cascade_tables,
+                table_names: &cascade_table_names,
+            },
             &initial_changed,
             &affected,
             &mut updated_cells,

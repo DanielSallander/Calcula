@@ -60,11 +60,11 @@ describe("DEFAULT_LAYOUT is the shipped Home tab", () => {
     ]);
   });
 
-  it("carries today's collapse priorities on the groups themselves", () => {
-    // These are the values the two ex-lookup-tables in index.ts produced,
-    // INCLUDING cells=99: GROUP_ORDER had no "cells" row, so it hit the
-    // fallback and Cells demotes last. Written out here so it cannot drift
-    // again; changing the number is a product call, not a cleanup.
+  it("carries the collapse priorities on the groups themselves", () => {
+    // D6 settled `cells`: it used to inherit an accidental 99 (GROUP_ORDER had
+    // no "cells" row, so it hit the fallback and Cells demoted LAST). 55 puts
+    // it between Styles and Editing, matching the order Excel's Home tab sheds
+    // groups as the window narrows. Written out here so it cannot drift again.
     expect(
       Object.fromEntries(DEFAULT_LAYOUT.groups.map((g) => [g.id, g.collapsePriority]))
     ).toEqual({
@@ -73,7 +73,7 @@ describe("DEFAULT_LAYOUT is the shipped Home tab", () => {
       alignment: 30,
       number: 40,
       styles: 50,
-      cells: 99,
+      cells: 55,
       editing: 60,
     });
   });
@@ -204,7 +204,7 @@ describe("saveLayout / loadLayout", () => {
     );
     const [group] = loadLayout().groups;
     expect(group.iconId).toBe("cells");
-    expect(group.collapsePriority).toBe(99);
+    expect(group.collapsePriority).toBe(55);
   });
 });
 

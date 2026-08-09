@@ -5359,8 +5359,8 @@ pub fn calp_refresh_apply(
     // The refreshed grids hold pristine upstream content plus overlays whose
     // formula cells are pending evaluation, and the dependency maps still
     // describe the PRE-refresh active sheet. Rebuild deps (active sheet only —
-    // the maps are single-sheet) and re-evaluate every refreshed sheet,
-    // including non-active ones that calculate_now never touches.
+    // the maps are single-sheet) and re-evaluate every refreshed sheet, rather
+    // than leaving the non-active ones for whenever the user next presses F9.
     {
         let refreshed_indices: Vec<usize> = {
             let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;

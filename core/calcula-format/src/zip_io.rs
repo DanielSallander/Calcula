@@ -1969,12 +1969,13 @@ mod tests {
                 e.as_literal()
             );
         }
-        // `Parse` is the one variant that deliberately does NOT round-trip: it
-        // shares the `#VALUE!` spelling because it has no Excel literal of its
-        // own, so it reloads as `Value` — which is exactly what it already
-        // displayed as. Asserted so the asymmetry is a decision, not a surprise.
-        let parsed = persistence::SavedCellValue::from_value(&engine::CellValue::Error(CellError::Parse));
-        assert_eq!(parsed.to_value(), engine::CellValue::Error(CellError::Value));
+        // EVERY variant round-trips now. There used to be one that did not —
+        // `CellError::Parse` shared the `#VALUE!` spelling and reloaded as
+        // `Value` — and the asymmetry was asserted here so it stayed a decision
+        // rather than a surprise. D7 deleted the variant instead: it was never
+        // constructed anywhere in the product (an unparseable formula is stored
+        // as TEXT by `Cell::new_formula`), so it existed only to be the one
+        // error that changed meaning on reload.
     }
 
     #[test]

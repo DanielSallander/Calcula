@@ -22,15 +22,25 @@ export function isNumericValue(value: string): boolean {
  * MUST COVER EVERY `CellError` VARIANT. The engine's canonical table is
  * `CellError::as_literal` in core/engine/src/cell.rs, and this list fell four
  * variants behind it: `#LIMIT!` (calculation-budget exhaustion), `#BLOCKED!`,
- * `#CIRCULAR!` and `#CONFLICT` were all introduced after this array was written,
- * so a cell holding one of them rendered as ORDINARY LEFT-ALIGNED BLACK TEXT —
- * indistinguishable from a user who had typed the string. That is the one place
- * an error must never hide, because `#LIMIT!` in particular means a number the
- * user is looking at was never computed.
+ * `#CIRCULAR!` and `#CONFLICT!` were all introduced after this array was
+ * written, so a cell holding one of them rendered as ORDINARY LEFT-ALIGNED
+ * BLACK TEXT — indistinguishable from a user who had typed the string. That is
+ * the one place an error must never hide, because `#LIMIT!` in particular means
+ * a number the user is looking at was never computed.
  *
- * `CellError::Parse` is deliberately absent: it has no literal of its own and
- * surfaces as `#VALUE!`. `#NULL!`, `#NUM!` and `#ERROR` have no engine variant
- * but are Excel literals that can arrive by import, so they stay.
+ * THE SAME DEFECT WAS ALSO REACHING THIS LIST FROM THE OTHER SIDE, and D7
+ * closed it (2026-08-09). The backend used to send the grid `#DIV0` / `#REF` /
+ * `#VALUE` / `#CIRCULAR` / `#PARSE` — a `format!("#{:?}")` of the Rust variant
+ * name — none of which any entry here matches, so a division-by-zero cell was
+ * painted as plain black text while a `#DIV/0!` cell imported from xlsx was
+ * painted red. The backend now forwards to `CellError::as_literal`, so the
+ * strings arriving here are the ones below.
+ *
+ * `#NULL!`, `#NUM!` and `#ERROR` have no engine variant but are Excel literals
+ * that can arrive by import, so they stay. `#SYNTAX!` is deliberately absent:
+ * it is what the evaluate-formula and script surfaces answer for an unparseable
+ * expression, and it never lands in a cell (`Cell::new_formula` stores an
+ * unparseable formula as TEXT).
  *
  * `type-guards-exhaustive.test.ts` pins this list against cell.rs.
  */
@@ -44,7 +54,7 @@ export const CELL_ERROR_LITERALS: readonly string[] = [
   "#NUM!",
   "#ERROR",
   "#CIRCULAR!",
-  "#CONFLICT",
+  "#CONFLICT!",
   "#BLOCKED!",
   "#LIMIT!",
 ];

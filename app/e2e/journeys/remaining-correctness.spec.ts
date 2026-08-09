@@ -454,8 +454,10 @@ async function toggleHeadingsViaMenu(page: Page, grid: { openMenu: (m: string) =
   await waitForGridStable(page);
 }
 
-/** Formulas > Calculate > Calculate Workbook, through the real menu. */
-async function calculateWorkbookViaMenu(
+/** Formulas > Calculate > Calculate Now, through the real menu.
+ *  (Named as Excel names it; the item used to read "Calculate Workbook" and to
+ *  calculate one sheet.) */
+async function calculateNowViaMenu(
   page: Page,
   grid: { openMenu: (m: string) => Promise<void> },
 ) {
@@ -464,8 +466,8 @@ async function calculateWorkbookViaMenu(
   await expect(calc, "Formulas > Calculate must be reachable").toBeVisible({ timeout: 5000 });
   await calc.hover({ timeout: 5000 });
   await page.waitForTimeout(400);
-  const workbook = page.locator("button").filter({ hasText: /^Calculate Workbook/ }).first();
-  await expect(workbook, "Formulas > Calculate > Calculate Workbook must be reachable").toBeVisible({
+  const workbook = page.locator("button").filter({ hasText: /^Calculate Now/ }).first();
+  await expect(workbook, "Formulas > Calculate > Calculate Now must be reachable").toBeVisible({
     timeout: 5000,
   });
   await workbook.click({ timeout: 5000 });
@@ -669,19 +671,23 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
    * entered and calculated identically, so "the check only fires on F9" cannot
    * be mistaken for "the cross-sheet case is special".
    *
-   * THE SPELLING. The grid paints `#CIRCULAR`, NOT the `#CIRCULAR!` every design
-   * note and Rust test writes, because `crate::cell_error_display`
-   * (app/src-tauri/src/lib.rs) special-cases only NA/Conflict/Blocked/Limit and
-   * lets the rest fall through to `format!("#{:?}").to_uppercase()`. Measured
-   * live on this app, not guessed: `#CIRCULAR` / `#DIV0` / `#NAME` / `#VALUE`
-   * where the engine's own `CellError::as_literal` says `#CIRCULAR!` /
-   * `#DIV/0!` / `#NAME?` / `#VALUE!`. This spec asserts what the PRODUCT paints;
-   * the divergence is recorded as its own item (register §2n) rather than
-   * papered over with a loose regex, because a loose regex here would also
-   * accept a future spelling that nobody chose.
+   * THE SPELLING — and why this constant moved. Until 2026-08-09 the grid
+   * painted `#CIRCULAR`, not the `#CIRCULAR!` every design note and Rust test
+   * wrote, because `crate::cell_error_display` (app/src-tauri/src/lib.rs)
+   * special-cased only NA/Conflict/Blocked/Limit and let the rest fall through
+   * to `format!("#{:?}").to_uppercase()` — the Rust variant NAME, uppercased.
+   * That was measured live rather than guessed (`#CIRCULAR` / `#DIV0` /
+   * `#NAME` / `#VALUE`), asserted here as what the PRODUCT paints, and recorded
+   * as its own register item (§2n) rather than papered over with a loose regex,
+   * because a loose regex would also accept a future spelling nobody chose.
+   *
+   * D7 closed it: `cell_error_display` now forwards to the engine's
+   * `CellError::as_literal`, so the grid, the formula bar, error checking, the
+   * UDF wire, `.cala` and `.calp` all spell an error the same way. The constant
+   * is still an exact string for the same reason it always was.
    */
-  /** What the grid actually paints for a cycle. See the note above. */
-  const CIRCULAR = "#CIRCULAR";
+  /** What the grid paints for a cycle — the engine's canonical literal. */
+  const CIRCULAR = "#CIRCULAR!";
   async function buildCrossSheetCycle(page: Page, grid: any, sheet1First: boolean): Promise<void> {
     await newFile(page);
     await addSheetViaUI(page);
@@ -788,19 +794,23 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
    * hop per WHOLE-WORKBOOK ROUND. The assertion therefore requires CONVERGENCE,
    * not instantaneity — and requires it to arrive.
    *
-   * WHAT A "WHOLE-WORKBOOK ROUND" IS ON THIS APP, measured rather than assumed.
-   * `calculate_now` — F9, Formulas > Calculate > Calculate Workbook, and the
-   * calculate-before-save step — evaluates the ACTIVE SHEET ALONE. So pressing
-   * F9 six times on Sheet1 moves a cross-sheet iterative cycle exactly nowhere:
-   * measured on the running app, `Sheet1!B1 = Sheet2!B1*0.5+10` with
-   * `Sheet2!B1 = Sheet1!B1` sat at 15 / 10 through six presses and did not
-   * budge. Switching tabs and pressing F9 on each sheet IS a round, and the
-   * cycle then converges geometrically: 15, 17.5, 18.75, 19.375, ...,
-   * 19.999999702 after 25. That is what this test drives, because it is the
-   * gesture the documented behaviour actually describes. The F9-alone
-   * measurement is recorded as its own item (register §2o) — a partial iterate
-   * is a legitimate value under iterative calculation, so it is a limit to
-   * decide about rather than a wrong answer to fix here.
+   * WHAT A "WHOLE-WORKBOOK ROUND" IS ON THIS APP — and what it USED to be.
+   * `calculate_now` — F9, Formulas > Calculate > Calculate Now, and the
+   * calculate-before-save step — used to evaluate the ACTIVE SHEET ALONE.
+   * Pressing F9 six times on Sheet1 then moved a cross-sheet iterative cycle
+   * exactly nowhere: measured on the running app, `Sheet1!B1 = Sheet2!B1*0.5+10`
+   * with `Sheet2!B1 = Sheet1!B1` sat at 15 / 10 through six presses and did not
+   * budge; switching tabs and pressing F9 on each sheet WAS the round, and the
+   * cycle then converged geometrically to 19.999999702 after 25 of them.
+   *
+   * D1 closed that: **F9 = Calculate Now = the WORKBOOK, Shift+F9 = Calculate
+   * Sheet = the active sheet**, which is Excel's model. The whole cycle is now
+   * one group of one workbook-wide plan, so a SINGLE F9 converges it. The loop
+   * below is kept exactly as written — it drives tab-switching rounds and
+   * tolerates up to 40 of them — because it must keep passing under either
+   * behaviour: what it asserts is CONVERGENCE, and convergence on round one is
+   * still convergence. The one-press claim is pinned where it can be measured
+   * rather than waited for, in `calculate_scope_tests.rs`.
    */
   test("3. with iterative calculation ON, a same-sheet and a cross-sheet circular reference both converge to 20 instead of reporting a circular error", async ({
     appPage: page,
@@ -1210,25 +1220,25 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
   // =========================================================================
 
   /**
-   * A name is resolved WHILE a formula is evaluated and is an edge in no
-   * dependency map, so no coordinate on any sheet describes the formulas it
-   * feeds. `apply_changes` therefore sets `report.workbook_recalc` for a
-   * named-range restore and runs the shared cascade over every sheet.
+   * A name is resolved WHILE a formula is evaluated, so no CELL coordinate on
+   * any sheet describes the formulas it feeds. `apply_changes` therefore sets
+   * `report.workbook_recalc` for a named-range restore and runs the shared
+   * cascade over every sheet.
    *
-   * WHY "APPLY NAMES" IS PART OF THE FIXTURE AND NOT A CONVENIENCE.
-   * `update_cell` RESOLVES a name at entry and stores the RESOLVED reference:
-   * measured on the running app, typing `=E2E_REMAINING_RATE` into G1 leaves the
-   * cell holding the formula `$D$5` — the name is not in the document at all.
-   * Repointing the name then cannot move that formula, and no amount of F9 will
-   * make it: the formula no longer mentions the name. A test built the obvious
-   * way therefore asserts nothing about the undo — it fails on its own
-   * precondition, which is how this was found.
+   * WHAT CHANGED HERE, AND WHY THE FIXTURE SHRANK (D2). This test used to need
+   * Formulas > "Apply Names..." to have anything to be about: `update_cell`
+   * resolved the name AT ENTRY and stored the resolved reference, so typing
+   * `=E2E_REMAINING_RATE` into G1 left the cell holding `$D$5` — the name was
+   * not in the document, repointing it moved nothing, and the obvious version of
+   * this test failed on its own precondition. That is fixed: a typed formula
+   * keeps its NAME, exactly as in Excel, and the first assertion below now reads
+   * the stored formula straight after typing it to prove so ON THE RUNNING APP.
    *
-   * Formulas > "Apply Names..." is the real product route that rewrites the
-   * reference back into the NAME (`f: "$D$5"` -> `f: "E2E_REMAINING_RATE"`,
-   * confirmed here by reading the stored formula), and a name-retaining formula
-   * is the only kind the §2i restore can be about. The pre-resolution itself is
-   * recorded as its own item (register §2p).
+   * Apply Names is still exercised, and it is no longer scaffolding — it is the
+   * IDEMPOTENCE check. It was the only way to get a name into a formula; it is
+   * now the repair tool it is in Excel, and running it over a formula that
+   * already reads the name must leave that formula alone rather than
+   * double-applying anything.
    *
    * TEETH: 111 -> 222 -> 111, asserted on the STORED value and on the CANVAS.
    * The undo target differs from what is on screen when Ctrl+Z is pressed, so a
@@ -1252,13 +1262,23 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
       );
       expect(created.success, `create_named_range failed: ${created.error ?? ""}`).toBe(true);
 
-      // Typed through the real grid. What lands in the cell is `$D$5`.
+      // Typed through the real grid. What lands in the cell is the NAME (D2).
       await grid.setCellValue("G1", `=${NAME}`);
       await page.waitForTimeout(500);
       await waitForGridStable(page);
       expect(await renderedCell(page, "G1"), "baseline: G1 resolves the name to D5").toBe("111");
+      const typedFormula = await invoke<Array<{ formula: string | null }>>(
+        page,
+        "get_viewport_cells",
+        { startRow: 0, startCol: 6, endRow: 0, endCol: 6 },
+      );
+      expect(
+        typedFormula[0]?.formula,
+        "the cell must KEEP the name — storing `=$D$5` here is the pre-resolution defect, and it makes every assertion below about a formula that no longer mentions the name",
+      ).toBe(`=${NAME}`);
 
-      // ---- Formulas > Apply Names..., the real menu item. ----
+      // ---- Formulas > Apply Names..., the real menu item. Idempotence: the
+      // formula already reads the name, so this must leave it alone. ----
       await grid.openMenu("Formulas");
       const applyNames = page.locator("button").filter({ hasText: /^Apply Names/ }).first();
       await expect(applyNames, "Formulas > Apply Names... must be reachable").toBeVisible({
@@ -1277,7 +1297,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
       );
       expect(
         storedFormula[0]?.formula,
-        "Apply Names put the NAME back into the formula — without this the cell holds `=$D$5` and the rest of this test would be about nothing",
+        "Apply Names is idempotent over a formula that already reads the name — it has no `$D$5` text left to match, so it must not touch this cell",
       ).toBe(`=${NAME}`);
       expect(
         await renderedCell(page, "G1"),

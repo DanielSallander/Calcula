@@ -329,7 +329,11 @@ impl Grid {
             }
             CellValue::Text(s) => s.clone(),
             CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-            CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+            // Find/Replace is a rendering surface: it must search the text the
+            // user can actually see. This was the last `#{Debug}` fallback in
+            // the product ("#DIV0", "#REF", "#NAME" — the Rust variant names,
+            // which no surface displays and `from_literal` cannot parse back).
+            CellValue::Error(e) => e.as_literal().to_string(),
             CellValue::List(items) => format!("[List({})]", items.len()),
             CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
         }
@@ -350,6 +354,55 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FIND MUST SEARCH THE TEXT THE USER CAN SEE.
+    ///
+    /// `get_cell_display_value` had the last `#{Debug}` error fallback in the
+    /// product, so it built "#DIV0" / "#REF" / "#NAME" from the Rust variant
+    /// name. That was merely *consistent* while the grid painted the same
+    /// wrong spellings; once D7 pointed every rendering surface at
+    /// `CellError::as_literal`, the grid painted `#DIV/0!` and Find still
+    /// matched `#DIV0` — so a user searching for exactly what the cell shows
+    /// got "no results", and searching for a string no surface displays got a
+    /// hit. Find is a rendering surface: it must go through the one table.
+    #[test]
+    fn find_matches_the_error_literal_the_grid_actually_paints() {
+        use crate::cell::CellError;
+
+        // One cell per variant, so this cannot pass by covering only the two
+        // spellings that happen to agree.
+        let variants = [
+            CellError::Div0,
+            CellError::Ref,
+            CellError::Name,
+            CellError::Value,
+            CellError::NA,
+            CellError::Circular,
+            CellError::Conflict,
+            CellError::Blocked,
+            CellError::Limit,
+        ];
+
+        let mut grid = Grid::new();
+        for (i, e) in variants.iter().enumerate() {
+            let mut cell = Cell::new();
+            cell.value = CellValue::Error(e.clone());
+            grid.set_cell(i as u32, 0, cell);
+        }
+
+        for (i, e) in variants.iter().enumerate() {
+            let literal = e.as_literal();
+            let hits = grid.find_all(literal, false, true, false);
+            assert_eq!(
+                hits,
+                vec![(i as u32, 0)],
+                "searching for {literal} — the exact text the grid paints for \
+                 {e:?} — found {hits:?}. Find reads the display value through \
+                 `get_cell_display_value`, which must forward to \
+                 `CellError::as_literal` like every other rendering surface."
+            );
+        }
+    }
 
     #[test]
     fn test_find_all_basic() {

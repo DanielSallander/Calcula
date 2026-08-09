@@ -232,6 +232,33 @@ fn agg_label(agg: AggregationType) -> &'static str {
     }
 }
 
+// ============================================================================
+// D3 — PIVOT WRITES SEED THE ONE SHARED CASCADE
+// ============================================================================
+
+/// Every cell of a pivot output block, as cascade seeds.
+///
+/// A pivot writes a RECTANGLE, exactly as `bi_insert_result` writes a query
+/// result block — and the census already requires that shape of command to
+/// recalculate on both the on-sheet and the off-sheet branch. The seeds are the
+/// whole rectangle rather than only the cells that ended up non-empty, because
+/// a pivot that SHRANK leaves emptied cells behind and a formula reading one of
+/// those is precisely the reader that has to drop to 0.
+pub(crate) fn pivot_block_seeds(
+    destination: (u32, u32),
+    row_count: usize,
+    col_count: usize,
+) -> Vec<(u32, u32)> {
+    let (start_row, start_col) = destination;
+    let mut seeds = Vec::with_capacity(row_count.saturating_mul(col_count));
+    for r in 0..row_count as u32 {
+        for c in 0..col_count as u32 {
+            seeds.push((start_row + r, start_col + c));
+        }
+    }
+    seeds
+}
+
 /// Creates a new pivot table from the specified source range (UI path: starts
 /// EMPTY, fields are configured later via update_pivot_fields).
 #[tauri::command]
@@ -239,19 +266,42 @@ pub fn create_pivot_table(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CreatePivotRequest,
 ) -> Result<PivotViewResponse, String> {
-    create_pivot_inner(state, file_state, pivot_state, request, Vec::new(), Vec::new())
+    create_pivot_inner(
+        state,
+        file_state,
+        pivot_state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        request,
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// Core pivot creation, optionally with row/value fields configured UP FRONT so
 /// the whole creation is a SINGLE undoable step (used by the MCP create_pivot
 /// tool; create_pivot_table passes empty field lists). Field NAMES are resolved
 /// to source-column indices against the freshly built cache.
+///
+/// DEPENDENTS RECALCULATE (D3). Creating a pivot writes a block over cells that
+/// may already have held data, and it recalculated nothing: `=B12*2` beside the
+/// destination kept the value of whatever the pivot had just overwritten. Every
+/// other pivot mutation reaches a recalculation through `finalize_pivot_update`;
+/// creation, deletion and the overwrite-undo were the three that did not.
+#[allow(clippy::too_many_arguments)]
 pub fn create_pivot_inner(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CreatePivotRequest,
     row_field_names: Vec<String>,
     value_specs: Vec<(String, AggregationType)>,
@@ -483,6 +533,33 @@ pub fn create_pivot_inner(
 
     log_info!("PIVOT", "created pivot_id={} rows={} (empty - awaiting field configuration)", pivot_id, response.row_count);
 
+    // PHASE B — the block just written seeds the ONE shared cascade, after every
+    // guard above is released (std mutexes are not reentrant).
+    drop(active);
+    drop(pivot_tables);
+    let seeds = pivot_block_seeds(destination, view.row_count, view.col_count);
+    let active_sheet = *state.active_sheet.read().unwrap();
+    if dest_sheet_idx == active_sheet {
+        let mut recalculated = Vec::new();
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            &state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &seeds,
+            &mut recalculated,
+        );
+    } else {
+        crate::commands::data::recalc_after_off_sheet_write(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &[dest_sheet_idx],
+        );
+    }
+
     Ok(response)
 }
 
@@ -575,6 +652,7 @@ pub fn undo_pivot_overwrite(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
@@ -622,18 +700,54 @@ pub fn undo_pivot_overwrite(
 
                                 // Restore cells that were overwritten by the pivot expansion
                                 if !snapshot.overwritten_cells.is_empty() {
-                                    let mut grids = state.grids.write(&effect).unwrap();
-                                    if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
-                                        for sc in &snapshot.overwritten_cells {
-                                            dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                                    {
+                                        let mut grids = state.grids.write(&effect).unwrap();
+                                        if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
+                                            for sc in &snapshot.overwritten_cells {
+                                                dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                                            }
+                                        }
+                                        let active_sheet = *state.active_sheet.read().unwrap();
+                                        if snapshot.dest_sheet_idx == active_sheet {
+                                            let mut grid = state.grid.write(&effect).unwrap();
+                                            for sc in &snapshot.overwritten_cells {
+                                                grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                                            }
                                         }
                                     }
+
+                                    // PHASE B — the RESTORED cells seed the ONE
+                                    // shared cascade, after the guards above are
+                                    // released. `finalize_pivot_update` did
+                                    // recalculate the sheet, but it ran BEFORE
+                                    // these writes, so the restore was the one
+                                    // write in this command that nothing
+                                    // followed.
+                                    let seeds: Vec<(u32, u32)> = snapshot
+                                        .overwritten_cells
+                                        .iter()
+                                        .map(|sc| (sc.row, sc.col))
+                                        .collect();
                                     let active_sheet = *state.active_sheet.read().unwrap();
                                     if snapshot.dest_sheet_idx == active_sheet {
-                                        let mut grid = state.grid.write(&effect).unwrap();
-                                        for sc in &snapshot.overwritten_cells {
-                                            grid.set_cell(sc.row, sc.col, sc.cell.clone());
-                                        }
+                                        let mut recalculated = Vec::new();
+                                        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                                            &state,
+                                            &user_files_state,
+                                            &pane_control_state,
+                                            &ribbon_filter_state,
+                                            &seeds,
+                                            &mut recalculated,
+                                        );
+                                    } else {
+                                        crate::commands::data::recalc_after_off_sheet_write(
+                                            &state,
+                                            &user_files_state,
+                                            &pivot_state,
+                                            &pane_control_state,
+                                            &ribbon_filter_state,
+                                            &[snapshot.dest_sheet_idx],
+                                        );
                                     }
                                 }
 
@@ -1286,6 +1400,9 @@ pub fn delete_pivot_table(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -1375,6 +1492,41 @@ pub fn delete_pivot_table(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // C10: a deleted pivot must not leave its object script mounted/persisted.
     crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &pivot_id.to_string());
+
+    // PHASE B — every cell the delete CLEARED seeds the ONE shared cascade,
+    // after each guard above is released. In Excel a formula reading a removed
+    // pivot drops to 0 at once; this used to hold the deleted pivot's last
+    // numbers until an unrelated later edit swept them up.
+    drop(active);
+    drop(pivot_tables);
+    if let Some(ref region) = old_region {
+        let seeds = pivot_block_seeds(
+            (region.start_row, region.start_col),
+            (region.end_row.saturating_sub(region.start_row) + 1) as usize,
+            (region.end_col.saturating_sub(region.start_col) + 1) as usize,
+        );
+        let active_sheet = *state.active_sheet.read().unwrap();
+        if dest_sheet_idx == active_sheet {
+            let mut recalculated = Vec::new();
+            crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                &state,
+                &user_files_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &seeds,
+                &mut recalculated,
+            );
+        } else {
+            crate::commands::data::recalc_after_off_sheet_write(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &[dest_sheet_idx],
+            );
+        }
+    }
 
     Ok(())
 }

@@ -338,6 +338,60 @@ pub(crate) fn apply_user_hidden_to_sheet(
 /// derived `hidden_rows` cache (which the app has never read back). The active
 /// sheet's sets go to the mirror, everything else to the per-sheet vectors —
 /// the same split the dimension maps use.
+/// Re-spell every stored DEFINED-NAME reference after a load, in the
+/// capitalisation the Name Manager holds (§2t).
+///
+/// THE DEFECT THIS CLOSES, measured live: create a name `BudgetTotal`, type
+/// `=BudgetTotal`, save, reopen — the formula reads `=BUDGETTOTAL`. A cell keeps
+/// only its AST (`engine::Cell` has no raw-text field; `formula_string()`
+/// renders it), so a reload re-parses the saved text through a lexer that
+/// normalises bare identifiers to upper case. Entry already restamps
+/// (`split_entered_formula`); nothing restamped the way back in, so saving and
+/// reopening rewrote the user's formula in capitals and the scenario suite's
+/// save/reload oracle fired on it.
+///
+/// EXCEL DECIDES THE SHAPE, per the standing rule: Excel canonicalises a typed
+/// name to the DEFINED name's spelling (type `=budgettotal` against a name
+/// defined as `BudgetTotal` and Excel rewrites your formula), so restamping
+/// from the name table is parity — and it makes entry and reload agree by
+/// construction, which merely preserving the lexer's input case would not.
+///
+/// EVERY SHEET, not just the active one. `state.grid` is the active sheet's
+/// authoritative mirror and `state.grids[i]` holds them all, so both are walked
+/// — a formula on sheet 3 shouts just as loudly as one on sheet 1.
+///
+/// Ordering: called BEFORE `rebuild_all_dependencies`, so the edge maps are
+/// derived from the ASTs the document is going to keep. Nothing depends on the
+/// order for correctness (every name lookup uppercases), but "rebuild from the
+/// final ASTs" is the invariant worth having.
+pub(crate) fn restamp_workbook_name_casing(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+) {
+    let Ok(named_ranges) = state.named_ranges.read() else { return };
+    if named_ranges.is_empty() {
+        return;
+    }
+    let mut respelled = 0usize;
+    if let Ok(mut grid) = state.grid.write(effect) {
+        respelled +=
+            crate::name_resolution::restamp_grid_name_casing(&mut grid, &named_ranges);
+    }
+    if let Ok(mut grids) = state.grids.write(effect) {
+        for g in grids.iter_mut() {
+            respelled +=
+                crate::name_resolution::restamp_grid_name_casing(g, &named_ranges);
+        }
+    }
+    if respelled > 0 {
+        crate::log_info!(
+            "LOAD",
+            "restamped {} formula(s) to the Name Manager's capitalisation",
+            respelled
+        );
+    }
+}
+
 pub(crate) fn restore_user_hidden_from_workbook(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -3170,6 +3224,30 @@ pub fn open_file(
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     crate::document_effect::mark_saved(&file_state);
 
+    // DEPENDENCY MAPS FOR THE WORKBOOK JUST READ. A `.cala` stores formula TEXT
+    // and this load re-parses it, so the ASTs are back but the (row, col)-keyed
+    // edge maps are empty until something rebuilds them — until now, the first
+    // sheet switch. That matters more since D2: a formula stores its DEFINED
+    // NAMES, and `name_dependents` is the only thing that can tell a repoint of
+    // `RATE` which cells to recalculate. A freshly opened workbook whose names
+    // had no edges would answer "none" and leave every reader of the name stale.
+    //
+    // Costs one AST scan of the active sheet, which is exactly what a sheet
+    // switch already pays.
+    //
+    // NAME CASING FIRST (§2t). A `.cala` stores formula TEXT and this load
+    // re-parses it; the lexer normalises bare identifiers to UPPERCASE, so a
+    // formula that entry deliberately spelled `=BudgetTotal` comes back as
+    // `=BUDGETTOTAL` and the act of saving and reopening rewrites the user's
+    // formula in capitals. Excel canonicalises a typed name to the DEFINED
+    // name's spelling and never shouts it, so the fix is to re-stamp from the
+    // name table that has just been loaded — the SAME `restamp_name_casing`
+    // `split_entered_formula` runs at entry, so the two cannot disagree.
+    // Cosmetic by construction (every lookup uppercases), which is why it may
+    // run here without touching a value or an edge.
+    restamp_workbook_name_casing(&state, &load_effect);
+    crate::undo_commands::rebuild_all_dependencies(&state);
+
     let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -3419,6 +3497,11 @@ pub fn new_file(
     state.row_dependents.lock().map_err(|e| e.to_string())?.clear();
     state.column_dependencies.lock().map_err(|e| e.to_string())?.clear();
     state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    // ...including the DEFINED-NAME edges, or a blank document would keep
+    // pointing the old workbook's names at cell coordinates that no longer mean
+    // anything (D2).
+    state.name_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.name_dependencies.lock().map_err(|e| e.to_string())?.clear();
 
     // Reset conditional format ID counter
     *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;

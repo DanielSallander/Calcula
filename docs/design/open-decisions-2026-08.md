@@ -1749,7 +1749,7 @@ golden containing an error cell and belongs with that re-record, not inside a ve
 `remaining-correctness.spec.ts` therefore asserts what the product PAINTS, with the divergence named at
 the assertion — not a loose regex, which would also accept a future spelling nobody chose.
 
-### 2o. "Calculate Workbook" calculates one sheet — RECORDED 2026-08-08, an owner decision
+### 2o. "Calculate Workbook" calculates one sheet — FIXED 2026-08-09 (D1 decided: F9 = workbook, Shift+F9 = sheet)
 
 The same root as §2m's F9 defect, stated as the general fact rather than as one of its symptoms:
 `calculate_now` collects its formula cells from the ACTIVE-sheet mirror and evaluates only those. The
@@ -1773,7 +1773,14 @@ cost would change for every workbook with more than one sheet. `remaining-correc
 drives whole-workbook rounds through the real tabs, which is the gesture the documented behaviour
 actually describes.
 
-### 2p. A typed formula does not keep its NAME — RECORDED 2026-08-08
+**RESOLVED 2026-08-09. Excel's model, implemented exactly** — see D1 for the decision and the
+benchmark. `calculate_now` (F9, `Formulas > Calculate > Calculate Now`, calculate-before-save) plans
+and evaluates the **whole workbook**; the new `calculate_sheet` (Shift+F9, `Calculate Sheet`) is the
+active sheet alone. The menu entries carry Excel's own names, not "Calculate Workbook" / "Calculate
+Worksheet". The six-presses-move-nothing measurement is now a **single** press.
+
+
+### 2p. A typed formula does not keep its NAME — FIXED 2026-08-09 (decided as D2; see §4 D2)
 
 §2i's named-range work is about formulas that resolve THROUGH a name at evaluation time. Writing the
 live proof for it found that no formula a user types is one.
@@ -1796,7 +1803,26 @@ would make names live indirections and demote `apply_names_to_formulas` from "th
 repair tool. Pre-resolving is cheaper to evaluate and is what the code has always done. Recorded with
 the measurement so the decision starts from facts rather than from this register's own prose.
 
-### 2q. The Animation play pill covers A1:C2 and swallows clicks — RECORDED 2026-08-08
+**DECIDED AND BUILT 2026-08-09 — Excel parity.** A typed formula now keeps its name and resolves it at
+evaluation, with a real name -> dependents edge. The design, the cost decision and every test that had
+to change are written up in **§4 D2**. The paragraph above stands as the measurement that produced the
+decision; the fixture it describes (`remaining-correctness.spec.ts` test 5 needing Apply Names to have
+anything to be about) no longer applies — that test now asserts the stored NAME directly and keeps
+Apply Names as an IDEMPOTENCE check.
+
+### 2q. The Animation play pill covers A1:C2 and swallows clicks — FIXED 2026-08-09 (D4 decided: viewport-pinned, with a close control)
+
+**Resolution.** The pill is no longer a grid object. It is viewport-pinned DOM chrome registered
+through `@api/ui`'s overlay registry and positioned over the grid canvas's bottom-left corner, with
+a visible close control that **unloads the driver**. It claims no cell, is not in the grid's
+hit-test path at all, and can be dismissed. The `clearDriver` half — the more important one — landed
+with it: three product routes now exist where there were none. Full write-up in §4 D4.
+
+The record of the defect is kept below because the class is the lesson: *a control that lives in
+cell coordinates competes with the data for the one resource the grid cannot spare.*
+
+---
+
 
 Found as the root of the functional-suite cascade (§3a), but it is not a test artifact.
 `extensions/Animation/overlay/playOverlay.ts` anchors the play pill at a FIXED SHEET POSITION near
@@ -1817,12 +1843,283 @@ only call that unloads it and **nothing in the product calls it**: not the panel
 not closing the panel, not `new_file`. Once a driver is loaded, the pill is on A1:C2 until the
 page reloads. That is why the E2E cleanup needs a `window` handle on the engine
 (`__CALCULA_ANIMATION__`); the handle exists because the product has no route, and it should be
-removed when the product grows one.
+removed when the product grows one. *(It has one now, and the handle is deleted — see D4.)*
 
 Recorded, not fixed: where the pill should live — viewport-pinned to a corner, given a close
 affordance, or made click-through with a drag handle — is an owner decision about a visible piece
 of UI, not a slip-in. What is NOT in question is that "a floating control sits on A1, eats the
 click, and cannot be dismissed" is wrong in all three designs.
+
+### 2r. Typing into a closed cell committed ONE character — FIXED 2026-08-09
+
+**Measured, not inferred.** `type("hello")` into a closed cell committed **`"o"`**. `type("tabbed")`
+committed **`"b"`**. Typing after F2 — editor already open — was always fine. So the loss was
+specific to the open-then-receive-keystrokes path, and it predates the `<input>`→`<textarea>` swap.
+
+**Root cause: opening the editor is asynchronous, and every keystroke that lands during the open
+arrives at the grid CONTAINER, not at the editor.** `handleContainerKeyDown` answers a printable key
+with `await startEditing(key)`, and `startEditing` awaits TWO IPC round trips — `checkEditGuards`
+then `getMergeInfo` — before it dispatches the editing state. React then has to render the editor,
+and the editor takes focus from a `setTimeout(0)`. The window is wide, and the container lost keys on
+BOTH sides of it, by two different mechanisms:
+
+* **Before the editing state existed.** The container had no way to know an open was already in
+  flight. `globalIsEditing` is raised *after* the first await, so the second keystroke either found
+  it still false (and called `startEditing` again outright) or found it true with `editing === null`
+  and hit the "self-healing for stuck editing state" branch, which cleared the flag and then fell
+  through to — `startEditing` again. Each call dispatched a fresh REPLACE-mode entry holding only its
+  own single character, and the last dispatch won. Five keystrokes, five overlapping opens, one
+  surviving character. That is the `"o"` and the `"b"` exactly.
+* **After the state existed but before the editor had focus.** The container's "editing is in
+  progress, let the editor handle it" early-return dropped the key on the floor — while the editor
+  that was supposed to handle it did not yet have focus.
+
+**The fix: an open window, latched synchronously, released when the editor is ready.**
+`core/lib/editOpenBuffer.ts` holds a latch engaged by the keystroke that starts the open, BEFORE
+`startEditing` awaits anything — which is what makes the next keystroke see an open in flight instead
+of starting a second one. While it is engaged the container owns the keyboard: text keys extend the
+pending entry (in order), `startEditing` seeds the editing state from that entry instead of from its
+own argument, and once the state exists each further key is pushed straight into it. Enter / Tab /
+Escape cannot be applied to a string, so they are latched and REPLAYED by the editor through its own
+handlers the moment it is ready — which keeps "type a value and hit Enter immediately" working at
+speed without a second implementation of what those keys mean.
+
+Three details worth keeping:
+
+* **No timing hack.** Nothing waits for a duration to decide what to do. The single timer in
+  `editOpenBuffer` is a failsafe that only fires if the editor never becomes ready AT ALL; remove it
+  and correct behaviour is unchanged. It is re-armed by every buffered key, so it can never fire
+  while someone is typing. The deterministic release is the editor's own focus effect, which now
+  calls `endEditorOpen()` whether or not it actually takes focus — a latch that outlived its editor
+  would swallow the keyboard, and that is a worse failure than the bug being fixed.
+* **The replay runs from a later render, deliberately.** `commitEdit` closes over `editing.value`
+  from the render that created it. Replaying Enter inline from the focus effect would commit the
+  value as it was one render ago, so the latched key is put into component state and executed from an
+  effect that already sees the final entry and the matching `onCommit`.
+* **IME is untouched, on purpose.** A composing keydown (`isComposing`, or `keyCode === 229` as
+  WebView2 reports it) is never buffered and never opens the editor: the composed text arrives later
+  as an input event on whatever holds focus, and taking the keydown would leave it nowhere to land.
+
+Enter/Alt+Enter/Escape/Tab semantics are unchanged — the three edit-ending keys were refactored into
+one `runTerminalKey` shared by the live handler and the replay, and the 47 existing editor tests are
+green against it.
+
+**Residual, documented.** Characters typed AFTER an Enter but still inside the open window belong to
+the next cell, and the buffer refuses them rather than folding them into the value on its way to the
+backend (three keystrokes inside one animation frame, including a commit). Alt+Enter inside the
+window is handled as text — the caret is always at the end there — and Ctrl+Enter is passed through
+to the container's existing fill-range branch.
+
+**Tests.** `core/lib/__tests__/editOpenBuffer.test.ts` pins the key classification (15).
+`core/components/Spreadsheet/__tests__/editorTypingRace.test.tsx` (13) is the oracle: it assembles
+the REAL container-keydown → `useEditing` → `InlineEditor` wiring and holds the IPC round trip open
+so the race is forced rather than hoped for. **11 of its 13 fail against the pre-fix code**; the two
+that pass are the two that must not change (IME, F2). It covers the whole word committing in order,
+the word AND its Enter arriving inside the window, Shift+Enter / Tab / Escape at that speed,
+Backspace correcting rather than clearing the cell, the phase-2 window (editor mounted, not yet
+focused — forced with a faked `setTimeout` while React's MessageChannel scheduler keeps running), and
+`getMergeInfo` being called exactly ONCE no matter how fast the word is typed, which is the direct
+sentinel for the overlapping-opens regression.
+
+**Live proof — written, NOT yet run.** `e2e/tests/inline-editor-live.spec.ts` gains tests 7 and 8:
+type `"hello"` into a closed cell at full speed and assert the editor holds all of it and commits it,
+and type `"tabbed"` + Enter with no pause at all and assert the cell reads `tabbed` and the cursor
+moved to B31. Those two are the bug report verbatim. They deliberately do NOT use the file's
+`typeIntoCell` helper — that helper exists only because of this bug, and its header now says so and
+points at these two. **The functional E2E suite was not run for this change** (an overnight run with
+other agents working in the same tree; launching the app would have collided), so these two are
+written against the fix but unverified live; the six pre-existing tests in that file are unchanged
+and still pass through the helper. The same open-window workaround still sits in
+`formula-autocomplete.spec.ts` (`=SU`) and `journeys/census-followon.spec.ts` — both now redundant,
+both left alone as they belong to other suites.
+
+Also unchanged and still stale: the `editing mode - inline editor visible` visual golden, which the
+`<input>`→`<textarea>` swap moved and which was never re-recorded. Nothing here changes the editor's
+appearance, and captures were out of scope for this batch.
+
+### 2s. Structural edits re-point references and never re-evaluate — FOUND 2026-08-09 by hardening the census, recorded not fixed (see D8)
+
+`insert_rows`, `insert_columns`, `delete_rows` and `delete_columns` shift every cell, every
+dependency map and every formula reference, then stop. No shared recalculation entry point is
+reached — the only `recalculate_*` call in them is `grid.recalculate_bounds()`, which is geometry,
+not evaluation.
+
+That LOOKS value-preserving, and it is why nothing has caught it: each cell's cached value moves
+along with the cell, and each formula is re-pointed so it still means the same cells. It is not
+quite true. A range endpoint **shifts** — `shift_formula_row_references` turns `A1:A5` into `A1:A6`
+when a row is inserted inside it — so a formula whose result depends on the SHAPE or POSITION of its
+own reference keeps a number its own rewritten AST no longer produces:
+
+- `=ROWS(A1:A5)` = 5, insert a row inside the range, the stored formula is now `=ROWS(A1:A6)` and the
+  displayed value is still 5;
+- likewise `COLUMNS`, `ROW()`/`COLUMN()` in a cell that moved, `COUNTBLANK` over a range that grew,
+  `OFFSET` with relative anchors, `CELL("row")`.
+
+Excel recalculates after a structural edit, and the owner's standing rule is that Excel parity
+decides what this register does not. So parity says these four should seed the cascade.
+
+**Deliberately NOT done in the integration pass.** The seed set for a row insert is every cell below
+the insertion point, so this is a performance decision of exactly the kind D1 and D3 were made to
+settle with a measurement, and a row insert is one of the most frequent gestures in the product. It
+is raised as **D8** rather than guessed at.
+
+**How it was found, which is the part worth keeping.** Not by reading the four functions — by
+sabotage. The census enumerates functions whose body textually contains `.set_cell(` / `.clear_cell(`,
+and these four write through `shift_per_sheet_cell_stores`, so the census had never enumerated them
+at all. See §3ap.
+
+### 2t. A stored name SHOUTS after save/reload — `BudgetTotal` -> `BUDGETTOTAL`. FOUND LIVE 2026-08-09 by the scenario oracle, a REGRESSION FROM D2 — **FIXED 2026-08-09** (the D1–D7 live-proof phase)
+
+**The scenario suite was 24/24 at the D1–D7 baseline. It is now 18 passed / 1 failed / 5 did not
+run**, and the failure is not a golden — it is the `save-reload-round-trip` oracle:
+
+```
+[save-reload-round-trip] Workbook state changed across save/reload. 1 differences;
+  first: sheets[0].cells.2:5.f: "BudgetTotal" -> "BUDGETTOTAL"
+```
+
+**Root cause, and it is two lines.** `core/parser/src/lexer.rs:196` normalises every bare identifier
+to upper case (`Token::Identifier(ident.to_uppercase())`), and `core/engine/src/ast_render.rs:98`
+renders `Expression::NamedRef { name, .. }` as whatever the AST happens to hold. At ENTRY the cell
+keeps the text the user typed, so the formula reads `BudgetTotal`; on RELOAD the formula is re-parsed
+and the name comes back out of the lexer in capitals.
+
+**This is D2's regression, and it could not have existed before D2.** `update_cell` used to resolve
+names at entry, so a `NamedRef` never reached storage and there was no bare identifier to round-trip.
+D2 deliberately made the name survive into the document — which is right, and is what Excel does —
+and in doing so it exposed the lexer's uppercasing on a path that had never been exercised.
+
+**Severity: display and round-trip stability, NOT evaluation.** Every lookup in
+`name_resolution.rs` keys on `name.to_uppercase()`, so `BUDGETTOTAL` still resolves to the same
+range and the values are unaffected. What breaks is (a) the user's formula is rewritten in capitals
+by the act of saving and reopening, and (b) the save/reload oracle fires, which aborted the
+`budget-model` scenario and left its remaining 5 phases unrun.
+
+**Excel parity decides the fix, and it is not "stop uppercasing".** Excel canonicalises a typed name
+to the spelling of the DEFINED name — type `=budgettotal` against a name defined as `BudgetTotal`
+and Excel rewrites your formula to `BudgetTotal`. It never shouts it. So the fix is to render a
+`NamedRef` through the workbook's name table (which already holds the authored spelling) rather than
+to preserve whatever case the lexer saw; that also makes entry and reload agree by construction,
+which preserving raw case would not.
+
+**NOT FIXED HERE, deliberately.** The candidate change is in the lexer's identifier path, which
+every function name, `TRUE`/`FALSE` and every structured reference also travels, behind 1,282 core
+tests — and the reason this was found at all is that the last person to touch this area shipped a
+defect the unit suites could not see. That is an argument for a measured fix in daylight, not a
+4 a.m. guess at the end of a re-record pass. This entry is the measurement.
+
+#### THE FIX — 2026-08-09, and it is the one this entry predicted
+
+**Excel canonicalises a typed name to the DEFINED name's spelling; so does Calcula now, on the way
+back IN as well as on the way in.** `restamp_name_casing` already existed and already ran at entry
+(`split_entered_formula`); what was missing was a caller on the LOAD path. `open_file` now calls
+`restamp_workbook_name_casing` (`persistence.rs`) immediately before
+`rebuild_all_dependencies`, which walks the active-sheet mirror **and every sheet in
+`state.grids`** and hands each grid to `name_resolution::restamp_grid_name_casing`.
+
+**It is the SAME function doing the work at both ends**, which is the whole reason this is a fix
+rather than a second recipe: entry and reload cannot disagree about what a name is called, because
+they call the same restamp against the same table.
+
+- **Not "stop uppercasing".** The entry deliberately warned against touching the lexer's identifier
+  path — every function name, `TRUE`/`FALSE` and every structured reference travels it, behind 1,282
+  core tests. Nothing in the lexer or the parser was touched.
+- **Cosmetic by construction.** It rewrites the `name` field of `NamedRef` nodes and nothing else.
+  Every lookup on this path uppercases (`named_ranges` is UPPERCASE-keyed, `resolve_names_in_ast`
+  uppercases, the evaluator's LET/LAMBDA scope uppercases), so no value, edge or resolution can move.
+  LET/LAMBDA **binding positions are skipped** — they are locals, and respelling one after a workbook
+  name that merely collides with it would tell the reader the wrong thing.
+- **Cost.** Gated by `ast_has_named_refs`, so a formula that names nothing is skipped without a
+  render, and a workbook with no defined names at all returns on the first `is_empty()`.
+- **Not a cell write.** It mutates an AST a cell already holds, in place; it calls neither `set_cell`
+  nor `clear_cell`, so it is not a member of the recalculation census's population and needs no
+  exemption.
+
+**Tests — written to FAIL first.** `app/src-tauri/src/name_casing_reload_tests.rs`, four tests. The
+first asserts the SHOUTED spelling as a **precondition** (`Cell::new_formula("=BudgetTotal*2")`
+renders `BUDGETTOTAL*2`) before restamping, so it cannot pass against a parser that never
+upper-cased anything. The others pin that the DEFINED spelling wins over whatever was typed
+(`=budgettotal` → `BudgetTotal`, which is Excel's rule and the reason this is a restamp and not a
+"preserve what the user wrote"), that nothing but a defined name moves — including a `LET` local
+called `rate` in a workbook that defines `Rate` — and that an empty name table is left exactly
+alone. They live in their own `_tests.rs` file **because the census enumerates any function body
+containing a `set_cell` call and skips `*_tests.rs`**; four grid-building fixtures would otherwise
+have shown up as unclassified cell writers.
+
+**Proved LIVE**, which is how the defect was found in the first place: `owner-decisions.spec.ts` D2
+defines a MIXED-CASE name (`OwnerDecisionRate`), types `=OwnerDecisionRate`, saves, opens a fresh
+document, reopens the file and requires the formula back **exactly**. An all-caps name would have
+satisfied that assertion whether or not the restamp existed. Measured before the fix on the same
+running app: `=OwnerRate*2` saved, reopened as `=OWNERRATE*2`.
+
+**Reach, checked rather than assumed.** The restamp is on `open_file`, and `open_file` is also the
+route an AutoRecover snapshot takes — `format_extension` maps `.cala.recovery` to the Calcula reader
+precisely so that it does, and the AutoRecover extension only ever *writes*. So recovery is covered
+too. The `.calp` overlay load (`calp_commands.rs`) rebuilds ASTs by its own route and was **not**
+audited for this; a name authored in mixed case and arriving through a distributed overlay may still
+come back shouting. That is the same one-line call in a different function, and it is left for
+whoever next has that path under test rather than asserted on a path nobody ran.
+
+### 2u. `vba-idioms-wave4` tests 7 and 8 "hang" — the BACKEND was wedged, not the tests. **ROOT-CAUSED AND FIXED 2026-08-09**
+
+Not in the stated baseline (526 / 13 / 11 named no `vba-*` failure), and seen on every run of this
+pass:
+
+| test | result |
+|---|---|
+| `vba-idioms-wave4.spec.ts:1226` — `removeDuplicates on AA80:AA86` | 10.0m timeout, 3 runs of 3 |
+| `vba-idioms-wave4.spec.ts:1303` — `onBeforeDoubleClick veto` | 10.0m timeout, 2 runs of 2 that reached it |
+
+**It is a test hang, not a crash — measured, not inferred.** In the third run the app was still
+serving CDP *after* both timeouts, which rules out the reading the first run invited. The 10.0m is
+the spec's own `test.setTimeout(600_000)` (line 506) being spent, not a slow test.
+
+**What the first run's "app died" actually was.** The app went down in two of the three runs, always
+~46 minutes after launch and always with the launcher's own background task reported as `killed` —
+i.e. the harness reaping the long-lived `yarn tauri dev` job, which takes `app.exe` with it. The
+signature matches §3af's method: no panic in the tauri log, no Windows Application event, and the
+one exit code that was observable was **1**, which §3af measured as `taskkill /F /T /PID` — the
+idiom the teardown uses — and NOT the `0xffffffff` of `Stop-Process` nor the `0xc0000409` of a Rust
+abort. **The product did not crash.** Everything after the hang in those runs is cascade.
+
+
+#### THE ROOT CAUSE — a leaked read guard in `remove_duplicates`, and it wedged the whole backend
+
+The entry above was right that this is not a crash and right that the app kept serving CDP. It was
+wrong about the shape: **the tests were not slow and were not hanging on the UI.** The backend
+command they drive never returned, and while it was stuck **every other Tauri command timed out** —
+measured, not inferred: with `remove_duplicates` outstanding, `get_viewport_cells`, `get_sheets`,
+`get_style`, `get_all_tables`, `get_undo_redo_state`, `is_file_modified` and even
+`get_calculation_mode` all blocked for 5 s and were abandoned. That is one wedged command taking the
+dispatcher with it, which is why test 8 — which shares the file and runs after 7 — died too, and
+why it looked like two independent hangs.
+
+**Reproduced with no macro, no editor and no Playwright**: a direct `remove_duplicates` invoke over
+CDP against a freshly launched app, on the same seven cells, never came back.
+
+**The defect.** `commands/data.rs::remove_duplicates` acquires the three name tables for the
+dependency rebuild — `named_ranges`, `tables`, `table_names`, all `read()` — at **function-body
+scope**. They therefore live past the explicit `drop()` list and straight through PHASE B, which
+calls `recalc_after_active_sheet_bulk_rewrite`, which takes **the same three locks for read again**.
+A recursive read on a writer-preferring `RwLock` is a deadlock the moment any writer queues in
+between, and nothing recovers it. `sort_range` — which owns the identical
+rebuild-then-seed shape and the identical comment about acquiring the tables at the call site —
+already scopes its guards inside the match arm and is unaffected. This one did not.
+
+**The fix is the braces**: the rebuild is now enclosed in its own block, so the guards end where the
+rebuild ends. One-line change in effect, with the reason written at the site (including "do not
+un-nest them") because the next person to tidy that function is the risk.
+
+| | before | after |
+|---|---|---|
+| direct `remove_duplicates` invoke | never returned (60 s abandoned; every other command blocked) | **7 ms**, `duplicatesRemoved: 3` |
+| `vba-idioms-wave4` test 7 | 10.0 m timeout, 3 runs of 3 | **14.6 s, passes** |
+| `vba-idioms-wave4` test 8 | 10.0 m timeout | **9.5 s, passes** |
+
+**Why no unit test caught it.** All eight of the D3 seeding changes are `State`-taking commands that
+cannot run in-process, so their coverage is split into a behavioural half and a source-wiring half
+(§4 D3). A source-wiring test can assert that the entry point is *called*; it cannot assert which
+guards are still alive when it is. The thing that found this was running the product.
 
 ## 3. Test-infrastructure decisions
 
@@ -1847,7 +2144,7 @@ way the notes described, because the notes described the wrong entry point.
 | 4a | undoing a row group removes the outline GUTTER from the canvas | Ctrl+Z; `outlineBarWidth` 0 again AND the left strip byte-identical to the frame before the group existed | the grouped frame must differ first |
 | 4b | undoing a hyperlink takes the pointer CURSOR with it | real mouse hover, `getComputedStyle(...).cursor` | the neighbour was never linked |
 | 4c | shape create -> undo -> redo on the canvas; deleting takes its object script; undoing the delete brings back the control without the dead binding | real Insert > Shapes gallery, the registered controls provider's own `deleteControl`, real Ctrl+Z / Ctrl+Y, canvas fill fraction in both directions | a real script binding is asserted present before the delete |
-| 5 | undoing a named-range change restores the value the formula had | real Formulas > "Apply Names...", then repoint + F9 + Ctrl+Z | 111 -> 222 -> 111 on the STORED value and on G1's pixels; the pixel probe is shown wired by requiring the 222 frame to differ |
+| 5 | undoing a named-range change restores the value the formula had | the typed formula's STORED form is read back and must be the NAME (D2); Formulas > "Apply Names..." then stays as an idempotence check; repoint + F9 + Ctrl+Z | 111 -> 222 -> 111 on the STORED value and on G1's pixels; the pixel probe is shown wired by requiring the 222 frame to differ |
 | 6 | display flags drive the renderer, a backend-only write drives it too, `new_file` resets it, and it survives save/reload | real View > Headings; dark-ink fraction in the canvas's top-left corner on an empty sheet | the ink must be there first; selection parked outside the probe so its accent chrome cannot contribute |
 | 7 | a floating control is clickable with the headings OFF | real Insert > Shapes, real mouse clicks at the painted centre in both heading states | a click well outside the painted box must select NOTHING, in both states |
 
@@ -2433,6 +2730,15 @@ Three changes, in descending order of what they bought.
    `__CALCULA_GRID_STATE__` / `__CALCULA_PANEL_REGISTRY__`: `__CALCULA_GRID_OVERLAYS__`
    (shell/bootstrap.ts) and `__CALCULA_ANIMATION__` (the Animation extension's `activate`).
 
+   **`__CALCULA_ANIMATION__` was DELETED 2026-08-09 (D4), and the reason is the better half of the
+   rule above.** The rule says live state must be reached through a published handle — true, and it
+   stays true. But that handle existed only because the PRODUCT had no way to unload a driver, so
+   the test surface was compensating for a missing feature. Once `clearDriver` got real routes
+   (a close control on the pill, an Unload button in the panel, the document-boundary events), the
+   specs drive those instead and the handle has no remaining caller. **The rule to add: before
+   publishing a handle so a test can reach live state, ask whether the test is reaching for
+   something a USER cannot reach. If so, the missing route is the bug.**
+
    **A fourth residue class, found while fixing the third: THE OPEN PANEL SURVIVES.**
    `animation.spec.ts` opens View ▸ Animation Timeline and never closes it, so the panel is open
    for the rest of the run — and its width is persisted, so it is still open after the app is
@@ -2996,7 +3302,9 @@ is the register's own recorded pattern, and this is its **fifth** instance: *a v
 reasoning about a symptom is a hypothesis.* It also lands on the two items the previous pass listed
 as open, and settles both: the `formula-autocomplete` four had a root, and it was not the app.
 
-**The other eleven failures are one class, and it is already D5.** Every remaining failure in the run
+**The other eleven failures are one class, and it is already D5.** (D5 is now CLOSED — see §4. The
+scrollbars are out of frame and the marching ants are parked; the re-record it triggers is 40
+goldens, not eleven, because cropping changes the image size.) Every remaining failure in the run
 is a `toHaveScreenshot` comparison (each has a `-diff.png`; the four autocomplete failures have
 none). They are residue plus chrome: leftovers from sibling specs sitting in the captured viewport
 (the `grid` fixture does NO per-test cleanup — `resetGrid` is opt-in, and `edge-cases` parks at
@@ -3092,7 +3400,7 @@ just freezes the drift into the baseline.
 | 4 `formula-autocomplete` | ROOT — **fixed** | tag-based wait, above; 4/4 green cold after |
 | 6 `worker-extension*` | ROOT — **fixed** | contribution ceiling, §3an; 6/6 green cold after |
 | 2 `evaluate-formula`, 1 `go-to-special` | **CASCADE** | pass cold in isolation; their diffs carry sibling residue (`edge-cases` parks at AE:AH, exactly where `evaluate-formula` shoots) |
-| 2 `paste-special` | ROOT, but **no product defect** | still fails cold ALONE; on a clean workbook the entire diff is the marching-ants copy border (which `screenshotGates.ts` already names as the only non-deterministic thing in either suite) plus the scrollbar thumb — D5's class |
+| 2 `paste-special` | **CLOSED 2026-08-09 by D5** | was: fails cold ALONE, the diff being the marching-ants copy border (named by `screenshotGates.ts` as the only non-deterministic thing in either suite) plus the scrollbar thumb. Both are gone — the border is parked by reduced motion, the scrollbars are out of frame. Two cold runs now produce a byte-identical capture. It still fails until the golden is re-recorded, which is now a mechanical crop, not a chase |
 | 2 `state-consistency` | **FLAKY, not a regression** | passed in run 1 (1.1 min), failed in run 2 on the SAME build. The invariant is named `page-crashed`, but the app did **not** crash: it was still running, still on CDP and still serving commands after the run, with **zero panics** in the whole log. It is Playwright's "Target page, context or browser has been closed" against a random 64-step monkey sequence (seed 1786220272147) |
 | 2 `protection`, 1 `ribbon-tabs`, 3 `scrolling` | **NOT individually isolated** | the per-spec cold loop hung on `protection` and was stopped to protect the remaining required runs. `scrolling`'s diff shows a whole selection block differing — the `clickCell` drift signature — but that is an inference, not a measurement, and is recorded as such |
 
@@ -3100,6 +3408,333 @@ The last row is deliberate. Everything else here was measured; that one was not,
 now been wrong six times by reasoning where it could have run something.
 
 ---
+
+### 3ap. The D1–D7 integration pass — contract verification, and the two things it found (2026-08-09)
+
+Seven decisions landed from separate sessions. This pass integrated them, re-ran every unit suite,
+and made each contract FAIL before trusting it. Both findings came from sabotage, not from reading.
+
+**Contract (a) — ONE cascade, and the census's teeth.** Verified by deleting a real recalc call, not
+a synthetic one:
+
+- deleting the `recalc_after_active_sheet_bulk_rewrite` call from
+  `commands/structure.rs::relocate_cell_references` made the census fail naming exactly
+  `commands/structure.rs::relocate_cell_references`. Restored; green.
+- **deleting the same call from `tables.rs::set_totals_row_function` changed NOTHING — the census
+  passed.** That is the finding. The census enumerates functions whose body textually contains
+  `.set_cell(` / `.clear_cell(`, and `set_totals_row_function` contains neither: it writes through
+  `write_table_formula_cell`, which is EXEMPT *precisely because* "`set_totals_row_function` and
+  `toggle_totals_row` seed the cascade over every cell they hand it". The exemption's reason was a
+  claim about another function that nothing verified, so the two halves could be removed one at a
+  time and no test would ever fail. An exemption whose reason names a caller must check that caller.
+
+  **Closed.** `DELEGATING_HELPERS` in `bulk_rewrite_recalc_tests.rs` lists the nine helpers whose
+  recorded reason is "my CALLER recalculates"; calling one now counts as writing a cell, so the
+  caller must itself recalculate or earn its own exemption. Re-running the sabotage now fails naming
+  `tables.rs::set_totals_row_function`. Three new assertions in
+  `the_census_detector_actually_fires_on_a_cell_writer_that_does_not_recalculate` pin the helper
+  path, including that a helper's own definition is still judged by its body.
+
+  The hardening exposed six previously-unenumerated functions. Two were second-level helpers with
+  clean stories (`apply_override_value_to_grid` — all three override commands run
+  `recalculate_sheet_values`; `shift_per_sheet_cell_stores`). **Four were the structural edits, and
+  they are a real residual: §2s / D8.** `EXEMPT` is now **54 entries**; every one has a written
+  reason, and the four structural-edit entries say plainly that they are recorded, not waived.
+
+**Contract (b) — F9 vs Shift+F9, and the save path.** `calculate_now` → `CalcScope::Workbook`,
+`calculate_sheet` → `CalcScope::ActiveSheet`, both through the one `run_calculation_pass`.
+`persistence::save_file` calls `calculate_now` — workbook-wide, chosen deliberately (Excel
+recalculates the workbook before saving) and pinned by
+`calculate_before_save_recalculates_the_workbook`, with D1's measurement behind it: fixture A shows
+workbook scope is ~30% FASTER than the pass it replaced on identical work, because the old F9 ran two
+walks and the new one runs one.
+
+**Contract (c) — a stored name has an edge.** Verified with teeth: stubbing the body of
+`recalc_after_name_change` fails **five** behavioural tests, including
+`repointing_a_name_recalculates_every_formula_that_reads_it` and
+`a_repoint_cascades_into_the_readers_dependents`. Restored; all 21 D2 tests green.
+
+**Contract (d) — error literals round-trip, `as_literal`/`from_literal` the single authority.**
+D7 reported "no `#{Debug}` arm remains anywhere". **Three remained**, and pointing the grid at
+`as_literal` had turned two of them from harmless into user-visible, because they had been agreeing
+with the *wrong* spelling. Each was made to fail first, then fixed:
+
+| site | was | consequence |
+|---|---|---|
+| `Grid::get_cell_display_value` (core/engine) — **Find/Replace** | `#DIV0` | searching for the `#DIV/0!` the grid paints returned NOTHING; the only string that matched was one no surface displays |
+| `format_value_for_ai` (calcula-format) — **AI context serializer** | `#DIV0` | a model was told a fact about the workbook that is not true, and could not correlate it with the literal the user quotes |
+| `saved_value_display` (calp) — **published HTML report** | `##DIV/0!` | `SavedCellValue::Error` already holds the canonical literal *including* the `#`; the export prefixed another. Every error cell in every published report had a doubled hash — pre-existing, on the one surface a subscriber sees and cannot correct |
+
+Three new tests, one per site, each covering all nine variants; `Limit`/`Blocked`/`Conflict`/`NA`
+keep their explicit arms and the round-trip test still asserts
+`from_literal(as_literal(v)) == v` for all nine. The `as_literal` doc comment claimed the last
+fallback was gone; it now names all three and what each broke.
+
+**Contracts (e), (f), (g).** Inline editor: 75 tests green across 5 files (the 47 pre-existing plus
+`editOpenBuffer` 15 and `editorTypingRace` 13) — Enter commits, Escape cancels, no keystroke dropped
+while the editor opens. Animation: 12 files / 58 tests; frames still go through
+`DocumentEffect::transient` under a filed `anim_snapshot` token, and the pill's unload asserts its
+own `anim_restore` does not dirty the document. `DocumentEffect`: `cargo check --lib --tests` is 0
+warnings and `is_modified_has_no_writer_outside_document_effect` still holds. Capability vocabulary
+unchanged at **16** ids, pinned by `capabilityIds.test.ts`.
+
+**Orphan / silent-failure sweep.** Every export added by the batch has a real non-test consumer
+(`editOpenBuffer` ×6, `pillGeometry` ×4, `name_resolution` ×7 — `needs_name_resolution` is consumed
+by `eval_ast` inside its own module, which is its documented role as the allocation-free gate). No
+empty catch blocks, no `any`, no TODO/FIXME in the new files.
+
+**One flake, characterised not waived.** `bi::model_editor::tests::an_abandoned_script_batch_is_reclaimed_and_rolled_back`
+failed once in a parallel app-lib run while three other builds were running, and passed 3/3 in
+isolation and in both subsequent full parallel runs. It is a wall-clock reclaim test, untouched by
+this batch. Recorded so a recurrence is recognised rather than re-diagnosed.
+
+
+### 3aq. The golden re-record list handed to the next phase (2026-08-09)
+
+**No golden was re-recorded in the integration pass.** This is the expected-diff list; the next phase
+triages against it, and **a golden diff that is NOT on this list is a possible regression, not a
+re-record.**
+
+**A. The 40 `takeGridScreenshot` goldens — D5, framing.** `takeGridScreenshot` now frames
+`[data-grid-canvas-layer]` instead of `[data-grid-area]`, which excludes the two scrollbars and the
+corner box. The image SIZE changes (1232x556 → 1218x542, measured live), so **every** capture through
+that helper moves — not only the eleven that were failing on scrollbar-thumb position. Counts
+re-derived independently in this pass from the specs themselves and they agree with D5:
+
+| spec | n | goldens |
+|---|---|---|
+| `tests/scrolling.spec.ts` | 4 | `scroll-before`, `scroll-after-wheel-down`, `scroll-distant-cell-z100`, `scroll-row-5000` |
+| `tests/dimensions.spec.ts` | 6 | `dimensions-before-width`, `dimensions-after-set-col-width`, `dimensions-before-row-height`, `dimensions-after-row-height`, `dimensions-after-col-width`, `dimensions-mixed-widths` |
+| `tests/grid-rendering.spec.ts` | 5 | `empty-grid-default`, `cells-with-text`, `formatted-cells-bold-italic`, `before-clear`, `after-clear-b1` |
+| `tests/paste-special.spec.ts` | 2 | `paste-special-values-result`, `paste-special-formatting-result` |
+| `tests/protection.spec.ts` | 2 | `protection-sheet-protected`, `protection-allow-edit-cleared` |
+| `tests/go-to-special.spec.ts` | 1 | `go-to-special-blanks` |
+| `tests/evaluate-formula.spec.ts` | 2 | `evaluate-formula-init`, `evaluate-formula-constant` |
+| `visual/core-visual.spec.ts` | 8 | `core-empty-canvas`, `core-data-entry`, `core-selection-single`, `core-selection-range`, `core-editing-mode`, `fmt-bold-italic-underline`, `fmt-number-formats`, `fmt-alignment` |
+| `visual/workflow-visual.spec.ts` | 10 | `workflow-table-headers-bold`, `workflow-table-complete`, `workflow-formula-chain-initial`, `workflow-formula-chain-updated`, `workflow-undo-step1`, `workflow-undo-step2`, `workflow-undo-step3-restored`, `workflow-undo-step4-redone`, `workflow-copy-paste-result`, `workflow-keyboard-entry` |
+
+**Unaffected, and worth stating so an unexpected diff there is read correctly:** every
+`takeGridRegionScreenshot` golden (`tables-*`, `notes-*`, `comments-*`, `go-to-special-formulas-sheet`
+— that helper already anchored on the canvas) and every whole-window checkpoint (`core-empty-grid`,
+`empty-grid-full-window`, the menu / ribbon / status-bar / scenario captures).
+
+**B. Marching ants — same 40, second cause, and it is now FIXED not masked.** The marquee's dash
+phase advances on wall-clock, so a re-record would only have picked a different phase. `GridCanvas`
+now honours `document.documentElement.dataset.reducedMotion` (the app's own accessibility switch,
+which `skinLoader` had always stamped and *nothing had ever read*), and `waitForGridStable` turns it
+on. Two independent cold runs produced a byte-identical `grid-paste-special-values-result`.
+
+**C. `__screenshots__/tables.spec.ts/grid-tables-totals-row-sum.png` — D3, already re-recorded, with
+cause.** The old baseline was recorded while the totals row rendered BLANK; it encoded the defect that
+the totals cell held an uncomputable AST. Keeping it would have made the suite assert that the totals
+row shows nothing.
+
+**D. `editing mode - inline editor visible` — stale from BEFORE this batch.** The `<input>`→`<textarea>`
+swap moved it and it was never re-recorded. D6 changed no appearance; this is the one known-stale
+baseline the batch inherited rather than caused.
+
+**E. Residue only, no direct mover: D7.** No spec that calls `takeGridScreenshot` writes an
+error-producing formula, so the literal respelling moves no golden on its own. The one exposure is
+residue — `edge-cases` leaves two circular cells at AH1:AH2 inside the viewport `evaluate-formula`
+captures, which now read `#CIRCULAR!` — and those two goldens are already in list A.
+
+**Expected to move NOTHING: the integration pass's own changes.** Find/Replace matching, the AI
+context serializer, the `.calp` HTML export and the census hardening are all non-rendering. If any
+golden outside A–D moves, that is a finding.
+
+### 3ar. The re-record pass — 40 goldens recorded, 3 refused, and what the refusals were (2026-08-09)
+
+**§3aq's prediction held exactly: 40 `takeGridScreenshot` goldens moved, and nothing else did.**
+Recorded in two cold runs, each reproducing the conditions its own baselines were recorded under —
+visual is a cold app with `--project=visual` first; functional is a cold app with the FULL ordered
+`--project=functional`, because those goldens encode the residue of the specs that precede them and a
+partial run would have baked in different content.
+
+| set | n | recorded in | verified by |
+|---|---|---|---|
+| `core-visual` grid captures | 8 | cold visual record run | independent cold run, **18/18** |
+| `workflow-visual` grid captures | 10 | same | same |
+| `dimensions` 6, `grid-rendering` 5, `scrolling` 4, `evaluate-formula` 2, `paste-special` 2, `protection` 2, `go-to-special` 1 | 22 | cold full functional record run | independent cold full run, all green |
+
+**The audit was mechanical, not narrative.** Every golden was sha256'd before the pass; the record
+runs used `--update-snapshots`; the hashes were diffed afterwards. That answers "what actually
+changed" with a list instead of a claim. **18 files changed in the visual run and 25 in the
+functional run — 40 expected, 3 not.**
+
+**Attribution, per §3aq's list.** All 40 are the D5 crop: every one changed SIZE, 1232x556 ->
+1218x542, which is the arithmetic-free consequence of framing `[data-grid-canvas-layer]`. Two
+goldens carry a second, visible cause on top of the crop, and both were confirmed by opening the
+images rather than by assuming:
+
+- **`grid-core-editing-mode` — three causes in one picture, all on the list.** The crop; **D7**, where
+  A2 moved from a black left-aligned `#VALUE` to a **red, centred `#VALUE!`** (the second defect D7
+  describes — `isErrorValue` only matches the canonical literals, so the old spelling was not painted
+  as an error at all); and the `<input>` -> `<textarea>` swap, which is why §3aq listed this one as
+  inherited-stale rather than caused by the batch.
+- **`grid-evaluate-formula-*`** — the predicted `#CIRCULAR!` residue from `edge-cases` at AH1:AH2.
+
+**The `clickCell` drift was fixed BEFORE recording, as instructed.** `core-visual.spec.ts`'s editing
+test now reaches A1 through `navigateTo` (the Name Box, a real DOM input) instead of `clickCell`
+(uniform column-width pixel maths that drifts run to run and can leave an ambient RANGE selection —
+measured elsewhere as M3:T19 one run, N3:T20 the next). Recording after a `clickCell` would have
+frozen one side of that coin flip into the baseline. The recorded golden shows the selection on A1
+exactly, and it reproduced byte-stably on the independent verify run.
+
+**The eleven scrollbar goldens are fixed by construction, confirmed rather than assumed.** All four
+`scrolling` goldens plus the other seven ex-thumb failures pass on an independent cold full run, and
+the new captures are 1218x542 with no scrollbar in frame — the cause is gone, not the pixels moved.
+
+#### THREE GOLDENS REFUSED — and refusing them is the finding
+
+`--update-snapshots` rewrote three `ribbon-tabs` goldens that are on no expected list. All three were
+**restored from the pre-pass backup**, because in each case the diff was ambient state the capture
+never chose:
+
+- **`ribbon-home-tab-buttons` and `ribbon-ribbon-tab-home-restored` — the MOUSE POINTER.** Both diffs
+  were the identical 57x26 box at the top left, 1465 px, max channel delta 13. Cropped and magnified,
+  it is a rounded grey **hover background behind the "Home" tab**: the pointer was left wherever the
+  previous action put it. Re-recording cannot fix that — the next spec to leave the pointer elsewhere
+  fails the new baseline exactly as the old one failed.
+  **Fixed at the cause instead**, in the same spirit as `settleCanvasMotion` and
+  `parkSelectionAwayFrom`: `takeRibbonScreenshot` now parks the pointer on the inert bottom-left of
+  the status bar first (not (0,0) — that is the File menu). **The fix costs zero baselines**: with the
+  pointer parked the app renders what the ORIGINAL goldens already held, and both tests pass against
+  the restored files on the verify run.
+- **`ribbon-minimized` — grid content residue, pre-existing, still failing.** A whole-window
+  checkpoint whose frame includes the grid; expected holds a clean A1 = `Before`, actual holds A1 =
+  `3` plus `first second` / `original` / `hello` / `tabbed` left by sibling specs, and different
+  scrollbar thumbs. This is §3ao's fourth residue class, it is one of the baseline's own 13 failures,
+  and **recording it would freeze one run's accumulated residue into a golden that any change of run
+  order breaks.** The honest fix is the one §3ao names — capture from a known state — which is a
+  decision about the spec, not a re-record.
+
+#### Two diffs investigated and dismissed WITHOUT touching a golden
+
+- **`core-empty-grid`** failed on a warm app with the ribbon's font box reading `Calibri` instead of
+  `system-ui` and a vertical-align button lit. Mechanism found in the source:
+  `HomeTabGroupComponent.tsx:182` renders `state.currentStyle?.fontFamily ?? "system-ui"`, and
+  `resetToNewWorkbook` dispatches `dimensions:refresh` / `app:sheet-changed` / `grid:refresh` — none
+  of which re-reads the active cell's style into the ribbon — so `new_file` clears the document while
+  the ribbon keeps the style the previous run left. **Proof it is residue and not a product change:
+  on a cold app the golden was not rewritten at all**, i.e. it matched the existing baseline
+  byte-for-byte. Left alone. It is order-dependent and will fail whenever `visual` is not the first
+  thing after a launch; that fragility is recorded here, not papered over.
+- **`core-formula-bar-display`** failed only in the run whose first two tests died in the fixture on
+  the documented cold-start timeout. Passed on every warm run; no golden touched.
+
+#### The suite still has teeth — proved by breaking it
+
+The established probe, run against the RECORDED baselines: `DEFAULT_THEME.gridLine`
+(`gridRenderer/types.ts`, the value the default light skin actually uses via
+`GRID_BASELINES.light`) changed `#e2e2e2` -> `#c8c8c8` — one shade, the smallest honest defect.
+
+| step | result |
+|---|---|
+| before | probe test **passes** |
+| gridline changed, full page reload | **FAILS** — `core-empty-grid` 39,980 px over the grid region; `grid-core-data-entry` and `grid-fmt-alignment` also fail |
+| reverted | all **18** grid goldens pass again |
+
+A **full page reload** was used, not an HMR patch: `skinLoader`'s `cachedGridTheme` is computed at
+init and survives HMR, so an HMR-only check would have proved nothing.
+
+The single failure remaining after the revert was `core-empty-grid`, and it was attributed rather
+than waved through: its diff bbox is `[128,69]-[441,108]` — entirely inside the RIBBON — with zero
+differing pixels over the grid, i.e. the residue above and not the gridline. Cold, the same suite is
+18/18.
+
+#### Numbers
+
+| suite | baseline | after |
+|---|---|---|
+| visual | 17 passed / 1 failed | **18 passed / 0 failed** (cold) |
+| functional | 526 passed / 13 failed / 11 skipped | 495 passed / **4** failed / 8 skipped at test 507 of ~550, where the run was stopped by hand (§2u) |
+| scenario | 24 / 24 | 18 passed / **1 failed** / 5 did not run — **§2t, a real D2 regression** |
+
+The four functional failures: `ribbon-minimized` (refused above, pre-existing), `state-consistency`
+(the monkey-sequence flake §3ao already classified), and `vba-idioms-wave4` tests 7 and 8 (§2u).
+**Every one of the 13 baseline failures that was a grid golden is now green.**
+
+
+### 3as. Proved LIVE — what `owner-decisions.spec.ts` holds, and the two defects that writing it found (2026-08-09)
+
+D1–D7 were decided, built in separate sessions, integrated in one pass (§3ap) and had their goldens
+re-recorded (§3ar). Through all of it, **no test had ever driven the seven decisions through the
+product on a running app.** Unit tests prove a Rust function seeds a cascade; a React test proves a
+DOM node exists. Neither proves the user sees the new number. This phase supplied that, and found two
+defects every static check had passed.
+
+`app/e2e/journeys/owner-decisions.spec.ts` — **10 tests, 10 passing, 1.6 min.** It lives in the
+JOURNEY project because it changes the workbook's calculation mode and iteration settings, defines
+and deletes names, and saves and reopens the document; the functional specs share one accumulating
+workbook whose goldens encode the residue of everything before them (§3b). Fresh grid real estate
+(CE–CN); the columns other specs park fixtures in are untouched.
+
+| # | test | what it proves that no unit test could | time |
+|---|---|---|---|
+| D1a | a dependent on a NON-ACTIVE sheet updates after F9 and NOT after Shift+F9 | scope, on the rendered grid, under MANUAL calculation — the only mode in which the two commands are distinguishable at all | 13.8s |
+| D1b | a cross-sheet iterative cycle converges under repeated F9 **with no sheet switching** | the measurement that settled D1: six presses used to move it nowhere. **It converged in ONE press** (logged by the test) | 13.8s |
+| D2 | a typed formula keeps its NAME — bar, repoint, delete, save/reload | all four halves, including §2t | 14.7s |
+| D3a | a formula over a pivot's output follows creation AND refresh | the seeding, rendered | 9.2s |
+| D3b | a table operation moves a formula reading the totals row | including the totals row COMPUTING at all — D3's third defect | 7.0s |
+| D4 | the pill claims no grid region, A1 reaches the grid, close unloads | the region claim is read off the REAL `getGridRegions()`; the click assertion also requires playback NOT to start | 8.6s |
+| D5 | the grid capture rectangle excludes the scrollbars, structurally | geometry, not a golden — the thing goldens were unreliable about | 5.6s |
+| D6 | Cells demotes between Styles and Editing, not last | the LIVE registered priorities and the LIVE measured widths, through the product's own `computeWidthDemotions` | 1.0s |
+| D7 | `#DIV/0!` / `#NAME?` render, no `#PARSE`, literals survive save/reload | the painted string and the round trip | 13.2s |
+| — | the TYPING RACE: a multi-character value typed into a CLOSED cell commits whole and in order | §2r, at full speed, four ways (word, word+Enter with no pause, ten characters, a number) | 8.9s |
+
+**Every fixture asserts the WRONG value first.** D1a asserts the cross-sheet dependent is stale at
+`20` before either press; D1b asserts the cycle starts more than 1.0 from its fixed point; D3a and
+D3b assert their readers are `0` before the pivot and the totals row exist; D4 parks the selection at
+CE50 so "A1" cannot be residue; D5 asserts the scrollbars EXIST and are non-degenerate before
+requiring them to be outside the frame; D7 asserts the intermediate document is empty before each
+reload. A stale value that happens to equal the fresh one proves nothing.
+
+#### Three teeth checks, run rather than argued
+
+| what was broken | result |
+|---|---|
+| `cells: collapsePriority` **55 → 99** in `homeTabConfig.ts`, full page reload (HMR does not re-run activation) | D6 FAILS on the live priorities; driving the product's own fit function with 99 produces the demotion order `[… styles, **editing, cells**]` — Cells last, which is the defect verbatim. Restored |
+| `data-grid-canvas-layer` removed from `S.CanvasLayer` | D5 FAILS naming the DO-NOT-BREAK contract (`Expected 1, Received 0`). Restored |
+| the `restamp_workbook_name_casing` call deleted from `open_file`, rebuilt, cold | D2 FAILS on exactly the §2t line: `Expected "=OwnerDecisionRate"`, `Received "=OWNERDECISIONRATE"`. Restored, rebuilt, green |
+
+D1 and D3's teeth are the preconditions inside them (a Rust rebuild per probe is not free, and the
+stale-value assertion fails against the pre-decision behaviour by construction).
+
+#### Where D6 is modelled rather than resized, and why that is the right call
+
+D6 reads the LIVE section list from `panelRegistry` and the LIVE rendered widths of the ribbon
+strip's own children, then narrows the band step by step through `computeWidthDemotions` — the
+product's real decision function. It does **not** shrink the actual ribbon, because `useSectionFit`'s
+own contract is that a demoted section STAYS demoted for the app session (its inline content is
+unmounted, so it cannot be re-measured). Narrowing the real band would leave demoted sections behind
+for every spec after it. Flagged as a deliberate modelling choice, not hidden.
+
+#### Suite numbers — every project from a COLD app
+
+| project | baseline | this run |
+|---|---|---|
+| **functional** | 526 passed / 13 failed / 11 skipped | **542 passed / 3 failed / 11 skipped** (40.2 min) |
+| **macro/VBA**, the 12 specs | 57 / 57 (and 2 hanging 10 min each, §2u) | **57 / 57** (12.8 min) |
+| **journey** | 54 passed / 1 skipped | **64 passed / 1 skipped** (12.2 min) — +10, this file |
+| **scenario** | 24 / 24, but **18 / 1 / 5** after §2t | **24 / 24** (1.8 min) |
+| **visual** | 18 / 18 | **18 / 18** (2.7 min) |
+| vitest | 742 files / 106,165 | **742 / 106,165** |
+| core `cargo test` | 1,285 | **1,285** |
+| `-p script-engine` | 111 | **111** |
+| app-lib | 1,148 | **1,152** (+4, §2t) |
+| `test_pivot` | 56 | **56** |
+
+**The three functional failures, classified — a number without this is not a result.**
+
+| failure | verdict | evidence |
+|---|---|---|
+| `inline-editor-live` 8 — "the word AND its Enter typed at full speed still commit the word" | **CASCADE** | the file is **8/8 green cold in isolation**. B30 came back EMPTY (not the pre-fix `"b"`), and the obvious residue was ruled out by measurement, not by reasoning: `formatting.spec.ts` leaves `"UnboldTest"` in B30, so the same word was typed at full speed into an OCCUPIED B30 twelve times over three trials — **12/12 committed `tabbed`**, empty and occupied alike, `type`+`press` and combined `"word\n"` alike. The upstream spec responsible is NOT identified; an attempt to reproduce it with an alphabetical prefix run was abandoned because a stray Playwright client from a killed earlier attempt contaminated the CDP session, and a contaminated run is not evidence |
+| `ribbon-tabs` — `ribbon-minimized` golden | **PRE-EXISTING, already refused** | §3ar refused to re-record this one: its diff is grid-content residue from whichever specs ran before it, and recording it would freeze one run's residue into the baseline. One of the baseline's own 13 |
+| `state-consistency` — random action sequence | **FLAKE, characterised** | seed 1786259782413, step 6 of 6, invariant `page-crashed` on `ribbon.switch-tab`. The call log shows `<div class="css-1fr3uyz"> intercepts pointer events` — a monkey sequence that opened an overlay and then clicked through it. §3ao classified this same invariant as a flake after it passed one run and failed the next on the SAME build |
+
+**Everything else in the baseline's 13 is now green**, including the two `paste-special` goldens D5
+predicted, `evaluate-formula`, `go-to-special`, `protection` and `scrolling`.
+
 
 ## 4. OWNER DECISIONS — not work, product calls
 
@@ -3111,30 +3746,140 @@ not "is the product doing what it says?".
 Each entry states the choice, what each option costs, and a recommendation. The recommendation is
 advice, not a decision taken.
 
-### D1. Should "Calculate Workbook" calculate the workbook? (§2o)
+**DECIDED 2026-08-09:** the owner ruled on this section, under one standing rule — **"parity with
+Excel should take priority always when there are such questions."**
 
-**The choice.** `calculate_now` collects formula cells from the ACTIVE-sheet mirror and evaluates
-only those, while the Formulas menu calls the item "Calculate Workbook". Measured with iterative
-calculation on: six presses of F9 on Sheet1 moved a cross-sheet cycle **not at all**; switching tabs
-and pressing F9 on each sheet is a real round, and the cycle then converges 15 → 17.5 → 18.75 → …
-→ 19.999999702 after 25 rounds.
+**ALL SEVEN ARE IMPLEMENTED AND INTEGRATED — 2026-08-09.** D1–D7 landed from separate sessions and
+were integrated in one pass: every unit suite re-run, every contract made to FAIL before being
+trusted (§3ap). A decided entry keeps its heading and its options — the alternatives are what make the
+decision legible — and gains a "what shipped" write-up.
 
-- **Make it workbook-wide.** The name becomes true and a cross-sheet cycle advances per press. Cost:
-  this is the hottest command in the product and `save_file` calls it when calculate-before-save is
-  on, so the cost of every save and every F9 changes for every workbook with more than one sheet.
-  Not a slip-in; wants a benchmark on a large multi-sheet workbook before it lands.
-- **Rename the command to "Calculate Sheet"** and add a separate workbook-wide item. Cheap, honest,
-  and leaves the fast path fast. Cost: Excel users expect F9 to mean the workbook, so this trades a
-  wrong name for a surprising key binding.
-- **Leave it.** Cost: the name stays wrong, and the next person to reason from it reaches a wrong
-  conclusion — which is exactly how §2m's silently-wrong answer happened.
+| | decision | measurement that settled it |
+|---|---|---|
+| **D1** | F9 = workbook, Shift+F9 = active sheet; save recalculates the workbook | 40k chained formulas: workbook **365 ms** vs the old single-sheet F9's **523 ms** on identical work — one walk replacing two. 8×5 000 cross-sheet: sheet 92 ms / workbook 348 ms |
+| **D2** | a typed formula keeps its NAME; repointing follows it | no cache, deliberately: a name-free workbook pays one `HashMap::is_empty()` per evaluated dependent |
+| **D3** | pivot/table/relocation writes seed the ONE shared cascade | seeding beat the whole-sheet pass it replaced only after a no-formula/no-dependents gate: 12 500 cells **9.27 ms** gated vs 54.19 ms naive vs 15.98 ms whole-sheet |
+| **D4** | play pill is viewport-pinned DOM chrome with a close control; Stop ≠ Unload | claims **no** grid region — read off the real `getGridRegions()` |
+| **D5** | grid captures frame the canvas layer, not `[data-grid-area]` | crop is CSS that already existed: 1232x556 → **1218x542**, measured live; **40** goldens move, not the 11 estimated |
+| **D6** | `cells: collapsePriority` 99 → 55 | demotion order `[10,20,30,40,50,55,60]` |
+| **D7** | Excel's exact literals; `CellError::Parse` deleted | 9 variants round-trip `from_literal(as_literal(v)) == v`; **3 more `#{Debug}` sites found at integration** — §3ap contract (d) |
 
-**Recommendation: rename now, make it workbook-wide behind a benchmark.** The rename removes the
-trap immediately at near-zero risk; the performance work can then be scheduled on its merits rather
-than being forced by a misleading label. A partial iterate is a legitimate value under iterative
-calculation, so this is a limit to name, not a wrong answer to rush.
+**Newly OPEN as of the integration pass: D8** (should a structural edit recalculate? — §2s), found by
+sabotaging the census rather than by reading it.
 
-### D2. Should a typed formula keep its NAME? (§2p)
+**ALL SEVEN ARE NOW PROVED ON A RUNNING APP — 2026-08-09.** Integration re-ran every unit suite; it
+did not launch the product. `app/e2e/journeys/owner-decisions.spec.ts` drives each decision through
+the real UI and reads the result off the rendered grid — **10 tests, 10 passing** — and doing so
+found two defects nothing static had caught: **§2t** (a mixed-case name shouting after save/reload,
+D2's own regression) and **§2u** (`remove_duplicates` deadlocking the whole backend on a leaked read
+guard, which is what the "`vba-idioms-wave4` hangs" actually were). Both are fixed. See **§3as**.
+
+
+### D1. Should "Calculate Workbook" calculate the workbook? (§2o) — **DECIDED AND SHIPPED 2026-08-09**
+
+**THE OWNER'S DECISION, in the owner's words:** *"In Excel there is 'Calculate Now' that calculates
+the workbook and 'Calculate Sheet' that calculates the sheet. We should do the same."* Parity with
+Excel, which is the rule every open question here is now settled by.
+
+**The choice, as it stood.** `calculate_now` collected formula cells from the ACTIVE-sheet mirror and
+evaluated only those, while the Formulas menu called the item "Calculate Workbook". Measured with
+iterative calculation on: six presses of F9 on Sheet1 moved a cross-sheet cycle **not at all**;
+switching tabs and pressing F9 on each sheet was a real round, and the cycle then converged
+15 → 17.5 → 18.75 → … → 19.999999702 after 25 rounds. The register recommended renaming first and
+making it workbook-wide later, behind a benchmark. The owner chose Excel parity instead, and the
+benchmark says the caution was misplaced — see the table.
+
+#### What shipped
+
+| | Excel | Calcula now |
+|---|---|---|
+| Workbook | Calculate Now — **F9** | `calculate_now` — **F9**, `Formulas > Calculate > Calculate Now` |
+| Sheet | Calculate Sheet — **Shift+F9** | `calculate_sheet` — **Shift+F9**, `Formulas > Calculate > Calculate Sheet` |
+
+`calculate_sheet` existed but delegated straight to `calculate_now`, on a comment reading *"for now,
+calculate_sheet does the same as calculate_now since we have a single sheet"* — a comment older than
+multi-sheet workbooks. The two commands are now genuinely different passes: one plain function,
+`run_calculation_pass(CalcScope)`, with two arms.
+
+**Shift+F9 is free.** The keybinding registry contains no `F9` binding of any kind (F9 is grid-owned,
+in `useGridKeyboard.ts`, alongside F5/F11), and a sandboxed contribution may only claim
+`Ctrl+Shift+<letter>` — so nothing could collide with it now or later.
+
+#### ONE cascade, not a fourth walk
+
+The workbook plan is **`workbook_circular_cells`' existing walk, made to return the topological order
+it was already computing and throwing away.** The old F9 ran that walk (to find cross-sheet cycles)
+*and* `partition_formula_cells` over the active sheet (to find an order). The workbook pass runs one
+walk and gets both, over flat `Vec` adjacency instead of `HashMap`s, with formula strings **moved**
+into the plan rather than cloned. Its Kahn residue *is* the cross-sheet cycle set, so the workbook
+pass does not call the detector at all.
+
+#### The benchmark — measured, not asserted
+
+`bench_calculate_scopes` in `app/src-tauri/src/commands/calculate_scope_tests.rs`
+(`cargo test --lib -- --ignored --nocapture bench_calculate_scopes`). **Debug build**, so the absolute
+numbers are pessimistic and the ratios are the point. Median of three runs.
+
+| Fixture | Shift+F9 (sheet) | F9 (workbook) | |
+|---|---|---|---|
+| **A. 1 sheet × 40,000 chained formulas** — both scopes evaluate the *same cells*, so the difference is the PLANNER alone | 40,000 cells — **523 ms** | 40,000 cells — **365 ms** | **F9 is ~30% FASTER than the old F9 on the same work** |
+| **B. 8 sheets × 5,000 chained formulas**, chained end to end — the scope difference itself | 5,000 cells — **92 ms** | 40,000 cells — **348 ms** | 8× the cells for 3.8× the time |
+
+Read fixture A carefully, because it is the answer to the question the register was worried about:
+**making F9 workbook-wide did not make the ordinary single-sheet F9 slower — it made it faster**, by
+removing the second traversal. The first cut of the planner (hash maps, cloned formulas) *was* 10%
+slower than the old path; the flat-vector rewrite is what turned −10% into +30%, and both numbers are
+in the run log rather than in an opinion. Fixture B is the honest cost: F9 on an 8-sheet workbook now
+does eight sheets' work, which is what the command means.
+
+#### Calculate-before-save: decided, not inherited
+
+`save_file` calls `calculate_now`, so it inherited workbook scope automatically — that is exactly the
+sort of consequential change that should not arrive by inheritance, so it was checked and **kept
+deliberately**. Excel recalculates the workbook before saving; a saved file whose non-active sheets
+are stale is the silent-staleness hazard `PendingRecalc` exists to make visible, and `.calp` publish
+— which hard-refuses on a pending set — is downstream of this very file. Fixture B is the cost, and
+paying it once per Ctrl+S is the right trade against shipping a report with a stale number in it.
+Pinned by `calculate_before_save_recalculates_the_workbook`.
+
+#### Was `mark_off_sheet_circular_cells` made redundant? — NO, and here is which half
+
+The brief asked. The answer is **half**: F9 no longer needs it and no longer calls it (every member of
+a cross-sheet cycle is in the workbook plan, so each is stamped on its own sheet by the ordinary
+circular-group branch), but **Shift+F9 still needs it and still calls it**, because a sheet-scoped
+pass genuinely does leave the other sheets unevaluated — which is precisely the `#CIRCULAR!`-here /
+plausible-`0`-one-tab-away defect it was written for. It stays, moved into the `ActiveSheet` arm, with
+both halves pinned (`f9_reports_a_cross_sheet_cycle_on_every_sheet_that_owns_a_member`,
+`shift_f9_still_needs_the_off_sheet_mark`). Deleting it would restore the defect on one command.
+
+#### Tests — run, not read
+
+The pass body was extracted out of the `#[tauri::command]` into `run_calculation_pass`, **so that F9's
+cross-sheet behaviour could stop being pinned by asserting on its source text.** Twelve tests in
+`commands/calculate_scope_tests.rs`, each with teeth (the pre-state is asserted to be wrong before the
+pass runs): a dependent on a non-active sheet, a THREE-sheet chain (a "neighbours of the active sheet"
+fix would fail it), Shift+F9's non-reach, the cross-sheet iterative cycle converging in ONE press with
+six sheet passes proved *not* to converge it first, no `#CIRCULAR!` under iteration, a cycle reported
+on both sheets, the layered false-positive guard under both scopes, plan determinism across runs, and
+the two wiring assertions.
+
+#### Two judgement calls, flagged rather than buried
+
+1. **The command returns the ACTIVE sheet's cells only.** Core applies only cells with no sheet index
+   (an off-sheet value must never be painted onto the sheet on screen) and the frontend re-fetches the
+   viewport on every sheet switch, so serialising every formula cell in the workbook on every F9 would
+   be a cost with no reader. The off-sheet WRITES all happen. This also removes a latent bug: the F9
+   handler emits a `cellEvent` for `updatedCells[0]`, which could previously be an off-sheet cell.
+2. **`PendingRecalc` stays single-sheet.** A cancelled workbook pass spans sheets and the marker
+   carries one `sheet_index`; it now records the sheet the pass stopped ON plus the **whole**
+   remainder, so the status-bar count and the `.calp` publish refusal are both honest and the tail's
+   per-cell sheet attribution is approximate. That is the right way round — over-reporting staleness
+   is safe, under-reporting is the hazard — and no reader locates a pending cell by coordinate. Resume
+   walks the PLAN (a workbook order is total, so the remainder is a suffix) rather than the marker.
+   Widening the persisted marker to carry a sheet per cell is a `.cala` format change and was
+   deliberately **not** bundled into this.
+
+### D2. Should a typed formula keep its NAME? (§2p) — **DECIDED AND SHIPPED 2026-08-09**
 
 **The choice.** `update_cell` resolves named references at ENTRY and stores the resolved reference.
 Measured: with `RATE` pointing at `$D$5`, typing `=RATE` leaves the cell holding `$D$5`. The name is
@@ -3154,126 +3899,566 @@ behaviour will keep generating false conclusions, because every other layer's te
 `update_cell` never produces. If it is not going to change, the pre-resolution should be documented
 at `update_cell` so the next author does not rediscover it from a failing live test.
 
-### D3. Who owns pivot and table recalculation? (§2m's census, `EXEMPT`)
-
-**The choice.** Eight functions write cells and deliberately do not recalculate. Each sits in the
-census `EXEMPT` table with a written reason, so none is an accident — but "in class, left to their
-owner" is a holding position, not an answer:
-
-- **Pivot:** `create_pivot_inner`, `delete_pivot_table`, `undo_pivot_overwrite`. A formula over a
-  freshly written pivot block stays stale; clearing a block leaves its readers stale.
-- **Tables:** `toggle_totals_row`, `set_totals_row_function`, `set_calculated_column`,
-  `check_table_auto_expand`.
-- **`relocate_cell_references`:** re-evaluates the formulas it rewrites but does not cascade to
-  THEIR dependents.
-
-- **Seed the shared cascade from each.** Correct by construction and uses machinery that already
-  exists. Cost: pivot/table writes become as expensive as bulk rewrites, and these run on every
-  refresh.
-- **Give each region its own refresh contract** — the pivot's own refresh path triggers dependents.
-  Cheaper and arguably more correct in design. Cost: a second cascade concept, which is precisely
-  what the ONE-cascade census was built to prevent.
-- **Leave exempt.** Cost: a stale formula over a pivot is a silently wrong answer, the tier this
-  program was built to empty.
-
-**Recommendation: close `relocate_cell_references` now, decide pivot/tables as one.** It is the
-narrowest of the eight, has no refresh path of its own to defer to, and is the only one where the
-"owner" is the structural-edit code that already recalculates. The other seven are one decision, not
-seven, and should be taken with the pivot refresh design in view.
-
-### D4. Where should the Animation play pill live? (§2q)
-
-**The choice.** The pill is anchored at a fixed SHEET position, so it puts a 172×26 hit-testable
-control on top of **A1:C2** — and it ate cell clicks across eighty-nine E2E spec files for months
-before anyone saw it. Options: viewport-pin it to a corner, give it a close affordance, or make it
-click-through with a drag handle.
-
-**What is NOT in question, and should not wait for the design:** there is currently **no route in
-the product to unload a driver**. Every lifecycle event Animation subscribes to calls
-`stopAndRestore`, which leaves the driver loaded; `clearDriver` unloads it and **nothing calls it** —
-not the panel's "Stop" button, not closing the panel, not `new_file`. Once a driver is loaded the
-pill owns A1:C2 until the page reloads.
-
-**Recommendation: viewport-pin with a close affordance, and give the product a `clearDriver`
-route regardless of which layout wins.** The E2E cleanup currently reaches `clearDriver` through a
-`window` handle (`__CALCULA_ANIMATION__`) that exists ONLY because the product has no route; that
-handle should be deleted the moment one exists. Whether "Stop" should also unload is the genuinely
-debatable part — a user mid-iteration probably wants the driver kept.
-
-### D5. The eleven scrollbar-thumb goldens (§3a)
-
-**The choice.** Eleven grid goldens differ only by a scrollbar thumb. Specs park fixtures in far
-columns to avoid colliding (`status-bar` at R:S, `edge-cases` at AE:AH, `scrolling` at row 5000); the
-data is off-screen, but it sets the used range, and the thumbs ARE in every capture.
-
-- **Reset before capture.** Honest and removes the coupling. Cost: re-records eleven baselines, and
-  every future spec must remember to reset.
-- **Exclude scrollbars from grid captures.** One change to the capture helper, fixes the class
-  permanently. Cost: re-records eleven baselines, and the suite stops watching scrollbars at all.
-- **Stop parking fixtures in far columns.** Cost: fights a convention the suite is not going to
-  abandon, and reintroduces the collisions the parking was there to avoid.
-
-**Recommendation: exclude scrollbars from grid captures.** It fixes the class rather than eleven
-instances, and a scrollbar thumb is chrome that no grid-rendering assertion is actually about — if
-scrollbar geometry deserves coverage it deserves its own test. Both fixing options re-record the same
-eleven baselines, so the choice is really "once, structurally" versus "once, per spec, forever".
-
-**Whichever is chosen, the re-record needs a stated per-golden reason.** This batch deliberately
-re-recorded nothing (contract (d) above), so the eleven are still failing honestly rather than
-hidden.
-
-### D6. `cells: collapsePriority` is an accidental 99 (§2a)
-
-**The choice.** The value is not considered — it is the fallback a missing `GROUP_ORDER` row
-produced, and it makes the Cells group demote LAST on a narrow ribbon, which is almost certainly
-unintended. It is now written out explicitly so it cannot drift silently, but it was not changed:
-changing it changes narrow-window behaviour, which is the owner's call under the "current appearance
-is the default" constraint.
-
-**Recommendation: 55**, between Styles (50) and Editing (60). It is the obvious candidate and the
-one the folded-in table would have produced had the row not been missing. This is the cheapest entry
-in this section — a one-line change plus a narrow-window check.
-
-### D7. The app/engine error-spelling divergence (§2n, extended)
-
-**The choice.** Six of the ten `CellError` variants are spelled differently by the app-side
-`cell_error_display` than by the engine's `CellError::as_literal`. The doc comment claiming the two
-were mirrors was **false and has been corrected**, and the divergence is now pinned by a test
-(`error_display_tests.rs`) so it cannot widen unnoticed — but the spellings themselves were not
-changed, because changing them moves grid goldens.
-
-| variant | grid shows | engine canonical |
-|---|---|---|
-| `Div0` | `#DIV0` | `#DIV/0!` |
-| `Ref` | `#REF` | `#REF!` |
-| `Name` | `#NAME` | `#NAME?` |
-| `Value` | `#VALUE` | `#VALUE!` |
-| `Circular` | `#CIRCULAR` | `#CIRCULAR!` |
-| `Parse` | `#PARSE` | `#VALUE!` |
-
-**`Parse` is not cosmetic and is new information** — the register previously listed four variants,
-all missing punctuation. `#PARSE` is an internal enum name leaking into the grid through the
-`#{Debug}` arm. The engine gives `Parse` no distinct literal on purpose (it shares `#VALUE!`, so
-`from_literal` reloads it as `Value`), which makes `#PARSE` a spelling **no other layer in the
-product can parse back**.
-
-- **Adopt the canonical literals.** The grid agrees with the engine, with Excel, and with the
-  frontend's `CELL_ERROR_LITERALS`. Cost: re-records every golden painting an error cell.
-- **Fix `Parse` only.** Removes the leak at almost no cost — `#PARSE` is unlikely to appear in a
-  golden. Cost: leaves five inconsistencies.
-- **Leave it.** No answer is wrong and persistence is unaffected (checked). Cost: the grid disagrees
-  with every other surface about what an error is called.
-
-**Recommendation: fix `Parse` now, adopt the rest with the D5 golden re-record.** `#PARSE` is the
-only one of the six that is a leak rather than a spelling preference, and it is separable. Folding
-the other five into whatever re-record D5 triggers means paying the baseline cost once.
-
-**Note for whoever takes this:** `Limit`, `Blocked`, `Conflict` and `NA` must keep their explicit
-arms. The `#{Debug}` fallback would drop the trailing punctuation, and the frontend's
-`normalizeCellErrorLiteral` collapses anything it does not recognise to `#VALUE!` — erasing exactly
-the distinction those variants exist to draw. A test pins this.
-
 ---
+
+**DECIDED 2026-08-09: Excel parity. BUILT.** The owner's words were "we should do exactly as in
+Excel", and the standing rule is that Excel decides anything this brief does not.
+
+#### What it does now
+
+A typed formula stores the NAME. `RATE` = `$D$5`, typing `=RATE*100` leaves the cell holding
+`RATE*100`; the formula bar shows it, the `.cala` saves it, and the expansion happens on the way into
+the evaluator. Repointing `RATE` moves every formula that reads it, defining a name turns the
+`#NAME?` cells that were waiting for it into numbers, and deleting one leaves `#NAME?` **with the
+formula text intact** — Excel does not substitute the old definition back in and does not blank the
+formula, and that behaviour now falls out of the storage rather than being coded for.
+
+#### The design, in the order the decisions were forced
+
+1. **The two ASTs are the same type.** `engine::Expression` is a re-export of `parser::ast::Expression`
+   (`core/engine/src/dependency_extractor.rs:17`), and `convert_expr` is a clone plus wildcard-sheet
+   expansion. Expanding a name at evaluation is therefore an AST **splice over an already-parsed
+   tree**, not a re-parse — which is what made "resolve per evaluation" affordable and removed the
+   need for a second, engine-level copy of `resolve_names_in_ast`. There is still exactly ONE name
+   resolver.
+2. **One recipe for entry, three callers.** `split_entered_formula` (`lib.rs`) returns
+   `EnteredFormula { stored, expanded }`: `stored` is what the cell keeps, `expanded` is what this
+   edit evaluates and what `extract_all_references` reads. `update_cell_impl`,
+   `update_cells_batch_core` and `fill_range` all go through it, so the three cannot drift about what
+   a name means. **Structured-table and spill references are still resolved at entry in both forms**,
+   deliberately: `[@Price]` means a different cell on every row and `A1#` means whatever that spill
+   covers right now, so neither can survive as text. Only names are deferred. The expansion re-runs
+   the table pass, because a name's `refers_to` may itself be `=Table1[Amount]`.
+3. **The dependency edge is the core of the work.** `AppState.name_dependents` /
+   `name_dependencies` (`name_resolution.rs`), maintained beside the cell/column/row edges in all
+   three entry paths and rebuilt by `rebuild_all_dependencies_from_grid`. Two subtleties:
+   - edges are recorded for names that **do not exist yet**, because `=RATE` before `RATE` exists is
+     a `#NAME?` cell and Excel turns it into a number the moment the name is defined;
+   - LET/LAMBDA parameter names earn **no** edge — they are local bindings that shadow defined names,
+     and registering `=LET(rate; 2; rate*10)` as a dependent of a workbook name called `rate` would
+     recalculate a formula the name cannot reach.
+4. **THE TRAP, and it is the one that would have shipped a stale-value bug.**
+   `extract_references_recursive` cannot see through a `NamedRef` — a name has no coordinates to
+   give. `rebuild_all_dependencies_from_grid` re-derives every cell edge from the STORED ASTs and
+   runs on **every sheet switch and every structural undo**, so without expanding first it would have
+   silently dropped `=RATE*B2`'s dependency on `$D$5`: the formula would have been right when typed
+   and stopped following its precedent at the first tab click. It now expands before extracting.
+   `name_tables` is passed IN at each call site (like `sheet_names` already was) rather than locked
+   inside, so a caller holding one of those read guards cannot deadlock.
+5. **A name change recalculates through the ONE cascade.** `recalc_after_name_change`
+   (`named_ranges.rs`) is called by all four CRUD commands. Active-sheet readers seed
+   `recalc_after_active_sheet_bulk_rewrite`; sheets that mention a changed name go through
+   `recalc_after_off_sheet_write`. No new walk — the census's five entry points are untouched. It
+   honours manual calculation mode explicitly, because only ONE of the two helpers does and half a
+   recalculation is worse than none.
+6. **`open_file` now rebuilds the dependency maps.** It cleared `dependents` with a comment saying
+   they would be "rebuilt on recalculation" and nothing did until the first sheet switch. Harmless
+   before; not harmless now, since `name_dependents` is the only thing that can answer "which cells
+   read `RATE`" and a freshly opened workbook would have answered "none".
+
+#### The cost decision, and why there is no cache
+
+The gate is `needs_name_resolution`, which is allocation-free, short-circuiting, and **returns
+immediately when the workbook has no defined names at all** — the dominant case pays one
+`HashMap::is_empty()` per evaluated dependent. It asks the workbook's own name table rather than
+answering "any `NamedRef` or any `Custom` call" the way `ast_has_named_refs` does, which is what keeps
+`=LET(x;1;x+1)` and every JS-UDF formula on the borrowed path. A formula that actually names something
+pays one tree clone per evaluation — the same order as the evaluation walk it feeds, and no parse.
+
+A resolved-AST cache keyed by `(sheet_index, formula)` with a name-table generation counter was
+designed and **deliberately not built**: an invalidation channel that can go stale is precisely the
+defect class this change exists to close, and the measured shape does not need one. If a profile ever
+says otherwise, that is the shape to add.
+
+#### Tests changed, and the judgement on each
+
+- `remaining-correctness.spec.ts` test 5 — its doc comment *asserted the defect* ("typing
+  `=E2E_REMAINING_RATE` into G1 leaves the cell holding `$D$5`") and used Formulas ▸ "Apply Names…"
+  as scaffolding to get a name into a formula at all. Rewritten: it now reads the stored formula
+  **straight after typing** and requires it to be the name, and Apply Names stays as an
+  **idempotence** check — a formula that already reads the name has no `$D$5` text left to match, so
+  the command must leave it alone. Same teeth (111 → 222 → 111 on the stored value and on G1's
+  pixels).
+- No other test asserted the pre-resolved shape. The unit fixtures §2p complained about
+  (`Cell::new_formula("=RATE*2")` written straight into the grid) model the shape `update_cell` now
+  actually produces, so they became correct rather than broken.
+- Added: `commands/d2_named_range_tests.rs` (19 tests) and `named_resolution`'s own module tests.
+  Added `app/e2e/tests/named-ranges.spec.ts` "repointing a name moves the formulas that read it".
+
+#### What was deliberately NOT done
+
+- **Old workbooks are not migrated.** A `.cala` saved before this holds the pre-resolved reference.
+  That file is *correct as stored* — it just is not live — and rewriting a user's formulas on load to
+  guess which references "meant" a name is exactly the kind of silent edit this program exists to
+  remove. "Apply Names…" is the migration, and it is the same one Excel offers.
+- **Spill references reached through a name's definition** are not expanded at evaluation: that needs
+  `state.spill_ranges`, a Mutex this would take once per evaluated dependent. Entry still resolves
+  the spill refs a user typed directly, which is the only shape that has ever worked.
+**CORRECTION, 2026-08-09 (the re-record pass).** Storing the name exposed a defect that pre-resolution
+had made unreachable: a stored `NamedRef` does not survive save/reload unchanged, because the lexer
+upper-cases bare identifiers and the AST renderer prints whatever the AST holds. `BudgetTotal`
+reloads as `BUDGETTOTAL`. Evaluation is unaffected (every name lookup keys on `to_uppercase`), but
+the user's formula is rewritten in capitals by saving and reopening, and the scenario suite's
+save/reload oracle fires. Excel canonicalises a typed name to the DEFINED name's spelling rather than
+preserving what was typed, so that is the shape of the fix. Full write-up and why it was not fixed at
+4 a.m.: **§2t**.
+
+- **The named-range UNDO arms keep `workbook_recalc`** rather than seeding from the new edge. The
+  store-wide arm restores a whole map (the changed set is a symmetric difference, not one name), and
+  the single-name arm runs while `apply_changes` holds the grid guards, where reporting a flag is how
+  every restore hands work to the second lock phase. Whole-workbook is a superset of the right
+  answer, so this is a cost decision and is now written as one — the two doc comments that claimed a
+  name "is in no dependency map" were corrected, because that sentence is no longer true.
+
+### D3. Who owns pivot and table recalculation? (§2m's census, `EXEMPT`) — **CLOSED 2026-08-09** (and HARDENED at integration — §3ap)
+
+**Decided: all eight seed the ONE shared cascade.** The owner's standing rule is that Excel parity
+decides any question this register does not, and Excel updates every one of these formulas. The
+earlier recommendation ("close `relocate_cell_references` now, decide pivot/tables later") is
+superseded. `EXEMPT` no longer contains an "IN CLASS" block.
+
+The eight, and what each was leaving stale:
+
+- **Pivot** — `create_pivot_inner`, `delete_pivot_table`, `undo_pivot_overwrite`. A formula over a
+  freshly written pivot block kept the value of whatever the pivot overwrote; clearing a block left
+  its readers showing the deleted pivot's totals.
+- **Tables** — `toggle_totals_row`, `set_totals_row_function`, `set_calculated_column`,
+  `check_table_auto_expand`.
+- **`relocate_cell_references`** — re-evaluated the formulas it rewrote and cascaded to nothing.
+  Done FIRST as the proving case: narrowest, and no refresh path of its own to defer to.
+
+**The seam.** Each reaches the shared entry points by name — `recalc_after_active_sheet_bulk_rewrite`
+for the active sheet, `recalc_after_off_sheet_write` for a destination sheet chosen at runtime — as a
+SECOND lock phase after the command's own guards drop. No per-region refresh contract was created; a
+second cascade concept is exactly what the census exists to prevent. The three pivot commands take
+both branches, like `bi_insert_result` and `consolidate_data`, which write result blocks of the same
+shape.
+
+Two things deliberately were **not** wrapped in a local helper: the phase-B call is written out at
+each of the four table call sites, because the census reads SOURCE and matches the entry point BY
+NAME — a forwarding wrapper would silently blind it.
+
+**A second defect found on the way.** The table commands wrote SUBTOTAL and calculated-column
+formulas into the grid and registered **no dependency edges at all**. Two consequences: editing the
+data underneath a totals row left the total frozen, and seeding could not reach a dependent along an
+edge nobody had recorded. `register_table_formula_dependencies` now does what `update_cell_impl`
+does — resolve structured refs, then record every edge kind. Seeding alone would not have delivered
+parity here.
+
+**A third defect, and the one worth reading — the totals row never worked at all.** Found live in
+`tables.spec.ts`, not by reading. `set_totals_row_function` and `toggle_totals_row` wrote the cell
+with `engine::Cell::new_formula`, which stores the RAW parse. But `reevaluate_formula_cell` evaluates
+a cached AST directly and resolves only NAMES — the crate's standing contract is that a stored AST
+already carries its structured-reference resolution, which is exactly what `update_cell_impl` and
+`set_calculated_column` store. So the totals cell held an unresolved
+`SUBTOTAL(109,Table1[Amount])` that the engine could never compute.
+
+This was invisible for as long as the totals row was never asked for a value: it rendered blank, and
+a blank totals row reads as "not configured yet". D3's cascade asked, and the answer came back **0**.
+The fix is `write_table_formula_cell`, which stores the resolved form; the totals row now shows a
+total, which is the entire point of the feature.
+
+Note the shape of this: the seeding change did not *cause* a regression, it **exposed** a feature that
+had never functioned. That is the argument for closing exemptions rather than parking them — an
+exemption from recalculation also exempts a formula from ever being checked.
+
+**Verified live in the running app**, not only in unit tests (probe against the real commands over
+CDP, since all eight are `State`-taking commands):
+
+| step | before | after |
+|---|---|---|
+| totals cell after `set_totals_row_function` | blank (uncomputable formula) | `300`, `=SUBTOTAL(109;$AG$22:$AG$23)` |
+| formula outside the table reading the total | `0` | `600` |
+| after editing the data underneath (200 → 1000) | total frozen | total `1100`, reader `2200` |
+
+**One visual baseline was re-recorded**, with the reason stated as D5 requires:
+`e2e/tests/__screenshots__/tables.spec.ts/grid-tables-totals-row-sum.png`. The old baseline was
+recorded when the totals row rendered blank — it encoded the defect above, so leaving it would have
+made the suite assert that the totals row shows nothing. `tables.spec.ts` is 4/4 after the
+re-record.
+
+**Cost — the measurement the hedge was about.** `cost_of_seeding_a_pivot_block_versus_a_whole_sheet_pass`
+(`commands/d3_cascade_seed_tests.rs`, `#[ignore]`d; run with `--ignored --nocapture`). Debug profile,
+so read the RATIOS, not the absolute milliseconds. "whole sheet" is
+`finalize_pivot_update` → `recalculate_sheet_formulas`, which every *other* pivot mutation already
+runs — that is the honest comparison, not "free".
+
+| block | cells | readers | seed, naive | seed, gated | whole sheet |
+|---|---|---|---|---|---|
+| 20×5 | 100 | 50 | 0.76 ms | **0.75 ms** | 1.69 ms |
+| 100×10 | 1 000 | 100 | 5.32 ms | **1.88 ms** | 3.61 ms |
+| 200×25 | 5 000 | 200 | 22.59 ms | **4.39 ms** | 7.42 ms |
+| 500×25 | 12 500 | 400 | 54.19 ms | **9.84 ms** | 15.57 ms |
+
+The "seed, naive" and "seed, gated" columns come from separate runs, so the whole-sheet column moves
+with ordinary run-to-run variance (15–23 ms at the largest size); compare within a run, not across.
+
+The naive column is the real finding, and it contradicted the assumption this entry was written on:
+seeding a large block was **worse** than the whole-sheet pass it was meant to improve on — 54.19 ms
+against 22.75 ms for the whole sheet in that same run, at 12 500 cells. A pivot block is 12 500
+*literals*; `recalc_order_from_seeds` admitted every one as a graph member, the evaluation loop
+cloned each only to find it had no formula, and the cross-sheet walk allocated a sheet-name String
+per root.
+
+The gate that fixes it is in `recalc_after_active_sheet_bulk_rewrite`, not in pivot code: **a seed
+that holds no formula and has no dependents provably contributes nothing** — it would be admitted as
+a member, skipped for having no formula, and expanded from to nothing. Dropping those makes the cost
+proportional to the number of READERS instead of the size of the block, and it benefits every caller
+of the shared entry point, not just pivots. Seeding is now cheaper than the whole-sheet pass at every
+size measured, so no exemption is justified on cost.
+
+**Tests.** `commands/d3_cascade_seed_tests.rs` — 14 tests. Each removal is matched by a behavioural
+test (the dependent MOVES, with the stale value asserted as a precondition so the test cannot pass
+against the broken code) plus a source-wiring test (the command still calls the entry point). All
+eight are `State`-taking commands and cannot run in-process, so this is the same two-part split the
+`sort_range` and `clear_range` tests use.
+
+**The census kept its teeth.** Verified by hand as asked — the recalc call was removed from
+`relocate_cell_references`, and the census failed naming exactly
+`commands/structure.rs::relocate_cell_references`; then restored. That check is now permanent rather
+than folkloric: `the_census_detector_actually_fires_on_a_cell_writer_that_does_not_recalculate` runs
+the detector over synthetic source and asserts it fires with the recalc call absent and stays quiet
+with it present, and `every_exemption_carries_a_written_reason` fails any entry parked with an empty
+reason.
+
+**Residual, worth its own entry.** `recalculate_sheet_formulas` — the recalculation the pivot module
+runs on every mutation that is *not* one of these eight — evaluates the **active sheet only**. A
+pivot written to a non-active sheet, and any cross-sheet reader of a refreshed pivot, is still stale
+on those paths. The eight fixed here take the off-sheet branch correctly; the pivot refresh path does
+not, and it is the larger surface.
+
+### D4. Where should the Animation play pill live? (§2q) — **DECIDED AND SHIPPED 2026-08-09**
+
+**The owner's call: viewport-pin it with a close affordance, and add the `clearDriver` product route
+regardless of the layout question.** Both halves shipped. The register's own summary of what was
+never in doubt turned out to be the right ordering of the work: the layout was the visible problem,
+the missing route was the real one.
+
+#### What shipped
+
+The pill is no longer a grid object at all. It was a `GridRegion` with `floating: {x: 8, y: 8}` —
+sheet coordinates — registered through `registerGridOverlay` with a `hitTest`, which is exactly what
+made it a click thief: it was *in the list the grid hit-tests*. It is now a DOM overlay registered
+through `@api/ui`'s overlay registry (the same route AutoFilter's dropdown and CellBookmarks'
+editors use), rendered by `OverlayContainer` at the Layout root, `position: fixed`, and it registers
+no grid region whatsoever.
+
+- **`overlay/PlayPill.tsx`** — the control: play/pause, progress, frame counter, **close**.
+- **`overlay/pillGeometry.ts`** — where it sits, as a pure function, so the placement is testable
+  without a layout engine.
+- **`overlay/playOverlay.ts`** — install/remove; shows and hides the overlay from the engine's own
+  `frameCount > 0`, exactly as before.
+
+**Bottom-left of the GRID CANVAS, not of the window** — and the distinction is the part that matters.
+Measuring from the live canvas rect (`getGridCanvas()` off the feature-neutral `@api/rendering`
+facade, plus a `ResizeObserver` on it) is what keeps it from fighting the panel/layout system:
+opening the sidebar, the task pane or collapsing the ribbon resizes the canvas, and the pill follows
+it instead of sitting on top of whatever the layout put there. A window-relative `position: fixed`
+would have traded a collision with the cells for a collision with the chrome.
+
+**Why bottom-left, given the owner's Excel-parity rule.** Excel does not settle this: it has no
+playback transport, so there is no Excel behaviour to copy. The next authority is the house/Office
+convention for transient document chrome — bottom-left, where Word's focus-mode and PowerPoint's
+slideshow transports live — and the negative constraint, which is stronger than the positive one:
+the top-left corner is the *worst* available position in a spreadsheet, because A1 is where every
+workbook starts and where every user clicks first. z-index 90: above the canvas, below the
+scrollbars, the task pane, menus and dialogs. Chrome the user did not ask for must never cover
+chrome they did.
+
+#### The half that mattered more: three routes to unload a driver, where there were none
+
+`clearDriver` existed and had no caller. A user who loaded a driver could not give it back without
+reloading the app — the pill stayed, the status-bar transport stayed, and the engine kept a driver
+bound to cells the user might since have repurposed. Now:
+
+1. **The pill's close control.** The natural one, and the one the E2E cleanup drives.
+2. **An "Unload" button in the panel transport**, next to Stop — *where drivers are managed*.
+3. **Document boundaries.** `BEFORE_OPEN` / `BEFORE_NEW` / `BEFORE_CLOSE` now call `clearDriver`
+   instead of `stopAndRestore`.
+
+**`clearDriver` is a strict superset of `stopAndRestore`** — `setDriver(null)` calls `stop()` first,
+which restores the model — so the transient guarantee is unchanged by all three. Nothing about the
+transient-write pattern was touched: frames still go through `anim_apply_frame` under a filed
+`anim_snapshot` token, which is what makes the no-dirty exemption checkable rather than remembered.
+
+**Judgement call, flagged: (3) is a behaviour change the brief did not ask for, and it is the right
+one.** A driver is bound to the cells, charts or scenarios of the workbook it was configured
+against; carrying it into a *different document* leaves a transport pointing at coordinates that now
+mean something else. Excel parity decides it in the direction I took: File ▸ New gives a clean
+workbook with nothing carried over. `BEFORE_SAVE` and `SHEET_CHANGED` deliberately still only
+**stop** — same workbook, same intent, and a user who saves mid-iteration wants to press Play again.
+
+**And the genuinely debatable part, decided: "Stop" does NOT unload.** The register named this as the
+open question, and the answer is the one it guessed — a user mid-iteration wants the driver kept.
+Stop and Unload are therefore two buttons, not one, and an E2E test pins the difference in both
+directions rather than just asserting the new one works.
+
+#### The E2E surface: what was removed, and why that is the finding
+
+**`__CALCULA_ANIMATION__` is deleted.** Two spec files reached `clearDriver` through it; both now
+click the pill's close control. The handle's own comment said it should go when the product grew a
+route, and it has.
+
+The general lesson is worth more than the deletion, and it is recorded at §3b as well: **that handle
+was the test surface compensating for a missing feature.** The cleanup needed to reach something *no
+user could reach*, and rather than reading that as a defect, the suite published a back door and
+carried on. Before publishing a handle so a test can reach live state, ask whether a user can reach
+the same thing. If not, the missing route is the bug — and here it was the bug that cost eighty-nine
+spec files.
+
+#### Tests — made to fail before being trusted
+
+Vitest, `extensions/Animation/overlay/__tests__/`:
+
+- **`claims no grid region — a loaded driver adds nothing the grid hit-tests`**, read off the REAL
+  `getGridRegions()` registry, not a mock. A mock could only prove that a function nobody calls was
+  not called. Verified with teeth: re-adding an `addGridRegions` call fails it (`expected 2, got 3`).
+- **`the close affordance unloads the driver and the pill disappears`** — click only; nothing else in
+  the test touches the engine, because calling `clearDriver` "to settle it" is exactly the vacuous
+  pass §3ak caught. Verified with teeth: stubbing the handler out fails it (`expected 11 to be 0`).
+- The pill is `position: fixed`; it renders nothing with no driver; the toggle plays/pauses and does
+  NOT unload; `pillPosition` pins to the canvas corner, falls back to the window when no grid is
+  mounted, and never goes negative.
+
+Playwright, `e2e/tests/animation.spec.ts` — three new tests, replacing a window handle with product
+paths:
+
+- **`the play pill claims no cell — with a driver loaded, a click at A1 still selects A1`.** Asserted
+  the way the defect actually presented: the selection moves to A1 **and** playback does not start.
+  Checking only the selection would pass on a pill that stopped stealing the click while still
+  starting an animation underneath it. The selection is parked at D5 first so "A1" cannot be residue.
+- **`the pill's close control stops playback, restores the model, and unloads the driver`**, clicked
+  **mid-playback** — the hardest case for the restore guarantee.
+- **`panel: Stop keeps the driver, Unload gives it back`** — the distinction above, both directions.
+
+#### Verification
+
+`npx vitest run extensions/Animation` — **12 files / 58 passed**. `check-types` clean for these files
+(the two `InlineEditor.tsx` `releaseOpenWindow` errors on HEAD are another agent's in-flight work).
+`lint:boundaries` clean. `eslint extensions/Animation/overlay` clean. `check:line-endings` 0 mixed.
+
+**E2E was NOT run** — the three new specs are written but unrun, for the same reason D1 gave: other
+agents were editing `app/src-tauri` through this window and a run would have been both disrupted by
+and disruptive to them. Nothing in this change touches Rust. The browser-only visual smoke (vite +
+Playwright + the `__TAURI_INTERNALS__` stub) was attempted as a substitute and **could not run on
+this machine**: Playwright's bundled Chromium gets `net::ERR_ABORTED` on every loopback navigation to
+the dev server, on `localhost`, `[::1]` and `127.0.0.1` alike, with and without `--no-proxy-server`,
+while `curl` against the same URL returns 200. That is an environment block, not a finding about the
+pill — but it is recorded so the next person does not spend the same thirty minutes. **So the pill's
+rendered appearance is the one thing here that is asserted rather than seen**; its behaviour is
+covered by a real React render (`position: fixed`, close → no driver) and its placement by the pure
+geometry tests.
+
+### D5. The eleven scrollbar-thumb goldens (§3a) — **CLOSED 2026-08-09, verified on a live app**
+
+**Decided: exclude the scrollbars from grid captures, structurally, in the helper.** Eleven grid
+goldens differed from their baseline by nothing but a scrollbar thumb. The thumb is a function of the
+USED RANGE, and the used range is shared state the suite leaks between specs on purpose — fixtures
+are parked in far columns to avoid colliding (`status-bar` at R:S, `edge-cases` at AE:AH, `scrolling`
+at row 5000), the data is off-screen and irrelevant to the shot, and the thumb it sets is not. Both
+candidate fixes re-recorded baselines, so the real choice was **"once, structurally" versus "once,
+per spec, forever"**.
+
+**The change, in one place.** `takeGridScreenshot` framed `[data-grid-area]`, which contains the
+canvas layer PLUS the two scrollbars and the corner box. It now frames `[data-grid-canvas-layer]` —
+a new DO-NOT-BREAK attribute on `S.CanvasLayer` (Spreadsheet.tsx), the element that is inset by
+`SCROLLBAR_SIZE` right and bottom **by definition** in `Spreadsheet.styles.ts`. No arithmetic in the
+helper, no measurement: the exclusion is the CSS that already existed. If the attribute ever
+disappears the helper falls back to the old framing and says so on stderr, because a silent fallback
+here is how eleven goldens would quietly need re-recording again.
+
+**Nothing else was in that strip.** `GridArea`'s only children are the canvas layer, the scrollbars
+and the corner box; headers, frozen panes, the grouping outline bar and the inline editor are all
+inside the canvas layer, which is `overflow: hidden`. `takeGridRegionScreenshot` already anchored on
+the canvas and did not move.
+
+**No capture legitimately needed the scrollbars — checked, not assumed.** `scrolling.spec.ts` is the
+only plausible claimant; its four goldens assert that the VISIBLE ROWS changed, and each already
+carries that proof in the row headers and cell contents. Nothing in either suite asserts scrollbar
+geometry, and a thumb photographed as a side effect is coverage nobody chose and nobody can
+interpret when it fails. If it deserves coverage it deserves a test that names the used range it
+expects, rather than inheriting one.
+
+**THE RE-RECORD IS 40 GOLDENS, NOT ELEVEN — the earlier cost estimate above was wrong.** Cropping
+changes the IMAGE SIZE (1232x556 → 1218x542, measured on the live app), so every golden produced by
+`takeGridScreenshot` must be re-recorded, not only the eleven that were failing. The estimate said
+"both fixing options re-record the same eleven"; that is true of reset-before-capture and false of
+this one. Masking instead of cropping would not have helped — it repaints the same 40. The list, by
+spec: `scrolling` 4, `dimensions` 6, `grid-rendering` 5, `paste-special` 2, `protection` 2,
+`go-to-special` 1, `evaluate-formula` 2, `core-visual` 8, `workflow-visual` 10. Region captures
+(`tables-*`, `notes-*`, `comments-*`, `go-to-special-formulas-sheet`) and window checkpoints are
+unaffected. It is one mechanical pass and then the class is gone; the decision stands, but whoever
+runs the re-record should expect 40.
+
+**The marching ants were settled too, and this is the part that a re-record could NOT have fixed.**
+`screenshotGates.ts` named the marching-ants copy border as the only non-deterministic element in
+either suite (77 px of noise over two cold runs of all 76 captures). Its dash phase is advanced by
+wall-clock delta in a `requestAnimationFrame` loop, so re-recording just picks a different phase —
+which is why `paste-special` was the one spec whose failures survived a re-record.
+
+The fix is not a test hook. `document.documentElement.dataset.reducedMotion` is the app's OWN
+accessibility switch: `skinLoader.apply()` stamps it from the OS `prefers-reduced-motion` query or
+the Settings > Appearance toggle. **Nothing read it** — the toggle was inert, and the marching ants
+are the one piece of motion in the product that never stops on its own, i.e. exactly what a user
+asking for reduced motion is asking to be rid of. `GridCanvas` is now its first consumer: the dashed
+border is still drawn (reduced motion removes the MOTION, not the information) with the dash phase
+parked at 0, and no frame is scheduled for it. The flag is re-read PER FRAME so that switching it on
+stops a marquee that is already marching, instead of at the next copy. `waitForGridStable` — the one
+function every capture path already awaits — turns it on, which is the same declaration
+`animations: "disabled"` makes for CSS and cannot make for a canvas.
+
+**Verified live, twice, cold.** Two independent runs of `paste-special.spec.ts` against a freshly
+launched app produced a `grid-paste-special-values-result` capture that was **byte-identical**
+(sha256 `93589669ad446e1c…`, second run confirmed by mtime), at 1218x542 with no scrollbars in frame.
+That capture is the one the register had recorded as unphotographable.
+
+**The gate numbers deliberately did NOT move.** The 77 px in `screenshotGates.ts` is a measured noise
+CEILING across 76 captures. Tightening `maxDiffPixels` to suit the new situation would be re-deriving
+a measured constant from an argument; the note now says so, and says what to re-measure.
+
+### D6. `cells: collapsePriority` is an accidental 99 (§2a) — **DECIDED AND SHIPPED 2026-08-09**
+
+**THE OWNER'S DECISION: 55.** Excel's Home tab sheds groups in a fixed order as the window narrows,
+and Cells is not the last thing standing; 55 puts it where Excel puts it, between Styles (50) and
+Editing (60). Parity with Excel, the standing rule for this section.
+
+**The choice, as it stood.** The value was not considered — it was the fallback a missing
+`GROUP_ORDER` row produced, and it made the Cells group demote LAST on a narrow ribbon. The earlier
+work had already folded the two ex-lookup-tables into `DEFAULT_LAYOUT`, so this was one number in one
+default object, exactly as the brief required: no second lookup table was reintroduced.
+
+**What shipped.** `app/extensions/BuiltIn/HomeTab/homeTabConfig.ts`, `DEFAULT_LAYOUT.groups`, the
+`cells` group: `collapsePriority: 99` → `55`, and the comment rewritten from "left as-is, it is a
+product call" to the decision and its reason. Three assertions moved with it — the priority table in
+`homeTabLayout.test.ts`, the demotion order in `homeTabSections.test.tsx`
+(`[10, 20, 30, 40, 50, 55, 60]`, which is literally the order groups become launchers), and the
+pre-version migration fill, which takes the number from the shipped default.
+
+`DEFAULT_COLLAPSE_PRIORITY` (99) is unchanged and still applies to groups the USER creates in the
+Customize dialog: a group someone added by hand should survive the squeeze longest, because the app
+cannot know how important it is. That was never the accident; the accident was `cells` silently
+inheriting it.
+
+### D7. The app/engine error-spelling divergence (§2n, extended) — **CLOSED 2026-08-09**
+
+**Decided: adopt the canonical literals everywhere, with Excel as the reference — and delete
+`Parse`.** The app-side `cell_error_display` listed four variants explicitly and sent the other six
+to `format!("#{:?}", e).to_uppercase()`, i.e. the Rust variant NAME. It is now a one-line forwarder
+to `CellError::as_literal`. There is no `#{Debug}` arm left anywhere in the product.
+
+| variant | grid painted | now | why |
+|---|---|---|---|
+| `Div0` | `#DIV0` | `#DIV/0!` | Excel |
+| `Ref` | `#REF` | `#REF!` | Excel |
+| `Name` | `#NAME` | `#NAME?` | Excel |
+| `Value` | `#VALUE` | `#VALUE!` | Excel |
+| `NA` | `#N/A` | `#N/A` | Excel — no trailing punctuation, checked rather than "corrected" |
+| `Circular` | `#CIRCULAR` | `#CIRCULAR!` | no Excel counterpart; Excel's punctuation |
+| `Conflict` | `#CONFLICT` | `#CONFLICT!` | as above — it was the one literal with no terminal mark |
+| `Blocked` | `#BLOCKED!` | `#BLOCKED!` | unchanged |
+| `Limit` | `#LIMIT!` | `#LIMIT!` | unchanged |
+| `Parse` | `#PARSE` | — | **variant deleted** |
+
+`#NULL!` and `#NUM!` are Excel errors with **no engine variant**; they were left absent rather than
+aliased onto a variant that exists, and `cellFormatting.ts` still recognises them because they arrive
+by xlsx import.
+
+**`Parse` was deleted, not respelled.** Excel has no unparseable-formula STATE — an invalid formula
+is refused at entry or lands as `#NAME?` — and neither does Calcula: `CellError::Parse` is
+constructed **nowhere in the product**. `Cell::new_formula` stores an unparseable formula as TEXT,
+and the evaluate-formula and script surfaces answer with the string `#SYNTAX!`. The variant existed
+only to be rendered as an internal enum name that no other layer could parse back, and to be the one
+error that changed meaning on reload (it shared `#VALUE!` outbound and read back as `Value`). Giving
+a spelling to a state that cannot occur would have preserved the dead branch; deleting it removes the
+class. If the engine ever needs the state, `#SYNTAX!` is already the product's word for it.
+
+**A SECOND DEFECT, and it is the one that mattered.** The divergence was not cosmetic: it stopped the
+grid from rendering those cells as errors at all. `isErrorValue`
+(`gridRenderer/styles/cellFormatting.ts`) matches against the CANONICAL literals, and `#DIV0` does
+not start with `#DIV/0!` — so a division-by-zero cell was painted as ORDINARY LEFT-ALIGNED BLACK
+TEXT, indistinguishable from a string the user typed, while a `#DIV/0!` cell imported from xlsx a row
+above was painted red and centred. Only `#NAME` matched, by accident (`#NAME?` minus its `?`). That
+is precisely the failure `CELL_ERROR_LITERALS`' own doc comment warns about, arriving from the other
+side of the boundary.
+
+**Round-trip verified, not assumed.** `as_literal`/`from_literal` remain the single authority; a new
+test (`every_error_literal_survives_a_save_and_reload`) asserts `from_literal(as_literal(v)) == v`
+for every variant, which `#CONFLICT!` — the one literal that moved — is exactly the shape of change
+to break. Persistence writes `as_literal` (`persistence/src/lib.rs`, `calp_commands.rs`), so `.cala`
+and `.calp` follow for free; `calcula-format`'s round-trip test now covers all nine variants with no
+exception, because there is no longer one. Pre-change workbooks holding the string `#CONFLICT` reload
+as `#VALUE!`; under the project's no-backward-compatibility rule that is accepted, and `Conflict` is
+an in-session UI-effect collision that is recomputed rather than authored.
+
+**The pinned constraint held.** `Limit`, `Blocked`, `Conflict` and `NA` had to keep exact literals or
+the frontend's `normalizeCellErrorLiteral` collapses them to `#VALUE!`. With no Debug arm there is
+nothing to fall through to, but the requirement outlives the implementation, so the test still pins
+all four by name. A further test asserts no literal equals its own `#{Debug}` spelling — the reusable
+mistake, stated directly.
+
+**Goldens this moves: none directly; the residue case is real.** No golden in either suite
+deliberately paints an error cell (checked: none of the nine specs that call `takeGridScreenshot`
+writes an error-producing formula). The exposure is residue — `edge-cases` leaves two circular cells
+at AH1:AH2 in the viewport `evaluate-formula` shoots, which now paint `#CIRCULAR!` in red and centred
+instead of `#CIRCULAR` in black. D5 re-records all 40 grid goldens anyway, so this is folded in.
+
+**Also updated:** `remaining-correctness.spec.ts` test 2 asserted the exact string `#CIRCULAR`, with a
+doc comment recording the divergence as measured product behaviour; it now asserts `#CIRCULAR!` and
+the comment records the closure. **Both cycle tests were run live against the app and pass.**
+`udf-evaluation`'s `toContain("#NAME")` is satisfied by `#NAME?` either way. Three stale comments
+that claimed a divergence which no longer exists (`formula.rs` ×2, `scripting/udf.rs`) were
+corrected rather than left to invite someone to "restore" a symmetry.
+
+**CORRECTION, 2026-08-09 (integration).** This entry claimed "no `#{Debug}` arm remains anywhere".
+**Three remained** — `Grid::get_cell_display_value` (Find/Replace), `format_value_for_ai` (the AI
+context serializer) and `saved_value_display` (the published `.calp` HTML report, which was emitting
+`##DIV/0!` with a doubled hash). Two of the three were made WORSE by this decision, not by accident
+but by construction: they had been quietly agreeing with the *wrong* spelling, so pointing the grid at
+`as_literal` turned a consistent error into a visible divergence — Find stopped matching the text the
+grid paints. All three are fixed, each with a test written to fail first; see §3ap contract (d). The
+lesson is the one `as_literal`'s own doc comment now carries: "the last one" is a claim that has to be
+grepped for, not remembered.
+
+
+### D8. Should a structural edit recalculate? (§2s) — **OPEN, raised 2026-08-09**
+
+**The question.** `insert_rows` / `insert_columns` / `delete_rows` / `delete_columns` re-point every
+reference and move every cached value with its cell, and never re-evaluate anything. For almost every
+formula that is correct and free. For formulas whose result depends on the SHAPE or POSITION of their
+own reference it is a stale value: `=ROWS(A1:A5)` becomes `=ROWS(A1:A6)` when you insert a row inside
+the range, and keeps displaying 5.
+
+**Excel recalculates after a structural edit**, so the owner's standing rule points one way. What the
+rule does not settle is the COST, and that is the whole of this decision.
+
+**Why it was not just done.** The seed set for a row insert is every cell at or below the insertion
+point — potentially the sheet. A row insert is among the most frequent gestures in the product, so
+this is exactly the shape of question D1 and D3 were made to answer with a measurement rather than an
+argument, and D3's own experience is the warning: naive seeding there measured **worse than the
+whole-sheet pass it replaced** (54.19 ms vs 22.75 ms) until the no-formula/no-dependents gate was
+added, and that gate is already in `recalc_after_active_sheet_bulk_rewrite`, so the honest cost is not
+knowable without running it.
+
+**The three options, in the order I would try them.**
+
+1. **Seed only the formula cells whose AST was actually rewritten**, plus their dependents. The
+   structural edit already visits and rewrites each one, so the seed set is free to collect — no extra
+   walk, which is the constraint that matters most here. This is my recommendation: it is proportional
+   to formulas touched rather than to cells moved, and it catches every case in §2s, because a
+   shape-sensitive formula only goes stale if its own reference was rewritten.
+2. Seed every moved cell. Simple, obviously correct, and proportional to the edit's blast radius
+   rather than to the workbook — but on a tall sheet that is the sheet.
+3. Do nothing and document it. Defensible only if measurement shows (1) is expensive, which would be
+   surprising.
+
+**Do not add a fourth walk** — whichever option wins must seed
+`recalc_after_active_sheet_bulk_rewrite` (and `recalc_after_off_sheet_write` for the off-sheet
+structural edit), like D3's eight.
+
+**Until it is decided**, the four functions sit in the census's `EXEMPT` with reasons that say exactly
+this rather than claiming they need no recalculation — the census's job is to make an omission into a
+written decision, and this is one.
+
 
 ## Suggested order
 
@@ -3344,7 +4529,10 @@ section 4.
    `scrolling` (3).** Everything else in the 21 was classified by running it; these were not, because
    the per-spec cold loop hung on `protection`. `scrolling`'s diff looks like the `clickCell`
    selection drift, which would make it the same item as (2) — but that is a hypothesis, and this
-   register's record on hypotheses is now 0 for 6. Run them cold, one spec per app.
+   register's record on hypotheses is now 0 for 6. Run them cold, one spec per app. **Do this AFTER
+   the D5 re-record, not before:** `protection` and `scrolling` are `takeGridScreenshot` specs, so
+   until their goldens are re-recorded at the new frame size every diff is a crop and tells you
+   nothing about the drift. `ribbon-tabs` is unaffected and can be isolated now.
 
 4. **The successor to the `AppState` conversion: `BiState` / `PivotState` / `ScriptState` /
    `PaneControlState`.** `DocumentEffect` gates *stores*, and the app's stores are now covered; what
@@ -3353,7 +4541,25 @@ section 4.
    were a map of §3c. Recounted this pass: still 47 / 13.
 
 5. **The seven decisions in section 4.** They are product calls, not work, and they are written up
-   for the owner rather than listed here.
+   for the owner rather than listed here. **D1 was decided and shipped 2026-08-09** — F9 = Calculate
+   Now = the workbook, Shift+F9 = Calculate Sheet = the active sheet, under the owner's standing rule
+   that Excel parity wins. The benchmark it was gated on came back the opposite way round from the
+   fear: the workbook pass is ~30% FASTER than the old F9 on identical single-sheet work.
+   **D4 was decided and shipped 2026-08-09** — the play pill is viewport-pinned DOM chrome with a
+   close control, and `clearDriver` has three product routes where it had none. `__CALCULA_ANIMATION__`
+   is deleted: the specs drive the product paths now. The finding underneath it is bigger than the
+   pill — that handle was the test surface compensating for a feature the product did not have.
+   **D5 was decided and shipped 2026-08-09** — grid captures frame the canvas layer, so the
+   scrollbars are out of frame, and the marching-ants border is parked by the app's own reduced-motion
+   switch (which nothing had ever read). Two cold runs of the capture the register called
+   unphotographable are now byte-identical. **Read the cost correction before scheduling the
+   re-record: it is 40 goldens, not eleven**, because cropping changes the image size — every
+   `takeGridScreenshot` golden moves, region captures and window checkpoints do not.
+   **D7 was decided and shipped 2026-08-09** — the grid spells errors the way Excel does and the way
+   the rest of the product already did, the last `#{Debug}` arm is gone, and `CellError::Parse` was
+   deleted rather than respelled because nothing in the product ever constructed it. The divergence
+   was hiding a real defect: `isErrorValue` matches the canonical literals, so every `#DIV0` /
+   `#VALUE` / `#REF` / `#CIRCULAR` cell was painted as ordinary black left-aligned text.
 
 **Deliberately not on this list: the rest of Wave 5 (§1c).** `CenterAcrossSelection`, insert/delete
 cells with shift, extended border styles, superscript/subscript and sparklines are each an engine

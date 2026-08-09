@@ -438,6 +438,20 @@ test.describe.serial("Dirty flag: mutations, AutoRecover and transient previews"
     expect(await isDirty(page)).toBe(false);
     await refreshTitle(page);
     expect(await titleShowsDirty(page)).toBe(false);
+
+    // UNLOAD through the product (D4): the play pill's close control. "Stop"
+    // restores the model but keeps the driver, so without this the journey
+    // leaves a loaded driver behind — the residue class §3b is about.
+    //
+    // It is also an assertion, not just cleanup: `clearDriver` runs an
+    // `anim_restore` of its own, and a restore that dirtied the document would
+    // hand the user a modified-file prompt for a preview they already stopped.
+    await page.locator('[data-testid="anim-pill-close"]').click({ timeout: 5000 });
+    await expect(page.locator('[data-testid="anim-play-pill"]')).toHaveCount(0, { timeout: 5000 });
+    expect(await driverDisplay()).toBe("7");
+    expect(await isDirty(page)).toBe(false);
+    await refreshTitle(page);
+    expect(await titleShowsDirty(page)).toBe(false);
   });
 
   // ------------------------------------------------------------------

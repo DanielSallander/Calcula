@@ -3,12 +3,25 @@
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 
 import { useCallback, useEffect, useState } from "react";
-import { useEditing, getGlobalEditingValue, setGlobalIsEditing, isGlobalFormulaMode } from "../../hooks";
+import {
+  useEditing,
+  getGlobalEditingValue,
+  setGlobalIsEditing,
+  getGlobalIsEditing,
+  isGlobalFormulaMode,
+  setGlobalCursorPosition,
+} from "../../hooks";
 import { useGridState } from "../../state";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
+import {
+  beginEditorOpen,
+  isEditorOpening,
+  handleKeyWhileOpening,
+  abortEditorOpen,
+} from "../../lib/editOpenBuffer";
 import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
 import { alertAsync } from "../../lib/dialogs";
 
@@ -346,6 +359,53 @@ export function useSpreadsheetEditing({
         }
       }
 
+      // === THE EDITOR IS OPENING ===
+      // Opening the editor by typing is asynchronous (two IPC round trips, a
+      // React render, then focus). Every keystroke that lands in that window
+      // arrives HERE rather than at the editor. Before this check existed they
+      // were lost: the ones that arrived before the editing state existed
+      // started a SECOND replace-mode edit holding only their own character
+      // (so the last keystroke won and "hello" committed as "o"), and the ones
+      // that arrived after it fell into the "let the editor handle it"
+      // early-return below while the editor did not yet have focus.
+      //
+      // While the open window is latched we own the keyboard: text keys extend
+      // the entry being opened, and Enter/Tab/Escape are latched for the editor
+      // to replay through its own handlers the moment it is ready. This runs
+      // FIRST -- ahead of the isEditingRef branch -- because the open window
+      // spans both sides of that flag flipping.
+      if (isEditorOpening()) {
+        // Built explicitly rather than passed straight through: React's
+        // synthetic keyboard event does not carry `isComposing`, only the
+        // native one does, and IME keys must never be buffered.
+        const outcome = handleKeyWhileOpening({
+          key: event.key,
+          shiftKey: event.shiftKey,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          altKey: event.altKey,
+          isComposing: event.nativeEvent.isComposing,
+          keyCode: event.nativeEvent.keyCode,
+        });
+        if (outcome.kind !== "passthrough") {
+          event.preventDefault();
+          // Push the extended entry into the live edit. Before the editing
+          // state exists this is a no-op in the reducer and startEditing seeds
+          // itself from the buffer instead; after it exists this is what makes
+          // the characters visible.
+          if (outcome.kind === "text") {
+            updateValue(outcome.value);
+            // The caret is at the end of everything typed so far. The editor
+            // restores the caret from this when it finally takes focus, so
+            // leaving it behind would drop the user mid-word: type "a", let
+            // "bc" land during the window, and the next character would be
+            // inserted at position 1 ("aXbc").
+            setGlobalCursorPosition(outcome.value.length);
+          }
+          return;
+        }
+      }
+
       // FIX: Use ONLY the synchronous ref for editing check
       // The ref is updated immediately when editing starts/stops, before React re-renders.
       // This prevents:
@@ -412,6 +472,12 @@ export function useSpreadsheetEditing({
         // inconsistent state (likely from a race condition or error during startEdit).
         // Clear the stuck global flag and allow navigation to proceed.
         if (!editing) {
+          // ...unless an open is genuinely in flight. startEditing sets the
+          // global flag before it has finished awaiting, so this state is
+          // NORMAL for a few milliseconds after the first keystroke; tearing it
+          // down here is what used to let the next keystroke start a second
+          // edit and throw the first one away.
+          if (isEditorOpening()) return;
           console.warn("[handleContainerKeyDown] Editing ref stuck without editing state, clearing...");
           setGlobalIsEditing(false);
           // Don't return - let the key be handled normally below
@@ -459,10 +525,23 @@ export function useSpreadsheetEditing({
         event.key.length === 1 &&
         !event.ctrlKey &&
         !event.metaKey &&
-        !event.altKey
+        !event.altKey &&
+        // An IME composition delivers its result to the focused element as a
+        // composition/input event, not as a character keydown. Opening on it
+        // would consume the key and leave the composition nowhere to land.
+        !event.nativeEvent.isComposing &&
+        event.nativeEvent.keyCode !== 229
       ) {
         event.preventDefault();
+        // Latch SYNCHRONOUSLY, before the first await inside startEditing:
+        // whichever keystroke arrives next must find an open already in flight.
+        beginEditorOpen(event.key);
         await startEditing(event.key);
+        // startEditing only raises the global editing flag once it has cleared
+        // its guards. If it bailed out (protected range, extension guard, no
+        // selection) no editor is coming, so the latch must not survive to
+        // swallow the keyboard.
+        if (!getGlobalIsEditing()) abortEditorOpen();
         return;
       }
 

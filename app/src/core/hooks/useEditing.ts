@@ -57,6 +57,7 @@ import {
   type FormulaReferenceWithPosition,
 } from "../lib/formulaRefParser";
 import { alertAsync } from "../lib/dialogs";
+import { openEntryValue, abortEditorOpen } from "../lib/editOpenBuffer";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -111,6 +112,10 @@ export function setGlobalIsEditing(value: boolean): void {
   if (!value) {
     globalEditingValue = "";
     globalCursorPosition = 0;
+    // The editor-open window only means anything while an entry is live. If
+    // the edit has ended, a latch left engaged would keep buffering keystrokes
+    // into an entry nobody will ever show.
+    abortEditorOpen();
   }
 }
 
@@ -966,15 +971,23 @@ export function useEditing(): UseEditingReturn {
           console.error("[useEditing] Failed to get merge info:", error);
         }
         
+        // The entry is whatever the user has typed since the open began, NOT
+        // just the character this call was handed. Opening awaits two IPC round
+        // trips above; keystrokes that landed during them were buffered by the
+        // grid container into the editor-open window, and this is where they
+        // rejoin the entry. Without this seed the editor renders holding one
+        // character and the rest of the word is gone.
+        const seededValue = openEntryValue() ?? initialValue;
+
         // FIX: Update global editing value and cursor position synchronously for formula mode detection
-        setGlobalEditingValue(initialValue);
-        globalCursorPosition = initialValue.length;
+        setGlobalEditingValue(seededValue);
+        globalCursorPosition = seededValue.length;
 
         dispatch(
           startEditingAction({
             row: editRow,
             col: editCol,
-            value: initialValue,
+            value: seededValue,
             sourceSheetIndex: sheetContext.activeSheetIndex,
             sourceSheetName: sheetContext.activeSheetName,
             rowSpan,

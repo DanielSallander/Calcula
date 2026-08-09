@@ -159,18 +159,162 @@ impl NamedRange {
     }
 }
 
+// ============================================================================
+// A NAME CHANGE IS A VALUE CHANGE  (D2 — Excel parity)
+// ============================================================================
+
+/// Recalculate everything that reads the names in `changed`.
+///
+/// A formula now STORES its defined names and expands them while calculating
+/// (see `name_resolution`), which is what makes a name a live indirection rather
+/// than a one-shot typing macro — and which makes repointing, redefining,
+/// renaming or deleting one a **value change for every formula that reads it**.
+/// A name is not a cell, so no cell seed can describe that; `name_dependents` is
+/// the edge that can.
+///
+/// Two halves, both through entry points that already exist — deliberately not a
+/// new walk (see the ONE-cascade census in `bulk_rewrite_recalc_tests`):
+///
+/// * the ACTIVE sheet's readers seed `recalc_after_active_sheet_bulk_rewrite`,
+///   which orders them topologically among themselves and continues into their
+///   own dependents and across sheet boundaries;
+/// * OTHER sheets are found by asking each grid whether any of its formulas
+///   mentions a changed name, and only those sheets go through
+///   `recalc_after_off_sheet_write`. The per-sheet dependency maps are
+///   active-sheet-only, so there is no seed vocabulary for them — but naming the
+///   sheets that actually read the name is much narrower than the whole-workbook
+///   sweep an undone name definition takes (`RestoreReport::workbook_recalc`).
+///
+/// CALLERS MUST HOLD NO `AppState` LOCKS: both helpers take their own. This is
+/// the second lock phase, exactly as in `apply_changes` and `sort_range`.
+pub(crate) fn recalc_after_name_change(
+    state: &AppState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    changed: &[String],
+) {
+    if changed.is_empty() {
+        return;
+    }
+    // MANUAL CALCULATION: the user asked for stale values until F9, and a name
+    // change is a value change like any other. Gated HERE rather than relying on
+    // the helpers, because only one of the two honours the mode
+    // (`recalc_after_active_sheet_bulk_rewrite` does; `recalculate_sheet_values`
+    // does not), and half a recalculation is worse than none — it would leave
+    // the sheets you are NOT looking at fresh and the one you are looking at
+    // stale.
+    if state
+        .calculation_mode
+        .lock()
+        .map(|m| *m != "automatic")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let changed_keys: HashSet<String> = changed.iter().map(|n| n.to_uppercase()).collect();
+
+    // OFF-SHEET half first, mirroring `apply_changes`: the active-sheet cascade
+    // below then reads values the other sheets have already settled on.
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let off_sheet: Vec<usize> = {
+        let grids = state.grids.read().unwrap();
+        grids
+            .iter()
+            .enumerate()
+            .filter(|(idx, grid)| {
+                *idx != active_sheet
+                    && grid.cells.values().any(|cell| {
+                        crate::name_resolution::cell_reads_any_name(cell, &changed_keys)
+                    })
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    };
+    if !off_sheet.is_empty() {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &off_sheet,
+        );
+    }
+
+    // ACTIVE-sheet half: the readers themselves are the seeds.
+    let seeds: Vec<(u32, u32)> = {
+        let name_dependents = state.name_dependents.lock().unwrap();
+        let mut seen: crate::CoordSet = crate::CoordSet::default();
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for key in &changed_keys {
+            if let Some(cells) = name_dependents.get(key) {
+                for &coord in cells {
+                    if seen.insert(coord) {
+                        out.push(coord);
+                    }
+                }
+            }
+        }
+        // Deterministic: the map is a hash set and seed ORDER reaches values
+        // through the topological pass.
+        out.sort_unstable();
+        out
+    };
+    if seeds.is_empty() {
+        return;
+    }
+    let mut updated_cells: Vec<CellData> = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &seeds,
+        &mut updated_cells,
+    );
+    // The cells are not returned: every route into these commands (Name
+    // Manager, the Name Box, `NewNameDialog`, a script, MCP) already emits
+    // `NAMED_RANGES_CHANGED`, and the DefinedNames extension turns that into one
+    // `refreshGridData()`. Widening `NamedRangeResult` would oblige each of
+    // those five callers to apply a cell list instead.
+}
+
 /// Create a new named range.
 #[tauri::command]
 pub fn create_named_range(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     name: String,
     sheet_index: Option<usize>,
     refers_to: String,
     comment: Option<String>,
     folder: Option<String>,
 ) -> NamedRangeResult {
-    create_named_range_impl(&state, &file_state, name, sheet_index, refers_to, comment, folder)
+    let result = create_named_range_impl(
+        &state, &file_state, name, sheet_index, refers_to, comment, folder,
+    );
+    // DEFINING a name is a value change too: every `#NAME?` cell that was
+    // waiting for it becomes a number (`collect_names` records edges for names
+    // that do not exist yet, precisely so this works).
+    if result.success {
+        if let Some(nr) = &result.named_range {
+            recalc_after_name_change(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &[nr.name.clone()],
+            );
+        }
+    }
+    result
 }
 
 /// Command body over plain references, so the dirty-flag contract is unit-testable
@@ -254,6 +398,10 @@ pub(crate) fn create_named_range_impl(
 pub fn update_named_range(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     name: String,
     sheet_index: Option<usize>,
     refers_to: String,
@@ -285,6 +433,18 @@ pub fn update_named_range(
 
     crate::undo_commands::record_named_range_undo(&state, &key, previous, "Edit name");
 
+    // REPOINTING A NAME MOVES EVERY FORMULA THAT READS IT. This is the whole
+    // point of D2 — before it, the formulas held the old definition's
+    // coordinates and nothing here could reach them.
+    recalc_after_name_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[name],
+    );
+
     NamedRangeResult {
         success: true,
         named_range: Some(named_range),
@@ -293,10 +453,21 @@ pub fn update_named_range(
 }
 
 /// Delete a named range.
+///
+/// EXCEL'S BEHAVIOUR, DELIBERATELY: the formulas are NOT rewritten. Excel leaves
+/// `=RATE*B2` saying `RATE` and the cell shows `#NAME?` until the name is
+/// defined again — it does not substitute the old definition back in, and it does
+/// not blank the formula. That falls straight out of storing the name: the
+/// expansion below finds nothing and the evaluator's unresolved-`NamedRef` arm
+/// returns `#NAME?`. All this command has to do is make the cells recalculate.
 #[tauri::command]
 pub fn delete_named_range(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     name: String,
 ) -> NamedRangeResult {
     let effect = DocumentEffect::mutates(&file_state);
@@ -325,6 +496,15 @@ pub fn delete_named_range(
                             .unwrap_or(false))
                 });
             }
+
+            recalc_after_name_change(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &[name],
+            );
 
             NamedRangeResult {
                 success: true,
@@ -557,10 +737,21 @@ pub fn resolve_named_range_coords(
 }
 
 /// Rename a named range.
+///
+/// EXCEL'S BEHAVIOUR, DELIBERATELY: renaming in the Name Manager does NOT
+/// rewrite the formulas that use the old name — they keep saying `OLDNAME` and
+/// become `#NAME?`. (Excel's own Name Manager warns about this; only the Name
+/// Box's "rename by redefining" flow leaves formulas working.) Both names are
+/// therefore reported as changed here, so the old name's readers recalculate to
+/// `#NAME?` instead of sitting on the value they had.
 #[tauri::command]
 pub fn rename_named_range(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     old_name: String,
     new_name: String,
 ) -> NamedRangeResult {
@@ -601,6 +792,16 @@ pub fn rename_named_range(
     if let Some(mut nr) = named_ranges.remove(&old_key) {
         nr.name = new_name.clone();
         named_ranges.insert(new_key, nr.clone());
+        drop(named_ranges);
+
+        recalc_after_name_change(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &[old_name, new_name],
+        );
 
         NamedRangeResult {
             success: true,
@@ -858,8 +1059,31 @@ pub fn apply_names_to_formulas(
         }
     }
 
+    // APPLY NAMES IS NOW A REPAIR TOOL, NOT THE WAY IN (D2). Entry keeps the
+    // name, so this can no longer "double-apply": a formula that already reads
+    // `RATE` has no `$D$5` text left for the replacer to match, which makes the
+    // command idempotent by construction rather than by a guard.
+    //
+    // What it DOES still owe is the dependency edge. Every rewritten cell just
+    // gained a name it did not have, and until `name_dependents` knows, a later
+    // repoint of that name would leave exactly these cells stale — the defect
+    // this whole change exists to remove. No recalculation is seeded: the name
+    // and the reference it replaced denote the same cell, so no VALUE moved.
+    //
+    // Second lock phase, like every other rebuild call: `rebuild_all_dependencies`
+    // takes the grid and the dependency maps itself.
+    let modified = modifications.len() as u32;
+    drop(locale);
+    drop(merged_regions);
+    drop(styles);
+    drop(grid);
+    drop(named_ranges);
+    if modified > 0 {
+        crate::undo_commands::rebuild_all_dependencies(&state);
+    }
+
     Ok(ApplyNamesResult {
-        formulas_modified: modifications.len() as u32,
+        formulas_modified: modified,
         cells: updated_cells,
     })
 }

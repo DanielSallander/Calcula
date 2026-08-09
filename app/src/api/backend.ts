@@ -5683,9 +5683,11 @@ export async function evaluateExpressions(expressions: string[]): Promise<string
 }
 
 /**
- * Trigger a full recalculation of all formulas in the grid.
- * Used after virtual file changes so that FILEREAD/FILELINES/FILEEXISTS formulas update.
- * Returns the list of cells that were updated.
+ * Trigger a full recalculation of the WHOLE WORKBOOK — the same pass F9 runs.
+ * Used after virtual file changes so that FILEREAD/FILELINES/FILEEXISTS formulas update,
+ * which is precisely a case where the affected formulas may be on any sheet.
+ * Returns the updated cells of the ACTIVE sheet (the only ones the grid can apply;
+ * off-sheet writes land in the backend and appear when that sheet is next fetched).
  */
 export async function recalculateFormulas(): Promise<CellData[]> {
   return invoke<CellData[]>("calculate_now");

@@ -62,30 +62,49 @@ test.describe("Animation extension", () => {
    * sec 3a/3b). This file used to leave three things in the shared workbook, and the
    * first of them was eating clicks for the other eighty-nine specs:
    *
-   *   1. A LOADED PLAYBACK DRIVER. Animation's play pill is a floating grid
-   *      overlay shown whenever `frameCount > 0`, anchored near the sheet origin
-   *      -- it covers A1:C2. It is a hit-testable region, so `grid.clickCell("A1")`
-   *      landed on the pill and toggled playback instead of selecting the cell.
-   *      Nothing in the file ever unloaded the driver, so from this spec onward
-   *      every write to A1/B1/C1 went wherever the selection happened to be and
-   *      every read came back as the previous spec's residue. That is the whole
-   *      of `editing.spec.ts` failing 3/3 in the ordered run and 12/12 cold, and
-   *      most of `dimensions`.
+   *   1. A LOADED PLAYBACK DRIVER. Animation's play pill used to be a floating
+   *      GRID overlay shown whenever `frameCount > 0`, anchored near the sheet
+   *      origin -- it covered A1:C2. It was a hit-testable region, so
+   *      `grid.clickCell("A1")` landed on the pill and toggled playback instead
+   *      of selecting the cell. Nothing in the file ever unloaded the driver, so
+   *      from this spec onward every write to A1/B1/C1 went wherever the
+   *      selection happened to be and every read came back as the previous
+   *      spec's residue. That is the whole of `editing.spec.ts` failing 3/3 in
+   *      the ordered run and 12/12 cold, and most of `dimensions`.
    *   2. A CHART, at (320, 40) 400x300 on sheet 0, in every grid golden after
    *      this point.
    *   3. CELL DATA in column AA, which is outside the box `resetGrid` clears.
    *
-   * Stopping playback is NOT enough -- `stop()` restores the model but leaves the
-   * driver loaded, so the pill stays. `clearDriver()` is the one that unloads it.
+   * (1) IS FIXED IN THE PRODUCT (D4). The pill is now viewport-pinned DOM chrome
+   * with a close control, so it claims no cell at all -- see the two tests below
+   * that hold both halves. The cleanup still runs, because a driver left loaded
+   * is still residue, but it now goes through the PRODUCT's route (the pill's
+   * close button) instead of the `__CALCULA_ANIMATION__` window handle that
+   * existed only because no route existed. That handle is gone.
+   *
+   * Stopping playback is still NOT enough -- `stop()` restores the model but
+   * leaves the driver loaded. Unloading is what removes the pill.
    */
   test.afterAll(async ({ sharedPage }) => {
+    // 0. UNLOAD THE DRIVER through the product: the pill's close control. It is
+    //    viewport-pinned chrome, present whenever a driver is loaded, and
+    //    independent of whether the panel is open or where it is placed.
+    await sharedPage
+      .locator('[data-testid="anim-pill-close"]')
+      .click({ timeout: 5000 })
+      .catch(() => {
+        /* no driver loaded -> nothing to unload */
+      });
+    await expect(sharedPage.locator('[data-testid="anim-play-pill"]')).toHaveCount(0, {
+      timeout: 5000,
+    });
+
     await sharedPage.evaluate(async () => {
       const w = window as unknown as {
-        __CALCULA_ANIMATION__?: { playbackEngine?: { clearDriver?: () => Promise<void> } };
         __CALCULA_PANEL_REGISTRY__?: { closePanel?: (id?: string) => void };
         __TAURI__?: { core: { invoke: (c: string, a?: unknown) => Promise<unknown> } };
       };
-      // 0. CLOSE THE PANEL this file opens with View > Animation Timeline. An
+      // 1. CLOSE THE PANEL this file opens with View > Animation Timeline. An
       //    open side panel takes 320px off [data-grid-area] — 1232px becomes
       //    912px — so every later grid golden fails on SIZE before a single
       //    pixel is compared. Measured: closePanel("animation.timeline") takes
@@ -95,17 +114,6 @@ test.describe("Animation extension", () => {
       } catch {
         /* the registry is a dev/E2E handle; never let it mask a real result */
       }
-      // 1. Unload the driver -> the play pill's region is removed.
-      //
-      // Through the extension's OWN handle, not through the dev `__calcImport`
-      // bridge. That bridge does a real dynamic import, which for a stateful
-      // module hands back a SECOND instance with its own clock: the first
-      // version of this cleanup called clearDriver on a fresh engine that had no
-      // driver, reported success, and left the pill exactly where it was. The
-      // probe that caught it read `frameCount: 0` while the pill on screen said
-      // "11/11". Anything reaching live extension state must go through a
-      // window handle the extension itself published.
-      await w.__CALCULA_ANIMATION__?.playbackEngine?.clearDriver?.();
       // 2. The chart, and the cells this file seeded (Z/AA are outside resetGrid).
       const tauri = w.__TAURI__;
       if (tauri?.core?.invoke) {
@@ -329,6 +337,98 @@ test.describe("Animation extension", () => {
     } finally {
       fs.rmSync(gifPath, { force: true });
     }
+  });
+
+  /**
+   * D4, HALF ONE: the pill claims no grid coordinates.
+   *
+   * This is the regression that cost eighty-nine spec files. The old pill was a
+   * hit-testable floating GRID region anchored near the sheet origin, so with a
+   * driver loaded a click at A1 hit the pill and toggled playback instead of
+   * selecting the cell — silently, with no affordance saying so. The pill is now
+   * viewport-pinned DOM chrome, so the click reaches the grid.
+   *
+   * Asserted the way the defect actually presented: click A1, and check BOTH
+   * that the selection moved there AND that playback did not start. Checking
+   * only the selection would pass on a pill that merely stopped stealing the
+   * click while still starting an animation underneath it.
+   */
+  test("the play pill claims no cell — with a driver loaded, a click at A1 still selects A1", async ({ grid }) => {
+    const page = grid.page;
+    await grid.setCellValueDirect("A1", "5");
+    await configureClockDriver(grid, "A1", "0", "10", "1", "1 / 11");
+    await expect(page.locator('[data-testid="anim-play-pill"]')).toBeVisible({ timeout: 5000 });
+
+    // Park the selection somewhere else first, so "A1" cannot be a leftover.
+    await grid.clickCell("D5");
+    expect(await grid.getNameBoxValue()).toBe("D5");
+
+    await grid.clickCell("A1");
+    expect(await grid.getNameBoxValue()).toBe("A1");
+    // The click did not reach the transport: still on frame 1, still not playing.
+    await expect(page.locator('[data-testid="anim-frame"]')).toHaveText("1 / 11");
+
+    await page.locator('[data-testid="anim-pill-close"]').click();
+    await expect(page.locator('[data-testid="anim-play-pill"]')).toHaveCount(0, { timeout: 5000 });
+  });
+
+  /**
+   * D4, HALF TWO — and the more important one: there is a route in the PRODUCT
+   * to stop owning a driver. Before this there was none at all; every lifecycle
+   * event called `stopAndRestore`, which leaves the driver loaded, and the only
+   * unload path (`clearDriver`) had no caller. A user who started an animation
+   * could not give it back without reloading the app.
+   *
+   * The close control must do BOTH things: unload (pill gone, transport reports
+   * "no driver") and restore (the transient guarantee — the pre-playback value
+   * comes back even when it is clicked mid-flight).
+   */
+  test("the pill's close control stops playback, restores the model, and unloads the driver", async ({ grid }) => {
+    const page = grid.page;
+    await grid.setCellValueDirect("A1", "7");
+    await grid.setCellValueDirect("B1", "=A1*2");
+    await configureClockDriver(grid, "A1", "0", "10", "1", "1 / 11");
+
+    // Start playing, and wait until the model is genuinely off its original value.
+    await page.locator('[data-testid="anim-pill-toggle"]').click();
+    await expect.poll(() => cellDisplay(page, 0, 0), { timeout: 8000 }).not.toBe("7");
+
+    // Close MID-PLAYBACK: the hardest case for the restore guarantee.
+    await page.locator('[data-testid="anim-pill-close"]').click();
+
+    await expect(page.locator('[data-testid="anim-play-pill"]')).toHaveCount(0, { timeout: 5000 });
+    await expect(page.locator('[data-testid="anim-frame"]')).toHaveText("no driver", { timeout: 5000 });
+    await expect.poll(() => cellDisplay(page, 0, 0), { timeout: 5000 }).toBe("7");
+    expect(await cellDisplay(page, 0, 1)).toBe("14");
+
+    // And the panel's own Unload button is disabled again, because there is
+    // nothing left to unload.
+    await expect(page.locator('[data-testid="anim-clear-driver"]')).toBeDisabled();
+  });
+
+  /**
+   * The panel's route (the same lever, where drivers are managed). "Stop" must
+   * NOT unload — a user mid-iteration wants to press Play again — so the two
+   * buttons are deliberately separate, and this pins the difference.
+   */
+  test("panel: Stop keeps the driver, Unload gives it back", async ({ grid }) => {
+    const page = grid.page;
+    await grid.setCellValueDirect("A1", "3");
+    await configureClockDriver(grid, "A1", "0", "10", "1", "1 / 11");
+
+    await page.locator('button[title="Step forward"]').click();
+    await expect(page.locator('[data-testid="anim-frame"]')).toHaveText("2 / 11", { timeout: 5000 });
+
+    // Stop restores the model but KEEPS the driver: the pill stays.
+    await page.locator('button[title="Stop (reset)"]').click();
+    await expect.poll(() => cellDisplay(page, 0, 0), { timeout: 5000 }).toBe("3");
+    await expect(page.locator('[data-testid="anim-play-pill"]')).toBeVisible();
+    await expect(page.locator('[data-testid="anim-frame"]')).toHaveText("1 / 11");
+
+    // Unload gives it back.
+    await page.locator('[data-testid="anim-clear-driver"]').click();
+    await expect(page.locator('[data-testid="anim-frame"]')).toHaveText("no driver", { timeout: 5000 });
+    await expect(page.locator('[data-testid="anim-play-pill"]')).toHaveCount(0, { timeout: 5000 });
   });
 
   test("Export controls are enabled once an animation is loaded", async ({ grid }) => {

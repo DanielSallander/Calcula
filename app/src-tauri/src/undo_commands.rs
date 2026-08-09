@@ -238,9 +238,24 @@ pub(crate) fn rebuild_all_dependencies(state: &AppState) {
     // taking that lock inside would add a fourth lock to a function some
     // callers already reach while holding the grid.
     let sheet_names = state.sheet_names.read().unwrap().clone();
+    // Same rule for the name tables: acquired HERE, at the call site, so a
+    // caller that already holds one cannot deadlock inside the rebuild.
+    let named_ranges = state.named_ranges.read().unwrap();
+    let tables = state.tables.read().unwrap();
+    let table_names = state.table_names.read().unwrap();
     let grid = state.grid.read().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
-    rebuild_all_dependencies_from_grid(&grid, active_sheet, &sheet_names, state);
+    rebuild_all_dependencies_from_grid(
+        &grid,
+        active_sheet,
+        &sheet_names,
+        crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+        },
+        state,
+    );
 }
 
 /// Same as rebuild_all_dependencies but for callers that already hold the
@@ -256,6 +271,7 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     grid: &engine::Grid,
     active_sheet: usize,
     sheet_names: &[String],
+    name_tables: crate::name_resolution::NameTables<'_>,
     state: &AppState,
 ) {
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -264,6 +280,8 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
     let mut row_dependents_map = state.row_dependents.lock().unwrap();
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut name_dependents_map = state.name_dependents.lock().unwrap();
+    let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
     let mut cross_sheet_dependents = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies = state.cross_sheet_dependencies.lock().unwrap();
 
@@ -274,6 +292,11 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     column_dependencies_map.clear();
     row_dependents_map.clear();
     row_dependencies_map.clear();
+    // DEFINED-NAME edges are single-sheet for the same reason (D2): they are
+    // keyed by name with no sheet dimension, so they describe the active sheet
+    // only and are rebuilt with it.
+    name_dependents_map.clear();
+    name_dependencies_map.clear();
 
     // The cross-sheet maps are GLOBAL across sheets — only rebuild the
     // ACTIVE sheet's edges. Wholesale clearing here would orphan every other
@@ -303,7 +326,15 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     // Scan all cells and rebuild
     for (&(row, col), cell) in &grid.cells {
         if let Some(ast) = &cell.ast {
-            let refs = extract_all_references(ast, &grid);
+            // THE STORED TREE KEEPS ITS DEFINED NAMES (D2), and
+            // `extract_references_recursive` cannot see through a `NamedRef` —
+            // it has no cell coordinates to give. Expanding first is what keeps
+            // `=RATE*B2` a dependent of the cell `RATE` points at: without it,
+            // the first sheet switch or structural undo would quietly drop that
+            // edge and editing the precedent would move nothing.
+            let expanded =
+                crate::name_resolution::eval_ast(ast, &name_tables.at(active_sheet, row));
+            let refs = extract_all_references(&expanded, &grid);
 
             if !refs.cells.is_empty() {
                 update_dependencies(
@@ -327,6 +358,17 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
                     refs.rows,
                     &mut row_dependencies_map,
                     &mut row_dependents_map,
+                );
+            }
+            // The name edges come from the STORED tree, which is the one in the
+            // grid: a formula keeps its defined names now (D2).
+            let names = crate::name_resolution::names_of_cell(cell);
+            if !names.is_empty() {
+                crate::name_resolution::update_name_dependencies(
+                    (row, col),
+                    names,
+                    &mut name_dependencies_map,
+                    &mut name_dependents_map,
                 );
             }
             if !refs.cross_sheet_cells.is_empty() {
@@ -3280,13 +3322,19 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_named_ranges snapshot: {}", e); return; }
             };
-            // A NAME IS NOT AN EDGE. `TAXRATE` is resolved while a formula is
-            // evaluated; it appears in no dependency map, so there is no cell
-            // whose recalculation reaches the formulas that use it. Undoing a
-            // definition therefore left every one of them holding a number
-            // computed against the OTHER definition, with nothing in the
-            // document indicating it. The only trigger that is actually true is
-            // "the whole workbook".
+            // A NAME IS NOT A CELL. `TAXRATE` is resolved while a formula is
+            // evaluated, so no CELL seed describes the formulas that read it.
+            // Undoing a definition therefore left every one of them holding a
+            // number computed against the OTHER definition, with nothing in the
+            // document indicating it.
+            //
+            // D2 added a real name -> dependents edge (`name_dependents`), so a
+            // narrower trigger now EXISTS — `recalc_after_name_change` uses it
+            // for the forward commands. It is deliberately not used here: this
+            // arm restores a WHOLE-STORE snapshot, so the set of changed names
+            // is the symmetric difference of two maps rather than one name, and
+            // the active-sheet edge map cannot describe the other sheets anyway.
+            // Whole-workbook is the honest trigger for a whole-store swap.
             report.workbook_recalc = true;
             let mut store = state.named_ranges.write(effect).unwrap();
             let current: Vec<(String, crate::named_ranges::NamedRange)> =
@@ -3442,9 +3490,13 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_named_range snapshot: {}", e); return; }
             };
-            // See "obj_named_ranges": names resolve during evaluation and are
-            // in no dependency map, so only a whole-workbook pass reaches the
-            // formulas this definition feeds.
+            // See "obj_named_ranges". A single-name restore COULD now seed from
+            // `name_dependents` (D2), but the restore runs while `apply_changes`
+            // holds the grid and style guards, and the seeded cascade is a
+            // second-lock-phase call — reporting a flag is how every other
+            // restore hands work to that phase. Whole-workbook is a superset of
+            // the right answer, so this is a cost decision, not a correctness
+            // one.
             report.workbook_recalc = true;
             let mut named_ranges = state.named_ranges.write(effect).unwrap();
             let current = named_ranges.remove(&snap.key);

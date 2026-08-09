@@ -89,7 +89,17 @@ test.describe("Core Visual Regression", () => {
     await appPage.waitForTimeout(300);
 
     await grid.setCellValue("A1", "Hello World");
-    await grid.clickCell("A1");
+    // `navigateTo`, NOT `clickCell`. This golden is a picture of the inline
+    // editor, and `clickCell` computes a canvas pixel from uniform column-width
+    // maths that drifts run to run — it can mis-target the column and leave an
+    // ambient RANGE selection behind (measured: paste-special captured M3:T19 on
+    // one run and N3:T20 on the next). The selection rectangle is the largest
+    // block of pixels in a grid capture, so recording a baseline after a
+    // clickCell freezes one side of that coin flip into the golden and the other
+    // side fails forever. The Name Box is a real DOM input: it selects exactly
+    // A1, every time, and it leaves focus on the spreadsheet container so F2
+    // reaches the grid.
+    await grid.navigateTo("A1");
     // Enter edit mode
     await appPage.keyboard.press("F2");
     await appPage.waitForTimeout(500);

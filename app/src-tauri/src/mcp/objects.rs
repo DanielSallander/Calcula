@@ -477,6 +477,10 @@ pub fn update_named_range(
         let removed = crate::named_ranges::delete_named_range(
             handle.state::<AppState>(),
             handle.state::<crate::persistence::FileState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
+            handle.state::<crate::pivot::PivotState>(),
+            handle.state::<crate::pane_control::PaneControlState>(),
+            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
             name.to_string(),
         );
         if !removed.success {
@@ -488,6 +492,10 @@ pub fn update_named_range(
         let created = crate::named_ranges::create_named_range(
             handle.state::<AppState>(),
             handle.state::<crate::persistence::FileState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
+            handle.state::<crate::pivot::PivotState>(),
+            handle.state::<crate::pane_control::PaneControlState>(),
+            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
             target_name.to_string(),
             target_scope,
             target_refers_to.clone(),
@@ -499,6 +507,10 @@ pub fn update_named_range(
             let _ = crate::named_ranges::create_named_range(
                 handle.state::<AppState>(),
                 handle.state::<crate::persistence::FileState>(),
+                handle.state::<crate::persistence::UserFilesState>(),
+                handle.state::<crate::pivot::PivotState>(),
+                handle.state::<crate::pane_control::PaneControlState>(),
+                handle.state::<crate::ribbon_filter::RibbonFilterState>(),
                 existing.name.clone(),
                 existing.sheet_index,
                 existing.refers_to.clone(),
@@ -517,6 +529,10 @@ pub fn update_named_range(
         let result = crate::named_ranges::update_named_range(
             handle.state::<AppState>(),
             handle.state::<crate::persistence::FileState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
+            handle.state::<crate::pivot::PivotState>(),
+            handle.state::<crate::pane_control::PaneControlState>(),
+            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
             existing.name.clone(),
             target_scope,
             target_refers_to.clone(),
@@ -558,6 +574,10 @@ pub fn delete_named_range(handle: &AppHandle, name: &str) -> Result<String, Stri
     let result = crate::named_ranges::delete_named_range(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
+        handle.state::<crate::persistence::UserFilesState>(),
+        handle.state::<crate::pivot::PivotState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
+        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
         name.to_string(),
     );
     if !result.success {
@@ -1029,6 +1049,9 @@ pub fn delete_pivot(handle: &AppHandle, pivot_id: &str) -> Result<String, String
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::PivotState>(),
+        handle.state::<crate::persistence::UserFilesState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
+        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
         id,
     )?;
 

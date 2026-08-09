@@ -81,20 +81,25 @@ async function focusCell(page: Page, ref: string): Promise<void> {
 }
 
 /**
- * Type `text` into the focused cell, opening the editor safely first.
+ * Type `text` into the focused cell, opening the editor first and only then
+ * sending the remainder.
  *
- * THE OPENING KEYSTROKE IS SPECIAL and this is a real app race, not a test
- * artefact: the first character both enters the value AND mounts the editor,
- * and characters sent during that async hand-off do not accumulate. Measured
- * here against the running app: `keyboard.type("hello")` commits **"o"** and
- * `keyboard.type("tabbed")` commits **"b"** — only the LAST keystroke survives.
+ * THE OPENING KEYSTROKE USED TO BE SPECIAL, and it was a real app race, not a
+ * test artefact: the first character both entered the value AND mounted the
+ * editor, and characters sent during that async hand-off did not accumulate.
+ * Measured against the running app, `keyboard.type("hello")` committed **"o"**
+ * and `keyboard.type("tabbed")` committed **"b"** — only the LAST keystroke
+ * survived.
  *
- * That race predates the <textarea> swap (`formula-autocomplete.spec.ts` works
- * around the same thing for `=SU`, and its header says the app is worth
- * fixing). It is NOT what these tests are about: they pin commit/cancel
- * semantics, so they open the editor, wait for it to exist, and only then type
- * the remainder. Test 3 types after F2 — no mount race — and passes either way,
- * which is what identifies the race as the opener rather than the editor.
+ * FIXED 2026-08-09 (§2r): keystrokes that arrive while the editor is opening
+ * are buffered and replayed in order instead of restarting the edit. Tests 7
+ * and 8 below are the live proof and deliberately do NOT use this helper —
+ * they type at full speed, which is what the bug report did.
+ *
+ * This helper keeps its wait anyway, because these six tests are about
+ * commit/cancel semantics rather than about the opener: waiting keeps a future
+ * opener regression from showing up here as six confusing failures instead of
+ * two pointed ones.
  */
 async function typeIntoCell(page: Page, text: string): Promise<void> {
   await page.keyboard.type(text[0]);
@@ -219,5 +224,37 @@ test.describe("Inline editor (textarea) — live grid semantics", () => {
     await page.waitForTimeout(200);
 
     expect(wide!.width).toBeGreaterThan(narrow!.width);
+  });
+
+  // ---------------------------------------------------------------------------
+  // The opener race (§2r) — typed at full speed, which is how it was measured
+  // ---------------------------------------------------------------------------
+
+  test("7. a whole word typed into a CLOSED cell keeps every character", async ({ appPage: page, grid }) => {
+    await focusCell(page, "B28");
+    // No waiting for the editor: every one of these keystrokes lands while the
+    // editor is still opening, which is the entire point. Pre-fix the editor
+    // came up holding "o".
+    await page.keyboard.type("hello");
+    await expect(page.locator(EDITOR)).toBeVisible();
+    expect(await page.locator(EDITOR).inputValue()).toBe("hello");
+
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    expect(await grid.getCellDisplayValue("B28")).toBe("hello");
+  });
+
+  test("8. the word AND its Enter typed at full speed still commit the word", async ({ appPage: page, grid }) => {
+    await focusCell(page, "B30");
+    // The commit key can land before there is anything to press it on. It must
+    // be replayed, not dropped: pre-fix this committed "b" — when it committed
+    // at all.
+    await page.keyboard.type("tabbed");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(500);
+
+    expect(await grid.getCellDisplayValue("B30")).toBe("tabbed");
+    expect(await page.locator(EDITOR).count()).toBe(0);
+    expect(await grid.getNameBoxValue()).toBe("B31");
   });
 });

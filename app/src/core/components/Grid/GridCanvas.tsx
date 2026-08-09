@@ -639,9 +639,46 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Combined animation loop for marching ants and insertion/deletion animations.
+     *
+     * REDUCED MOTION. `document.documentElement.dataset.reducedMotion` is the
+     * app's own accessibility switch: `skinLoader.apply()` stamps it from
+     * `a11y.reducedMotion`, which is the OS `prefers-reduced-motion` query OR
+     * the explicit toggle in Settings > Appearance. Until now NOTHING read it —
+     * the toggle was inert — and the marching ants are the one piece of motion
+     * in the product that never stops on its own, which makes them exactly what
+     * a user asking for reduced motion is asking to be rid of. When it is on,
+     * the dashed border is still drawn (the range you copied must stay visible;
+     * reduced motion removes the MOTION, not the information) at a fixed phase,
+     * and no animation frame is scheduled for it at all.
+     *
+     * It also makes the border deterministic, which the E2E capture helpers
+     * depend on: `screenshotGates.ts` names the marching-ants border as the one
+     * non-deterministic element in either suite, because its dash phase is
+     * wall-clock driven. Playwright's `animations: "disabled"` freezes CSS
+     * animations and cannot see canvas motion; this switch is the equivalent
+     * lever for a canvas app, and `takeGridScreenshot` turns it on.
+     *
+     * The flag is read PER FRAME rather than when the effect runs. That costs
+     * one `dataset` read per frame, and only while a marquee is actually up,
+     * and it buys the thing an effect-time read cannot: turning reduced motion
+     * ON stops a marquee that is ALREADY marching, within one frame, instead of
+     * at the next copy. A preference that only takes effect after you do
+     * something else is a preference users report as broken — and the capture
+     * helpers would have hit exactly that, since the copy in a spec happens
+     * before the screenshot that needs the border still.
+     *
+     * The insertion/deletion animation is deliberately NOT covered: it is
+     * bounded, self-terminating and resolves a promise the caller awaits, so
+     * suppressing it means completing it instantly rather than skipping it —
+     * a different change, with a different failure mode, and it does not
+     * affect any capture because the grid is settled by the time one is taken.
      */
     useEffect(() => {
-      const shouldAnimateClipboard = clipboardSelection && clipboardMode !== "none";
+      const prefersReducedMotion = (): boolean =>
+        typeof document !== "undefined" &&
+        document.documentElement.dataset.reducedMotion === "true";
+      const hasClipboardMarquee = clipboardSelection && clipboardMode !== "none";
+      const shouldAnimateClipboard = hasClipboardMarquee && !prefersReducedMotion();
       const shouldAnimateInsertion = insertionAnimation !== null;
 
       if (!shouldAnimateClipboard && !shouldAnimateInsertion) {
@@ -662,12 +699,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         const deltaTime = currentTime - lastTime;
         lastTime = currentTime;
 
-        // Update marching ants offset
-        if (shouldAnimateClipboard) {
+        // Update marching ants offset. Re-read the preference each frame so
+        // that switching reduced motion on parks a LIVE marquee at phase 0
+        // rather than waiting for the next copy — see the note above.
+        const marchThisFrame = hasClipboardMarquee && !prefersReducedMotion();
+        if (marchThisFrame) {
           animationOffsetRef.current += MARCHING_ANTS_SPEED * (deltaTime / 16.67);
           if (animationOffsetRef.current >= DASH_PATTERN_LENGTH) {
             animationOffsetRef.current -= DASH_PATTERN_LENGTH;
           }
+        } else if (hasClipboardMarquee) {
+          animationOffsetRef.current = 0;
         }
 
         // Update insertion/deletion animation progress
@@ -697,8 +739,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         // Redraw with current animation states
         draw(animationOffsetRef.current, currentInsertionAnim);
 
-        // Continue animation if still needed
-        if (shouldAnimateClipboard || (currentInsertionAnim !== null)) {
+        // Continue animation if still needed. `marchThisFrame` and not
+        // `shouldAnimateClipboard`, so the loop STOPS the frame after reduced
+        // motion is switched on instead of spinning forever redrawing an
+        // unchanging border.
+        if (marchThisFrame || (currentInsertionAnim !== null)) {
           animationFrameRef.current = requestAnimationFrame(animate);
         }
       };

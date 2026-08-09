@@ -1286,8 +1286,12 @@ async function recalcAll(forceCube: boolean): Promise<CellData[]> {
   return cells;
 }
 
+/** **Calculate Now — F9 — the WHOLE WORKBOOK**, as Excel's F9 means it.
+ *  Its partner is `calculateSheet` (Shift+F9), the active sheet alone. The
+ *  returned cells are the ACTIVE sheet's: an off-sheet value must never be
+ *  painted onto the sheet on screen, and every sheet switch re-fetches. */
 export async function calculateNow(): Promise<CellData[]> {
-  console.log("[tauri-api] calculateNow - recalculating all formulas");
+  console.log("[tauri-api] calculateNow - recalculating the workbook");
   const result = await recalcAll(false);
   console.log(`[tauri-api] calculateNow returned ${result.length} updated cells`);
   return result;
@@ -1299,8 +1303,10 @@ export async function recalcWithCube(): Promise<CellData[]> {
   return recalcAll(true);
 }
 
+/** **Calculate Sheet — Shift+F9 — the ACTIVE sheet alone**, as Excel means it.
+ *  No cube prefetch: that belongs to a FULL recalculation (see `recalcAll`). */
 export async function calculateSheet(): Promise<CellData[]> {
-  console.log("[tauri-api] calculateSheet - recalculating current sheet");
+  console.log("[tauri-api] calculateSheet - recalculating the active sheet");
   const startedAt = performance.now();
   const result = await invoke<CellData[]>("calculate_sheet");
   console.log(`[tauri-api] calculateSheet returned ${result.length} updated cells`);

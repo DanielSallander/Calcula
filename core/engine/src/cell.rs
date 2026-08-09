@@ -4,7 +4,7 @@
 //! It separates the user's input (formula) from the calculated result (value).
 //! It is designed to be lightweight as millions of these instances may exist.
 //!
-//! PERFORMANCE: The AST is the canonical formula storage — it is parsed once
+//! PERFORMANCE: The AST is the canonical formula storage â€” it is parsed once
 //! and never re-parsed on recalculation. It IS serialized: `Cell` derives
 //! Serialize/Deserialize with no `skip` on `ast`, which is what lets the
 //! AST-carrying undo snapshots (`script_grid_cells`) restore a formula exactly.
@@ -32,10 +32,9 @@ pub enum CellError {
     Name,       // Unknown function name
     Value,      // Wrong type of argument
     NA,         // Value not available (#N/A)
-    Parse,      // Formula parsing error
     Circular,   // Circular dependency detected
     Conflict,   // Conflicting UI effects (e.g., two formulas setting same row height)
-    Blocked,    // Code the user refused to run (denied/declined capability) — a
+    Blocked,    // Code the user refused to run (denied/declined capability) â€” a
                 // refused value, not a computation error. Transparency: the user
                 // must see #BLOCKED! rather than a stale number or a generic error.
     /// A CALCULATION LIMIT was exceeded: the formula's work budget ran out
@@ -45,12 +44,12 @@ pub enum CellError {
     ///
     /// WHY A DISTINCT VARIANT, and not one of the ones above:
     /// - NOT `#VALUE!` (what the depth guard used to return): `#VALUE!` means
-    ///   "an argument has the wrong type — fix the argument", and it already
+    ///   "an argument has the wrong type â€” fix the argument", and it already
     ///   carries Excel's `#NUM!`. Budget exhaustion means "this formula is too
-    ///   expensive, or it never terminates — simplify it". Those send a user to
+    ///   expensive, or it never terminates â€” simplify it". Those send a user to
     ///   two different places, and the single most alarming failure in the
     ///   product must not be indistinguishable from a typo. It also has to be
-    ///   COUNTABLE — error checking and the audit trail want to say "3 cells hit
+    ///   COUNTABLE â€” error checking and the audit trail want to say "3 cells hit
     ///   the calculation limit", which needs a distinct value.
     /// - NOT `#CIRCULAR!`: that is graph-owned ("the dependency graph contains a
     ///   cycle") and iterative calculation keys off it, so a budget-exhausted
@@ -58,7 +57,7 @@ pub enum CellError {
     /// - NOT `#BLOCKED!`: that is a consent outcome, not a cost outcome.
     ///
     /// WHY `Limit` AND NOT `Timeout`: the deterministic trigger is WORK, not
-    /// time. On a slow machine nothing timed out — the formula did too much,
+    /// time. On a slow machine nothing timed out â€” the formula did too much,
     /// and a user could trivially falsify a "timeout" claim ("it only took two
     /// seconds"). `#LIMIT!` is also the right umbrella for the whole family:
     /// fuel exhaustion, the depth ceiling, and the size caps all mean "this
@@ -71,27 +70,62 @@ impl CellError {
     ///
     /// Every rendering, every wire format and every persisted form goes through
     /// this table and its inverse [`CellError::from_literal`]. Before it existed
-    /// there were three competing spellings — the UDF bridge's canonical table,
+    /// there were three competing spellings â€” the UDF bridge's canonical table,
     /// a `format!("#{:?}", e).to_uppercase()` fallback in `display_value` that
     /// produced "#DIV0" / "#NAME" / "#REF" (none of which are the Excel
     /// literals, and none of which parse back), and a `format!("{:?}", e)` in
     /// the persistence layer that wrote the Rust variant NAME into the file.
     /// Divergence between them is not cosmetic: a literal that does not
     /// round-trip becomes a DIFFERENT ERROR on reload.
+    ///
+    /// EVERY `#{Debug}` FALLBACK IN THE PRODUCT IS GONE — D7 (2026-08-09) took
+    /// the app-side one, integration took the remaining three.
+    /// `cell_error_display` — what the GRID actually paints — kept one, and
+    /// therefore painted `#DIV0` / `#REF` / `#NAME` / `#VALUE` / `#CIRCULAR`,
+    /// none of which are Excel's spelling and none of which `from_literal`
+    /// parses back. It also painted `#PARSE`, an internal enum name; that
+    /// variant no longer exists (see the enum).
+    ///
+    /// Pointing the grid here EXPOSED three surfaces that had been quietly
+    /// agreeing with the wrong spelling, which is why this note names them:
+    ///   - `Grid::get_cell_display_value` (Find/Replace) — searched `#DIV0`
+    ///     while the grid painted `#DIV/0!`, so searching for the visible text
+    ///     returned nothing;
+    ///   - `format_value_for_ai` (the AI context serializer) — handed a model
+    ///     `#DIV0`, a literal no surface displays;
+    ///   - `saved_value_display` (`.calp` HTML export) — re-prefixed a '#' onto
+    ///     a payload that already had one and published `##DIV/0!`.
+    ///
+    /// There is now exactly ONE spelling per variant on every surface: grid,
+    /// formula bar, Find/Replace, error checking, AI context, UDF wire,
+    /// `.cala`, `.calp` and the published HTML report.
+    ///
+    /// **Anything that renders a `CellError` must call this.** Reconstructing a
+    /// literal from the variant name is how all four divergences started.
     pub fn as_literal(&self) -> &'static str {
         match self {
+            // ---- The Excel literals, spelled EXACTLY as Excel spells them ---
+            // Verified character by character against Excel's error set, which
+            // is the tiebreaker for anything this table does not settle on its
+            // own: #DIV/0! and #VALUE! and #REF! and #NULL! and #NUM! end in
+            // "!", #NAME? ends in "?", and #N/A has no trailing punctuation at
+            // all. (#NULL! and #NUM! have no engine variant and are therefore
+            // deliberately absent rather than aliased onto one that exists —
+            // see CELL_ERROR_LITERALS in cellFormatting.ts, which still
+            // recognises them because they can arrive by xlsx import.)
             CellError::Div0 => "#DIV/0!",
             CellError::Ref => "#REF!",
             CellError::Name => "#NAME?",
             CellError::Value => "#VALUE!",
             CellError::NA => "#N/A",
-            // No distinct Excel literal; surfaced as #VALUE!. NOTE the
-            // consequence for persistence: `Parse` is the one variant that does
-            // NOT round-trip, because it deliberately shares a spelling. It
-            // reloads as `Value`, which is what it already displayed as.
-            CellError::Parse => "#VALUE!",
+            // ---- Calcula-only states, following Excel's punctuation ---------
+            // None of these three has an Excel counterpart, so Excel cannot
+            // settle their spelling — but it does settle their SHAPE: an error
+            // literal is "#WORD" + terminal punctuation. `#CONFLICT` was the
+            // one variant written without it, which made it the odd one out on
+            // every surface that lists them.
             CellError::Circular => "#CIRCULAR!",
-            CellError::Conflict => "#CONFLICT",
+            CellError::Conflict => "#CONFLICT!",
             CellError::Blocked => "#BLOCKED!",
             CellError::Limit => "#LIMIT!",
         }
@@ -107,7 +141,7 @@ impl CellError {
             "#VALUE!" => CellError::Value,
             "#N/A" => CellError::NA,
             "#CIRCULAR!" => CellError::Circular,
-            "#CONFLICT" => CellError::Conflict,
+            "#CONFLICT!" => CellError::Conflict,
             "#BLOCKED!" => CellError::Blocked,
             "#LIMIT!" => CellError::Limit,
             _ => CellError::Value,
@@ -118,7 +152,7 @@ impl CellError {
 /// Represents the calculated result or raw data within a cell.
 ///
 /// List and Dict variants use Box<Vec<...>> to keep the enum small (~24 bytes).
-/// Normal scalar cells pay zero cost for the existence of these variants —
+/// Normal scalar cells pay zero cost for the existence of these variants â€”
 /// the heap allocation only happens when a List or Dict is actually created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CellValue {
@@ -200,7 +234,7 @@ impl RichTextRun {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Cell {
     /// The formula AST. `None` for non-formula cells (numbers, text, etc.).
-    /// This is the canonical representation — the string form is derived.
+    /// This is the canonical representation â€” the string form is derived.
     pub ast: Option<Box<Expression>>,
     pub value: CellValue,
     pub style_index: usize,

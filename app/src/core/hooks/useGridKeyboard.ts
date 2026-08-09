@@ -509,7 +509,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle F9 - Calculate Now (recalculate all formulas)
+      // Handle F9 - Calculate Now (recalculate the WORKBOOK, as Excel's F9 does)
       if (key === "F9" && !modKey && !altKey && !shiftKey) {
         event.preventDefault();
         event.stopPropagation();
@@ -518,6 +518,23 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           onCommand('calculate.now');
         }
         fnLog.exit('handleKeyDown', 'calculate now');
+        return;
+      }
+
+      // Handle Shift+F9 - Calculate Sheet (the ACTIVE sheet alone).
+      // EXCEL PARITY: Excel's two manual recalculations are F9 = Calculate Now
+      // = workbook and Shift+F9 = Calculate Sheet = sheet. Handled here rather
+      // than in the keybinding registry because its partner F9 is, and the two
+      // must be reachable under exactly the same focus conditions — a
+      // Shift+F9 that fired where F9 did not would be worse than neither.
+      if (key === "F9" && !modKey && !altKey && shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Shift+F9', ['Shift']);
+        if (onCommand) {
+          onCommand('calculate.sheet');
+        }
+        fnLog.exit('handleKeyDown', 'calculate sheet');
         return;
       }
 

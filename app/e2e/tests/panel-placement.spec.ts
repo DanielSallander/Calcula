@@ -107,20 +107,15 @@ test.describe("Panel placement freedom", () => {
       //     "Expected an image 1232px by 556px, received 912px by 556px". That is
       //     paste-special and protection, four results, none of them about
       //     pasting or protection.
-      //   * THE LOADED DRIVER. `anim-set-driver` above loads a clock-cell driver,
-      //     and Animation's play pill then sits over A1:C2 as a hit-testable
-      //     region that swallows cell clicks. "Stop (reset)" does NOT unload it;
-      //     clearDriver does.
+      //   * THE LOADED DRIVER. `anim-set-driver` above loads a clock-cell driver.
+      //     "Stop (reset)" does NOT unload it — unloading is what removes the
+      //     play pill and gives the driver back. Driven through the PRODUCT's
+      //     route (the pill's close control), not through a window handle: the
+      //     old `__CALCULA_ANIMATION__` handle existed only because the product
+      //     had no route, and it went away when D4 gave it one.
       await page
-        .evaluate(async () => {
-          // The extension's own handle. The dev `__calcImport` bridge would hand
-          // back a SECOND engine instance with its own clock and clear nothing —
-          // see the note in animation.spec.ts.
-          const w = window as unknown as {
-            __CALCULA_ANIMATION__?: { playbackEngine?: { clearDriver?: () => Promise<void> } };
-          };
-          await w.__CALCULA_ANIMATION__?.playbackEngine?.clearDriver?.();
-        })
+        .locator('[data-testid="anim-pill-close"]')
+        .click({ timeout: 5000 })
         .catch(() => {});
       // Close the panel through the registry rather than by clicking the
       // activity-bar toggle: a toggle is only correct if you know the current

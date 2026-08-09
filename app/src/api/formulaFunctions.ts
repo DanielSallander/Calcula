@@ -51,7 +51,7 @@ export const CELL_ERROR_LITERALS = [
   "#VALUE!",
   "#N/A",
   "#CIRCULAR!",
-  "#CONFLICT",
+  "#CONFLICT!",
   "#BLOCKED!",
   "#LIMIT!",
 ] as const;

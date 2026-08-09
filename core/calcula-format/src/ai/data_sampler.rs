@@ -185,7 +185,10 @@ fn format_value_for_ai(value: &CellValue) -> String {
         CellValue::Number(n) => format_num(*n),
         CellValue::Text(s) => s.clone(),
         CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+        // One spelling per variant on every surface, including the one an AI
+        // reads: `format!("#{:?}", e)` handed the model "#DIV0" / "#NA", which
+        // it could not correlate with the `#DIV/0!` the user sees and quotes.
+        CellValue::Error(e) => e.as_literal().to_string(),
         CellValue::List(items) => format!("[List({})]", items.len()),
         CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
     }
@@ -276,6 +279,43 @@ mod tests {
 
     fn make_cell(value: CellValue) -> Cell {
         Cell { ast: None, value, style_index: 0, rich_text: None }
+    }
+
+    /// THE AI MUST BE TOLD THE SAME SPELLING THE USER IS SHOWN.
+    ///
+    /// `format_value_for_ai` built its error text with `format!("#{:?}", e)`,
+    /// which produces the Rust variant name uppercased — "#DIV0", "#NA",
+    /// "#LIMIT" — and none of those is what any surface of the product
+    /// displays. The AI context serializer is what an assistant reads to
+    /// answer "why is this cell broken?", so a divergent spelling here is a
+    /// model being handed a fact about the workbook that is not true: it
+    /// cannot correlate "#DIV0" with the `#DIV/0!` the user quotes, and
+    /// "#NA" is not even a plausible Excel literal.
+    #[test]
+    fn the_ai_sample_spells_errors_exactly_as_every_other_surface_does() {
+        use engine::cell::CellError;
+
+        for e in [
+            CellError::Div0,
+            CellError::Ref,
+            CellError::Name,
+            CellError::Value,
+            CellError::NA,
+            CellError::Circular,
+            CellError::Conflict,
+            CellError::Blocked,
+            CellError::Limit,
+        ] {
+            let rendered = format_value_for_ai(&CellValue::Error(e.clone()));
+            assert_eq!(
+                rendered,
+                e.as_literal(),
+                "the AI context rendered {e:?} as {rendered:?}, but the grid, \
+                 the formula bar, `.cala` and `.calp` all spell it {:?}. \
+                 `CellError::as_literal` is the single authority.",
+                e.as_literal()
+            );
+        }
     }
 
     #[test]

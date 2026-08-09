@@ -45,6 +45,15 @@
 // single-line defect (520 px). On small captures the ratio binds: ~15 px on a
 // status-bar strip, ~9 px on a region crop.
 //
+// THE 77 px IS NOW HISTORY, AND THE NUMBERS DELIBERATELY DID NOT MOVE.
+// `waitForGridStable` puts the app in reduced motion before every capture, so
+// the marching-ants dash phase is parked at 0 and that source of noise is gone
+// (D5, 2026-08-09). Tightening `maxDiffPixels` to suit would be re-deriving a
+// measured constant from an argument instead of a measurement: the 77 px was
+// the noise CEILING across 76 captures, and nobody has re-run those 76 cold to
+// find the new one. If someone does, this is the note to update — with the new
+// measurement written down, the way this one is.
+//
 // DO NOT LOOSEN THESE TO MAKE A SHOT PASS. A shot that cannot hold this gate is
 // capturing something non-deterministic; fix the capture.
 // ============================================================================

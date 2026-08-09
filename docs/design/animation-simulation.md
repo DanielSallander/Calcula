@@ -149,9 +149,21 @@ All backend calls flow through `app/extensions/Animation/lib/animationBackend.ts
   `captureGridRegion` (grid selection) → hand the frames to `export_gif`.
 - **WebM export.** `webmExporter.ts` records live playback via `canvas.captureStream(fps)` +
   `MediaRecorder` (vp9 → vp8), saved through the dialog plugin + `writeBinaryFile`.
-- **On-canvas control.** A floating play/progress control is rendered via the generic
-  `registerGridOverlay` API (`overlay/playOverlay.ts`), torn down on `deactivate()`.
-  Animation renders its **own** overlay — it does not add a `bind.input:"play"` to Charts.
+- **The play pill.** A floating play/progress/close control, shown whenever a driver is
+  loaded (`overlay/playOverlay.ts` + `overlay/PlayPill.tsx`), torn down on `deactivate()`.
+  Animation renders its **own** control — it does not add a `bind.input:"play"` to Charts.
+  It is **viewport-pinned DOM chrome**, registered through `@api/ui`'s overlay registry and
+  positioned over the grid canvas's bottom-left corner (`overlay/pillGeometry.ts`).
+  It was previously a hit-testable floating **grid region** at a fixed sheet position, which
+  put it on top of **A1:C2** and made it eat cell clicks — in the product, and across
+  eighty-nine E2E spec files. A control must not live in cell coordinates: the cells are the
+  document. See open-decisions-2026-08.md §2q / D4.
+- **Unloading a driver.** Three product routes, all `playbackEngine.clearDriver()` (which
+  restores the model first, so it is a strict superset of `stopAndRestore`): the pill's
+  close control, the panel transport's **Unload** button, and the document-boundary events
+  `BEFORE_OPEN` / `BEFORE_NEW` / `BEFORE_CLOSE`. `BEFORE_SAVE` and `SHEET_CHANGED`
+  deliberately only **stop** — the user is still in the same workbook and wants to keep
+  iterating. **Stop is not Unload**, and the two buttons stay separate for that reason.
 
 ---
 

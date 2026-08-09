@@ -86,30 +86,14 @@ function activate(context: ExtensionContext): void {
   registerDialog({ id: ANIMATION_DIALOG_ID, title: "Animation", component: AnimationDialog, priority: 100 });
   cleanupFns.push(() => unregisterDialog(ANIMATION_DIALOG_ID));
 
-  // On-canvas play control (floating pill; appears while a driver is loaded).
+  // Viewport-pinned play pill (a DOM overlay; appears while a driver is loaded).
+  // Its close button is one of the product's routes to `clearDriver` — see the
+  // lifecycle block below and the panel's "Unload" button for the others.
+  // (open-decisions-2026-08.md §2q / D4: the pill used to be a hit-testable grid
+  // region on A1:C2, and nothing in the product could unload a driver at all.
+  // The E2E `__CALCULA_ANIMATION__` handle that existed only to work around that
+  // is gone with it — the specs drive the product routes now.)
   cleanupFns.push(installPlayOverlay());
-
-  // E2E handle on the LIVE engine (mirrors __CALCULA_PANEL_REGISTRY__ in
-  // shell/bootstrap.ts). Two facts make this necessary rather than convenient:
-  //
-  //   1. There is NO WAY IN THE PRODUCT to unload a driver. Every lifecycle
-  //      event above calls `stopAndRestore`, which restores the model and leaves
-  //      the driver loaded; the panel's button is labelled "Stop" and does the
-  //      same; closing the panel does nothing. Only `clearDriver` unloads, and
-  //      nothing calls it. So the play pill, once shown, stays on A1:C2 until
-  //      the page reloads — see open-decisions-2026-08.md §2q, which is about
-  //      the product, not the tests.
-  //   2. A test cannot reach the engine any other way. The dev `__calcImport`
-  //      bridge performs a real dynamic import, which for a STATEFUL module
-  //      yields a second instance with its own clock — measured: it reported
-  //      `frameCount: 0` while the pill on screen read "11/11". A cleanup built
-  //      on that silently does nothing.
-  //
-  // When (1) is fixed this handle should go with it.
-  (window as unknown as Record<string, unknown>).__CALCULA_ANIMATION__ = { playbackEngine };
-  cleanupFns.push(() => {
-    delete (window as unknown as Record<string, unknown>).__CALCULA_ANIMATION__;
-  });
 
   // Load saved animations for the already-open workbook, and on file open/new.
   void loadAnimations();
@@ -125,15 +109,24 @@ function activate(context: ExtensionContext): void {
 
   // Transient guarantee: never let an animated frame be saved or leak across a
   // sheet/file change — force-stop (which restores the model) on these events.
-  const restoreOn = [
-    AppEvents.BEFORE_SAVE,
-    AppEvents.BEFORE_OPEN,
-    AppEvents.BEFORE_NEW,
-    AppEvents.BEFORE_CLOSE,
-    AppEvents.SHEET_CHANGED,
-  ];
+  // The driver SURVIVES these: the user is still working on the same workbook
+  // and probably wants to keep iterating (Excel likewise keeps a pane's
+  // configuration across a save or a sheet switch).
+  const restoreOn = [AppEvents.BEFORE_SAVE, AppEvents.SHEET_CHANGED];
   for (const ev of restoreOn) {
     cleanupFns.push(onAppEvent(ev, () => void playbackEngine.stopAndRestore()));
+  }
+
+  // Document boundaries UNLOAD the driver, they do not merely stop it. A driver
+  // is bound to cells / charts / scenarios of the workbook it was configured
+  // against; carrying it into a different document (or into no document) leaves
+  // a transport pointing at coordinates that mean something else. `clearDriver`
+  // restores first and then unloads, so this is a strict superset of
+  // `stopAndRestore` — the transient guarantee is unchanged. Excel parity: File
+  // ▸ New gives a clean workbook, with no chrome carried over from the last one.
+  const unloadOn = [AppEvents.BEFORE_OPEN, AppEvents.BEFORE_NEW, AppEvents.BEFORE_CLOSE];
+  for (const ev of unloadOn) {
+    cleanupFns.push(onAppEvent(ev, () => void playbackEngine.clearDriver()));
   }
 }
 

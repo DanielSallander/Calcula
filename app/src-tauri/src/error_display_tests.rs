@@ -2,41 +2,46 @@
 //! PURPOSE: Pin the app-side error spelling against the engine's canonical one.
 //!
 //! CONTEXT: `cell_error_display`'s doc comment claimed for a long time that it
-//! mirrored `Cell::display_value` "exactly". It does not, and by the time
-//! anyone checked, the engine had moved to an explicit `CellError::as_literal`
-//! table with no `#{Debug}` fallback at all. Nothing caught the drift because
-//! nothing compared the two.
+//! mirrored `Cell::display_value` "exactly". It did not, and by the time anyone
+//! checked, the engine had moved to an explicit `CellError::as_literal` table
+//! with no `#{Debug}` fallback at all. Nothing caught the drift because nothing
+//! compared the two. These tests were written to MEASURE the divergence so the
+//! owner could decide on it; D7 decided — adopt Excel's literals — and they now
+//! pin the agreement instead.
 //!
-//! These tests do not assert which spelling is RIGHT — that is an owner
-//! decision, recorded in the register, and changing it moves grid goldens.
-//! They assert what each side actually produces today, so that:
-//!   * the divergence cannot widen unnoticed (a new `CellError` variant taking
-//!     the Debug arm fails `every_variant_is_accounted_for`), and
-//!   * whoever makes the decision reads a measured table rather than a claim.
+//! WHAT THEY GUARD NOW:
+//!   * every variant renders the same string on both sides (a re-introduced
+//!     `#{Debug}` arm, or a new variant that forgets one of the two tables,
+//!     fails here rather than in a golden three weeks later);
+//!   * `Limit` / `Blocked` / `Conflict` / `NA` keep their exact literals, which
+//!     is a frontend requirement, not a style preference — see below;
+//!   * the literal a variant renders as is the literal `from_literal` reads
+//!     back, i.e. every variant survives a save/reload.
 
 use engine::{Cell, CellError, CellValue};
 
-/// Every `CellError` variant, with what each side renders it as TODAY.
+/// Every `CellError` variant, with the ONE spelling both sides must produce.
 ///
-/// (variant, `cell_error_display`, `Cell::display_value`)
-const SPELLINGS: &[(CellError, &str, &str)] = &[
-    // -- The four that agree: each is listed explicitly in both tables ------
-    (CellError::NA, "#N/A", "#N/A"),
-    (CellError::Conflict, "#CONFLICT", "#CONFLICT"),
-    (CellError::Blocked, "#BLOCKED!", "#BLOCKED!"),
-    (CellError::Limit, "#LIMIT!", "#LIMIT!"),
-    // -- The six that diverge: these take `#{Debug}` on the app side -------
-    (CellError::Div0, "#DIV0", "#DIV/0!"),
-    (CellError::Ref, "#REF", "#REF!"),
-    (CellError::Name, "#NAME", "#NAME?"),
-    (CellError::Value, "#VALUE", "#VALUE!"),
-    (CellError::Circular, "#CIRCULAR", "#CIRCULAR!"),
-    // `Parse` is the one that is not merely a missing punctuation mark: the
-    // Debug arm leaks an internal enum name. The engine gives `Parse` no
-    // distinct literal on purpose (it shares `#VALUE!`, so `from_literal`
-    // reloads it as `Value`), which makes "#PARSE" a spelling no other layer
-    // can parse back.
-    (CellError::Parse, "#PARSE", "#VALUE!"),
+/// The Excel five are Excel's literals character for character — Excel is the
+/// project's tiebreaker, and it spells them `#DIV/0!`, `#REF!`, `#NAME?`,
+/// `#VALUE!`, `#N/A`. (`#NULL!` and `#NUM!` are Excel errors with no engine
+/// variant; they are deliberately NOT aliased onto one that exists.)
+///
+/// The Calcula four have no Excel counterpart, so Excel cannot settle their
+/// spelling — but it settles their SHAPE, "#WORD" plus terminal punctuation,
+/// which is why `#CONFLICT` became `#CONFLICT!`.
+const SPELLINGS: &[(CellError, &str)] = &[
+    // -- Excel's own, exactly as Excel spells them -------------------------
+    (CellError::Div0, "#DIV/0!"),
+    (CellError::Ref, "#REF!"),
+    (CellError::Name, "#NAME?"),
+    (CellError::Value, "#VALUE!"),
+    (CellError::NA, "#N/A"),
+    // -- Calcula-only states, following Excel's punctuation ----------------
+    (CellError::Circular, "#CIRCULAR!"),
+    (CellError::Conflict, "#CONFLICT!"),
+    (CellError::Blocked, "#BLOCKED!"),
+    (CellError::Limit, "#LIMIT!"),
 ];
 
 fn engine_display(e: &CellError) -> String {
@@ -46,70 +51,99 @@ fn engine_display(e: &CellError) -> String {
 }
 
 #[test]
-fn cell_error_display_divergence_from_the_engine_is_pinned() {
-    let mut drifted: Vec<String> = Vec::new();
-    for (variant, app_expected, engine_expected) in SPELLINGS {
+fn the_app_and_the_engine_spell_every_error_the_same_way() {
+    let mut wrong: Vec<String> = Vec::new();
+    for (variant, expected) in SPELLINGS {
         let app_actual = crate::cell_error_display(variant);
         let engine_actual = engine_display(variant);
-        if app_actual != *app_expected {
-            drifted.push(format!(
-                "{:?}: cell_error_display now renders {:?}, this table says {:?}",
-                variant, app_actual, app_expected
+        let literal = variant.as_literal();
+        if app_actual != *expected {
+            wrong.push(format!(
+                "{:?}: cell_error_display renders {:?}, this table says {:?}",
+                variant, app_actual, expected
             ));
         }
-        if engine_actual != *engine_expected {
-            drifted.push(format!(
-                "{:?}: Cell::display_value now renders {:?}, this table says {:?}",
-                variant, engine_actual, engine_expected
+        if engine_actual != *expected {
+            wrong.push(format!(
+                "{:?}: Cell::display_value renders {:?}, this table says {:?}",
+                variant, engine_actual, expected
+            ));
+        }
+        if literal != *expected {
+            wrong.push(format!(
+                "{:?}: CellError::as_literal is {:?}, this table says {:?}",
+                variant, literal, expected
             ));
         }
     }
     assert!(
-        drifted.is_empty(),
-        "the pinned error spellings have moved:\n  {}\n\nIf this is the \
-         deliberate closure of the app/engine divergence, update this table \
-         AND re-record the grid goldens that paint an error cell — the \
-         register's owner-decision section lists them.",
-        drifted.join("\n  ")
+        wrong.is_empty(),
+        "the canonical error spellings have moved:\n  {}\n\nThere is ONE \
+         authority — CellError::as_literal in core/engine/src/cell.rs. If a \
+         spelling genuinely changes, change it THERE, update this table, and \
+         re-record the grid goldens that paint an error cell.",
+        wrong.join("\n  ")
     );
 }
 
 #[test]
-fn the_four_that_must_never_take_the_debug_arm_still_do_not() {
-    // `Limit`, `Blocked` and `Conflict` are load-bearing: the Debug arm would
-    // drop the trailing punctuation, and `normalizeCellErrorLiteral` on the
-    // frontend collapses anything it does not recognise into "#VALUE!" — which
-    // would erase exactly the distinction these variants exist to draw.
+fn every_error_literal_survives_a_save_and_reload() {
+    // `as_literal` is what the `.cala` / `.calp` writers persist and
+    // `from_literal` is what reads it back, so a spelling that is not in BOTH
+    // tables silently becomes a different error on reload. `#CONFLICT!` is the
+    // one D7 moved, and it is exactly the shape of change that breaks this.
+    for (variant, literal) in SPELLINGS {
+        assert_eq!(
+            CellError::from_literal(literal),
+            *variant,
+            "{:?} renders as {} but that literal reads back as {:?} — a cell \
+             holding this error would change meaning on reload",
+            variant,
+            literal,
+            CellError::from_literal(literal)
+        );
+    }
+}
+
+#[test]
+fn the_four_the_frontend_would_collapse_keep_their_exact_literal() {
+    // `Limit`, `Blocked`, `Conflict` and `NA` are load-bearing on the frontend:
+    // `normalizeCellErrorLiteral` (app/src/api/formulaFunctions.ts) collapses
+    // ANY literal it does not recognise into "#VALUE!", which would erase
+    // exactly the distinction these variants exist to draw — `#LIMIT!` in
+    // particular means "the number you are looking at was never computed".
+    //
+    // The old `#{Debug}` fallback would have dropped their punctuation
+    // ("#LIMIT", "#CONFLICT"); it is gone, but the REQUIREMENT outlives the
+    // implementation, so it is still pinned by name. Anything added to
+    // CELL_ERROR_LITERALS on the frontend must match these strings byte for
+    // byte.
     for (variant, literal) in [
         (CellError::Limit, "#LIMIT!"),
         (CellError::Blocked, "#BLOCKED!"),
         (CellError::NA, "#N/A"),
-        (CellError::Conflict, "#CONFLICT"),
+        (CellError::Conflict, "#CONFLICT!"),
     ] {
-        let rendered = crate::cell_error_display(&variant);
         assert_eq!(
-            rendered, literal,
-            "{:?} must keep its explicit arm in cell_error_display; the \
-             `#{{Debug}}` fallback would render {:?} and the frontend would \
-             collapse it to #VALUE!",
+            crate::cell_error_display(&variant),
+            literal,
+            "{:?} must render as {} — the frontend's normalizeCellErrorLiteral \
+             collapses anything else to #VALUE!",
             variant,
-            format!("#{:?}", variant).to_uppercase()
+            literal
         );
     }
 }
 
 #[test]
 fn every_variant_is_accounted_for() {
-    // A new `CellError` lands on the Debug arm by default, which is how five of
-    // the six current divergences got there. This fails until the new variant
-    // is measured into the table above.
+    // A new `CellError` that nobody adds here is a new spelling nobody checked.
     let all = [
         CellError::Div0,
         CellError::Ref,
         CellError::Name,
         CellError::Value,
         CellError::NA,
-        CellError::Parse,
         CellError::Circular,
         CellError::Conflict,
         CellError::Blocked,
@@ -117,9 +151,9 @@ fn every_variant_is_accounted_for() {
     ];
     for variant in &all {
         assert!(
-            SPELLINGS.iter().any(|(v, _, _)| v == variant),
-            "{:?} is not in SPELLINGS — measure what both sides render it as \
-             and add a row",
+            SPELLINGS.iter().any(|(v, _)| v == variant),
+            "{:?} is not in SPELLINGS — decide its literal (Excel's if Excel \
+             has one) and add a row",
             variant
         );
     }
@@ -128,4 +162,23 @@ fn every_variant_is_accounted_for() {
         all.len(),
         "SPELLINGS and the variant list disagree in size"
     );
+}
+
+#[test]
+fn no_literal_is_the_rust_variant_name() {
+    // The defect this file exists for, stated directly: `#PARSE` reached the
+    // grid because a `format!("#{:?}", e)` arm turned an internal enum name
+    // into user-visible text. `CellError::Parse` has since been deleted (it was
+    // never constructed: `Cell::new_formula` stores an unparseable formula as
+    // TEXT, and the evaluate-formula surfaces answer `#SYNTAX!`), but the arm
+    // is the reusable mistake, not the variant.
+    for (variant, literal) in SPELLINGS {
+        let debug_spelling = format!("#{:?}", variant).to_uppercase();
+        assert_ne!(
+            *literal, debug_spelling,
+            "{:?} renders as {} — which is just its Rust variant name. That is \
+             a `#{{Debug}}` arm, not a decision: give it a real literal.",
+            variant, literal
+        );
+    }
 }

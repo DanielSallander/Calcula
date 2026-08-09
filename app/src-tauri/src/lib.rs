@@ -75,6 +75,9 @@ pub mod pivot;
 pub mod bi;
 pub mod scripting;
 pub mod named_ranges;
+/// Excel-parity named-range resolution: a stored formula keeps its NAME and the
+/// name is expanded at EVALUATION, with a name -> dependents edge of its own.
+pub mod name_resolution;
 pub mod data_validation;
 pub mod comments;
 pub mod notes;
@@ -198,6 +201,9 @@ mod eval_budget_tests;
 mod error_display_tests;
 
 #[cfg(test)]
+mod name_casing_reload_tests;
+
+#[cfg(test)]
 mod document_effect_pilot_tests;
 
 #[cfg(test)]
@@ -315,6 +321,17 @@ pub struct AppState {
     pub column_dependencies: Mutex<StripeDependenciesMap>,
     /// Track which rows each formula cell depends on (for cleanup)
     pub row_dependencies: Mutex<StripeDependenciesMap>,
+    /// DEFINED-NAME dependencies: UPPERCASE name -> formula cells on the ACTIVE
+    /// sheet that resolve through it.
+    ///
+    /// A name is not a cell, so it appears in none of the four maps above — and
+    /// a formula now STORES the name rather than the reference it expands to
+    /// (Excel parity, D2). Without this edge, repointing `RATE` would leave
+    /// every formula reading it holding the number it computed from the old
+    /// definition. See `name_resolution`.
+    pub name_dependents: Mutex<name_resolution::NameDependentsMap>,
+    /// Track which names each formula cell resolves through (for cleanup).
+    pub name_dependencies: Mutex<name_resolution::NameDependenciesMap>,
     /// Cross-sheet dependencies: (sheet_name, row, col) -> set of (sheet_index, row, col) that depend on it
     pub cross_sheet_dependents: Mutex<CrossSheetDependentsMap>,
     /// Track which cross-sheet cells each formula depends on (for cleanup)
@@ -614,6 +631,8 @@ pub fn create_app_state() -> AppState {
         row_dependents: Mutex::new(StripeDependentsMap::default()),
         column_dependencies: Mutex::new(StripeDependenciesMap::default()),
         row_dependencies: Mutex::new(StripeDependenciesMap::default()),
+        name_dependents: Mutex::new(name_resolution::NameDependentsMap::default()),
+        name_dependencies: Mutex::new(name_resolution::NameDependenciesMap::default()),
         cross_sheet_dependents: Mutex::new(CrossSheetDependentsMap::default()),
         cross_sheet_dependencies: Mutex::new(CrossSheetDependenciesMap::default()),
         undo_stack: Mutex::new(UndoStack::new()),
@@ -750,57 +769,52 @@ pub fn format_cell_value(value: &CellValue, style: &CellStyle, locale: &engine::
 
 /// Render a `CellError` the way the GRID renders it.
 ///
-/// THE ONE APP-SIDE AUTHORITY on that spelling.
+/// IT FORWARDS TO THE ENGINE. There is one authority on the spelling of a cell
+/// error — `CellError::as_literal` in `core/engine/src/cell.rs` — and this is a
+/// named forwarder to it, kept because ~8 call sites read better saying "render
+/// this the way the grid does" than reaching into the engine's inherent impl.
+/// It is the same relationship `scripting::udf::cell_error_to_str` has, and the
+/// three surfaces now agree by construction rather than by comment.
 ///
-/// IT DOES NOT MIRROR `Cell::display_value`. This doc comment used to claim it
-/// did "exactly", and described the engine as special-casing a few literals and
-/// letting the rest fall through to `#{Debug}`. The engine has no Debug
-/// fallback: `Cell::display_value` delegates to `CellError::as_literal`, an
-/// explicit table of the canonical Excel literals. The claim was stale, and a
-/// stale claim of agreement is worse than a recorded disagreement, because it
-/// invites the next author to "restore" a symmetry that was never there.
+/// WHAT THIS REPLACED (D7, 2026-08-09). This function used to list four
+/// variants explicitly and send the other six to `format!("#{:?}", e)`, so the
+/// grid painted the Rust variant NAME uppercased:
 ///
-/// The disagreement, measured rather than asserted, is pinned by
-/// `cell_error_display_divergence_from_the_engine_is_pinned` in
-/// `error_display_tests.rs`. Four of the ten variants agree; six do not,
-/// because they take the `#{Debug}` arm below:
+/// | variant    | grid painted | Excel / engine canonical |
+/// |------------|--------------|--------------------------|
+/// | `Div0`     | `#DIV0`      | `#DIV/0!`                |
+/// | `Ref`      | `#REF`       | `#REF!`                  |
+/// | `Name`     | `#NAME`      | `#NAME?`                 |
+/// | `Value`    | `#VALUE`     | `#VALUE!`                |
+/// | `Circular` | `#CIRCULAR`  | `#CIRCULAR!`             |
+/// | `Parse`    | `#PARSE`     | — (variant deleted)      |
 ///
-/// | variant    | this helper | engine `as_literal` |
-/// |------------|-------------|---------------------|
-/// | `Div0`     | `#DIV0`     | `#DIV/0!`           |
-/// | `Ref`      | `#REF`      | `#REF!`             |
-/// | `Name`     | `#NAME`     | `#NAME?`            |
-/// | `Value`    | `#VALUE`    | `#VALUE!`           |
-/// | `Circular` | `#CIRCULAR` | `#CIRCULAR!`        |
-/// | `Parse`    | `#PARSE`    | `#VALUE!`           |
+/// Two consequences, both closed by the forwarding:
 ///
-/// `Parse` is the one worth a second look and is NOT merely cosmetic: the
-/// Debug arm leaks an internal enum name into the grid. The engine
-/// deliberately gives `Parse` no distinct literal (it shares `#VALUE!`, and
-/// `from_literal` therefore reloads it as `Value`), so `#PARSE` is a spelling
-/// no other layer in the product can parse back. Whether to close any of this
-/// is an owner decision — it moves grid goldens — and is written up in the
-/// register's owner-decision section.
+///  1. **The grid did not render those cells as errors at all.** The renderer
+///     decides via `isErrorValue` in `gridRenderer/styles/cellFormatting.ts`,
+///     which matches against the CANONICAL literals. `#DIV0` does not start
+///     with `#DIV/0!`, so a division-by-zero cell was painted as ORDINARY
+///     LEFT-ALIGNED BLACK TEXT — indistinguishable from a user-typed string.
+///     Only `#NAME` matched (`#NAME?` minus its `?`), by accident.
+///  2. **`#PARSE` was an internal enum name no other layer could parse back.**
+///     `CellError::Parse` was never constructed anywhere in the product — an
+///     unparseable formula is stored as TEXT by `Cell::new_formula`, and the
+///     evaluate-formula surfaces answer with the string `#SYNTAX!` — so the
+///     variant existed only to be rendered wrong. It has been deleted rather
+///     than given a spelling for a state that cannot occur.
 ///
-/// The special case that matters and must stay: `Limit` MUST be listed
-/// explicitly. The Debug fallback would render "#LIMIT" without the trailing
-/// "!", which `normalizeCellErrorLiteral` on the frontend does not recognise
-/// and therefore collapses to "#VALUE!" — turning the one error a user most
-/// needs to find back into the one it was given its own variant to be
-/// distinguished from. The same argument applies to `Blocked` and `Conflict`.
-///
-/// NOTE the deliberate asymmetry with `scripting::udf::cell_error_to_str`: that
-/// one produces the canonical EXCEL literals ("#DIV/0!") because it is a wire
-/// contract with JavaScript that must round-trip through `parse_cell_error`.
-/// This one produces what the grid shows. They agree on `#LIMIT!`.
+/// The special case that mattered and is now structural: `Limit`, `Blocked`,
+/// `Conflict` and `NA` had to be listed explicitly here, because the `#{Debug}`
+/// arm would have dropped their trailing punctuation and the frontend's
+/// `normalizeCellErrorLiteral` collapses anything it does not recognise to
+/// `#VALUE!` — turning the one error a user most needs to find back into the
+/// one it was given its own variant to be distinguished from. With no Debug arm
+/// left there is nothing for them to fall through to. `error_display_tests.rs`
+/// still pins all four by name, because the requirement outlives this
+/// implementation of it.
 pub fn cell_error_display(e: &CellError) -> String {
-    match e {
-        CellError::NA => "#N/A".to_string(),
-        CellError::Conflict => "#CONFLICT".to_string(),
-        CellError::Blocked => "#BLOCKED!".to_string(),
-        CellError::Limit => "#LIMIT!".to_string(),
-        other => format!("#{:?}", other).to_uppercase(),
-    }
+    e.as_literal().to_string()
 }
 
 /// Format a cell value and return both display text and optional color override.
@@ -1693,6 +1707,114 @@ fn resolve_names_in_ast_with_shadows(
             operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
         },
     }
+}
+
+// ============================================================================
+// ONE TYPED FORMULA, TWO FORMS  (D2 — Excel parity for defined names)
+// ============================================================================
+
+/// The two forms a freshly typed formula takes.
+///
+/// **`stored` is what the document keeps** and what the formula bar shows: the
+/// tree the user typed, with structured-table and spill references resolved
+/// (those are POSITIONAL — `[@Price]` means a different cell on every row, and
+/// `A1#` means whatever that spill covers right now — so they cannot survive as
+/// text) but **defined names left exactly as typed**.
+///
+/// `expanded` is the same tree with the names spliced in. It is what this edit
+/// evaluates and what `extract_all_references` reads, and it is `None` when the
+/// formula names nothing, so the overwhelmingly common case pays no clone.
+///
+/// WHY THE SPLIT EXISTS. `update_cell` used to store the EXPANDED tree: with
+/// `RATE` = `$D$5`, typing `=RATE` left the cell holding `$D$5`. Excel stores the
+/// name and resolves it while calculating, so repointing a name moves every
+/// formula that uses it; storing the expansion makes a defined name a one-shot
+/// typing macro instead. See `name_resolution` for the evaluation half and for
+/// the dependency edge that keeps the two in step.
+pub struct EnteredFormula {
+    /// The form the cell keeps. Names intact.
+    pub stored: ParserExpr,
+    /// The form this edit evaluates. `None` when it would equal `stored`.
+    expanded: Option<ParserExpr>,
+}
+
+impl EnteredFormula {
+    /// The tree to evaluate and to extract cell references from.
+    pub fn evaluated(&self) -> &ParserExpr {
+        self.expanded.as_ref().unwrap_or(&self.stored)
+    }
+}
+
+/// Resolve the POSITIONAL reference kinds — structured table refs and spill
+/// refs. Both are resolved at entry in both forms, because neither can be
+/// re-derived later from the cell alone.
+fn resolve_positional_refs(
+    state: &AppState,
+    ast: &ParserExpr,
+    sheet_index: usize,
+    row: u32,
+) -> ParserExpr {
+    let resolved = if ast_has_table_refs(ast) {
+        let tables_map = state.tables.read().unwrap();
+        let table_names_map = state.table_names.read().unwrap();
+        let ctx = TableRefContext {
+            tables: &tables_map,
+            table_names: &table_names_map,
+            current_sheet_index: sheet_index,
+            current_row: row,
+        };
+        let r = resolve_table_refs_in_ast(ast, &ctx);
+        drop(table_names_map);
+        drop(tables_map);
+        r
+    } else {
+        ast.clone()
+    };
+
+    if ast_has_spill_refs(&resolved) {
+        let spill_ranges_map = state.spill_ranges.lock().unwrap();
+        let r = resolve_spill_refs_in_ast(&resolved, &spill_ranges_map, sheet_index);
+        drop(spill_ranges_map);
+        r
+    } else {
+        resolved
+    }
+}
+
+/// Split ONE parsed formula into the form the cell stores and the form this
+/// edit evaluates. The single recipe behind `update_cell`, `update_cells_batch`
+/// and `fill_range`, so all three agree about what a name means.
+pub fn split_entered_formula(
+    state: &AppState,
+    parsed: &ParserExpr,
+    sheet_index: usize,
+    row: u32,
+) -> EnteredFormula {
+    let mut stored = resolve_positional_refs(state, parsed, sheet_index, row);
+
+    // The lexer UPPERCASES bare identifiers, which never showed while the name
+    // was expanded away at entry. Now that the cell keeps it, put the name back
+    // in the capitalisation the Name Manager holds — cosmetic only (every lookup
+    // uppercases), and it is what Excel's formula bar shows.
+    {
+        let named_ranges_map = state.named_ranges.read().unwrap();
+        name_resolution::restamp_name_casing(&mut stored, &named_ranges_map);
+    }
+
+    let expanded = if ast_has_named_refs(&stored) {
+        let named_ranges_map = state.named_ranges.read().unwrap();
+        let mut visited = HashSet::new();
+        let spliced = resolve_names_in_ast(&stored, &named_ranges_map, sheet_index, &mut visited);
+        drop(named_ranges_map);
+        // Again, because a name's `refers_to` may itself be a structured
+        // reference (`=Table1[Amount]`) that only becomes visible once the name
+        // is expanded.
+        Some(resolve_positional_refs(state, &spliced, sheet_index, row))
+    } else {
+        None
+    };
+
+    EnteredFormula { stored, expanded }
 }
 
 /// Checks if a parser AST contains any NamedRef nodes that need resolution.

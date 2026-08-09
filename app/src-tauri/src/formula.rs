@@ -287,12 +287,16 @@ fn eval_result_to_typed(
             serde_json::Value::String(eval_result_to_display(result))
         }
         // The REAL Excel literal ("#DIV/0!"), from the same helper the typed
-        // CELL read uses (commands/data.rs typed_cell_value). The older
-        // `eval_result_to_json` below renders `#{:?}` uppercased, which yields
-        // "#DIV0" — close enough for a template splice, wrong for an API whose
-        // whole promise is that an error is reported the way the grid reports
-        // it. Two paths that answer differently for the same failure is exactly
-        // how a script ends up matching on a string that never appears.
+        // CELL read uses (commands/data.rs typed_cell_value). This used to be
+        // the ONLY path that produced it: `eval_result_to_json` below, and
+        // `crate::cell_error_display` behind `eval_result_to_display`, both
+        // ended in a `#{:?}` uppercased arm that yielded "#DIV0" — close enough
+        // for a template splice, wrong for an API whose whole promise is that
+        // an error is reported the way the grid reports it. Two paths that
+        // answer differently for the same failure is exactly how a script ends
+        // up matching on a string that never appears. D7 removed the Debug arm,
+        // so all three now agree; the explicit call stays because agreeing by
+        // construction is worth more than one indirection saved.
         EvalResult::Error(e) => serde_json::Value::String(
             crate::scripting::udf::cell_error_to_str(e).to_string(),
         ),
@@ -549,7 +553,9 @@ mod typed_eval_tests {
     /// An error is an ERROR, not a cell that happens to contain "#DIV/0!" — and
     /// it carries the SAME literal a typed cell read reports. Two paths that
     /// spell the same failure differently ("#DIV/0!" here, "#DIV0" there) is how
-    /// a script ends up matching on a string that never appears.
+    /// a script ends up matching on a string that never appears. Since D7 there
+    /// is one table for every surface (`CellError::as_literal`), so this test
+    /// asserts the shared answer rather than one of two.
     #[test]
     fn an_error_reports_as_an_error_with_the_real_excel_literal() {
         for (err, literal) in [

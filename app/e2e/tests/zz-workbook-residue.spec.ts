@@ -12,6 +12,13 @@
  * "failures" across nine files were that one object, and every one of them
  * looked like a defect in the feature under test.
  *
+ * That particular pill was fixed at the source (D4): it is viewport-pinned DOM
+ * chrome now and registers no grid region at all. `"animation-play"` stays in
+ * the list below anyway — a guard's list is cheap and the point of this file is
+ * that nobody could SEE the class until it was named. If a future change puts a
+ * transport back into cell coordinates, this fails on the same line it failed
+ * on the first time.
+ *
  * Nothing in the suite could see it. `resetGrid` clears cells; `new_file`
  * clears the document but NOT the frontend's floating-object layer (proved:
  * `dimensions.spec.ts` calls `resetToNewWorkbook` and the pill and the chart

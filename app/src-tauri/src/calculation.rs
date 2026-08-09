@@ -450,6 +450,12 @@ fn cross_sheet_circular_cells(
 /// Returns an EMPTY set for a workbook with no cross-sheet references at all,
 /// so same-sheet-only workbooks are unaffected (their cycles are still found
 /// by `partition_formula_cells`, which keeps running unchanged).
+///
+/// CALLERS ARE THE SHEET-SCOPED PATHS: `recalculate_sheet_values` (the
+/// background per-sheet pass) and the `CalcScope::ActiveSheet` arm of
+/// `run_calculation_pass` (Shift+F9). A WORKBOOK pass does not call it — its
+/// own plan is the same graph, so the residue of its Kahn IS this set, and
+/// computing it twice would be the second traversal this file works to avoid.
 pub(crate) fn workbook_circular_cells(
     grids: &[engine::Grid],
     sheet_names: &[String],
@@ -636,20 +642,27 @@ fn merge_cross_sheet_circular(
 ///
 /// WHY THIS EXISTS — THE OTHER HALF OF THE SAME FACT.
 /// `merge_cross_sheet_circular` moves only the members on `active_sheet` into a
-/// circular group, because that is the only sheet a pass evaluates. `calculate_now`
-/// evaluates exactly one sheet, so with `Sheet1!A1 = Sheet2!A1` and
-/// `Sheet2!A1 = Sheet1!A1` it reported `#CIRCULAR!` on the sheet you were LOOKING
-/// AT and left the other member holding whatever number the previous evaluation
-/// order produced — `0`. Measured on the running app, not reasoned: F9 on Sheet1
-/// gave `#CIRCULAR` / `0`, and only a second F9 after switching to Sheet2 made the
-/// two agree.
+/// circular group, because that is the only sheet a SHEET-SCOPED pass evaluates.
+/// With `Sheet1!A1 = Sheet2!A1` and `Sheet2!A1 = Sheet1!A1` such a pass reported
+/// `#CIRCULAR!` on the sheet you were LOOKING AT and left the other member holding
+/// whatever number the previous evaluation order produced — `0`. Measured on the
+/// running app, not reasoned: F9 on Sheet1 gave `#CIRCULAR` / `0`, and only a
+/// second F9 after switching to Sheet2 made the two agree.
 ///
 /// That surviving number is the exact defect the workbook-level detector exists to
 /// remove. It is also strictly worse than the original bug in one respect: half the
 /// cycle now says "error" while the other half says "zero", so a user reading the
 /// summary sheet gets a plausible number with a contradiction one tab away.
 /// `recalculate_sheet_values` never had the problem because the off-sheet write path
-/// calls it for EVERY sheet; nothing calls `calculate_now` more than once.
+/// calls it for EVERY sheet.
+///
+/// STILL NEEDED, BUT NO LONGER BY F9. When this was written, `calculate_now` was
+/// the sheet-scoped pass — that WAS the defect. F9 now plans the whole workbook
+/// (Excel parity: F9 = Calculate Now = workbook), so every member of the cycle is
+/// in its plan and is written by the ordinary circular-group branch on its own
+/// sheet; the workbook pass never calls this. **Shift+F9 — Calculate Sheet — does,
+/// and genuinely needs to**, because a sheet pass really does leave the other
+/// sheets unevaluated. Deleting this would restore the defect on that one command.
 ///
 /// A CYCLE IS A WORKBOOK-LEVEL FACT, so it is reported on every sheet that owns a
 /// member. This is not a second detector and not a second traversal: `circular` is
@@ -704,36 +717,301 @@ pub(crate) fn mark_off_sheet_circular_cells(
     marked
 }
 
-/// Recalculate all formulas in the grid.
-/// When iterative calculation is enabled, circular references are resolved
-/// by repeatedly evaluating the circular group until convergence.
+// ============================================================================
+// WHAT A MANUAL RECALCULATION COVERS  (Excel: F9 = workbook, Shift+F9 = sheet)
+// ============================================================================
+
+/// The scope of one manual recalculation pass.
 ///
-/// # Why this command is `(async)`
+/// **EXCEL PARITY, and the entire reason this type exists.** Excel gives a
+/// manual recalculation two commands and two keys: **Calculate Now (F9)**
+/// recalculates the **workbook**, **Calculate Sheet (Shift+F9)** recalculates
+/// the **active sheet**. Calcula shipped both menu entries and only one
+/// behaviour — both evaluated the active sheet — and that single fact produced
+/// two visible defects:
 ///
-/// **This is the change that makes cancellation exist at all**, and it is a
+///   * a cross-sheet **iterative** cycle moved nowhere under repeated F9. Only
+///     the half of the cycle living on the active sheet was ever evaluated, so
+///     the other half never took its hop and the group could not converge no
+///     matter how many times the key was pressed.
+///   * a cross-sheet **circular** reference reported `#CIRCULAR!` on the sheet
+///     you were looking at and an order-dependent `0` one tab away. That was
+///     patched by stamping the off-sheet members (`mark_off_sheet_circular_cells`);
+///     see that function for why the patch is still needed — for Shift+F9 — and
+///     no longer needed for F9.
+///
+/// Making F9 mean the workbook fixes both at the source rather than papering
+/// over them: every member of a cycle lands in ONE group of ONE plan, so an
+/// iterative cycle iterates as a unit, and a non-iterative one is stamped on
+/// every sheet that owns a member because the pass evaluates every sheet that
+/// owns a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CalcScope {
+    /// Calculate Now / F9 — every sheet, planned as ONE workbook-wide order.
+    Workbook,
+    /// Calculate Sheet / Shift+F9 — the active sheet alone.
+    ActiveSheet,
+}
+
+impl CalcScope {
+    /// The `scope` field of the `app:calc-progress` event.
+    fn progress_label(self) -> &'static str {
+        match self {
+            CalcScope::Workbook => "workbook",
+            CalcScope::ActiveSheet => "sheet",
+        }
+    }
+}
+
+/// One cell a pass will evaluate: the sheet it lives on, where it is, and its
+/// formula text. **The sheet index is what makes a plan workbook-wide** — every
+/// downstream step (evaluation, the mirror write, the returned `CellData`, the
+/// pending remainder) reads it rather than assuming the active sheet.
+type PlannedCell = (usize, u32, u32, String);
+
+/// The work a pass will do, in the order it will do it.
+struct CalcPlan {
+    /// Acyclic cells in topological order.
+    ordered: Vec<PlannedCell>,
+    /// Cells on — or downstream of — a dependency cycle, one `Vec` per
+    /// connected component. **A component may SPAN SHEETS.** That is precisely
+    /// what lets a cross-sheet iterative cycle converge: the group is iterated
+    /// as a unit, so both halves take a hop per round.
+    circular_groups: Vec<Vec<PlannedCell>>,
+}
+
+impl CalcPlan {
+    fn total_cells(&self) -> usize {
+        self.ordered.len() + self.circular_groups.iter().map(|g| g.len()).sum::<usize>()
+    }
+}
+
+/// ONE Kahn over every formula cell in the workbook, same-sheet and cross-sheet
+/// edges together — the plan a **workbook-scoped** pass executes.
+///
+/// THIS IS NOT A FOURTH WALK. It is `workbook_circular_cells`' walk, made to
+/// return the topological ORDER it was already computing and throwing away.
+/// The old F9 path ran that walk (to find cross-sheet cycles) *and*
+/// `partition_formula_cells` over the active sheet (to find an order); a
+/// workbook pass runs the walk once and gets both. For a single-sheet workbook
+/// the cost is therefore unchanged: one AST pass, one Kahn.
+///
+/// EDGES COME FROM `cell.ast`, not from `AppState.dependencies`, for the same
+/// reason `recalculate_sheet_values` builds its own: the AppState maps have no
+/// sheet dimension and describe the ACTIVE sheet only, so they cannot order a
+/// workbook. `cell.ast` is the RESOLVED expression `update_cell` cached (names,
+/// structured table refs and spill refs already substituted), which is exactly
+/// the expression the AppState maps were themselves extracted from.
+///
+/// A formula cell with no cached AST is still a NODE — it must be evaluated —
+/// it simply contributes no precedent edges, so it sorts early. Under-ordering
+/// a cell costs it one stale round; DROPPING it would mean F9 silently skipped
+/// a formula, which is not a trade worth making.
+///
+/// DETERMINISTIC. The ready set is a min-heap rather than a FIFO seeded from a
+/// `HashMap`, so two runs over the same workbook produce the same order and the
+/// same circular grouping. The soak and regression oracles compare recalc
+/// results across runs; an order that depends on hash iteration makes an
+/// independent-cell tie look like a change.
+fn build_workbook_plan(grids: &[engine::Grid], sheet_names: &[String]) -> CalcPlan {
+    use std::cmp::Reverse;
+    use std::collections::{BinaryHeap, HashMap, VecDeque};
+
+    type Node = (usize, u32, u32);
+
+    // Sheet name -> index, matched case-insensitively because the lexer
+    // UPPERCASES bare identifiers (`=Sheet1!A2` is stored as `SHEET1!A2`).
+    let sheet_index_of = |name: &str| -> Option<usize> {
+        sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+    };
+
+    // ONE walk of every AST in the workbook: the nodes and the raw edges.
+    let mut cells: Vec<(Node, String)> = Vec::new();
+    let mut raw_edges: Vec<(Node, Node)> = Vec::new();
+    for (sheet_idx, grid) in grids.iter().enumerate() {
+        for (&(row, col), cell) in &grid.cells {
+            let Some(formula) = cell.formula_string() else {
+                continue;
+            };
+            let node: Node = (sheet_idx, row, col);
+            cells.push((node, formula));
+            let Some(ast) = &cell.ast else {
+                continue;
+            };
+            let refs = crate::extract_all_references(ast, grid);
+            for &(r, c) in &refs.cells {
+                raw_edges.push(((sheet_idx, r, c), node));
+            }
+            for (name, r, c) in &refs.cross_sheet_cells {
+                // A reference to a sheet that no longer exists carries no edge.
+                // A PREFIXED reference to the cell's own sheet (`=Sheet1!A1`
+                // written on Sheet1) resolves to a same-sheet edge here, which
+                // is what `ExtractedRefs::cells` never reports and the
+                // sheet-local detector therefore always missed.
+                if let Some(target) = sheet_index_of(name) {
+                    raw_edges.push(((target, *r, *c), node));
+                }
+            }
+        }
+    }
+
+    if cells.is_empty() {
+        return CalcPlan { ordered: Vec::new(), circular_groups: Vec::new() };
+    }
+
+    // SORTED ONCE, then everything downstream is an INDEX. `grid.cells` is a
+    // hash map, so its iteration order is not stable across runs; sorting here
+    // is what makes the plan reproducible, and it also lets the ready set be a
+    // heap of `u32` rather than of node triples.
+    cells.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let n = cells.len();
+    let index_of: HashMap<Node, u32> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, (node, _))| (*node, i as u32))
+        .collect();
+
+    // Adjacency in flat vectors rather than hash maps: this is the hottest
+    // command in the product, and F9 now plans every sheet, so the plan's own
+    // bookkeeping must not be the part that costs.
+    let mut in_degree: Vec<u32> = vec![0; n];
+    let mut dependents: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut precedents: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (from, to) in raw_edges {
+        // A literal (or an empty cell) has no outgoing edge and can never be
+        // part of a cycle, so it is never a node and its edges are dropped.
+        let (Some(&from), Some(&to)) = (index_of.get(&from), index_of.get(&to)) else {
+            continue;
+        };
+        in_degree[to as usize] += 1;
+        dependents[from as usize].push(to);
+        precedents[to as usize].push(from);
+    }
+
+    let mut ready: BinaryHeap<Reverse<u32>> = (0..n as u32)
+        .filter(|&i| in_degree[i as usize] == 0)
+        .map(Reverse)
+        .collect();
+    let mut order: Vec<u32> = Vec::with_capacity(n);
+    while let Some(Reverse(i)) = ready.pop() {
+        order.push(i);
+        for &dep in &dependents[i as usize] {
+            let d = &mut in_degree[dep as usize];
+            *d -= 1;
+            if *d == 0 {
+                ready.push(Reverse(dep));
+            }
+        }
+    }
+
+    let mut sorted_out = vec![false; n];
+    for &i in &order {
+        sorted_out[i as usize] = true;
+    }
+
+    // Formulas are MOVED into the plan, never cloned: a workbook-sized recalc
+    // would otherwise duplicate every formula string in the file on every F9.
+    let mut formulas: Vec<Option<String>> = cells
+        .iter_mut()
+        .map(|(_, f)| Some(std::mem::take(f)))
+        .collect();
+    let take = |formulas: &mut Vec<Option<String>>, i: u32| -> PlannedCell {
+        let (sheet, row, col) = cells[i as usize].0;
+        (sheet, row, col, formulas[i as usize].take().unwrap_or_default())
+    };
+
+    let residue: Vec<u32> = (0..n as u32).filter(|&i| !sorted_out[i as usize]).collect();
+    let ordered: Vec<PlannedCell> = order.iter().map(|&i| take(&mut formulas, i)).collect();
+
+    if residue.is_empty() {
+        return CalcPlan { ordered, circular_groups: Vec::new() };
+    }
+
+    // Group the residue into connected components, following precedents AND
+    // dependents — the same rule `partition_formula_cells` uses, so a cell
+    // merely READING a circular cell is reported with it. `residue` is already
+    // in index (i.e. sorted node) order, so the grouping is reproducible.
+    let mut visited = vec![false; n];
+    let mut circular_groups: Vec<Vec<PlannedCell>> = Vec::new();
+    for &start in &residue {
+        if visited[start as usize] {
+            continue;
+        }
+        let mut group: Vec<u32> = Vec::new();
+        let mut queue: VecDeque<u32> = VecDeque::new();
+        queue.push_back(start);
+        while let Some(current) = queue.pop_front() {
+            if sorted_out[current as usize] || visited[current as usize] {
+                continue;
+            }
+            visited[current as usize] = true;
+            group.push(current);
+            for &next in precedents[current as usize]
+                .iter()
+                .chain(dependents[current as usize].iter())
+            {
+                if !sorted_out[next as usize] && !visited[next as usize] {
+                    queue.push_back(next);
+                }
+            }
+        }
+        group.sort_unstable();
+        if !group.is_empty() {
+            circular_groups.push(group.into_iter().map(|i| take(&mut formulas, i)).collect());
+        }
+    }
+
+    CalcPlan { ordered, circular_groups }
+}
+
+/// Recalculate formulas: the whole workbook (`CalcScope::Workbook`, F9) or the
+/// active sheet alone (`CalcScope::ActiveSheet`, Shift+F9).
+///
+/// When iterative calculation is enabled, circular references are resolved by
+/// repeatedly evaluating the circular group until convergence.
+///
+/// # Why the commands wrapping this are `(async)`
+///
+/// **That is the change that makes cancellation exist at all**, and it is a
 /// threading change rather than a token design. A plain `#[tauri::command]` on
 /// a synchronous function runs on the MAIN thread, which on Windows is the
 /// WebView2 UI thread: while a long recalculation ran, the webview could not
 /// paint, could not dispatch a click, and could not deliver
 /// `invoke("cancel_calculation")`. An `AtomicBool` nobody can reach is not
-/// cancellation. `(async)` dispatches this to the async runtime's pool and
-/// frees the UI thread, so the Cancel button can be drawn AND clicked.
+/// cancellation. `(async)` dispatches to the async runtime's pool and frees the
+/// UI thread, so the Cancel button can be drawn AND clicked.
 ///
-/// The function itself stays synchronous Rust — it holds `std::sync::MutexGuard`s
-/// and must never be suspended across an await. 106 commands in this crate are
-/// already async, so `AppState`'s mutexes being touched off the main thread is
-/// not a new hazard. The consequence to design for (not to discover) is that a
-/// concurrent edit command now BLOCKS on the grid mutex while a recalc runs;
-/// the frontend therefore enters an explicit "calculating" state on invoke,
-/// which it wants anyway, because that is where the Cancel button lives.
-#[tauri::command(async)]
-pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
+/// This function itself stays synchronous Rust — it holds
+/// `std::sync::MutexGuard`s and must never be suspended across an await. 106
+/// commands in this crate are already async, so `AppState`'s mutexes being
+/// touched off the main thread is not a new hazard. The consequence to design
+/// for (not to discover) is that a concurrent edit command now BLOCKS on the
+/// grid mutex while a recalc runs; the frontend therefore enters an explicit
+/// "calculating" state on invoke, which it wants anyway, because that is where
+/// the Cancel button lives.
+///
+/// # Why it is a plain function and not the command
+///
+/// So the pass can be TESTED. `#[tauri::command]` bodies take `State` and
+/// `Window` and cannot run in-process, which is why the cross-sheet behaviour
+/// of F9 used to be pinned by asserting on its SOURCE TEXT. It is now pinned by
+/// running it.
+pub(crate) fn run_calculation_pass(
+    scope: CalcScope,
+    window: Option<tauri::Window>,
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    cube_results: Option<engine::CubePrefetch>,
+) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
     // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
     // pass (never per formula) and read by the evaluator through the
     // thread-local pass scope. Built BEFORE any grid lock is taken.
-    let _visibility_pass = crate::row_visibility::begin_pass(&state);
+    let _visibility_pass = crate::row_visibility::begin_pass(state);
     // THE PASS OWNS THE CANCEL FLAG. `begin` clears anything a previous pass
     // left set; the guard clears it again on the way out (including on a panic)
     // so a cancelled pass cannot poison the resume the user is about to ask for.
@@ -741,12 +1019,17 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     // and the Recalc fuel ceiling. See eval_budget.rs for why the surface is
     // ambient rather than a parameter on ~78 call sites.
     let pass = eval_budget::begin_pass(EvalSurface::Recalc, &state.calc_cancel);
-    // VERIFICATION HOOK for the `(async)` change above. The claim "this no
-    // longer runs on the WebView2 UI thread" is a claim about framework
-    // behaviour, and the whole Cancel affordance rests on it, so it is logged
-    // rather than asserted from the documentation: compare this thread id
-    // against a UI-thread command's and they must differ.
-    log_info!("CALC", "calculate_now on thread {:?}", std::thread::current().id());
+    // VERIFICATION HOOK for the `(async)` note above. The claim "this no longer
+    // runs on the WebView2 UI thread" is a claim about framework behaviour, and
+    // the whole Cancel affordance rests on it, so it is logged rather than
+    // asserted from the documentation: compare this thread id against a
+    // UI-thread command's and they must differ.
+    log_info!(
+        "CALC",
+        "recalculation pass ({}) on thread {:?}",
+        scope.progress_label(),
+        std::thread::current().id()
+    );
     // CENSUS "UNCLEAR" -> DELIBERATELY CLEAN (DerivedCache). Recalculation rewrites
     // cell VALUES, and values are persisted, so this looks like a document mutation.
     // It is not one, for two reasons.
@@ -763,11 +1046,10 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     //
     // The commands that make a recalc's results meaningful DO mark: the edit that
     // caused the staleness (update_cell / update_cells_batch), and `clear_pending_recalc`
-    // when a human discards the marker. Note also that `save_file` calls this command
+    // when a human discards the marker. Note also that `save_file` calls `calculate_now`
     // itself when calculate-before-save is on (persistence.rs) and then assigns
     // is_modified = false; a dirty mark here would be both wrong and immediately undone.
     //
-    // `calculate_sheet` delegates straight to this function and inherits the decision.
     // Recorded rather than omitted: `rg deliberately_clean` must list every such call.
     let effect = crate::document_effect::DocumentEffect::deliberately_clean(
         crate::document_effect::CleanReason::DerivedCache,
@@ -779,8 +1061,25 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     // GET.CONTROLVALUE snapshot: built ONCE per recalc, BEFORE the grid locks
     // below (canonical lock order: control stores first, grids last).
     let control_values = crate::control_values::build_control_values(
-        &state, &pane_control_state, &ribbon_filter_state,
+        state, pane_control_state, ribbon_filter_state,
     );
+    // PER-SHEET DIMENSIONS for the sheets a workbook pass visits besides the
+    // active one (ROW()/COLUMN()-adjacent builtins read them). Cloned here,
+    // BEFORE any grid lock, so this can never invert a lock order; the ACTIVE
+    // sheet keeps reading its live mirror below, which `all_row_heights[active]`
+    // is allowed to lag behind.
+    let (other_row_heights, other_column_widths): (
+        Vec<std::collections::HashMap<u32, f64>>,
+        Vec<std::collections::HashMap<u32, f64>>,
+    ) = match scope {
+        CalcScope::Workbook => (
+            state.all_row_heights.read().unwrap().clone(),
+            state.all_column_widths.read().unwrap().clone(),
+        ),
+        CalcScope::ActiveSheet => (Vec::new(), Vec::new()),
+    };
+    let empty_dims: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
@@ -788,9 +1087,9 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
 
     // The active-sheet mirror (state.grid) is the source of truth; grids[i]
     // can lag behind it (see get_watch_cells note in commands/data.rs).
-    // Formula evaluation below reads the ACTIVE sheet through `grids`, so a
-    // stale grids[active] silently recalculates from old values (BUG-0016).
-    // Sync it from the mirror before evaluating.
+    // Formula evaluation below reads every sheet through `grids`, so a stale
+    // grids[active] silently recalculates from old values (BUG-0016).
+    // Sync it from the mirror before planning or evaluating anything.
     if active_sheet < grids.len() {
         grids[active_sheet] = grid.clone();
     }
@@ -820,21 +1119,12 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     // Pre-fetch writeback submissions once per recalculation pass so GATHER
     // formulas see current data (empty map, no registry I/O, when the
     // workbook has no writeback regions).
-    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_data = crate::calp_commands::build_gather_data(state);
     let gather_fn = |region_id: &str| -> engine::GatherRegionData {
         gather_data.get(region_id).cloned().unwrap_or_default()
     };
 
     let mut updated_cells = Vec::new();
-
-    // Collect all cells with formulas
-    let formula_cells: Vec<_> = grid
-        .cells
-        .iter()
-        .filter_map(|(&(row, col), cell)| {
-            cell.formula_string().map(|f| (row, col, f))
-        })
-        .collect();
 
     // Lock table state once for all formula evaluations
     let tables_map = state.tables.read().unwrap();
@@ -842,110 +1132,195 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     let named_ranges_map = state.named_ranges.read().unwrap();
     let mut row_heights = state.row_heights.write(&effect).unwrap();
     let mut column_widths = state.column_widths.write(&effect).unwrap();
-    let dependencies_map = state.dependencies.lock().unwrap();
 
-    // Partition formula cells into non-circular (topological order) and circular groups
-    let (mut non_circular, mut circular_groups) = partition_formula_cells(&formula_cells, &dependencies_map);
-    drop(dependencies_map);
+    // ---- THE PLAN -------------------------------------------------------
+    let mut plan = match scope {
+        // F9. One workbook-wide order over every formula cell on every sheet.
+        // No cross-sheet MERGE step and no off-sheet MARK step are needed here:
+        // a cycle's members are all in the plan, so they take the ordinary
+        // circular-group branch on whichever sheet they live on.
+        CalcScope::Workbook => build_workbook_plan(&grids, &sheet_names),
+        // Shift+F9. The active sheet alone, ordered by the AppState dependency
+        // map (which describes exactly that sheet), with the workbook-level
+        // cycle answer merged in — a cycle is a workbook-level fact even when
+        // the pass is not.
+        CalcScope::ActiveSheet => {
+            let formula_cells: Vec<_> = grid
+                .cells
+                .iter()
+                .filter_map(|(&(row, col), cell)| cell.formula_string().map(|f| (row, col, f)))
+                .collect();
+            let dependencies_map = state.dependencies.lock().unwrap();
+            let (mut non_circular, mut circular_groups) =
+                partition_formula_cells(&formula_cells, &dependencies_map);
+            drop(dependencies_map);
 
-    // §2c follow-on: `state.dependencies` has no sheet dimension, so F9 could
-    // not see a cycle that crosses a boundary either. Same merge as
-    // `recalculate_sheet_values`; the sheet under recalculation here is always
-    // the active one.
-    {
-        let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names);
-        merge_cross_sheet_circular(
-            active_sheet,
-            &cross_circular,
-            &mut non_circular,
-            &mut circular_groups,
-        );
-        // ...and the members on the OTHER sheets, which this pass does not
-        // evaluate and which were therefore left holding an order-dependent
-        // number while the active sheet said `#CIRCULAR!`. See
-        // `mark_off_sheet_circular_cells` for the measurement.
-        let marked =
-            mark_off_sheet_circular_cells(&mut grids, &cross_circular, active_sheet, iteration_enabled);
-        for (sheet, row, col) in marked {
-            let effective_style_index = grids[sheet].effective_style_index(row, col);
-            let style = styles.get(effective_style_index);
-            let formula = grids[sheet]
-                .get_cell(row, col)
-                .and_then(|c| c.formula_string())
-                .map(|f| format!("={}", f));
-            updated_cells.push(CellData {
-                row,
-                col,
-                display: format_cell_value(
-                    &engine::CellValue::Error(engine::CellError::Circular),
-                    style,
-                    &locale,
-                ),
-                display_color: None,
-                formula,
-                style_index: effective_style_index,
-                row_span: 1,
-                col_span: 1,
-                // NAMED, so the frontend cannot paint an off-sheet value onto the
-                // sheet on screen: Core applies only cells with no sheet index.
-                sheet_index: Some(sheet),
-                rich_text: None,
-                accounting_layout: None,
-            });
+            // §2c follow-on: `state.dependencies` has no sheet dimension, so a
+            // sheet-scoped pass cannot see a cycle that crosses a boundary
+            // either. Merge the workbook-level answer in.
+            let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names);
+            merge_cross_sheet_circular(
+                active_sheet,
+                &cross_circular,
+                &mut non_circular,
+                &mut circular_groups,
+            );
+            // ...and the members on the OTHER sheets, which a SHEET-scoped pass
+            // does not evaluate and which would otherwise be left holding an
+            // order-dependent number while the active sheet said `#CIRCULAR!`.
+            // See `mark_off_sheet_circular_cells`.
+            let marked = mark_off_sheet_circular_cells(
+                &mut grids,
+                &cross_circular,
+                active_sheet,
+                iteration_enabled,
+            );
+            for (sheet, row, col) in marked {
+                let effective_style_index = grids[sheet].effective_style_index(row, col);
+                let style = styles.get(effective_style_index);
+                let formula = grids[sheet]
+                    .get_cell(row, col)
+                    .and_then(|c| c.formula_string())
+                    .map(|f| format!("={}", f));
+                updated_cells.push(CellData {
+                    row,
+                    col,
+                    display: format_cell_value(
+                        &engine::CellValue::Error(engine::CellError::Circular),
+                        style,
+                        &locale,
+                    ),
+                    display_color: None,
+                    formula,
+                    style_index: effective_style_index,
+                    row_span: 1,
+                    col_span: 1,
+                    // NAMED, so the frontend cannot paint an off-sheet value onto the
+                    // sheet on screen: Core applies only cells with no sheet index.
+                    sheet_index: Some(sheet),
+                    rich_text: None,
+                    accounting_layout: None,
+                });
+            }
+
+            CalcPlan {
+                ordered: non_circular
+                    .into_iter()
+                    .map(|(r, c, f)| (active_sheet, r, c, f))
+                    .collect(),
+                circular_groups: circular_groups
+                    .into_iter()
+                    .map(|g| g.into_iter().map(|(r, c, f)| (active_sheet, r, c, f)).collect())
+                    .collect(),
+            }
         }
-    }
+    };
 
-    // RESUME. If the previous pass on this sheet was cancelled, recalculate only
-    // what it never reached, so an accidental Cancel costs nothing.
+    // ---- RESUME ---------------------------------------------------------
     //
-    // Filtering the FRESH topological order down to the pending set is correct
-    // because the pending set is, by construction, a topological SUFFIX of the
-    // previous order: every precedent of a pending cell is either pending too
-    // (and still precedes it here) or was already recalculated. Cells that an
-    // edit cascade recalculated in the meantime were dropped from the set by
-    // `update_cell`; any that were missed are merely recalculated twice, which
-    // is wasteful and never wrong.
+    // If the previous pass was cancelled, recalculate only what it never
+    // reached, so an accidental Cancel costs nothing.
     let resume: Option<std::collections::HashSet<(u32, u32)>> = {
         let pending = state.pending_recalc.lock().map_err(|e| e.to_string())?;
-        pending
-            .as_ref()
-            .filter(|p| p.sheet_index == active_sheet && !p.is_empty())
-            .map(|p| p.cells.iter().map(|c| (c.row, c.col)).collect())
+        match scope {
+            CalcScope::ActiveSheet => pending
+                .as_ref()
+                .filter(|p| p.sheet_index == active_sheet && !p.is_empty())
+                .map(|p| p.cells.iter().map(|c| (c.row, c.col)).collect()),
+            CalcScope::Workbook => pending
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .map(|p| p.cells.iter().map(|c| (c.row, c.col)).collect()),
+        }
     };
     if let Some(resume_set) = &resume {
-        non_circular.retain(|(r, c, _)| resume_set.contains(&(*r, *c)));
-        // A circular group is atomic: if any member is pending, the group has to
-        // be iterated as a whole — a half-converged group is not a resting state.
-        circular_groups.retain(|g| g.iter().any(|(r, c, _)| resume_set.contains(&(*r, *c))));
-        log_info!("CALC", "resuming cancelled pass: {} cells, {} circular groups",
-            non_circular.len(), circular_groups.len());
+        match scope {
+            // Filtering the FRESH topological order down to the pending set is
+            // correct because the pending set is, by construction, a topological
+            // SUFFIX of the previous order: every precedent of a pending cell is
+            // either pending too (and still precedes it here) or was already
+            // recalculated. Cells that an edit cascade recalculated in the
+            // meantime were dropped from the set by `update_cell`; any that were
+            // missed are merely recalculated twice, which is wasteful and never
+            // wrong.
+            CalcScope::ActiveSheet => {
+                plan.ordered.retain(|(_, r, c, _)| resume_set.contains(&(*r, *c)));
+                // A circular group is atomic: if any member is pending, the group
+                // has to be iterated as a whole — a half-converged group is not a
+                // resting state.
+                plan.circular_groups
+                    .retain(|g| g.iter().any(|(_, r, c, _)| resume_set.contains(&(*r, *c))));
+            }
+            // A WORKBOOK plan is a total order across sheets, so the remainder is
+            // a SUFFIX of it and "where it stopped" is all that is needed. Resume
+            // from the first planned cell the pending set names and run
+            // everything after it, whatever sheet that lands on. Membership is
+            // tested by (row, col) alone because the saved marker carries no
+            // per-cell sheet (see the pending record at the bottom); a
+            // coincidental match on an earlier sheet resumes EARLIER than
+            // necessary, which repeats work and never skips any. A pending set
+            // that names nothing in this plan (the formulas changed under it)
+            // falls through and recalculates the whole workbook — the safe
+            // answer, not the cheap one.
+            CalcScope::Workbook => {
+                if let Some(start) = plan
+                    .ordered
+                    .iter()
+                    .position(|(_, r, c, _)| resume_set.contains(&(*r, *c)))
+                {
+                    plan.ordered.drain(..start);
+                } else if let Some(start) = plan
+                    .circular_groups
+                    .iter()
+                    .position(|g| g.iter().any(|(_, r, c, _)| resume_set.contains(&(*r, *c))))
+                {
+                    plan.ordered.clear();
+                    plan.circular_groups.drain(..start);
+                }
+            }
+        }
+        log_info!(
+            "CALC",
+            "resuming cancelled pass: {} cells, {} circular groups",
+            plan.ordered.len(),
+            plan.circular_groups.len()
+        );
     }
 
-    let total_cells: usize =
-        non_circular.len() + circular_groups.iter().map(|g| g.len()).sum::<usize>();
-    let mut progress = ProgressEmitter::new(Some(window.clone()), "workbook", total_cells);
+    let total_cells = plan.total_cells();
+    let mut progress = ProgressEmitter::new(window, scope.progress_label(), total_cells);
     let mut cells_done: usize = 0;
     let mut cancelled = false;
     // Everything a cancelled pass did NOT recalculate, in evaluation order.
-    let mut pending_cells: Vec<PendingCell> = Vec::new();
+    let mut pending_nodes: Vec<(usize, u32, u32)> = Vec::new();
 
-    // Phase 1: Evaluate non-circular formulas in topological order (single pass)
-    for (idx, (row, col, formula)) in non_circular.iter().enumerate() {
+    // ---- Phase 1: acyclic formulas, in topological order ------------------
+    for (idx, (sheet, row, col, formula)) in plan.ordered.iter().enumerate() {
         // Check 1 of 2: before spending any work on this cell.
         if pass.cancelled() {
             cancelled = true;
-            pending_cells.extend(
-                non_circular[idx..].iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }),
-            );
+            pending_nodes.extend(plan.ordered[idx..].iter().map(|(s, r, c, _)| (*s, *r, *c)));
             break;
         }
+        let sheet = *sheet;
+        if sheet >= grids.len() {
+            continue;
+        }
 
+        let (rh, cw) = if sheet == active_sheet {
+            (&*row_heights, &*column_widths)
+        } else {
+            (
+                other_row_heights.get(sheet).unwrap_or(&empty_dims),
+                other_column_widths.get(sheet).unwrap_or(&empty_dims),
+            )
+        };
         let result = evaluate_single_formula(
             *row, *col, formula,
-            &grids, &sheet_names, active_sheet,
+            &grids, &sheet_names, sheet,
             &styles, &user_files, &pivot_data_fn, &gather_fn,
             &tables_map, &table_names_map, &named_ranges_map,
-            &row_heights, &column_widths,
+            rh, cw,
             cube_arc.as_ref(),
             Some(&control_values),
         );
@@ -959,45 +1334,43 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
         // un-recalculated, which it is.
         if pass.cancelled() {
             cancelled = true;
-            pending_cells.extend(
-                non_circular[idx..].iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }),
-            );
+            pending_nodes.extend(plan.ordered[idx..].iter().map(|(s, r, c, _)| (*s, *r, *c)));
             break;
         }
 
-        if let Some(cell) = grid.get_cell(*row, *col) {
+        if let Some(cell) = grids[sheet].get_cell(*row, *col) {
             let mut updated = cell.clone();
             updated.value = result;
-            grid.set_cell(*row, *col, updated.clone());
-            if active_sheet < grids.len() {
-                grids[active_sheet].set_cell(*row, *col, updated.clone());
-            }
+            grids[sheet].set_cell(*row, *col, updated.clone());
+            if sheet == active_sheet {
+                grid.set_cell(*row, *col, updated.clone());
 
-            // Row/column tiers apply to what is displayed and to the index the
-            // renderer gets; the stored cell keeps its own (inherit) index.
-            let effective_style_index = grid.effective_style_index(*row, *col);
-            let style = styles.get(effective_style_index);
-            let display = format_cell_value(&updated.value, style, &locale);
-            updated_cells.push(CellData {
-                row: *row,
-                col: *col,
-                display,
-                display_color: None,
-                formula: updated.formula_string().map(|f| format!("={}", f)),
-                style_index: effective_style_index,
-                row_span: 1,
-                col_span: 1,
-                sheet_index: None,
-                rich_text: None,
-                accounting_layout: None,
-            });
+                // Row/column tiers apply to what is displayed and to the index the
+                // renderer gets; the stored cell keeps its own (inherit) index.
+                let effective_style_index = grid.effective_style_index(*row, *col);
+                let style = styles.get(effective_style_index);
+                let display = format_cell_value(&updated.value, style, &locale);
+                updated_cells.push(CellData {
+                    row: *row,
+                    col: *col,
+                    display,
+                    display_color: None,
+                    formula: updated.formula_string().map(|f| format!("={}", f)),
+                    style_index: effective_style_index,
+                    row_span: 1,
+                    col_span: 1,
+                    sheet_index: None,
+                    rich_text: None,
+                    accounting_layout: None,
+                });
+            }
         }
         cells_done += 1;
         progress.tick(cells_done);
     }
 
-    // Phase 2: Handle circular groups
-    for (gi, group) in circular_groups.iter().enumerate() {
+    // ---- Phase 2: circular groups ----------------------------------------
+    for (gi, group) in plan.circular_groups.iter().enumerate() {
         if cancelled {
             break;
         }
@@ -1007,42 +1380,51 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
         // pending rather than partially written.
         if pass.cancelled() {
             cancelled = true;
-            for g in &circular_groups[gi..] {
-                pending_cells.extend(g.iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }));
+            for g in &plan.circular_groups[gi..] {
+                pending_nodes.extend(g.iter().map(|(s, r, c, _)| (*s, *r, *c)));
             }
             break;
         }
         if !iteration_enabled {
-            // Iteration disabled: set all cells in the circular group to #CIRC! error
-            for (row, col, _formula) in group {
-                if let Some(cell) = grid.get_cell(*row, *col) {
+            // Iteration disabled: every member reports #CIRCULAR!, on whatever
+            // sheet it lives on.
+            for (sheet, row, col, _formula) in group {
+                let sheet = *sheet;
+                if sheet >= grids.len() {
+                    continue;
+                }
+                if let Some(cell) = grids[sheet].get_cell(*row, *col) {
                     let mut updated = cell.clone();
                     updated.value = engine::CellValue::Error(engine::CellError::Circular);
-                    grid.set_cell(*row, *col, updated.clone());
-                    if active_sheet < grids.len() {
-                        grids[active_sheet].set_cell(*row, *col, updated.clone());
-                    }
+                    grids[sheet].set_cell(*row, *col, updated.clone());
+                    if sheet == active_sheet {
+                        grid.set_cell(*row, *col, updated.clone());
 
-                    let effective_style_index = grid.effective_style_index(*row, *col);
-                    let style = styles.get(effective_style_index);
-                    let display = format_cell_value(&updated.value, style, &locale);
-                    updated_cells.push(CellData {
-                        row: *row,
-                        col: *col,
-                        display,
-                        display_color: None,
-                        formula: updated.formula_string().map(|f| format!("={}", f)),
-                        style_index: effective_style_index,
-                        row_span: 1,
-                        col_span: 1,
-                        sheet_index: None,
-                        rich_text: None,
-                        accounting_layout: None,
-                    });
+                        let effective_style_index = grid.effective_style_index(*row, *col);
+                        let style = styles.get(effective_style_index);
+                        let display = format_cell_value(&updated.value, style, &locale);
+                        updated_cells.push(CellData {
+                            row: *row,
+                            col: *col,
+                            display,
+                            display_color: None,
+                            formula: updated.formula_string().map(|f| format!("={}", f)),
+                            style_index: effective_style_index,
+                            row_span: 1,
+                            col_span: 1,
+                            sheet_index: None,
+                            rich_text: None,
+                            accounting_layout: None,
+                        });
+                    }
                 }
             }
         } else {
-            // Iteration enabled: iterate the circular group until convergence
+            // Iteration enabled: iterate the circular group until convergence.
+            // The group can span sheets, and each round evaluates every member,
+            // which is what makes a CROSS-SHEET iterative cycle converge — under
+            // the old active-sheet-only F9 the off-sheet half never took its hop
+            // and the group sat still no matter how many times F9 was pressed.
             log_info!("CALC", "Iterating circular group of {} cells (max_iterations={}, max_change={})",
                 group.len(), max_iterations, max_change);
 
@@ -1062,29 +1444,42 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
                 }
                 let mut max_delta: f64 = 0.0;
 
-                for (row, col, formula) in group {
-                    let old_value = grid.get_cell(*row, *col)
+                for (sheet, row, col, formula) in group {
+                    let sheet = *sheet;
+                    if sheet >= grids.len() {
+                        continue;
+                    }
+                    let old_value = grids[sheet]
+                        .get_cell(*row, *col)
                         .map(|c| cell_value_as_f64(&c.value))
                         .unwrap_or(0.0);
 
+                    let (rh, cw) = if sheet == active_sheet {
+                        (&*row_heights, &*column_widths)
+                    } else {
+                        (
+                            other_row_heights.get(sheet).unwrap_or(&empty_dims),
+                            other_column_widths.get(sheet).unwrap_or(&empty_dims),
+                        )
+                    };
                     let new_result = evaluate_single_formula(
                         *row, *col, formula,
-                        &grids, &sheet_names, active_sheet,
+                        &grids, &sheet_names, sheet,
                         &styles, &user_files, &pivot_data_fn, &gather_fn,
                         &tables_map, &table_names_map, &named_ranges_map,
-                        &row_heights, &column_widths,
+                        rh, cw,
                         cube_arc.as_ref(),
                         Some(&control_values),
                     );
 
                     let new_numeric = cell_value_as_f64(&new_result);
 
-                    if let Some(cell) = grid.get_cell(*row, *col) {
+                    if let Some(cell) = grids[sheet].get_cell(*row, *col) {
                         let mut updated = cell.clone();
                         updated.value = new_result;
-                        grid.set_cell(*row, *col, updated.clone());
-                        if active_sheet < grids.len() {
-                            grids[active_sheet].set_cell(*row, *col, updated);
+                        grids[sheet].set_cell(*row, *col, updated.clone());
+                        if sheet == active_sheet {
+                            grid.set_cell(*row, *col, updated);
                         }
                     }
 
@@ -1105,14 +1500,17 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
                 // Stopped mid-convergence. The group's cells hold intermediate
                 // iterates, which are not an answer — record the whole group
                 // and every group after it as un-recalculated.
-                for g in &circular_groups[gi..] {
-                    pending_cells.extend(g.iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }));
+                for g in &plan.circular_groups[gi..] {
+                    pending_nodes.extend(g.iter().map(|(s, r, c, _)| (*s, *r, *c)));
                 }
                 break;
             }
 
-            // Collect final values for all cells in the group
-            for (row, col, _formula) in group {
+            // Collect final values for the members the user can see.
+            for (sheet, row, col, _formula) in group {
+                if *sheet != active_sheet {
+                    continue;
+                }
                 if let Some(cell) = grid.get_cell(*row, *col) {
                     let effective_style_index = grid.effective_style_index(*row, *col);
                     let style = styles.get(effective_style_index);
@@ -1137,15 +1535,20 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
         progress.tick(cells_done);
     }
 
-    // Re-evaluate all computed properties for this sheet.
+    // Re-evaluate all computed properties for the ACTIVE sheet.
     // Skipped after a cancel: computed properties are re-derived from the whole
     // sheet, and re-deriving them from a half-recalculated one would bake the
     // partial state into row heights and column widths — where, unlike a cell
     // value, the user has no indicator telling them it is stale.
+    //
+    // Deliberately still active-sheet only, even under a workbook pass: the
+    // property re-evaluator is active-sheet machinery (it writes the live
+    // `row_heights` / `column_widths` mirrors and the style registry), and
+    // widening it is a separate change with its own dimension-change plumbing.
     if !cancelled {
         // Refreshes each property's CACHED VALUE from formulas that are themselves
         // persisted -- the same derived-state argument as the recalc pass this sits in
-        // (see the `effect` at the top of this command). The property definitions are
+        // (see the `effect` at the top of this function). The property definitions are
         // untouched here; add/update/remove_computed_property own the dirty flag.
         let mut cp_storage = state.computed_properties.write(&effect).unwrap();
         let (_dim_changes, _style_refresh) =
@@ -1160,7 +1563,7 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
                 &mut styles,
                 Some(&control_values),
             );
-        // Note: calculate_now returns Vec<CellData>, not UpdateCellResult.
+        // Note: this pass returns Vec<CellData>, not UpdateCellResult.
         // Dimension changes and style refresh are handled by the frontend
         // re-fetching viewport data after recalculation.
     }
@@ -1177,33 +1580,86 @@ pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_fil
     // bit adds a field to `Cell` plus an invalidation problem. See
     // eval_budget::PendingRecalc.
     //
+    // A CANCELLED WORKBOOK PASS SPANS SHEETS AND `PendingRecalc` DOES NOT.
+    // `sheet_index` records the sheet the pass stopped ON; `cells` records the
+    // whole remainder, including cells on later sheets, so the COUNT the status
+    // bar shows and the refusal `.calp` publish makes are both honest. What is
+    // approximate is the per-cell sheet attribution of the tail, and that is the
+    // right way round: the doc above states the invariant — over-reporting
+    // staleness is safe (a cell left in the set is merely recalculated again),
+    // under-reporting is the hazard this whole mechanism exists to remove. No
+    // reader locates a pending cell by coordinate; both consumers (the status
+    // bar, the publish gate) read the count, and `resume` above walks the plan
+    // rather than the marker. Widening the persisted marker to carry a sheet per
+    // cell is a `.cala` format change and is deliberately NOT bundled here.
+    //
     // `pending_recalc` is a LEAF mutex — nothing else is locked underneath it —
     // so taking it here, while the grid locks are still held, cannot deadlock.
     {
         let mut pending = state.pending_recalc.lock().map_err(|e| e.to_string())?;
         if cancelled {
             log_info!("CALC", "cancelled after {} of {} cells; {} left un-recalculated",
-                cells_done, total_cells, pending_cells.len());
-            *pending = Some(PendingRecalc { sheet_index: active_sheet, cells: pending_cells.clone() });
+                cells_done, total_cells, pending_nodes.len());
+            *pending = Some(PendingRecalc {
+                sheet_index: pending_nodes.first().map(|(s, _, _)| *s).unwrap_or(active_sheet),
+                cells: pending_nodes
+                    .iter()
+                    .map(|(_, r, c)| PendingCell { row: *r, col: *c })
+                    .collect(),
+            });
         } else {
             *pending = None;
         }
     }
-    progress.finish(cells_done, cancelled, pending_cells.len());
+    progress.finish(cells_done, cancelled, pending_nodes.len());
 
     Ok(updated_cells)
+}
+
+/// **Calculate Now — F9. The whole workbook**, exactly as Excel's F9 does.
+///
+/// Also the calculate-before-save step (`persistence::save_file`): Excel
+/// recalculates the workbook before saving, and a saved file that is only
+/// partly calculated is the silent-staleness hazard `PendingRecalc` exists to
+/// prevent — so save uses the workbook pass deliberately, not by inheritance.
+#[tauri::command(async)]
+pub fn calculate_now(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    user_files_state: State<'_, UserFilesState>,
+    pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    cube_results: Option<engine::CubePrefetch>,
+) -> Result<Vec<CellData>, String> {
+    run_calculation_pass(
+        CalcScope::Workbook,
+        Some(window),
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        cube_results,
+    )
 }
 
 /// Evaluate all formula cells on one sheet (active or not), writing results
 /// into grids[sheet_index] (and the active-sheet mirror when applicable).
 ///
-/// calculate_now only ever evaluates the ACTIVE sheet; .calp refresh and
-/// override revert/accept write formula cells (value Empty pending recalc)
-/// into arbitrary sheets, which would otherwise display empty until the user
-/// manually recalculated there. Builds a local same-sheet dependency map for
-/// evaluation order — the AppState dependency maps describe only the active
-/// sheet. Computed properties are not re-evaluated here (active-sheet
-/// machinery; the frontend recalc path covers them).
+/// This is the BACKGROUND path, not the manual one. `.calp` refresh and
+/// override revert/accept write formula cells (value Empty pending recalc) into
+/// arbitrary sheets, and those sheets would display empty until something
+/// recalculated them — waiting for the user to press F9 is not an answer when
+/// the write was not the user's gesture. Builds a local same-sheet dependency
+/// map for evaluation order — the AppState dependency maps describe only the
+/// active sheet. Computed properties are not re-evaluated here (active-sheet
+/// machinery; the manual recalc path covers them).
+///
+/// Distinct from `run_calculation_pass`, which is the two MANUAL commands (F9 =
+/// workbook, Shift+F9 = active sheet): this one takes an explicit sheet, takes
+/// its own locks, returns nothing, and is called once per sheet by callers that
+/// already know which sheets they touched.
 pub(crate) fn recalculate_sheet_values(
     state: &AppState,
     user_files_state: &UserFilesState,
@@ -1447,17 +1903,38 @@ pub(crate) fn recalculate_sheet_values(
     }
 }
 
-/// Recalculate all formula cells in the current sheet (same as calculate_now for single-sheet)
+/// **Calculate Sheet — Shift+F9. The ACTIVE sheet alone**, as Excel's Shift+F9
+/// does.
 ///
-/// `(async)` for the same reason `calculate_now` is — it delegates straight to
-/// it, and a sync wrapper around an off-main-thread body would put the whole
-/// thing back on the UI thread.
+/// It used to delegate to `calculate_now`, on the note "same as calculate_now
+/// since we have a single sheet" — a comment older than multi-sheet workbooks.
+/// The two commands are now genuinely different: this one plans one sheet, F9
+/// plans the workbook.
+///
+/// A cycle is still reported as the workbook-level fact it is (see the
+/// `CalcScope::ActiveSheet` arm of the planner): the members on OTHER sheets are
+/// stamped, not evaluated, because a sheet pass does not evaluate them.
+///
+/// No `cube_results` parameter, deliberately: the frontend prefetches CUBE data
+/// for a FULL recalculation (`recalcAll`), which is F9's job. A sheet pass keeps
+/// its cube cells' last values, the same as any pass invoked without a prefetch.
+///
+/// `(async)` for the same reason F9 is — a sync command body runs on the
+/// WebView2 UI thread, and a recalculation there cannot be cancelled.
 #[tauri::command(async)]
 pub fn calculate_sheet(window: tauri::Window, state: State<'_, AppState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
 
-    // For now, calculate_sheet does the same as calculate_now since we have a single sheet
-    let result = calculate_now(window, state, user_files_state, pivot_state, pane_control_state, ribbon_filter_state, None);
+    let result = run_calculation_pass(
+        CalcScope::ActiveSheet,
+        Some(window),
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        None,
+    );
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result
@@ -1860,6 +2337,11 @@ pub(crate) fn recalc_visibility_dependents_core(
                 &styles,
                 &locale,
                 &merge_lookup,
+                crate::name_resolution::NameTables {
+                    named_ranges: &cascade_named_ranges,
+                    tables: &cascade_tables,
+                    table_names: &cascade_table_names,
+                },
                 &initial_changed,
                 &affected,
                 &mut updated_cells,

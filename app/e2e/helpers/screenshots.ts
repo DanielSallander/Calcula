@@ -226,6 +226,14 @@ export async function resetGrid(page: Page): Promise<void> {
 /**
  * Wait for the grid to be fully rendered and stable.
  * Waits for: Canvas painted, no pending recalculations, no active animations.
+ *
+ * "No active animations" was aspirational until 2026-08-09 — the marching-ants
+ * copy border marches forever and this function did nothing about it. It now
+ * puts the app in reduced motion first (see `settleCanvasMotion`), which parks
+ * that border at a fixed dash phase. That is done HERE, in the one function
+ * every capture path already awaits, rather than in each of the four capture
+ * helpers: a guarantee that has to be remembered in four places is a guarantee
+ * that will be missing from the fifth.
  */
 export async function waitForGridStable(page: Page, timeoutMs = 3000): Promise<void> {
   // Wait for the spreadsheet container to be visible
@@ -233,6 +241,10 @@ export async function waitForGridStable(page: Page, timeoutMs = 3000): Promise<v
     state: "visible",
     timeout: timeoutMs,
   });
+
+  // Stop canvas-painted motion before waiting for it to settle. Ordered first
+  // so the two rAF ticks below are the frames that park the dash phase.
+  await settleCanvasMotion(page);
 
   // Wait for any pending Tauri invocations to complete
   await page.waitForTimeout(500);
@@ -260,11 +272,15 @@ export async function waitForGridStable(page: Page, timeoutMs = 3000): Promise<v
  * are byte-identical. On timeout it returns quietly rather than throwing: the
  * screenshot assertion that follows is the real check.
  *
- * DELIBERATELY NOT called from `waitForGridStable`. Some grid goldens contain
- * genuinely animated canvas chrome — the marching-ants copy border in the
- * paste-special shots — which never reaches two identical frames. Those would
- * burn the full timeout on every capture and still settle on an arbitrary
- * frame. Use this only where a transient overlay is the risk.
+ * DELIBERATELY NOT called from `waitForGridStable`. It polls full-page
+ * screenshots in a loop, which is expensive on every capture, and it can only
+ * ever confirm what it already waited for. The historical second reason —
+ * "some grid goldens contain genuinely animated canvas chrome (the
+ * marching-ants copy border) which never reaches two identical frames, so this
+ * would burn the full timeout and still settle on an arbitrary frame" — no
+ * longer holds: `waitForGridStable` now parks that border via reduced motion.
+ * The cost argument stands on its own. Use this only where a transient overlay
+ * is the risk.
  */
 export async function waitForVisualStability(
   page: Page,
@@ -330,6 +346,58 @@ export async function takeCheckpoint(
 
 /** The composited grid: canvas + every DOM layer stacked on it. */
 const GRID_CONTAINER_SELECTORS = ["[data-grid-area]"];
+
+/**
+ * The same thing MINUS the scrollbars — what a grid golden is actually about.
+ *
+ * `[data-grid-canvas-layer]` is `S.CanvasLayer` in Spreadsheet.tsx. It is inset
+ * by `SCROLLBAR_SIZE` on the right and bottom BY DEFINITION (`right: Npx;
+ * bottom: Npx` in Spreadsheet.styles.ts), and `[data-grid-area]`'s only other
+ * children are the two scrollbars and the corner box, so framing this element
+ * excludes the scrollbars exactly, with no measurement and no arithmetic here.
+ *
+ * The fallback to the grid area is deliberate and must stay: if the attribute
+ * is ever dropped, the capture degrades to the old framing (a golden that fails
+ * on a thumb) rather than throwing, and the fallback is announced on stderr.
+ */
+const GRID_CANVAS_LAYER_SELECTORS = ["[data-grid-canvas-layer]"];
+
+/**
+ * Put the app in REDUCED MOTION before a capture, and leave it there.
+ *
+ * WHAT THIS FIXES. `screenshotGates.ts` measured the marching-ants copy border
+ * as the only non-deterministic element in either suite (77 px of run-to-run
+ * noise across two cold runs of all 76 captures; everything else was
+ * bit-identical). It is non-deterministic because its dash phase is advanced by
+ * wall-clock delta in a `requestAnimationFrame` loop, so a capture photographs
+ * whatever phase the loop happened to reach. Re-recording does not fix that —
+ * the new baseline is just a different phase — which is why `paste-special` is
+ * the one spec whose failures survive a re-record.
+ *
+ * WHY THIS LEVER. `animations: "disabled"` in SCREENSHOT_DEFAULTS is
+ * Playwright's declaration that a capture must not race a moving picture, and
+ * it is honoured for CSS animations and transitions. It cannot see motion
+ * painted on a canvas. `document.documentElement.dataset.reducedMotion` is the
+ * app's OWN switch for the same idea — `skinLoader.apply()` stamps it from the
+ * OS `prefers-reduced-motion` query or the Settings > Appearance toggle — so
+ * this is the app's accessibility preference, set the way a user with that
+ * preference would have it, not a test-only backdoor. `GridCanvas` parks the
+ * dash phase at 0 and stops scheduling frames while it is on; the border is
+ * still drawn, so a copy golden still shows what was copied.
+ *
+ * IT IS NOT UNDONE. A screenshot helper that toggled a display preference on
+ * and off around each shot would make the shots depend on ordering again, which
+ * is the whole class of defect D5 is about. Reduced motion changes nothing else
+ * in the product today (GridCanvas is its only consumer), so the suite simply
+ * runs under it. `page.evaluate` is a no-op after the first call, but it is
+ * cheap and unconditional on purpose: a page that reloaded mid-spec would
+ * otherwise silently lose the flag.
+ */
+async function settleCanvasMotion(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    document.documentElement.dataset.reducedMotion = "true";
+  });
+}
 
 /**
  * Scroll a cell range into view, and return the geometry it is visible under.
@@ -450,10 +518,45 @@ async function ensureRangeVisible(
  * them:
  *   - the InlineEditor (a real <input>, rendered as a sibling of the canvas
  *     inside CanvasLayer) — so every "editing mode" golden was previously a
- *     picture of the grid WITHOUT the editor that the shot exists to show;
- *   - the row/column scrollbars and the corner box.
- * Capturing `[data-grid-area]` composites all of it, positioned exactly as the
- * user sees it, with no image stitching.
+ *     picture of the grid WITHOUT the editor that the shot exists to show.
+ * Capturing the composited DOM layer composites all of it, positioned exactly
+ * as the user sees it, with no image stitching.
+ *
+ * ============================================================================
+ * THE SCROLLBARS ARE OUT OF FRAME, AND THAT IS THE POINT (D5, 2026-08-09)
+ * ============================================================================
+ * This used to frame `[data-grid-area]`, which INCLUDES the row/column
+ * scrollbars and the corner box. Eleven goldens across the functional suite
+ * differed from their baseline by nothing but a scrollbar thumb.
+ *
+ * The thumb is a function of the USED RANGE, and the used range is shared
+ * state that specs leak into each other on purpose: they park fixtures in far
+ * columns to avoid colliding (`status-bar` at R:S, `edge-cases` at AE:AH,
+ * `scrolling` at row 5000). The data is off-screen and irrelevant to the shot;
+ * the thumb it produces is not. The `grid` fixture does no per-test cleanup, so
+ * whichever specs ran earlier decide how tall the thumb in your capture is.
+ *
+ * Three fixes were on the table. Resetting the grid before every capture, and
+ * abandoning the far-column parking convention, both cost a re-record AND a
+ * rule every future spec has to remember. This one costs the SAME re-record
+ * once and then holds by construction, so the choice was "once, structurally"
+ * versus "once, per spec, forever".
+ *
+ * WHAT IS GIVEN UP: the suite no longer watches scrollbar geometry at all. That
+ * is the right trade because no grid-rendering assertion in the suite is about
+ * a scrollbar — they are about cells, chrome and layout — and a scrollbar
+ * thumb photographed as a side effect is coverage nobody chose and nobody can
+ * interpret when it fails. If scrollbar geometry deserves coverage it deserves
+ * a test that says so: use `takeRegionScreenshot` clipped to the scrollbar, or
+ * assert `useScrollbarMetrics`'s numbers directly, where the assertion can name
+ * the used range it expects instead of inheriting one.
+ *
+ * NOTHING ELSE MOVES. `[data-grid-canvas-layer]` is the same rectangle minus a
+ * 14px strip on the right and bottom; the headers, the frozen panes, the
+ * grouping outline bar and the inline editor are all inside it (CanvasLayer is
+ * `overflow: hidden`, so nothing can paint outside it in the first place).
+ * `takeGridRegionScreenshot` already anchored on the canvas and was never
+ * affected.
  *
  * SCALE CAVEAT — read before adding a new feature golden here. A whole-grid
  * shot is 1232x556 = 685k pixels, so the `maxDiffPixels: 200` cap is what binds
@@ -473,7 +576,22 @@ export async function takeGridScreenshot(
   }
 ): Promise<void> {
   await waitForGridStable(page);
-  const grid = await resolveOne(page, "the grid area", GRID_CONTAINER_SELECTORS);
+  if ((await page.locator(GRID_CANVAS_LAYER_SELECTORS[0]).count()) === 0) {
+    // Loud, but not fatal: the shot still happens, framed the old way. Silence
+    // here would mean the scrollbar thumbs quietly came back and the next
+    // person re-recorded eleven goldens again without knowing why.
+    console.warn(
+      `[screenshot] "${name}": ${GRID_CANVAS_LAYER_SELECTORS[0]} matched nothing, ` +
+        `falling back to ${GRID_CONTAINER_SELECTORS[0]} — the scrollbars are back ` +
+        `IN frame and this golden can fail on a thumb. Restore the attribute on ` +
+        `S.CanvasLayer in app/src/core/components/Spreadsheet/Spreadsheet.tsx.`
+    );
+  }
+  const grid = await resolveOne(
+    page,
+    "the grid area (scrollbars excluded)",
+    [...GRID_CANVAS_LAYER_SELECTORS, ...GRID_CONTAINER_SELECTORS]
+  );
   await expect(grid).toHaveScreenshot(`grid-${name}.png`, {
     ...DEFAULT_SCREENSHOT_OPTIONS,
     ...options,
@@ -705,6 +823,39 @@ export async function takeRegionScreenshot(
  * golden also framed part of the formula bar and whatever cell content happened
  * to be in it. Those goldens churned on unrelated cell edits.
  */
+/**
+ * Move the mouse pointer off the ribbon before a ribbon capture.
+ *
+ * WHY THIS EXISTS — measured, not theorised. A re-record pass (2026-08-09)
+ * rewrote `ribbon-home-tab-buttons` and `ribbon-ribbon-tab-home-restored` with
+ * no product change behind them. Both diffs were the SAME 57x26 box at the top
+ * left, 1465 px, max channel delta 13: a rounded grey HOVER background behind
+ * the "Home" tab. The pointer was simply left where the previous action put it,
+ * and `RibbonTabBar` paints `:hover` on whatever it is over.
+ *
+ * That is the same defect class as the marching ants and the active-cell
+ * highlight (see `settleCanvasMotion`, `parkSelectionAwayFrom`): a capture that
+ * photographs ambient state nobody chose. Re-recording cannot fix it — the next
+ * spec that leaves the pointer somewhere else fails the new baseline just as
+ * the old one failed. The pointer has to be somewhere DEFINITE instead.
+ *
+ * WHERE: the far bottom-left of the viewport — the status bar's "Ready" text,
+ * which is inert. Deliberately NOT (0, 0): that is the File menu, and parking
+ * on a menu trades a hovered tab for a hovered menu. Deliberately not the grid
+ * canvas either, since that is what the grid helpers photograph.
+ *
+ * The three ribbon goldens this makes deterministic were RESTORED rather than
+ * re-recorded: with the pointer parked, the app renders what the original
+ * baselines already hold, so the fix costs no baseline at all.
+ */
+async function parkPointerAwayFromChrome(page: Page): Promise<void> {
+  const viewport = await page.evaluate(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  await page.mouse.move(4, Math.max(0, viewport.height - 4));
+}
+
 export async function takeRibbonScreenshot(
   page: Page,
   name: string,
@@ -713,6 +864,7 @@ export async function takeRibbonScreenshot(
     threshold?: number;
   }
 ): Promise<void> {
+  await parkPointerAwayFromChrome(page);
   await page.waitForTimeout(300);
   const ribbon = await resolveOne(page, "the ribbon", [
     "[data-testid='ribbon']",

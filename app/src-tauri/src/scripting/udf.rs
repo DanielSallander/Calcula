@@ -50,6 +50,13 @@ pub enum UdfValue {
 /// `from_literal` on the engine's `CellError` — and this pair forwards to it, so
 /// the UDF wire format, the cell display and the saved file cannot drift apart
 /// again.
+///
+/// A FOURTH spelling outlived that consolidation and was only found in 2026-08:
+/// the app's own `crate::cell_error_display`, which is what the GRID paints,
+/// kept its own `format!("#{:?}", e)` arm and so painted "#DIV0" / "#PARSE"
+/// while this function sent "#DIV/0!" over the wire. D7 made it forward here
+/// too. The moral is in the count: consolidating N spellings into one is only
+/// finished when you have grepped for the arm, not for the table.
 pub(crate) fn cell_error_to_str(e: &CellError) -> &'static str {
     e.as_literal()
 }
@@ -405,18 +412,31 @@ pub fn collect_udf_calls(
     };
     let udf_dyn: &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult> = &collecting_udf_fn;
 
+    // A stored formula keeps its DEFINED NAMES (D2), so the scan and the
+    // evaluation below both work from the EXPANDED tree: a UDF call reached
+    // through `=MyName` where `MyName` is `=MY_UDF(A1)` is invisible in the
+    // stored text, and a cell that is not a candidate never gets its argument
+    // pre-fetched — which is a `#NAME?` in a cell that used to compute.
+    let udf_named_ranges = state.named_ranges.read().unwrap().clone();
+    let udf_tables = state.tables.read().unwrap().clone();
+    let udf_table_names = state.table_names.read().unwrap().clone();
+    let name_tables = crate::name_resolution::NameTables {
+        named_ranges: &udf_named_ranges,
+        tables: &udf_tables,
+        table_names: &udf_table_names,
+    };
+
     // --- Candidate scan over the ACTIVE sheet only (see the fn doc). A cell
     // can only call a UDF if the name appears in its formula text, so the
     // case-insensitive substring test is exact for discovery.
     let mut candidates: Vec<(u32, u32)> = Vec::new();
     let mut volatile_cells: Vec<UdfCellRef> = Vec::new();
     for (&(r, c), cell) in scratch[sheet_index].cells.iter() {
-        if cell.get_cached_ast().is_none() {
-            continue;
-        }
-        let Some(formula) = cell.formula_string() else {
+        let Some(stored_ast) = cell.get_cached_ast() else {
             continue;
         };
+        let expanded = crate::name_resolution::eval_ast(stored_ast, &name_tables.at(sheet_index, r));
+        let formula = engine::ast_render::render_formula(&expanded);
         let upper_formula = formula.to_uppercase();
         if !udf_name_set
             .iter()
@@ -443,8 +463,12 @@ pub fn collect_udf_calls(
     // --- Evaluate each candidate with its OWN position, using the cached AST.
     let eval_cell = |scratch: &[engine::Grid], r: u32, c: u32| {
         if let Some(cell) = scratch[sheet_index].get_cell(r, c) {
-            if let Some(ast) = cell.get_cached_ast() {
-                let ast = ast.clone();
+            if let Some(stored_ast) = cell.get_cached_ast() {
+                let ast = crate::name_resolution::eval_ast(
+                    stored_ast,
+                    &name_tables.at(sheet_index, r),
+                )
+                .into_owned();
                 let eval_ctx = engine::EvalContext {
                     cube_prefetch: None,
                     current_row: Some(r),
@@ -664,7 +688,7 @@ mod tests {
             (CellError::Value, "#VALUE!"),
             (CellError::NA, "#N/A"),
             (CellError::Circular, "#CIRCULAR!"),
-            (CellError::Conflict, "#CONFLICT"),
+            (CellError::Conflict, "#CONFLICT!"),
             (CellError::Blocked, "#BLOCKED!"),
             (CellError::Limit, "#LIMIT!"),
         ] {

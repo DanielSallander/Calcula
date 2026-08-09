@@ -88,10 +88,12 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
     ]);
   });
 
-  it("carries today's collapse priorities", () => {
+  it("carries the collapse priorities", () => {
     // useSectionFit sorts ASCENDING and demotes from the front, so this list
     // is the exact order in which groups become launchers on a narrow band.
-    expect(sections().map((s) => s.collapsePriority)).toEqual([10, 20, 30, 40, 50, 99, 60]);
+    // Cells is 55 (D6) — it sheds after Styles and before Editing, instead of
+    // clinging on last because of a missing lookup-table row.
+    expect(sections().map((s) => s.collapsePriority)).toEqual([10, 20, 30, 40, 50, 55, 60]);
   });
 
   it("keeps every section inline in the ribbon band", () => {

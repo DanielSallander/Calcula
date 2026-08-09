@@ -1175,12 +1175,205 @@ pub fn rename_table_column(
     TableResult::ok(table.clone())
 }
 
+// ============================================================================
+// D3 — TABLE WRITES SEED THE ONE SHARED CASCADE
+// ============================================================================
+
+/// Resolve a generated table formula the way the ordinary edit path resolves a
+/// typed one: structured references (`Table1[Amount]`, `[@Price]`) expanded to
+/// the cells they name, against the row the formula will live on.
+fn resolve_table_formula(
+    tables: &TableStorage,
+    table_names: &TableNameRegistry,
+    active_sheet: usize,
+    row: u32,
+    formula: &str,
+) -> Option<engine::Expression> {
+    let parsed = parser::parse(formula).ok()?;
+    if !crate::ast_has_table_refs(&parsed) {
+        return Some(parsed);
+    }
+    let ctx = crate::TableRefContext {
+        tables,
+        table_names,
+        current_sheet_index: active_sheet,
+        current_row: row,
+    };
+    Some(crate::resolve_table_refs_in_ast(&parsed, &ctx))
+}
+
+/// Write (or clear) a totals-row cell, storing the RESOLVED AST, then record its
+/// dependency edges.
+///
+/// THE SECOND DEFECT D3 UNCOVERED, found live in `tables.spec.ts`.
+///
+/// `set_totals_row_function` and `toggle_totals_row` wrote the totals cell with
+/// `engine::Cell::new_formula`, which stores the RAW parse. But
+/// `reevaluate_formula_cell` evaluates a cell's cached AST directly and resolves
+/// only NAMES: the crate's standing contract is that a stored AST already
+/// carries its structured-reference resolution, which is exactly what
+/// `update_cell_impl` and `set_calculated_column` store. So the totals cell held
+/// an unresolved `SUBTOTAL(109,Table1[Amount])`.
+///
+/// That had been latent because nothing ever asked the cell for a value — it
+/// rendered blank. The moment D3's cascade made it evaluate, it evaluated to
+/// **0**: the totals row had been writing a formula the engine could never
+/// compute. Storing the resolved form is what makes the totals row show a
+/// total, which is the whole point of the feature and what Excel does.
+///
+/// `formula` is `None` when the command CLEARED the cell (totals function set
+/// back to "None"); the edge-dropping half must still run, so the removed
+/// formula's stale precedents do not keep it in the graph.
+///
+/// LOCKING: the caller holds `tables` + `grid` + `grids`; the edge registration
+/// takes the dependency maps, which sit AFTER those in the canonical order.
+#[allow(clippy::too_many_arguments)]
+fn write_table_formula_cell(
+    state: &AppState,
+    grid: &mut engine::Grid,
+    grids: &mut [engine::Grid],
+    tables: &TableStorage,
+    table_names: &TableNameRegistry,
+    sheet_names: &[String],
+    active_sheet: usize,
+    row: u32,
+    col: u32,
+    formula: Option<&str>,
+) {
+    let resolved =
+        formula.and_then(|f| resolve_table_formula(tables, table_names, active_sheet, row, f));
+
+    match formula {
+        Some(text) => {
+            let mut cell = engine::Cell::new_formula(text.to_string());
+            // The RESOLVED form, per the contract above, when it parsed at all.
+            // `new_formula` already stores an UNPARSEABLE formula as TEXT, which
+            // is what a bad CUSTOM totals formula did before and must keep doing
+            // — overwriting that with a clear would silently discard the user's
+            // input. The VALUE is left to the cascade this command seeds: it
+            // re-evaluates its own seeds.
+            if let Some(ast) = &resolved {
+                cell.set_cached_ast(crate::convert_expr(ast));
+            }
+            grid.set_cell(row, col, cell.clone());
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, cell);
+            }
+        }
+        None => {
+            grid.clear_cell(row, col);
+            if active_sheet < grids.len() {
+                grids[active_sheet].clear_cell(row, col);
+            }
+        }
+    }
+
+    register_table_formula_dependencies(
+        state,
+        grid,
+        sheet_names,
+        active_sheet,
+        row,
+        col,
+        resolved.as_ref(),
+    );
+}
+
+/// Register the dependency edges for a formula cell a table command just wrote,
+/// exactly as the ordinary edit path does for a typed formula.
+///
+/// THE GAP THIS CLOSES. `set_totals_row_function`, `toggle_totals_row` and
+/// `set_calculated_column` wrote SUBTOTAL and calculated-column formulas
+/// straight into the grid and recorded NO edges at all. Two silent
+/// consequences: editing the data underneath a totals row left the total
+/// showing its previous number (Excel updates it), and a calculated column
+/// reading ANOTHER calculated column was invisible to the cascade these
+/// commands now seed — seeding cannot reach a dependent along an edge nobody
+/// ever recorded.
+///
+/// Takes the RESOLVED ast, not the formula text: both callers have already
+/// resolved it (the totals writer to store it on the cell, the calculated
+/// column to evaluate the row), and structured-reference resolution is per-ROW,
+/// so doing it twice is pure duplicated work over a whole column.
+///
+/// `resolved` is `None` when the command CLEARED the cell (totals function set
+/// back to "None"), which must still run: it drops the stale outgoing edges the
+/// removed formula owned.
+///
+/// LOCKING: the caller holds `tables` + `grid` + `grids`; this takes the
+/// dependency maps, which sit AFTER those in the canonical order.
+#[allow(clippy::too_many_arguments)]
+fn register_table_formula_dependencies(
+    state: &AppState,
+    grid: &engine::Grid,
+    sheet_names: &[String],
+    active_sheet: usize,
+    row: u32,
+    col: u32,
+    resolved: Option<&engine::Expression>,
+) {
+    let refs = resolved
+        .map(|ast| crate::extract_all_references(ast, grid))
+        .unwrap_or_else(crate::ExtractedRefs::new);
+
+    {
+        let mut dependencies = state.dependencies.lock().unwrap();
+        let mut dependents = state.dependents.lock().unwrap();
+        crate::update_dependencies((row, col), refs.cells, &mut dependencies, &mut dependents);
+    }
+    {
+        let mut column_dependencies = state.column_dependencies.lock().unwrap();
+        let mut column_dependents = state.column_dependents.lock().unwrap();
+        crate::update_column_dependencies(
+            (row, col),
+            refs.columns,
+            &mut column_dependencies,
+            &mut column_dependents,
+        );
+    }
+    {
+        let mut row_dependencies = state.row_dependencies.lock().unwrap();
+        let mut row_dependents = state.row_dependents.lock().unwrap();
+        crate::update_row_dependencies(
+            (row, col),
+            refs.rows,
+            &mut row_dependencies,
+            &mut row_dependents,
+        );
+    }
+    {
+        let mut cross_sheet_dependencies = state.cross_sheet_dependencies.lock().unwrap();
+        let mut cross_sheet_dependents = state.cross_sheet_dependents.lock().unwrap();
+        crate::update_cross_sheet_dependencies(
+            (active_sheet, row, col),
+            crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, sheet_names),
+            &mut cross_sheet_dependencies,
+            &mut cross_sheet_dependents,
+        );
+    }
+}
+
+// PHASE B for every table command below is written out at each call site rather
+// than wrapped in a local helper ON PURPOSE. The census
+// (`every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason`)
+// reads SOURCE and looks for the shared entry point BY NAME, so a local
+// forwarding wrapper would silently blind it — and a blinded census is exactly
+// how this defect class kept recurring. The updated cells are discarded for the
+// same reason `clear_cell` discards them: these commands return a `Table`, and
+// the Table extension repaints the grid from the backend afterwards.
+
 /// Set totals row function for a column.
 /// Also writes the corresponding SUBTOTAL formula into the totals row cell.
+///
+/// DEPENDENTS RECALCULATE (D3): the totals cell it writes is a seed for the ONE
+/// shared cascade, so a formula reading the total updates with it, as in Excel.
 #[tauri::command]
 pub fn set_totals_row_function(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: SetTotalsRowFunctionParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -1212,47 +1405,79 @@ pub fn set_totals_row_function(
     table.columns[idx].totals_row_function = params.function.clone();
     table.columns[idx].totals_row_formula = params.custom_formula.clone();
 
-    // Write formula into the totals row cell (if totals row is visible)
-    if table.style_options.total_row {
+    // DECIDE what the totals cell must hold. The grid write happens after the
+    // `table` borrow ends, because resolving the structured reference needs
+    // `&tables` and `table` is a mutable borrow of it.
+    let written: Option<(u32, u32, Option<String>)> = if table.style_options.total_row {
         let totals_row = table.end_row;
         let cell_col = table.start_col + idx as u32;
         let table_name = table.name.clone();
         let col_name = table.columns[idx].name.clone();
 
+        // `None` here means the function is "None" -> clear the cell.
         let formula = if params.function == TotalsRowFunction::Custom {
             params.custom_formula.clone()
         } else {
             build_subtotal_formula(&params.function, &table_name, &col_name)
         };
+        Some((totals_row, cell_col, formula))
+    } else {
+        None
+    };
 
-        match formula {
-            Some(formula_str) => {
-                let cell = engine::Cell::new_formula(formula_str);
-                grid.set_cell(totals_row, cell_col, cell.clone());
-                if active_sheet < grids.len() {
-                    grids[active_sheet].set_cell(totals_row, cell_col, cell);
-                }
-            }
-            None => {
-                // Function is "None" - clear the cell
-                grid.clear_cell(totals_row, cell_col);
-                if active_sheet < grids.len() {
-                    grids[active_sheet].clear_cell(totals_row, cell_col);
-                }
-            }
-        }
+    let result = table.clone();
+
+    let mut seeds: Vec<(u32, u32)> = Vec::new();
+    if let Some((row, col, formula)) = written {
+        let sheet_names = state.sheet_names.read().unwrap().clone();
+        let table_names = state.table_names.read().unwrap();
+        write_table_formula_cell(
+            &state,
+            &mut grid,
+            &mut grids,
+            &tables,
+            &table_names,
+            &sheet_names,
+            active_sheet,
+            row,
+            col,
+            formula.as_deref(),
+        );
+        seeds.push((row, col));
     }
 
-    TableResult::ok(table.clone())
+    // PHASE B — after every guard above is released.
+    drop(grids);
+    drop(grid);
+    drop(tables);
+    let mut recalculated = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
+
+    TableResult::ok(result)
 }
 
 /// Toggle totals row visibility.
 /// When enabling, expands the table and writes SUBTOTAL formulas into the totals row cells.
 /// When disabling, clears the totals row cells and shrinks the table.
+///
+/// DEPENDENTS RECALCULATE (D3). Every totals cell written OR cleared is a seed
+/// for the ONE shared cascade. The CLEAR half matters as much as the write:
+/// hiding a totals row erases cells a formula may be reading, and in Excel that
+/// formula drops to 0 immediately instead of holding the vanished total.
 #[tauri::command]
 pub fn toggle_totals_row(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     show: bool,
 ) -> TableResult {
@@ -1278,6 +1503,8 @@ pub fn toggle_totals_row(
     };
 
     let was_shown = table.style_options.total_row;
+    // (row, col, formula) for every totals cell this call writes or clears.
+    let mut written: Vec<(u32, u32, Option<String>)> = Vec::new();
 
     if show && !was_shown {
         // Adding totals row - expand range
@@ -1296,29 +1523,61 @@ pub fn toggle_totals_row(
                     build_subtotal_formula(&col.totals_row_function, &table_name, &col.name)
                 };
                 if let Some(formula_str) = formula {
-                    let cell = engine::Cell::new_formula(formula_str);
-                    grid.set_cell(totals_row, cell_col, cell.clone());
-                    if active_sheet < grids.len() {
-                        grids[active_sheet].set_cell(totals_row, cell_col, cell);
-                    }
+                    written.push((totals_row, cell_col, Some(formula_str)));
                 }
             }
         }
     } else if !show && was_shown {
-        // Removing totals row - clear cells first, then shrink range
+        // Removing totals row - the cells are CLEARED below, then the range
+        // shrinks.
         let totals_row = table.end_row;
         for i in 0..table.columns.len() {
             let cell_col = table.start_col + i as u32;
-            grid.clear_cell(totals_row, cell_col);
-            if active_sheet < grids.len() {
-                grids[active_sheet].clear_cell(totals_row, cell_col);
-            }
+            written.push((totals_row, cell_col, None));
         }
         table.end_row -= 1;
         table.style_options.total_row = false;
     }
 
-    TableResult::ok(table.clone())
+    let result = table.clone();
+
+    // WRITE, after the `table` borrow ends: resolving the structured reference
+    // needs `&tables`, and `table` is a mutable borrow of it.
+    if !written.is_empty() {
+        let sheet_names = state.sheet_names.read().unwrap().clone();
+        let table_names = state.table_names.read().unwrap();
+        for (row, col, formula) in &written {
+            write_table_formula_cell(
+                &state,
+                &mut grid,
+                &mut grids,
+                &tables,
+                &table_names,
+                &sheet_names,
+                active_sheet,
+                *row,
+                *col,
+                formula.as_deref(),
+            );
+        }
+    }
+    let seeds: Vec<(u32, u32)> = written.iter().map(|(r, c, _)| (*r, *c)).collect();
+
+    // PHASE B — after every guard above is released.
+    drop(grids);
+    drop(grid);
+    drop(tables);
+    let mut recalculated = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
+
+    TableResult::ok(result)
 }
 
 /// Resize a table
@@ -1712,10 +1971,18 @@ pub fn convert_to_range(
 
 /// Check if a cell edit should trigger table auto-expansion.
 /// Returns Some(table) with updated boundaries if expansion occurred, None otherwise.
+///
+/// DEPENDENTS RECALCULATE (D3). The column branch WRITES a generated header
+/// into the grid, and a header cell is ordinary readable content: `=D1&" total"`
+/// beside the table showed the old text until an unrelated edit swept it up.
+/// The written header is therefore a seed for the ONE shared cascade.
 #[tauri::command]
 pub fn check_table_auto_expand(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     row: u32,
     col: u32,
 ) -> Option<Table> {
@@ -1758,6 +2025,8 @@ pub fn check_table_auto_expand(
 
     let (table_id, expand_type) = table_id?;
     let table = sheet_tables.get_mut(&table_id)?;
+    // The header cell the column branch writes, if it writes one.
+    let mut seeds: Vec<(u32, u32)> = Vec::new();
 
     match expand_type {
         "row" => {
@@ -1809,6 +2078,7 @@ pub fn check_table_auto_expand(
                     if active_sheet < grids.len() {
                         grids[active_sheet].set_cell(table.start_row, col, cell);
                     }
+                    seeds.push((table.start_row, col));
                 }
             }
 
@@ -1829,7 +2099,25 @@ pub fn check_table_auto_expand(
         _ => return None,
     }
 
-    Some(table.clone())
+    let result = table.clone();
+
+    // PHASE B — after every guard above is released. A generated header is a
+    // literal, so it owns no outgoing edges to record; it only needs to be a
+    // seed for whatever already reads it.
+    drop(grids);
+    drop(grid);
+    drop(tables);
+    let mut recalculated = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
+
+    Some(result)
 }
 
 /// Validate and enforce header uniqueness after a cell edit on a header row.
@@ -2071,6 +2359,12 @@ pub fn resolve_structured_reference(
 /// this propagates it to all other data rows in that column.
 /// The formula is parsed, table references resolved per-row, evaluated,
 /// and the computed value is written to each data cell.
+///
+/// DEPENDENTS RECALCULATE (D3). This evaluates every cell it writes, but it
+/// evaluated NOTHING downstream of them: `=SUM(Table1[Margin])` beside a table
+/// whose Margin column had just been (re)defined kept its previous total. Each
+/// written cell is a seed for the ONE shared cascade, and each now records its
+/// own edges so a later edit to the columns it reads re-derives it.
 #[tauri::command]
 pub fn set_calculated_column(
     file_state: State<'_, crate::persistence::FileState>,
@@ -2128,6 +2422,7 @@ pub fn set_calculated_column(
 
     // Write formulas to all data rows and evaluate them
     let mut computed = Vec::new();
+    let mut seeds: Vec<(u32, u32)> = Vec::new();
 
     if !formula.is_empty() {
         // Parse the formula once
@@ -2209,8 +2504,35 @@ pub fn set_calculated_column(
             if active_sheet < grids.len() {
                 grids[active_sheet].set_cell(row, abs_col, cell);
             }
+
+            // Record this cell's own edges. Resolution is per-ROW ([@Price] is
+            // a different cell on every row), so this cannot be hoisted out of
+            // the loop the way a plain shared formula could.
+            register_table_formula_dependencies(
+                &state,
+                &grid,
+                &sheet_names,
+                active_sheet,
+                row,
+                abs_col,
+                Some(&resolved),
+            );
+            seeds.push((row, abs_col));
         }
     }
+
+    // PHASE B — after every guard above is released. The grid/user-files guards
+    // are scoped to the block above; `tables` is not, so it is dropped here.
+    drop(tables);
+    let mut recalculated = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &seeds,
+        &mut recalculated,
+    );
 
     TableResult {
         success: true,

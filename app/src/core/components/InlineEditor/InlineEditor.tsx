@@ -21,6 +21,7 @@ import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../../api/formulaAutocomplete";
 import { isColumnAutocompleteVisible, ColumnAutocompleteEvents } from "../../../api/columnAutocomplete";
 import { rowHeaderGutter, colHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
+import { endEditorOpen, type OpenTerminalKey, type PendingTerminal } from "../../lib/editOpenBuffer";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -505,6 +506,60 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   }, []);
 
   /**
+   * Carry out an edit-ending key: Enter commits and moves, Tab commits and
+   * moves sideways, Escape cancels.
+   *
+   * Shared deliberately. It runs both for a key pressed on the live editor and
+   * for one REPLAYED from the editor-open window (a key the user pressed
+   * before this editor existed), so "type a value and hit Enter immediately"
+   * cannot end up meaning something subtly different from pressing Enter a
+   * moment later.
+   */
+  const runTerminalKey = useCallback(
+    async (key: OpenTerminalKey, shiftKey: boolean): Promise<void> => {
+      if (key === "Escape") {
+        // FIX: Set canceling flag BEFORE calling onCancel to prevent blur from committing
+        isCancelingRef.current = true;
+        onCancel();
+        // Restore focus to grid container so keyboard navigation works
+        onRestoreFocus?.();
+        return;
+      }
+
+      isCommittingRef.current = true;
+      try {
+        const success = await onCommit();
+        if (success) {
+          if (key === "Enter") onEnter?.(shiftKey);
+          else onTab?.(shiftKey);
+        }
+        // Restore focus to grid container so keyboard navigation works
+        onRestoreFocus?.();
+      } finally {
+        isCommittingRef.current = false;
+      }
+    },
+    [onCommit, onCancel, onEnter, onTab, onRestoreFocus]
+  );
+
+  /**
+   * An edit-ending key that arrived before this editor was ready, waiting to be
+   * replayed. Held in state rather than run straight from the focus effect so
+   * that it runs from a render that already sees the final entry value and the
+   * matching `onCommit` -- replaying it inline would commit the value as it was
+   * one render ago.
+   */
+  const [pendingTerminal, setPendingTerminal] = useState<PendingTerminal | null>(null);
+
+  useEffect(() => {
+    if (!pendingTerminal || disabled) return;
+    // Cleared first, so the re-render this causes re-enters the effect as a
+    // no-op instead of replaying the key twice.
+    setPendingTerminal(null);
+    void runTerminalKey(pendingTerminal.key, pendingTerminal.shiftKey);
+  }, [pendingTerminal, disabled, runTerminalKey]);
+
+  /**
    * Handle keyboard events.
    * FIX: Added F4 handler to toggle absolute/relative cell reference modes.
    */
@@ -591,47 +646,19 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           event.preventDefault();
           event.stopPropagation();
           console.log("[InlineEditor] Enter pressed, starting commit");
-          isCommittingRef.current = true;
-          try {
-            const commitSuccess = await onCommit();
-            console.log("[InlineEditor] onCommit returned:", commitSuccess, "onEnter exists:", !!onEnter);
-            if (commitSuccess && onEnter) {
-              console.log("[InlineEditor] Calling onEnter");
-              onEnter(event.shiftKey);
-            } else {
-              console.log("[InlineEditor] NOT calling onEnter - commitSuccess:", commitSuccess);
-            }
-            // Restore focus to grid container so keyboard navigation works
-            onRestoreFocus?.();
-          } finally {
-            isCommittingRef.current = false;
-          }
+          await runTerminalKey("Enter", event.shiftKey);
           break;
 
         case "Escape":
           event.preventDefault();
           event.stopPropagation();
-          // FIX: Set canceling flag BEFORE calling onCancel to prevent blur from committing
-          isCancelingRef.current = true;
-          onCancel();
-          // Restore focus to grid container so keyboard navigation works
-          onRestoreFocus?.();
+          await runTerminalKey("Escape", event.shiftKey);
           break;
 
         case "Tab":
           event.preventDefault();
           event.stopPropagation();
-          isCommittingRef.current = true;
-          try {
-            const tabSuccess = await onCommit();
-            if (tabSuccess && onTab) {
-              onTab(event.shiftKey);
-            }
-            // Restore focus to grid container so keyboard navigation works
-            onRestoreFocus?.();
-          } finally {
-            isCommittingRef.current = false;
-          }
+          await runTerminalKey("Tab", event.shiftKey);
           break;
 
         case "F4": {
@@ -703,7 +730,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           break;
       }
     },
-    [onCommit, onCancel, onTab, onEnter, onCtrlEnter, onRestoreFocus, disabled, onValueChange, onArrowKeyReference, editing.value]
+    [runTerminalKey, onCtrlEnter, onRestoreFocus, disabled, onValueChange, onArrowKeyReference, editing.value]
   );
 
   /**
@@ -885,11 +912,28 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
    * race conditions where blur fires before focus is set.
    */
   useEffect(() => {
-    if (inputRef.current && position.visible && !disabled) {
-      // Use setTimeout to ensure focus happens after any pending DOM updates
-      // This is especially important after sheet switches
-      const timeoutId = setTimeout(() => {
+    if (!position.visible || disabled || !inputRef.current) {
+      // This editor is not going to take focus on this pass, so the grid
+      // container will keep receiving keystrokes. Release the open window all
+      // the same -- leaving it latched would buffer the user's typing into an
+      // entry that nothing is going to show. Anything already buffered is
+      // still in the entry; only a key that ends the edit needs replaying.
+      const stranded = endEditorOpen();
+      if (stranded) setPendingTerminal(stranded);
+      return;
+    }
+
+    // Use setTimeout to ensure focus happens after any pending DOM updates
+    // This is especially important after sheet switches
+    const timeoutId = setTimeout(() => {
         if (inputRef.current) {
+          // The editor is ready: keystrokes now land on it directly, so the
+          // open window closes here. Whatever ended the entry while it was
+          // still opening (Enter/Tab/Escape typed faster than the editor could
+          // mount) is replayed through this editor's own handlers.
+          const replay = endEditorOpen();
+          if (replay) setPendingTerminal(replay);
+
           // FIX: Check if focus is already on the formula bar (data-formula-bar)
           // If it is, DO NOT steal focus. Let the user type in the formula bar.
           const activeElement = document.activeElement;
@@ -916,8 +960,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         }
       }, 0);
 
-      return () => clearTimeout(timeoutId);
-    }
+    return () => clearTimeout(timeoutId);
   }, [editing.row, editing.col, position.visible, disabled, refocusTrigger]);
 
   // Don't render the inline editor if we're viewing a different sheet than the source.

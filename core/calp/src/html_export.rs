@@ -596,11 +596,15 @@ fn saved_value_display(value: &SavedCellValue) -> String {
         SavedCellValue::Boolean(b) => {
             if *b { "TRUE".to_string() } else { "FALSE".to_string() }
         }
+        // The payload is ALREADY the canonical literal — persistence stores
+        // `CellError::as_literal()`, which begins with '#'. Prefixing another
+        // one published every error cell as `##DIV/0!`. Emit it verbatim so the
+        // report shows exactly what the workbook shows.
         SavedCellValue::Error(msg) => {
             if msg.is_empty() {
                 "#ERROR".to_string()
             } else {
-                format!("#{}", msg)
+                msg.clone()
             }
         }
         SavedCellValue::List(items) => {
@@ -793,6 +797,51 @@ mod tests {
     use engine::ThemeColor;
     use persistence::{Sheet, Workbook};
     use tempfile::TempDir;
+
+    /// THE PUBLISHED REPORT SHOWED `##DIV/0!`, WITH TWO HASHES.
+    ///
+    /// `SavedCellValue::Error` holds the CANONICAL LITERAL — persistence
+    /// writes `CellError::as_literal()`, which already starts with `#` — but
+    /// `saved_value_display` re-added one with `format!("#{}", msg)`. So every
+    /// error cell in an exported `.calp` HTML report rendered with a doubled
+    /// hash, on the one surface a subscriber sees and cannot correct. The
+    /// sibling `"#ERROR"` fallback is the tell: it was written when the payload
+    /// was expected to be a bare word like `DIV/0!`.
+    ///
+    /// This is the export half of contract (d): a literal must survive
+    /// save -> reload -> publish unchanged, and `as_literal` is the only
+    /// authority allowed to spell it.
+    #[test]
+    fn exported_html_shows_the_error_literal_verbatim_not_double_hashed() {
+        use engine::cell::CellError;
+        use persistence::SavedCellValue;
+
+        for e in [
+            CellError::Div0,
+            CellError::Ref,
+            CellError::Name,
+            CellError::Value,
+            CellError::NA,
+            CellError::Circular,
+            CellError::Conflict,
+            CellError::Blocked,
+            CellError::Limit,
+        ] {
+            let saved = SavedCellValue::from_value(&engine::CellValue::Error(e.clone()));
+            let shown = saved_value_display(&saved);
+            assert_eq!(
+                shown,
+                e.as_literal(),
+                "a published report rendered {e:?} as {shown:?}; the workbook, \
+                 and the `.cala` it was published from, both say {:?}",
+                e.as_literal()
+            );
+            assert!(
+                !shown.starts_with("##"),
+                "{shown:?} carries a doubled hash"
+            );
+        }
+    }
 
     /// Build a workbook with two sheets, a styled (green background) bold cell,
     /// a merged region, an injection-attempt cell, plus a hidden sheet.

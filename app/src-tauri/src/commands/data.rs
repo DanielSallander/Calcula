@@ -963,6 +963,10 @@ fn update_cell_impl(
     let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
     let mut row_dependents_map = state.row_dependents.lock().unwrap();
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    // DEFINED-NAME edges. Locked in the same phase as the other dependency maps
+    // and in declaration order, so the canonical lock order stays one sequence.
+    let mut name_dependents_map = state.name_dependents.lock().unwrap();
+    let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
@@ -1054,6 +1058,12 @@ fn update_cell_impl(
             &mut row_dependencies_map,
             &mut row_dependents_map,
         );
+        crate::name_resolution::update_name_dependencies(
+            (row, col),
+            Default::default(),
+            &mut name_dependencies_map,
+            &mut name_dependents_map,
+        );
 
         // Get merge span info for the cleared cell
         let merge_info = merged_regions
@@ -1113,55 +1123,15 @@ fn update_cell_impl(
         // Extract references for dependency tracking AND cache the AST
         match parser::parse(&formula) {
             Ok(parsed) => {
-                // Resolve named references (AST splicing) before extracting refs or evaluating.
-                let resolved = if crate::ast_has_named_refs(&parsed) {
-                    let named_ranges_map = state.named_ranges.read().unwrap();
-                    let mut visited = HashSet::new();
-                    let resolved = crate::resolve_names_in_ast(
-                        &parsed,
-                        &named_ranges_map,
-                        active_sheet,
-                        &mut visited,
-                    );
-                    drop(named_ranges_map);
-                    resolved
-                } else {
-                    parsed
-                };
+                // THE CELL KEEPS THE NAME (Excel parity, D2). `stored` is what
+                // this cell will hold and what the formula bar will show;
+                // `evaluated()` is the same tree with defined names spliced in,
+                // which is what this edit evaluates and what dependency
+                // extraction reads. See `split_entered_formula`.
+                let entered = crate::split_entered_formula(&state, &parsed, active_sheet, row);
+                let resolved = entered.evaluated();
 
-                // Resolve structured table references (e.g., Table1[Revenue], [@Price])
-                let resolved = if crate::ast_has_table_refs(&resolved) {
-                    let tables_map = state.tables.read().unwrap();
-                    let table_names_map = state.table_names.read().unwrap();
-                    let ctx = crate::TableRefContext {
-                        tables: &tables_map,
-                        table_names: &table_names_map,
-                        current_sheet_index: active_sheet,
-                        current_row: row,
-                    };
-                    let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
-                    drop(table_names_map);
-                    drop(tables_map);
-                    resolved
-                } else {
-                    resolved
-                };
-
-                // Resolve spill range references (e.g., A1# → A1:A5)
-                let resolved = if crate::ast_has_spill_refs(&resolved) {
-                    let spill_ranges_map = state.spill_ranges.lock().unwrap();
-                    let resolved = crate::resolve_spill_refs_in_ast(
-                        &resolved,
-                        &spill_ranges_map,
-                        active_sheet,
-                    );
-                    drop(spill_ranges_map);
-                    resolved
-                } else {
-                    resolved
-                };
-
-                let refs = extract_all_references(&resolved, &grid);
+                let refs = extract_all_references(resolved, &grid);
 
                 log_debug!("DEPS", "update_cell({},{}) formula='{}' extracted_refs: cells={:?} cross_sheet={:?} columns={:?} rows={:?}",
                     row, col, formula, refs.cells, refs.cross_sheet_cells, refs.columns, refs.rows);
@@ -1194,9 +1164,24 @@ fn update_cell_impl(
                     &mut cross_sheet_dependents_map,
                 );
 
+                // DEFINED-NAME edges, read from the tree the cell KEEPS — the
+                // expanded one no longer mentions the name at all.
+                {
+                    let mut names = crate::name_resolution::NameSet::default();
+                    crate::name_resolution::collect_names(&entered.stored, &mut names);
+                    crate::name_resolution::update_name_dependencies(
+                        (row, col),
+                        names,
+                        &mut name_dependencies_map,
+                        &mut name_dependents_map,
+                    );
+                }
+
                 // PERF: Convert the already-parsed AST directly instead of re-parsing.
-                let engine_ast = crate::convert_expr(&resolved);
-                cell.set_cached_ast(engine_ast.clone());
+                // The cell keeps the NAME-BEARING tree; only the evaluation
+                // below sees the expansion.
+                let engine_ast = crate::convert_expr(resolved);
+                cell.set_cached_ast(crate::convert_expr(&entered.stored));
                 // Build EvalContext with current cell position and dimension state
                 let rh_map = state.row_heights.read().unwrap().clone();
                 let cw_map = state.column_widths.read().unwrap().clone();
@@ -1510,6 +1495,11 @@ fn update_cell_impl(
             &styles,
             &locale,
             &merge_lookup,
+            crate::name_resolution::NameTables {
+                named_ranges: &cascade_named_ranges,
+                tables: &cascade_tables,
+                table_names: &cascade_table_names,
+            },
             &[(row, col)],
             &recalc_order,
             &mut updated_cells,
@@ -1701,11 +1691,22 @@ pub(crate) fn reevaluate_formula_cell(
     // Get the AST (cached or freshly parsed) and evaluate to raw EvalResult
     let (raw_result, ast_to_cache) = if let Some(cached_ast) = dep_cell.get_cached_ast() {
         *cache_hits += 1;
+        // A STORED formula keeps its defined names (D2), so they are expanded
+        // HERE, on the way into the evaluator — never written back into the
+        // cell. Borrowed, at no cost, for a formula that names nothing.
+        let name_ctx = crate::name_resolution::NameEvalCtx {
+            named_ranges,
+            tables,
+            table_names,
+            sheet_index: active_sheet,
+            row: dep_row,
+        };
+        let eval_target = crate::name_resolution::eval_ast(cached_ast, &name_ctx);
         let result = evaluate_formula_raw_with_files_and_pivot(
             &*grids,
             sheet_names,
             active_sheet,
-            cached_ast,
+            &eval_target,
             eval_ctx,
             Some(styles),
             user_files,
@@ -1715,6 +1716,14 @@ pub(crate) fn reevaluate_formula_cell(
         );
         (result, None)
     } else {
+        // UNREACHABLE in practice, and deliberately kept: `formula_string()` and
+        // `get_cached_ast()` read the SAME `Cell::ast` field, so a cell that
+        // produced a formula string above always has an AST here. Left as the
+        // string-shaped fallback it has always been.
+        //
+        // NOTE it does NOT splice names into what it caches: whatever this path
+        // stores must keep the name, exactly as the entry path does (D2). It
+        // resolves names only for the value it returns.
         *cache_misses += 1;
         if let Ok(engine_ast) = parser::parse(formula).map(|parsed| {
             let resolved = if crate::ast_has_named_refs(&parsed) {
@@ -1763,7 +1772,10 @@ pub(crate) fn reevaluate_formula_cell(
                 None, // gather lookup: not wired on this path (unchanged)
                 udf_resolver,
             );
-            (result, Some(engine_ast))
+            // The AST cached back is the one the cell must KEEP, so it is
+            // re-derived from the formula text without the name splice — never
+            // `engine_ast`, which is the expanded form this call evaluated.
+            (result, parser::parse(formula).ok().map(|p| crate::convert_expr(&p)))
         } else {
             // Fallback to string-based evaluation (no spill support)
             // (GET.CONTROLVALUE unavailable here (v1): string path)
@@ -2013,6 +2025,7 @@ fn recalc_walked_cell(
     styles: &StyleRegistry,
     locale: &engine::LocaleSettings,
     merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
+    name_tables: crate::name_resolution::NameTables<'_>,
     updated_cells: &mut Vec<CellData>,
     include_formulas: bool,
 ) -> bool {
@@ -2028,11 +2041,18 @@ fn recalc_walked_cell(
 
     // Use the cached AST if available; otherwise re-parse the rendered string.
     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+        // Defined names are expanded on the way into the evaluator (D2), against
+        // the DEPENDENT'S OWN sheet — a sheet-scoped name means something
+        // different over there, and this walk is on another sheet by definition.
+        let eval_target = crate::name_resolution::eval_ast(
+            cached_ast,
+            &name_tables.at(dep_sheet_idx, dep_row),
+        );
         crate::evaluate_formula_raw_with_ast_files_and_cube(
             &*grids,
             sheet_names,
             dep_sheet_idx,
-            cached_ast,
+            &eval_target,
             user_files,
             None,
             None,
@@ -2146,6 +2166,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
     styles: &StyleRegistry,
     locale: &engine::LocaleSettings,
     merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
+    name_tables: crate::name_resolution::NameTables<'_>,
     initial_changed: &[(u32, u32)],
     already_recalced: &[(u32, u32)],
     updated_cells: &mut Vec<CellData>,
@@ -2232,6 +2253,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
                     styles,
                     locale,
                     merge_lookup,
+                    name_tables,
                     updated_cells,
                     include_formulas,
                 );
@@ -2512,6 +2534,10 @@ pub(crate) fn update_cells_batch_core(
     let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
     let mut row_dependents_map = state.row_dependents.lock().unwrap();
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    // DEFINED-NAME edges. Locked in the same phase as the other dependency maps
+    // and in declaration order, so the canonical lock order stays one sequence.
+    let mut name_dependents_map = state.name_dependents.lock().unwrap();
+    let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
@@ -2651,55 +2677,13 @@ pub(crate) fn update_cells_batch_core(
         if let Some(formula) = cell.formula_string() {
             match parser::parse(&formula) {
                 Ok(parsed) => {
-                    // Resolve named references (AST splicing)
-                    let resolved = if crate::ast_has_named_refs(&parsed) {
-                        let named_ranges_map = state.named_ranges.read().unwrap();
-                        let mut visited = HashSet::new();
-                        let resolved = crate::resolve_names_in_ast(
-                            &parsed,
-                            &named_ranges_map,
-                            active_sheet,
-                            &mut visited,
-                        );
-                        drop(named_ranges_map);
-                        resolved
-                    } else {
-                        parsed
-                    };
+                    // THE CELL KEEPS THE NAME (Excel parity, D2) — one recipe,
+                    // shared with update_cell and fill_range.
+                    let entered =
+                        crate::split_entered_formula(&state, &parsed, active_sheet, row);
+                    let resolved = entered.evaluated();
 
-                    // Resolve structured table references
-                    let resolved = if crate::ast_has_table_refs(&resolved) {
-                        let tables_map = state.tables.read().unwrap();
-                        let table_names_map = state.table_names.read().unwrap();
-                        let ctx = crate::TableRefContext {
-                            tables: &tables_map,
-                            table_names: &table_names_map,
-                            current_sheet_index: active_sheet,
-                            current_row: row,
-                        };
-                        let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
-                        drop(table_names_map);
-                        drop(tables_map);
-                        resolved
-                    } else {
-                        resolved
-                    };
-
-                    // Resolve spill range references
-                    let resolved = if crate::ast_has_spill_refs(&resolved) {
-                        let spill_ranges_map = state.spill_ranges.lock().unwrap();
-                        let resolved = crate::resolve_spill_refs_in_ast(
-                            &resolved,
-                            &spill_ranges_map,
-                            active_sheet,
-                        );
-                        drop(spill_ranges_map);
-                        resolved
-                    } else {
-                        resolved
-                    };
-
-                    let refs = extract_all_references(&resolved, &grid);
+                    let refs = extract_all_references(resolved, &grid);
 
                     update_dependencies(
                         (row, col),
@@ -2728,10 +2712,22 @@ pub(crate) fn update_cells_batch_core(
                         &mut cross_sheet_dependents_map,
                     );
 
+                    // DEFINED-NAME edges, from the tree the cell KEEPS.
+                    {
+                        let mut names = crate::name_resolution::NameSet::default();
+                        crate::name_resolution::collect_names(&entered.stored, &mut names);
+                        crate::name_resolution::update_name_dependencies(
+                            (row, col),
+                            names,
+                            &mut name_dependencies_map,
+                            &mut name_dependents_map,
+                        );
+                    }
+
                     // PERF: Convert the already-parsed AST directly instead of re-parsing.
                     // This eliminates a redundant parse_formula() call per cell.
-                    let engine_ast = crate::convert_expr(&resolved);
-                    cell.set_cached_ast(engine_ast.clone());
+                    let engine_ast = crate::convert_expr(resolved);
+                    cell.set_cached_ast(crate::convert_expr(&entered.stored));
 
                     // Use raw evaluation to get EvalResult for spill handling
                     let eval_ctx = engine::EvalContext {
@@ -2981,17 +2977,33 @@ pub(crate) fn update_cells_batch_core(
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
                 if let Some(formula) = dep_cell.formula_string() {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                        // Names expand on the way into the evaluator (D2).
+                        let eval_target = crate::name_resolution::eval_ast(
+                            cached_ast,
+                            &crate::name_resolution::NameTables {
+                                named_ranges: &batch_named_ranges,
+                                tables: &batch_tables,
+                                table_names: &batch_table_names,
+                            }
+                            .at(active_sheet, *dep_row),
+                        );
                         crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
                             &sheet_names,
                             active_sheet,
-                            cached_ast,
+                            &eval_target,
                             &user_files,
                             batch_udf,
                             None,
                             Some(control_values.clone()),
                         ).to_cell_value()
                     } else {
+                        // UNREACHABLE: `formula_string()` and `get_cached_ast()`
+                        // read the SAME `Cell::ast` field, so a cell that produced
+                        // a formula string above always has an AST here. Kept as
+                        // the fallback it has always been. It is the one place that
+                        // still writes an expanded AST back into a cell, which would
+                        // be the pre-resolution defect (D2) if it could run.
                         // Slow path: parse, resolve refs, and cache AST
                         if let Ok(engine_ast) = {
                             parser::parse(&formula).map(|parsed| {
@@ -3118,6 +3130,11 @@ pub(crate) fn update_cells_batch_core(
             &styles,
             &locale,
             &merge_lookup,
+            crate::name_resolution::NameTables {
+                named_ranges: &batch_named_ranges,
+                tables: &batch_tables,
+                table_names: &batch_table_names,
+            },
             &cells_needing_recalc,
             &all_recalc_order,
             &mut updated_cells,
@@ -4656,10 +4673,21 @@ pub fn sort_range(
             // Formula cells moved (and their references were shifted) —
             // rebuild the dependency maps so incremental recalc keeps
             // working against the new positions (BUG-0010).
+            // Name tables acquired HERE, at the call site, like `sheet_names`:
+            // the rebuild must expand defined names before extracting cell
+            // references, and a caller holding one of these must not deadlock.
+            let rebuild_named_ranges = state.named_ranges.read().unwrap();
+            let rebuild_tables = state.tables.read().unwrap();
+            let rebuild_table_names = state.table_names.read().unwrap();
             crate::undo_commands::rebuild_all_dependencies_from_grid(
                 &grid,
                 active_sheet,
                 &sheet_names_for_rebuild,
+                crate::name_resolution::NameTables {
+                    named_ranges: &rebuild_named_ranges,
+                    tables: &rebuild_tables,
+                    table_names: &rebuild_table_names,
+                },
                 &state,
             );
 
@@ -4793,10 +4821,21 @@ pub fn sort_range(
             // Formula cells moved (and their references were shifted) —
             // rebuild the dependency maps so incremental recalc keeps
             // working against the new positions (BUG-0010).
+            // Name tables acquired HERE, at the call site, like `sheet_names`:
+            // the rebuild must expand defined names before extracting cell
+            // references, and a caller holding one of these must not deadlock.
+            let rebuild_named_ranges = state.named_ranges.read().unwrap();
+            let rebuild_tables = state.tables.read().unwrap();
+            let rebuild_table_names = state.table_names.read().unwrap();
             crate::undo_commands::rebuild_all_dependencies_from_grid(
                 &grid,
                 active_sheet,
                 &sheet_names_for_rebuild,
+                crate::name_resolution::NameTables {
+                    named_ranges: &rebuild_named_ranges,
+                    tables: &rebuild_tables,
+                    table_names: &rebuild_table_names,
+                },
                 &state,
             );
 
@@ -5553,12 +5592,43 @@ pub fn remove_duplicates(
     // BUG-0010 hazard `sort_range` rebuilds for. Rebuild before seeding, or the
     // cascade below would walk stale edges.
     let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
-    crate::undo_commands::rebuild_all_dependencies_from_grid(
-        &grid,
-        active_sheet,
-        &sheet_names_for_rebuild,
-        &state,
-    );
+    // THE BRACES ARE LOAD-BEARING — do not un-nest them.
+    //
+    // Name tables are acquired HERE, at the call site, like `sheet_names`: the
+    // rebuild must expand defined names before extracting cell references, and
+    // a caller already holding one of these must not deadlock inside. What that
+    // rule also demands, and what this function was missing, is that the guards
+    // END HERE. Phase B below calls `recalc_after_active_sheet_bulk_rewrite`,
+    // which takes `tables` / `table_names` / `named_ranges` for READ itself.
+    // Leaving these guards alive across that call means the same thread asks a
+    // writer-preferring `RwLock` for a second read while still holding the
+    // first — and any writer that queues in between (a name or table edit from
+    // another command) wedges the thread permanently, taking every later
+    // command down with it because they all wait behind it.
+    //
+    // MEASURED, not theorised: `api.removeDuplicates` never returned, the macro
+    // that called it never wrote its result, and while it was stuck EVERY other
+    // Tauri command timed out — grid reads, `get_sheets`, even
+    // `get_calculation_mode`. That is §2u (`vba-idioms-wave4` tests 7 and 8
+    // "hanging" for their full 10-minute timeout); the tests were not slow, the
+    // backend was wedged. `sort_range`, which owns the same rebuild-then-seed
+    // shape, already scopes its guards this way — this one did not.
+    {
+        let rebuild_named_ranges = state.named_ranges.read().unwrap();
+        let rebuild_tables = state.tables.read().unwrap();
+        let rebuild_table_names = state.table_names.read().unwrap();
+        crate::undo_commands::rebuild_all_dependencies_from_grid(
+            &grid,
+            active_sheet,
+            &sheet_names_for_rebuild,
+            crate::name_resolution::NameTables {
+                named_ranges: &rebuild_named_ranges,
+                tables: &rebuild_tables,
+                table_names: &rebuild_table_names,
+            },
+            &state,
+        );
+    }
 
     // PHASE B — dependents (§2c). Remove-duplicates rewrites EVERY cell of its
     // range (compact up, then clear the tail), so every position in the range
@@ -5698,9 +5768,51 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
         .map(|r| ((r.start_row, r.start_col), r))
         .collect();
 
-    let mut recalc_order = crate::recalc_order_from_seeds(seeds, &dependents_map, true);
+    // COST GATE (D3). A pivot block is 10k+ cells and every one of them is a
+    // LITERAL, so passing the raw block as seeds made the walk itself the
+    // expensive part: `recalc_order_from_seeds` admitted all 12,500 as members
+    // and the loop below cloned each one only to discover it had no formula.
+    // Measured at 500x25: 54.19ms, against 22.75ms for the whole-sheet pass the
+    // pivot module already runs on every other mutation — i.e. seeding was
+    // WORSE than the thing it replaces, which is what the D3 cost question was
+    // actually about.
+    //
+    // A seed that holds no formula AND has no dependents provably contributes
+    // nothing: it would be admitted as a member, skipped by the evaluation loop
+    // for having no formula, and expanded from to nothing. Dropping those here
+    // is behaviour-preserving and makes the cost proportional to the number of
+    // READERS instead of the size of the block.
+    //
+    //
+    // The cross-sheet walk is included in the SAME filter rather than being
+    // handed the raw list, because it pays a String CLONE per root: seeding it
+    // with 12,500 literals allocated 12,500 sheet names to discover that none
+    // of them had an off-sheet reader. Its keys carry the sheet name, so the
+    // active sheet's entries are projected down to coordinates once here.
+    let active_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
+    let cross_sheet_read_on_active: crate::CoordSet = cross_sheet_dependents_map
+        .keys()
+        .filter(|(name, _, _)| *name == active_sheet_name)
+        .map(|(_, r, c)| (*r, *c))
+        .collect();
+
+    let live_seeds: Vec<(u32, u32)> = seeds
+        .iter()
+        .copied()
+        .filter(|&(r, c)| {
+            dependents_map.contains_key(&(r, c))
+                || column_dependents_map.contains_key(&c)
+                || row_dependents_map.contains_key(&r)
+                || cross_sheet_read_on_active.contains(&(r, c))
+                || grid
+                    .get_cell(r, c)
+                    .is_some_and(|cell| cell.formula_string().is_some())
+        })
+        .collect();
+
+    let mut recalc_order = crate::recalc_order_from_seeds(&live_seeds, &dependents_map, true);
     let mut recalc_set: crate::CoordSet = recalc_order.iter().copied().collect();
-    for &seed in seeds {
+    for &seed in &live_seeds {
         for dep in get_column_row_dependents(seed, &column_dependents_map, &row_dependents_map) {
             if recalc_set.insert(dep) {
                 recalc_order.push(dep);
@@ -5758,7 +5870,12 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
         &styles,
         &locale,
         &merge_lookup,
-        seeds,
+        crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+        },
+        &live_seeds,
         &recalc_order,
         updated_cells,
         include_cascade_formulas,
@@ -6219,6 +6336,10 @@ pub fn fill_range(
     let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
     let mut row_dependents_map = state.row_dependents.lock().unwrap();
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    // DEFINED-NAME edges. Locked in the same phase as the other dependency maps
+    // and in declaration order, so the canonical lock order stays one sequence.
+    let mut name_dependents_map = state.name_dependents.lock().unwrap();
+    let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
@@ -6323,55 +6444,14 @@ pub fn fill_range(
                     // Parse and evaluate the shifted formula
                     match parser::parse(&shifted) {
                         Ok(parsed) => {
-                            // Resolve named references
-                            let resolved = if crate::ast_has_named_refs(&parsed) {
-                                let named_ranges_map = state.named_ranges.read().unwrap();
-                                let mut visited = HashSet::new();
-                                let resolved = crate::resolve_names_in_ast(
-                                    &parsed,
-                                    &named_ranges_map,
-                                    active_sheet,
-                                    &mut visited,
-                                );
-                                drop(named_ranges_map);
-                                resolved
-                            } else {
-                                parsed
-                            };
+                            // THE CELL KEEPS THE NAME (Excel parity, D2) — one
+                            // recipe, shared with update_cell and the batch writer.
+                            let entered = crate::split_entered_formula(
+                                &state, &parsed, active_sheet, tr,
+                            );
+                            let resolved = entered.evaluated();
 
-                            // Resolve structured table references
-                            let resolved = if crate::ast_has_table_refs(&resolved) {
-                                let tables_map = state.tables.read().unwrap();
-                                let table_names_map = state.table_names.read().unwrap();
-                                let ctx = crate::TableRefContext {
-                                    tables: &tables_map,
-                                    table_names: &table_names_map,
-                                    current_sheet_index: active_sheet,
-                                    current_row: tr,
-                                };
-                                let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
-                                drop(table_names_map);
-                                drop(tables_map);
-                                resolved
-                            } else {
-                                resolved
-                            };
-
-                            // Resolve spill range references
-                            let resolved = if crate::ast_has_spill_refs(&resolved) {
-                                let spill_ranges_map = state.spill_ranges.lock().unwrap();
-                                let resolved = crate::resolve_spill_refs_in_ast(
-                                    &resolved,
-                                    &spill_ranges_map,
-                                    active_sheet,
-                                );
-                                drop(spill_ranges_map);
-                                resolved
-                            } else {
-                                resolved
-                            };
-
-                            let refs = extract_all_references(&resolved, &grid);
+                            let refs = extract_all_references(resolved, &grid);
 
                             update_dependencies(
                                 (tr, tc),
@@ -6403,9 +6483,24 @@ pub fn fill_range(
                                 &mut cross_sheet_dependents_map,
                             );
 
+                            // DEFINED-NAME edges, from the tree the cell KEEPS.
+                            {
+                                let mut names = crate::name_resolution::NameSet::default();
+                                crate::name_resolution::collect_names(
+                                    &entered.stored,
+                                    &mut names,
+                                );
+                                crate::name_resolution::update_name_dependencies(
+                                    (tr, tc),
+                                    names,
+                                    &mut name_dependencies_map,
+                                    &mut name_dependents_map,
+                                );
+                            }
+
                             // Convert AST and evaluate
-                            let engine_ast = crate::convert_expr(&resolved);
-                            new_cell.set_cached_ast(engine_ast.clone());
+                            let engine_ast = crate::convert_expr(resolved);
+                            new_cell.set_cached_ast(crate::convert_expr(&entered.stored));
 
                             let eval_ctx = engine::EvalContext {
                                 cube_prefetch: None,
@@ -6570,17 +6665,33 @@ pub fn fill_range(
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
                 if let Some(formula) = dep_cell.formula_string() {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                        // Names expand on the way into the evaluator (D2).
+                        let eval_target = crate::name_resolution::eval_ast(
+                            cached_ast,
+                            &crate::name_resolution::NameTables {
+                                named_ranges: &batch_named_ranges,
+                                tables: &batch_tables,
+                                table_names: &batch_table_names,
+                            }
+                            .at(active_sheet, *dep_row),
+                        );
                         crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
                             &sheet_names,
                             active_sheet,
-                            cached_ast,
+                            &eval_target,
                             &user_files,
                             None,
                             None,
                             Some(control_values.clone()),
                         ).to_cell_value()
                     } else {
+                        // UNREACHABLE: `formula_string()` and `get_cached_ast()`
+                        // read the SAME `Cell::ast` field, so a cell that produced
+                        // a formula string above always has an AST here. Kept as
+                        // the fallback it has always been. It is the one place that
+                        // still writes an expanded AST back into a cell, which would
+                        // be the pre-resolution defect (D2) if it could run.
                         if let Ok(engine_ast) = {
                             parser::parse(&formula).map(|parsed| {
                                 let resolved = if crate::ast_has_named_refs(&parsed) {
@@ -6679,6 +6790,11 @@ pub fn fill_range(
             &styles,
             &locale,
             &merge_lookup,
+            crate::name_resolution::NameTables {
+                named_ranges: &batch_named_ranges,
+                tables: &batch_tables,
+                table_names: &batch_table_names,
+            },
             &cells_needing_recalc,
             &all_recalc_order,
             &mut updated_cells,
@@ -6735,7 +6851,10 @@ mod typed_range_tests {
 
     #[test]
     fn errors_carry_their_excel_literal_not_the_display_text() {
-        let (k, v) = typed_cell_value(&CellValue::Error(CellError::Div0), "#DIV0");
+        // The display argument is deliberately NOT a literal any surface
+        // produces: the point is that the typed value comes from
+        // `CellError::as_literal`, never from the text the grid was handed.
+        let (k, v) = typed_cell_value(&CellValue::Error(CellError::Div0), "divided by zero");
         assert_eq!(k, "error");
         assert_eq!(v, serde_json::json!("#DIV/0!"));
     }
@@ -6891,3 +7010,24 @@ mod cross_sheet_recalc_tests;
 #[cfg(test)]
 #[path = "bulk_rewrite_recalc_tests.rs"]
 mod bulk_rewrite_recalc_tests;
+
+/// D1 — Calculate Now (F9) is the WORKBOOK and Calculate Sheet (Shift+F9) is the
+/// active sheet, as in Excel. A CHILD module of `data` for the same reason as
+/// above: it reuses the `Workbook` harness those two share.
+#[cfg(test)]
+#[path = "calculate_scope_tests.rs"]
+mod calculate_scope_tests;
+
+/// D3 — the pivot, table and cut/paste-relocation writes must seed the ONE
+/// shared cascade. The last eight `EXEMPT` cell-writing functions. A CHILD
+/// module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "d3_cascade_seed_tests.rs"]
+mod d3_cascade_seed_tests;
+
+/// D2 — a typed formula keeps its NAME and the name resolves at EVALUATION, as
+/// in Excel, with a name -> dependents edge so repointing one moves every
+/// formula that reads it. A CHILD module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "d2_named_range_tests.rs"]
+mod d2_named_range_tests;

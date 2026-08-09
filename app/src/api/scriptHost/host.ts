@@ -9141,11 +9141,14 @@ export async function releaseManualCalculation(
 }
 
 /**
- * The api.recalculate executor body: the active sheet by default, the whole
- * workbook with { full: true } (calculate_now — same command as F9, including
- * the cube prefetch and the RECALCULATION_COMPLETED announcement the lib
- * wrappers make). The returned cells are pushed through the same refresh
- * choreography every script write uses, so the canvas shows the result.
+ * The api.recalculate executor body: the active sheet by default
+ * (calculate_sheet — Shift+F9), the whole workbook with { full: true }
+ * (calculate_now — F9, including the cube prefetch and the
+ * RECALCULATION_COMPLETED announcement the lib wrappers make). The two are
+ * genuinely different passes; until the F9-scope fix they were one pass with
+ * two names, so a script asking for `{ full: true }` got the active sheet.
+ * The returned cells are pushed through the same refresh choreography every
+ * script write uses, so the canvas shows the result.
  */
 export async function executeRecalculate(
   lib: Awaited<ReturnType<typeof getLib>>,

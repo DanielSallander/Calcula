@@ -34,6 +34,7 @@ import {
   cancelUndoTransaction,
   fillRange,
   calculateNow,
+  calculateSheet,
   recalcControlDependents,
   getAllColumnWidths,
   getAllRowHeights,
@@ -1403,13 +1404,22 @@ export function useSpreadsheetSelection({
         emitAppEvent(AppEvents.NAMEBOX_FOCUS);
         break;
 
-      // Calculate Now (F9) - recalculate all formulas
-      case 'calculate.now': {
+      // Calculate Now (F9) — the WORKBOOK — and Calculate Sheet (Shift+F9) —
+      // the active sheet. EXCEL PARITY: those are Excel's two manual
+      // recalculations, and they differ only in scope, so they share one
+      // handler and differ only in which backend command they invoke.
+      case 'calculate.now':
+      case 'calculate.sheet': {
+        const workbookScope = command === 'calculate.now';
+        const label = workbookScope ? 'Calculate Now' : 'Calculate Sheet';
         try {
-          const updatedCells = await calculateNow();
-          console.log(`[useSpreadsheetSelection] Calculate Now - ${updatedCells.length} cells updated`);
+          const updatedCells = workbookScope ? await calculateNow() : await calculateSheet();
+          console.log(`[useSpreadsheetSelection] ${label} - ${updatedCells.length} cells updated`);
 
-          // Refresh canvas to show updated values
+          // Refresh canvas to show updated values. Both commands return the
+          // ACTIVE sheet's cells only; a workbook pass's off-sheet writes are
+          // picked up when that sheet is next fetched, which every sheet switch
+          // does anyway.
           const canvas = canvasRef.current;
           if (canvas) {
             await canvas.refreshCells();
@@ -1427,7 +1437,7 @@ export function useSpreadsheetSelection({
             });
           }
         } catch (error) {
-          console.error("[useSpreadsheetSelection] Calculate Now failed:", error);
+          console.error(`[useSpreadsheetSelection] ${label} failed:`, error);
         }
         break;
       }

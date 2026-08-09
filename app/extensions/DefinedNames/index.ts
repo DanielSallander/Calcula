@@ -3,7 +3,7 @@
 // CONTEXT: Registers dialogs and menu items for managing named ranges.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { AppEvents, emitAppEvent, listenTauriEvent } from "@api";
+import { AppEvents, emitAppEvent, listenTauriEvent, onAppEvent, refreshGridData } from "@api";
 import { NameManagerDialog } from "./components/NameManagerDialog";
 import { NewNameDialog } from "./components/NewNameDialog";
 import { NewFunctionDialog } from "./components/NewFunctionDialog";
@@ -68,6 +68,23 @@ function activate(context: ExtensionContext): void {
     unlistenNamedRanges = un;
   });
   cleanupFns.push(() => unlistenNamedRanges?.());
+
+  // A NAME CHANGE IS A VALUE CHANGE (D2). A formula now stores its defined
+  // names and resolves them while calculating, so repointing, renaming or
+  // deleting a name re-evaluates every formula that reads it — the backend has
+  // already done that by the time this fires. What the GRID still holds is the
+  // pre-change display text, and `NAMED_RANGES_CHANGED` had no cell consumer at
+  // all: the Name Manager, the Name Box and the autocomplete all listened, and
+  // not one of them told the canvas to re-read anything.
+  //
+  // `refreshGridData()` (re-fetch + repaint), not `GRID_REFRESH` (repaint what
+  // is already cached) — the values changed in the backend, so a repaint of the
+  // cached cells would draw the old numbers again.
+  cleanupFns.push(
+    onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
+      refreshGridData();
+    })
+  );
 
   isActivated = true;
   console.log("[DefinedNames] Activated successfully.");

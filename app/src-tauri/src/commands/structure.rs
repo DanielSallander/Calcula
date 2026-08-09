@@ -2,6 +2,7 @@
 // PURPOSE: Complex logic for inserting and deleting rows/columns and updating references.
 
 use crate::api_types::CellData;
+use crate::commands::data::recalc_after_active_sheet_bulk_rewrite;
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
 use crate::persistence::FileState;
@@ -3277,12 +3278,23 @@ fn relocate_references_in_formula(
 /// moved from `(src_start_row, src_start_col)` to `(dest_start_row, dest_start_col)`,
 /// but formulas on the sheet still reference the old coordinates.
 ///
-/// Returns the list of cells whose formulas were rewritten (with updated values).
+/// Returns the list of cells whose formulas were rewritten (with updated values),
+/// FOLLOWED BY every cell the shared cascade re-derived from them.
+///
+/// DEPENDENTS RECALCULATE (D3). This used to re-evaluate the formulas it
+/// rewrote and stop there, so a formula reading one of those rewritten cells
+/// kept its pre-move number: cut A1:A3 to C1, and `=SUM(A1:A3)` correctly
+/// became `=SUM(C1:C3)` while any `=B1*2` reading THAT total still showed the
+/// old product. Excel updates the whole chain, so the rewritten cells are seeds
+/// for the ONE shared cascade, run as a SECOND lock phase after this command's
+/// own guards are dropped.
 #[tauri::command]
 pub fn relocate_cell_references(
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
     user_files_state: State<crate::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     src_start_row: u32,
     src_start_col: u32,
     src_end_row: u32,
@@ -3421,6 +3433,36 @@ pub fn relocate_cell_references(
             result.push(cd);
         }
     }
+
+    // PHASE B — the dependents OF the rewritten formulas, after every guard
+    // above is released (std mutexes are not reentrant, and the cascade takes
+    // the same grid + dependency maps + user files this phase holds).
+    let seeds: Vec<(u32, u32)> = rewrites.iter().map(|(r, c, _)| (*r, *c)).collect();
+    drop(locale);
+    drop(undo_stack);
+    drop(cross_sheet_dependencies_map);
+    drop(cross_sheet_dependents_map);
+    drop(row_dependencies_map);
+    drop(row_dependents_map);
+    drop(column_dependencies_map);
+    drop(column_dependents_map);
+    drop(dependencies_map);
+    drop(dependents_map);
+    drop(user_files);
+    drop(merged_regions);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+    drop(sheet_names);
+
+    recalc_after_active_sheet_bulk_rewrite(
+        &state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &seeds,
+        &mut result,
+    );
 
     Ok(result)
 }

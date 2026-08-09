@@ -1395,7 +1395,15 @@ function SpreadsheetContent({
         onContextMenu={handleContextMenu}
       >
         {/* Grid Canvas */}
-        <S.CanvasLayer $scrollbarSize={SCROLLBAR_SIZE}>
+        {/* `data-grid-canvas-layer` is a DO-NOT-BREAK test contract, in the
+            same family as `data-grid-area` above. It marks the grid MINUS its
+            scrollbars — this element is inset by SCROLLBAR_SIZE on the right
+            and bottom by definition (see Spreadsheet.styles.ts) and contains
+            the canvas plus every DOM layer stacked on it. `takeGridScreenshot`
+            (app/e2e/helpers/screenshots.ts) frames it so that a scrollbar THUMB,
+            whose size and position follow the used range and therefore leak
+            between specs, can never be the reason a grid golden differs. */}
+        <S.CanvasLayer data-grid-canvas-layer $scrollbarSize={SCROLLBAR_SIZE}>
           <GridCanvas
             ref={canvasRef}
             theme={gridTheme}

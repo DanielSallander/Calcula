@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/CalculationOptions/handlers/formulasMenuItemBuilder.ts
-// PURPOSE: Registers "Calculation Options", "Calculate Worksheet", and "Calculate Workbook"
-//          items in the Formulas menu.
+// PURPOSE: Registers "Calculation Options", "Calculate Now" (F9, the workbook)
+//          and "Calculate Sheet" (Shift+F9, the active sheet) in the Formulas
+//          menu — Excel's two manual recalculations, under Excel's own names.
 // CONTEXT: Uses registerMenuItem to append to the existing "formulas" menu
 //          (created by the Tracing extension).
 
@@ -253,6 +254,16 @@ export function registerCalculationMenuItems(): void {
   });
 
   // ---- Calculate (with submenu) ----
+  //
+  // EXCEL PARITY, names and keys both. Excel's Formulas tab offers exactly two
+  // manual recalculations: **Calculate Now (F9)**, which recalculates the
+  // WORKBOOK, and **Calculate Sheet (Shift+F9)**, which recalculates the active
+  // sheet. These entries used to read "Calculate Workbook" / "Calculate
+  // Worksheet" — neither is what Excel calls them, and worse, both ran the same
+  // active-sheet pass, so the workbook entry was a promise the backend did not
+  // keep. The shortcut strings are DISPLAY ONLY (the grid's key handler owns
+  // the dispatch); they are here because a user who does not know the keys is
+  // exactly the user reading this menu.
   registerMenuItem("formulas", {
     id: "formulas:calculate",
     label: "Calculate",
@@ -260,7 +271,8 @@ export function registerCalculationMenuItems(): void {
     children: [
       {
         id: "formulas:calculateWorkbook",
-        label: "Calculate Workbook",
+        label: "Calculate Now",
+        shortcut: "F9",
         icon: IconCalcWorkbook,
         action: () => {
           calculateNow().then((cells) => {
@@ -271,7 +283,8 @@ export function registerCalculationMenuItems(): void {
       },
       {
         id: "formulas:calculateSheet",
-        label: "Calculate Worksheet",
+        label: "Calculate Sheet",
+        shortcut: "Shift+F9",
         icon: IconCalcWorksheet,
         action: () => {
           calculateSheet().then((cells) => {

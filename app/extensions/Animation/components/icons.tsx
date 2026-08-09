@@ -32,6 +32,11 @@ export function StepFwdIcon({ size = 14 }: IconProps): React.ReactElement {
   return svg(size, <path d="M11 3v10h1.3V3H11zM4 3v10l6-5L4 3z" />);
 }
 
+/** Eject — "unload the driver" (media convention for giving the medium back). */
+export function EjectIcon({ size = 14 }: IconProps): React.ReactElement {
+  return svg(size, <path d="M8 3l5 6H3l5-6zm-5 8h10v2H3v-2z" />);
+}
+
 export function FilmIcon({ size = 16 }: IconProps): React.ReactElement {
   return svg(
     size,

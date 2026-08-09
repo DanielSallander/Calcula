@@ -312,15 +312,21 @@ fn an_acyclic_cross_sheet_chain_stays_numeric() {
 }
 
 // ---------------------------------------------------------------------------
-// 2b. F9 evaluates ONE sheet, and a cycle spans several
+// 2b. A SHEET-scoped pass evaluates ONE sheet, and a cycle spans several
 // ---------------------------------------------------------------------------
 //
 // Found LIVE on the running app (remaining-correctness.spec.ts), not by
 // reading. Every test above recalculates EVERY sheet, because that is what the
 // off-sheet write path does — `recalc_after_off_sheet_write` calls
-// `recalculate_sheet_values` once per sheet. `calculate_now` does not: it is F9,
-// Formulas > Calculate > Calculate Workbook, and the calculate-before-save step,
-// and it evaluates the ACTIVE sheet alone.
+// `recalculate_sheet_values` once per sheet.
+//
+// HISTORY, because the fixture below reads oddly otherwise: `calculate_now` —
+// F9 — used to evaluate the ACTIVE SHEET ALONE, and that is the state this
+// section was written against. F9 now plans the whole workbook (Excel parity:
+// F9 = Calculate Now = workbook, Shift+F9 = Calculate Sheet = sheet), so the
+// off-sheet mark below belongs to the SHEET-scoped pass, which is the only one
+// that still leaves sheets unevaluated. See
+// `calculate_scope_tests.rs` for the workbook half, run rather than read.
 //
 // So `merge_cross_sheet_circular` moved the active sheet's members into a
 // circular group and the members on the other sheets were left holding whatever
@@ -334,14 +340,14 @@ fn an_acyclic_cross_sheet_chain_stays_numeric() {
 // `mark_off_sheet_circular_cells` closes it: a cycle is a workbook-level fact,
 // so every sheet owning a member reports it.
 
-/// The set `calculate_now` computes for itself, from the same walk.
+/// The set a SHEET-scoped pass computes for itself, from the same walk.
 fn workbook_cycle_members(wb: &Workbook) -> std::collections::HashSet<(usize, u32, u32)> {
     let grids = wb.state.grids.read().unwrap();
     let names = wb.state.sheet_names.read().unwrap().clone();
     crate::calculation::workbook_circular_cells(&grids, &names)
 }
 
-/// Do to the grids exactly what `calculate_now` now does after its merge.
+/// Do to the grids exactly what the SHEET-scoped pass does after its merge.
 fn mark_off_sheet(wb: &Workbook, active: usize) -> Vec<(usize, u32, u32)> {
     let circular = workbook_cycle_members(wb);
     let iteration_enabled = *wb.state.iteration_enabled.lock().unwrap();
@@ -461,18 +467,19 @@ fn the_off_sheet_mark_is_skipped_under_iterative_calculation() {
 }
 
 #[test]
-fn calculate_now_marks_the_cycle_members_on_the_sheets_it_does_not_evaluate() {
-    // `calculate_now` is a `#[tauri::command]` taking `State` and `Window`, so
-    // it cannot run in-process. The behaviour is tested above; this proves the
-    // command still CALLS the writer, and the failure mode is silent.
+fn the_sheet_scoped_pass_marks_the_cycle_members_on_the_sheets_it_does_not_evaluate() {
+    // Behaviour is pinned by running the pass (calculate_scope_tests.rs); this
+    // pins the WIRING, because deleting the call is silent: a sheet pass would
+    // still look right on the sheet you are looking at and leave a plausible 0
+    // one tab away.
     const CALCULATION_RS: &str = include_str!("../calculation.rs");
-    let body = body_of(CALCULATION_RS, "calculate_now");
+    let body = body_of(CALCULATION_RS, "run_calculation_pass");
     assert!(
         body.contains("mark_off_sheet_circular_cells("),
-        "`calculate_now` merges the ACTIVE sheet's cross-sheet cycle members and \
-         stops there, so the members on every other sheet keep the number the \
-         previous evaluation order left behind — F9 reports #CIRCULAR! on the \
-         sheet you are looking at and a plausible 0 one tab away"
+        "the SHEET-scoped pass (Shift+F9) merges the active sheet's cross-sheet \
+         cycle members and stops there, so the members on every other sheet keep \
+         the number the previous evaluation order left behind — #CIRCULAR! on \
+         the sheet you are looking at and a plausible 0 one tab away"
     );
 }
 
@@ -719,8 +726,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
     // (file relative to src/, function, reason it does not recalculate)
     const EXEMPT: &[(&str, &str, &str)] = &[
         // -- It IS recalculation, or an inner step of it -------------------
-        ("calculation.rs", "calculate_now", "the full-recalculation pass itself"),
-        ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of that pass: reports a cycle the pass already detected on the sheets it does not evaluate"),
+        ("calculation.rs", "run_calculation_pass", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet)"),
+        ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the SHEET-scoped pass: reports a cycle the pass already detected on the sheets it does not evaluate"),
         ("commands/data.rs", "reevaluate_formula_cell", "the cascade's per-cell evaluator"),
         ("commands/data.rs", "recalc_walked_cell", "the cross-sheet walk's per-cell step"),
         ("pivot/operations.rs", "recalculate_sheet_formulas", "a whole-sheet evaluation"),
@@ -758,6 +765,9 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("scripting/commands.rs", "parse_script_formula_writes", "builds a detached grid; apply_script_modified_grids_core recalculates"),
         ("commands/structure.rs", "shift_cross_sheet_formulas", "helper of the structural edit, which recalculates"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "helper of off_sheet_structural_edit, which recalculates"),
+        ("tables.rs", "write_table_formula_cell", "helper: writes ONE totals cell with its resolved AST + edges; `set_totals_row_function` and `toggle_totals_row` seed the cascade over every cell they hand it"),
+        ("calp_commands.rs", "apply_override_value_to_grid", "helper of the three override commands; calp_revert_override, calp_accept_upstream and calp_refresh_apply each run recalculate_sheet_values after"),
+        ("commands/structure.rs", "shift_per_sheet_cell_stores", "helper of the four structural edits; wraps shift_per_sheet_cell_map over every per-sheet store"),
         ("undo_commands.rs", "apply_changes", "drives the cascade for every restore kind"),
         ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes recalculates"),
         ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes recalculates"),
@@ -767,22 +777,50 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("undo_commands.rs", "apply_script_grid_cells_restore", "reports its sheet; apply_changes recalculates"),
         ("undo_commands.rs", "apply_sheet_structural_restore", "reports its sheet; apply_changes recalculates"),
         // -- Writes a sheet nothing can yet reference -----------------------
-        ("pivot/commands.rs", "drill_through_to_sheet", "writes a freshly created sheet"),
-        // -- IN CLASS, left to their owner. Named so the next sweep starts
-        //    from a list rather than a grep. Each writes into a region whose
-        //    own refresh path is the thing that ought to trigger.
-        ("pivot/commands.rs", "create_pivot_inner", "IN CLASS — pivot owner: a formula over a freshly written pivot block stays stale"),
-        ("pivot/commands.rs", "delete_pivot_table", "IN CLASS — pivot owner: clearing the block leaves readers stale"),
-        ("pivot/commands.rs", "undo_pivot_overwrite", "IN CLASS — pivot owner"),
-        ("tables.rs", "toggle_totals_row", "IN CLASS — table owner"),
-        ("tables.rs", "set_totals_row_function", "IN CLASS — table owner"),
-        ("tables.rs", "set_calculated_column", "IN CLASS — table owner"),
-        ("tables.rs", "check_table_auto_expand", "IN CLASS — table owner"),
+        ("pivot/commands.rs", "drill_through_to_sheet", "writes a freshly created sheet: no formula can reference a sheet that did not exist a moment ago, so there is nothing to cascade to"),
         // -- Rewrites formula REFERENCES, not values ------------------------
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; no value moves"),
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; no value moves"),
-        ("commands/structure.rs", "relocate_cell_references", "RESIDUAL — re-evaluates the formulas it rewrites but does not cascade to THEIR dependents; the cut/paste flow's paste half seeds from the pasted block only"),
+        // -- KNOWN RESIDUAL, recorded not waived: see §2s in the register ---
+        // These four re-point every reference so that formulas keep meaning
+        // the same cells, and they move each cell's cached value along with
+        // the cell — which is why they look value-preserving and why nothing
+        // has caught them. It is not quite true. A range endpoint SHIFTS
+        // (`shift_formula_row_references`: A1:A5 becomes A1:A6 when a row is
+        // inserted inside it), so a formula whose result depends on the SHAPE
+        // or POSITION of its own reference — ROWS/COLUMNS, ROW/COLUMN,
+        // COUNTBLANK, OFFSET, CELL("row") — keeps a value its own rewritten
+        // AST no longer produces. Excel recalculates after a structural edit,
+        // so parity says these should seed the cascade.
+        //
+        // NOT DONE HERE, and deliberately: the seed set for a row insert is
+        // every cell below the insertion point, so this is a performance
+        // decision that needs the same measurement D1 and D3 got, not a
+        // 4 a.m. guess. Raised as D8 in docs/design/open-decisions-2026-08.md.
+        ("commands/structure.rs", "insert_rows", "re-points references and moves cached values with their cells; the shape-sensitive residual (ROWS/ROW/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
+        ("commands/structure.rs", "insert_columns", "re-points references and moves cached values with their cells; the shape-sensitive residual (COLUMNS/COLUMN/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
+        ("commands/structure.rs", "delete_rows", "re-points references and moves cached values with their cells; the shape-sensitive residual (ROWS/ROW/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
+        ("commands/structure.rs", "delete_columns", "re-points references and moves cached values with their cells; the shape-sensitive residual (COLUMNS/COLUMN/OFFSET over a shifted endpoint) is recorded as §2s / D8, unmeasured"),
     ];
+    //
+    // D3 CLOSED THE "IN CLASS" BLOCK. Eight entries used to sit here saying the
+    // pivot and table writes were somebody else's problem: create_pivot_inner,
+    // delete_pivot_table, undo_pivot_overwrite, toggle_totals_row,
+    // set_totals_row_function, set_calculated_column, check_table_auto_expand
+    // and relocate_cell_references. Each wrote into a region and recalculated
+    // nothing, so a formula reading that region kept a stale value with no
+    // error shown — and in Excel every one of those formulas updates. They now
+    // seed the SHARED cascade (`recalc_after_active_sheet_bulk_rewrite` on the
+    // active sheet, `recalc_after_off_sheet_write` for a destination sheet
+    // chosen at runtime), NOT a per-region refresh contract of their own: a
+    // second cascade concept is exactly what this census exists to prevent.
+    // Behaviour is pinned in `commands/d3_cascade_seed_tests.rs`.
+    //
+    // The measured cost is in docs/design/open-decisions-2026-08.md §4 D3. It
+    // is far cheaper than the alternative already in the tree: the pivot
+    // refresh path (`finalize_pivot_update` -> `recalculate_sheet_formulas`)
+    // re-evaluates EVERY formula on the sheet, where seeding touches only the
+    // block and its dependents.
 
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     assert!(
@@ -868,6 +906,136 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
     }
 }
 
+/// THE CENSUS HAS TEETH, asserted rather than trusted.
+///
+/// `every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason`
+/// is the acceptance test for a whole class of defect, so its own detector must
+/// be shown to FIRE. The manual version of this check is "delete one recalc
+/// call and confirm the census names that function" — which is exactly what
+/// this does, on a synthetic source string, so it runs on every build instead
+/// of once in somebody's head.
+///
+/// Three properties, and all three matter:
+///   1. a function that writes a cell and does NOT recalculate is reported;
+///   2. the same function WITH a shared entry point is not;
+///   3. removing the call flips it back — the detector keys on the recalc call,
+///      not on the function's name or position.
+#[test]
+fn the_census_detector_actually_fires_on_a_cell_writer_that_does_not_recalculate() {
+    const WITHOUT: &str = "\
+pub fn writes_and_forgets(grid: &mut Grid) {
+    grid.set_cell(0, 0, cell);
+}
+";
+    const WITH: &str = "\
+pub fn writes_and_forgets(grid: &mut Grid) {
+    grid.set_cell(0, 0, cell);
+    recalc_after_active_sheet_bulk_rewrite(state, files, pane, filters, seeds, out);
+}
+";
+    const NO_WRITE: &str = "\
+pub fn touches_nothing(grid: &mut Grid) {
+    let _ = grid.get_cell(0, 0);
+}
+";
+
+    let found = cell_writing_functions(WITHOUT);
+    assert_eq!(
+        found,
+        vec![("writes_and_forgets".to_string(), false)],
+        "the census did not flag a function that writes a cell and reaches no          shared entry point — it would pass a workbook full of stale values"
+    );
+
+    let found = cell_writing_functions(WITH);
+    assert_eq!(
+        found,
+        vec![("writes_and_forgets".to_string(), true)],
+        "the census failed to notice a function that DOES seed the shared          cascade; a census that reports everything is ignored, which is the          same as having none"
+    );
+
+    assert!(
+        cell_writing_functions(NO_WRITE).is_empty(),
+        "the census reported a function that writes no cell at all"
+    );
+
+    // 4. THE HOLE FOUND BY SABOTAGE. A caller that reaches the grid only
+    //    through a delegating helper is still a cell writer. Before this,
+    //    deleting the recalc call from `set_totals_row_function` — whose whole
+    //    exemption story is "the caller seeds" — failed nothing at all.
+    const VIA_HELPER: &str = "\
+pub fn writes_through_a_helper(state: &AppState) {
+    write_table_formula_cell(state, &mut grid, row, col, formula);
+}
+";
+    assert_eq!(
+        cell_writing_functions(VIA_HELPER),
+        vec![("writes_through_a_helper".to_string(), false)],
+        "a function that writes cells ONLY by calling a delegating helper was \
+         not enumerated. The helper is EXEMPT because its caller recalculates, \
+         so an unchecked caller means neither half is checked."
+    );
+
+    // ...and it is satisfied by the same shared entry points, not by anything
+    // special-cased for helpers.
+    const VIA_HELPER_OK: &str = "\
+pub fn writes_through_a_helper(state: &AppState) {
+    write_table_formula_cell(state, &mut grid, row, col, formula);
+    recalc_after_active_sheet_bulk_rewrite(state, files, pane, filters, seeds, out);
+}
+";
+    assert_eq!(
+        cell_writing_functions(VIA_HELPER_OK),
+        vec![("writes_through_a_helper".to_string(), true)]
+    );
+
+    // The helper's OWN definition must still be judged by its body, or every
+    // helper would classify itself as a caller of itself and the exemption
+    // list could never be satisfied.
+    const HELPER_ITSELF: &str = "\
+pub fn write_table_formula_cell(grid: &mut Grid) {
+    grid.set_cell(0, 0, cell);
+}
+";
+    assert_eq!(
+        cell_writing_functions(HELPER_ITSELF),
+        vec![("write_table_formula_cell".to_string(), false)],
+        "the helper's own definition must be classified by its body"
+    );
+}
+
+/// The exemption list is a list of DECISIONS, so every entry must carry a
+/// reason somebody wrote. An empty string is how an entry gets parked
+/// "temporarily" and then stays forever — which is precisely what the eight
+/// "IN CLASS" entries D3 removed had done.
+#[test]
+fn every_exemption_carries_a_written_reason() {
+    // Re-read the list from this file's own source: the constant is scoped to
+    // the census test above, and duplicating it here would let the two drift.
+    const SELF: &str = include_str!("bulk_rewrite_recalc_tests.rs");
+    let start = SELF
+        .find("const EXEMPT:")
+        .expect("the census must still declare an EXEMPT list");
+    let end = SELF[start..]
+        .find("\n    ];")
+        .map(|o| start + o)
+        .expect("the EXEMPT list must still terminate");
+    let block = &SELF[start..end];
+
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("(\"") {
+            continue;
+        }
+        assert!(
+            !trimmed.contains(", \"\")"),
+            "an EXEMPT entry carries an empty reason:\n  {}\n\nAn exemption is a \
+             decision, and a decision nobody wrote down is indistinguishable \
+             from an oversight",
+            trimmed
+        );
+    }
+}
+
 /// Every `.rs` file under `dir`, recursively.
 fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -887,6 +1055,42 @@ fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 /// for every function in `text` that writes a cell, with `#[cfg(test)]` modules
 /// removed first — a test fixture seeding a grid is not a product write.
 fn cell_writing_functions(text: &str) -> Vec<(String, bool)> {
+    cell_writing_functions_with_helpers(text, DELEGATING_HELPERS)
+}
+
+/// The EXEMPT entries whose recorded reason is "my CALLER recalculates".
+///
+/// THE HOLE THIS CLOSES, found by sabotage during integration. The census
+/// enumerates functions whose body textually contains `.set_cell(` /
+/// `.clear_cell(`. `set_totals_row_function` contains neither — it delegates to
+/// `write_table_formula_cell`, which is EXEMPT precisely *because*
+/// `set_totals_row_function` seeds the cascade. So the recalc call was deleted
+/// from `set_totals_row_function` and the census PASSED: the exemption's reason
+/// was a claim about another function that nothing verified, and the two halves
+/// could be removed one at a time with no test ever failing.
+///
+/// Calling one of these counts as writing a cell, which is what it is — the
+/// helper exists only to be the write. The caller must then recalculate or earn
+/// its own exemption, exactly like a direct writer.
+const DELEGATING_HELPERS: &[&str] = &[
+    "consolidate_data_inner",
+    "write_override_value",
+    "shift_per_sheet_cell_map",
+    "parse_script_formula_writes",
+    "shift_cross_sheet_formulas",
+    "shift_cross_sheet_formulas_for_off_sheet_edit",
+    "write_table_formula_cell",
+    // Second-level helpers: each wraps one of the above, so the chain has to
+    // continue through them or it stops one call short of the command that
+    // actually owns the decision. `apply_override_value_to_grid` reaches
+    // `calp_revert_override` / `calp_accept_upstream` / `calp_refresh_apply`
+    // (all three recalculate); `shift_per_sheet_cell_stores` reaches the four
+    // structural edits.
+    "apply_override_value_to_grid",
+    "shift_per_sheet_cell_stores",
+];
+
+fn cell_writing_functions_with_helpers(text: &str, helpers: &[&str]) -> Vec<(String, bool)> {
     const RECALC: [&str; 5] = [
         "recalc_after_active_sheet_bulk_rewrite(",
         "recalc_after_off_sheet_write(",
@@ -917,7 +1121,18 @@ fn cell_writing_functions(text: &str) -> Vec<(String, bool)> {
         let body = &lines[start..=end];
         let writes = body.iter().any(|l| {
             let t = l.trim_start();
-            !t.starts_with("//") && (l.contains(".set_cell(") || l.contains(".clear_cell("))
+            if t.starts_with("//") {
+                return false;
+            }
+            if l.contains(".set_cell(") || l.contains(".clear_cell(") {
+                return true;
+            }
+            // Delegating to a helper that exists only to do the write is
+            // writing. `name != h` so the helper's own definition is still
+            // classified by its body, not by its signature line.
+            helpers
+                .iter()
+                .any(|h| *h != name.as_str() && l.contains(&format!("{}(", h)))
         });
         if !writes {
             continue;
