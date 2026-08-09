@@ -97,4 +97,52 @@ describe("animationStore", () => {
   it("newAnimationId returns unique ids", () => {
     expect(newAnimationId()).not.toBe(newAnimationId());
   });
+  // ------------------------------------------------------------------
+  // THE ACCEPTANCE SHAPE: mutate -> persist -> reload -> still there.
+  //
+  // "persist was called" is the assertion that passes on the broken version of
+  // this defect -- a store plus a hand-synced mirror is only ever wrong at the
+  // ONE mutator nobody wrote a test for. What is worth pinning is that the blob
+  // the workbook keeps is the blob that comes back.
+  // ------------------------------------------------------------------
+
+  it("what a sequence of mutations persisted is exactly what reloads", async () => {
+    await upsertAnimation(spec("a1", "One"));
+    await upsertAnimation(spec("a2", "Two"));
+    await upsertAnimation(spec("a1", "One renamed"));
+    await deleteAnimation("a2");
+
+    const persisted = vi.mocked(setExtensionDataUndoable).mock.calls.at(-1)![1];
+    resetAnimations();
+    expect(listAnimations()).toEqual([]);
+
+    vi.mocked(getExtensionData).mockResolvedValue(persisted);
+    await loadAnimations();
+
+    expect(listAnimations().map((s) => s.id)).toEqual(["a1"]);
+    expect(getAnimation("a1")?.name).toBe("One renamed");
+  });
+
+  it("a delete of an id that is not there persists nothing and notifies nobody", async () => {
+    await upsertAnimation(spec("a1", "One"));
+    const cb = vi.fn();
+    const un = subscribeAnimations(cb);
+    vi.mocked(setExtensionDataUndoable).mockClear();
+
+    await deleteAnimation("nope");
+
+    expect(setExtensionDataUndoable).not.toHaveBeenCalled();
+    expect(cb).not.toHaveBeenCalled();
+    un();
+  });
+
+  it("loading and resetting install a list WITHOUT writing one back", async () => {
+    // The two exempt doors. A load that persisted would put the workbook's own
+    // contents onto the undo stack on every open; a reset that persisted would
+    // write an undo entry into a brand-new document.
+    vi.mocked(getExtensionData).mockResolvedValue({ animations: [spec("a1", "One")] });
+    await loadAnimations();
+    resetAnimations();
+    expect(setExtensionDataUndoable).not.toHaveBeenCalled();
+  });
 });

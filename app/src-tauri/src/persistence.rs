@@ -2748,20 +2748,12 @@ pub fn open_file(
     *state.object_scripts.write(&load_effect).unwrap() = workbook.object_scripts.clone();
     *state.extension_data.write(&load_effect).unwrap() = workbook.extension_data.clone();
 
-    // Restore grid reports from extension_data (their cells reload as ordinary
-    // grid content; re-register each report's protected region from its bounds).
-    {
-        let reports: Vec<crate::report::SavedReport> = state
-            .extension_data
-            .read()
-            .unwrap()
-            .get(crate::report::REPORTS_EXT_KEY)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        for r in &reports {
-            crate::report::reregister_report_region(&state, r);
-        }
-        *state.report_definitions.lock().unwrap() = reports;
+    // Re-register each grid report's protected region from its saved bounds. The
+    // report DEFINITIONS need no restoring: they live in the extension_data slot
+    // that was just assigned above, and that slot is the store (see report.rs).
+    // Only the derived region index has to be rebuilt.
+    for r in &crate::report::read_reports(&state) {
+        crate::report::reregister_report_region(&state, r);
     }
 
     // Restore named ranges (defined names). The save builders populate
@@ -3547,9 +3539,11 @@ pub fn new_file(
     // (including distributed ones) leak into the new workbook and get saved
     // with it. Same family as the writeback-index leak fixed in Wave 0.
     state.object_scripts.write(&reset_effect).unwrap().clear();
+    // Clearing extension_data clears the grid reports with it — the slot IS the
+    // report store, so there is no second copy left holding the old workbook's
+    // reports (there used to be, and it had to be cleared by hand right here).
     state.extension_data.write(&reset_effect).unwrap().clear();
     state.pivot_layouts.write(&reset_effect).unwrap().clear();
-    state.report_definitions.lock().unwrap().clear();
 
     // Clear subscription metadata
     *state.subscriptions.write(&reset_effect).map_err(|e| e.to_string())? =
@@ -4445,6 +4439,28 @@ pub fn set_extension_data(
     set_extension_data_impl(&state, &file_state, extension_id, value)
 }
 
+/// Extension-data keys that are NOT free-form extension state: a first-party
+/// store lives there and owns the slot outright.
+///
+/// `calcula.reports` is the grid-report store itself (see `report.rs`), and it is
+/// spelled exactly like the Reports extension's manifest id -- so the perfectly
+/// ordinary `setExtensionData(EXTENSION_ID, ...)` idiom every other extension
+/// uses would have replaced every report in the workbook with whatever the caller
+/// happened to be persisting. The store cannot be reached by a compile-time check
+/// from here (the key is a string arriving over IPC), so it is refused at the
+/// door instead of being allowed to clobber.
+fn reject_reserved_extension_key(extension_id: &str) -> Result<(), String> {
+    if extension_id == crate::report::REPORTS_EXT_KEY {
+        return Err(format!(
+            "'{}' is a reserved extension-data key: it holds this workbook's grid \
+             reports. Use the report commands (create_report / refresh_report / \
+             delete_report) to change them.",
+            crate::report::REPORTS_EXT_KEY
+        ));
+    }
+    Ok(())
+}
+
 /// Command body over plain references (see `document_effect_wave2_tests`).
 pub(crate) fn set_extension_data_impl(
     state: &AppState,
@@ -4455,6 +4471,7 @@ pub(crate) fn set_extension_data_impl(
     // THE SANCTIONED EXTENSION PERSISTENCE TIER (`workbook.extension_data`). Every
     // extension that persists state -- animations, grid reports, third-party add-ins --
     // went through this one hole, so a single missing flag lost all of them at once.
+    reject_reserved_extension_key(&extension_id)?;
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut data = state.extension_data.write(&effect).map_err(|e| e.to_string())?;
     match value {
@@ -4480,6 +4497,7 @@ pub fn set_extension_data_undoable(
     state: State<AppState>,
     file_state: State<FileState>,
 ) -> Result<(), String> {
+    reject_reserved_extension_key(&extension_id)?;
     // Snapshot the prior value (lock released before recording undo / re-locking).
     let previous = {
         let data = state.extension_data.read().map_err(|e| e.to_string())?;

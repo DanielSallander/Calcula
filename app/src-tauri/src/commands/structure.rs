@@ -64,12 +64,20 @@ fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
 // ============================================================================
 
 /// Realign report definitions with their (already coordinate-shifted) protected
-/// regions and drop definitions whose region was removed, then persist. A report
-/// definition mirrors its region exactly (anchor = region start, bounds = region
-/// end), so after a generic region shift this brings the definition store — the
-/// source of truth for the NEXT refresh's destination — back in sync. Without it
-/// a refresh would re-materialize the report at its pre-shift coordinates.
-fn sync_report_definitions_to_regions(state: &AppState, effect: &crate::document_effect::DocumentEffect) {
+/// regions and drop definitions whose region was removed. A report definition
+/// mirrors its region exactly (anchor = region start, bounds = region end), so
+/// after a generic region shift this brings the definition — the source of truth
+/// for the NEXT refresh's destination — back in step with the index derived from
+/// it. Without it a refresh would re-materialize the report at its pre-shift
+/// coordinates.
+///
+/// There is no separate persist step: `with_reports_mut` writes the definitions
+/// where they live (`extension_data["calcula.reports"]`), which is what the save
+/// path reads. See `report.rs`.
+pub(crate) fn sync_report_definitions_to_regions(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+) {
     let report_regions: Vec<_> = {
         let regions = state.protected_regions.lock().unwrap();
         regions
@@ -78,8 +86,7 @@ fn sync_report_definitions_to_regions(state: &AppState, effect: &crate::document
             .map(|r| (r.owner_id, r.sheet_index, r.start_row, r.start_col, r.end_row, r.end_col))
             .collect()
     };
-    {
-        let mut defs = state.report_definitions.lock().unwrap();
+    crate::report::with_reports_mut(state, effect, |defs| {
         defs.retain(|d| report_regions.iter().any(|(id, ..)| *id == d.id));
         for d in defs.iter_mut() {
             if let Some((_, sheet, sr, sc, er, ec)) =
@@ -92,8 +99,7 @@ fn sync_report_definitions_to_regions(state: &AppState, effect: &crate::document
                 d.end_col = *ec;
             }
         }
-    }
-    crate::report::sync_reports_to_extension_data(state, effect);
+    });
 }
 
 /// Shift protected regions when rows are inserted.

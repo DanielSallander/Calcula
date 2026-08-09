@@ -2206,6 +2206,66 @@ correctness, and no caller holds an outer lookup pass that could go stale across
 Left alone: adding a cache is a performance change and this register does not make those without a
 measurement.
 
+### 2w. File ▸ New does not reset three stores the save path writes — so a NEW document silently saves the PREVIOUS one's pivots, ribbon filters and model connections (2026-08-09)
+
+**Found by probing §3av's neighbours, and CONFIRMED on the bytes.** Not by reasoning: by opening the
+saved `.cala`.
+
+`persistence::new_file` takes `AppState`, `FileState`, `UserFilesState`, `SlicerState`,
+`PaneControlState` and `ScriptState`, and resets each of them (slicers, pane controls, workbook
+scripts and notebooks, object scripts, extension data, pivot layouts, protected regions, user files).
+It does **not** take `PivotState`, `RibbonFilterState` or `BiState`, and nothing else clears them.
+`assemble_workbook_for_save` nevertheless projects all three into the workbook:
+`collect_pivot_definitions(pivot_state, …)`, `collect_ribbon_filters_for_save(ribbon_filter_state)`
+and `capture_local_bi_connections(bi_state)` — each of which serializes its whole live store with no
+document scoping.
+
+**The reproduction, on a cold app.** Workbook A gets one model connection ("LEAK PROBE MODEL", a
+CSV-backed model), one grid pivot ("LEAK PROBE PIVOT") and one ribbon filter ("LEAK PROBE FILTER").
+Then File ▸ New, one cell typed, Save as B. All three are still live after File ▸ New (1 / 1 / 1),
+and B — a document into which the user typed a single cell — physically contains them:
+
+```
+ENTRIES: manifest.json, theme.json, styles/registry.json, sheets/0_Sheet1/…,
+         pivot_definitions/def_019fe72a-….json      <- LEAK PROBE PIVOT
+         ribbon_filters/filter_019fe72a-….json      <- LEAK PROBE FILTER
+         bi_connections/conn_0.json                 <- LEAK PROBE MODEL
+```
+
+`bi_connections/conn_0.json` carries the **whole embedded model** (tables, bindings, measures,
+source catalog), so this is not only content the user never authored — it is another project's
+semantic model travelling inside their file.
+
+**The three differ in blast radius, and the difference is which restore path clears.**
+
+| store | leaks across File ▸ New | leaks across Open | why |
+|---|---|---|---|
+| `PivotState` | YES | no | `restore_pivot_definitions` clears before restoring |
+| `RibbonFilterState` | YES | no | `restore_ribbon_filters` clears before restoring |
+| `BiState.connections` (+ caches, roles) | YES | **YES** | `restore_local_bi_connections` only ADDS; nothing anywhere clears the map |
+
+So BI connections accumulate for the lifetime of the process, across every document the user opens,
+and every save embeds all of them.
+
+**This is data INJECTION, not data loss** — the mirror image of §3av, which is presumably why a sweep
+looking for lost writes went straight past it. Nothing is corrupted and nothing is lost; the file
+simply contains objects its author never put there, silently and permanently.
+
+**The fix is not "clear three more stores in `new_file`", and that is the point.** Each of these is a
+`State<_>` a command mutates without a `DocumentEffect`, which is precisely the successor project
+already on the list ("`BiState` / `PivotState` / `ScriptState` / `PaneControlState`", 47 sites across
+13 files). What §2w adds is the reason that project is not merely structural debt: an ungated store
+is also an UNSCOPED store, and the save path cannot tell the difference. Whatever shape that project
+takes, the invariant it must buy is **"a store that `assemble_workbook_for_save` reads is reset by
+`new_file`"** — which is a check that can be written, and should be, because three of the current
+answers are wrong and no test noticed.
+
+**Not fixed here, deliberately.** It is a cross-cutting change to three states owned by other
+subsystems, arriving at the end of a pass whose job was reports; landing it unproved would be exactly
+the mistake this register keeps recording. It is filed with a reproduction, the byte-level evidence,
+and the invariant its fix must establish.
+
+
 ## 3. Test-infrastructure decisions
 
 ### 3ae. Proved LIVE — what `remaining-correctness.spec.ts` holds (2026-08-08)
@@ -3990,6 +4050,268 @@ classification.
 (**0 mixed**) all clean at hand-off.
 
 
+### 3av. `report_definitions` — the mirror is gone, not disciplined (2026-08-09)
+
+The last correctness item on the list, and the one §3ai deliberately left: reports were a store
+(`AppState.report_definitions`, a bare `Mutex<Vec<SavedReport>>`) plus a MIRROR
+(`extension_data["calcula.reports"]`), and the mirror was what reached the `.cala`. Nothing forced
+`sync_reports_to_extension_data` to be called, so a report mutation that skipped it was dropped at
+save with no error and no prompt.
+
+**THE ROUTE ENUMERATION, WHICH IS THE EVIDENCE THE FIX IS COMPLETE.** This program has twice been
+burned by a by-name list that missed a caller, so every route was found from the code — `rg
+report_definitions`, then every writer walked — not from the section that filed the item.
+
+| # | route | mutating site | synced before? |
+|---|---|---|---|
+| 1 | `create_report` | `report.rs` push | yes |
+| 2 | `refresh_report` (incl. Edit Design Query rename + DSL swap) | `report.rs` `iter_mut` | yes |
+| 3 | `delete_report` | `report.rs` retain | yes |
+| 4 | `restore_report` (`.calp` pull, via the distributable-object channel) | `report.rs` retain+push | yes |
+| 5 | delete sheet | `sheets.rs` retain + shift | yes |
+| 6 | move sheet | `sheets.rs` remap | yes |
+| 7 | copy sheet | `sheets.rs` shift | yes |
+| 8 | row/column insert + delete | `commands/structure.rs` `sync_report_definitions_to_regions` | yes |
+| 9 | undo/redo of any of the above | `undo_commands.rs` `apply_report_restore` | yes |
+| 10 | open workbook | `persistence.rs` whole-vector assign | n/a (load) |
+| 11 | File > New | `persistence.rs` clear | n/a (reset) |
+
+**All eleven were correct. That is the finding, not an acquittal** — the defect was never an
+instance, it was that correctness at the twelfth site was unpurchased. Scripting/broker and MCP have
+no report surface at all (checked: no `report` verb in the script validators or the 21 MCP tools;
+scripts reach reports only by invoking the same commands), so the list above is the whole surface.
+
+**Two REVERSE-direction routes nobody had enumerated, because the item was framed as store->mirror.**
+The mirror could also be written without the store, and both of these were reachable on HEAD:
+
+1. **`set_extension_data("calcula.reports", …)`.** The reports slot key is spelled EXACTLY like the
+   Reports extension's manifest id (`extensions/Reports/index.ts`), and `setExtensionData(EXTENSION_ID,
+   …)` is the idiom every other extension uses to persist (Animation does it). One such call would have
+   replaced every report in the workbook with whatever the caller was persisting.
+2. **The `.calp` extension-data merge.** `merge_pulled_extension_data` inserts any key the subscriber
+   lacks, so a published workbook's raw reports slot rode into the subscriber — with the PUBLISHER's
+   connection ids and sheet indices and no protected regions — alongside the properly rebound copies
+   that `restore_report` installs.
+
+**THE DESIGN, AND THE ONE THAT WAS REJECTED.** The obvious fix was the `DocumentEffect` shape: a
+guard type over `report_definitions` whose `Drop` performs the sync, making the mutation and the
+persist inseparable. It was rejected, and the reason generalises: **a guard disciplines two
+representations; it does not remove the second one.** It leaves the reverse direction wide open
+(both routes above stay legal), it leaves a cache that can be stale between the mutation and the
+drop, and it leaves a future author free to add a reader that reads the wrong one.
+
+What shipped is the collapse. `AppState.report_definitions` is DELETED. `extension_data[REPORTS_EXT_KEY]`
+is the one representation — the thing that is saved is the thing that is mutated — reached through
+exactly two doors in `report.rs`:
+
+* `read_reports(state) -> Reports` — free, no effect. Returns a `Reports` newtype that derefs to
+  `[SavedReport]`: everything a reader wants, nothing a writer wants. (A plain `Vec` would have made
+  `read_reports(&state).push(r)` compile and do nothing — the same "my change did not survive"
+  failure one scope smaller.)
+* `with_reports_mut(state, effect, f)` — takes a `DocumentEffect`, hands the closure a `&mut Vec`,
+  and writes the result back before it returns. There is no sync to forget because there is nothing
+  to sync. It writes nothing when the closure changes nothing, so the callers that run on every row
+  insert and every sheet reorder do not stamp an empty `"calcula.reports": []` into every workbook.
+
+The two reverse routes are closed at the only place a string key arriving over IPC can be:
+`reject_reserved_extension_key` refuses the slot in both `set_extension_data` variants with a message
+naming the report commands, and the `.calp` merge skips it (reports arrive through `restore_report`,
+which rebinds the connection and registers the region).
+
+Three sheet-index loops in `sheets.rs` — delete, move, copy — collapsed into one
+`report::remap_report_sheets(state, effect, |i| -> Option<usize>)`, which is the exact shape of the
+`remap_sheet_keyed_stores` call sitting next to each of them.
+
+**THE COMPILE-TIME HALF, DEMONSTRATED.** A four-arm probe, each arm a way to change reports without
+persisting them. All four failed; probe deleted.
+
+```
+error[E0609]: no field `report_definitions` on type `&AppState`
+error[E0061]: this method takes 1 argument but 0 arguments were supplied   (extension_data.write())
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied (with_reports_mut, no effect)
+error[E0599]: no method named `push` found for struct `Reports` in the current scope
+```
+
+Two permanent tests replace it: `appstate_holds_no_second_copy_of_the_report_store` (source-level —
+a re-added cache compiles, so there is nothing else to check) and `only_report_rs_reaches_the_reports_slot`,
+which allows exactly three files to NAME the key and carries each one's reason, so a fourth has to be
+argued for rather than merely made to compile.
+
+**THE ACCEPTANCE TESTS ARE `mutate -> save -> reload -> still there`, not "the sync was called."**
+That distinction is the whole item: "the sync was called" is precisely the assertion that PASSES on
+the broken design, because all eleven sites called it. Ten tests, one per route, each ending in a
+real `.cala` written to a temp dir with `save_calcula` and reopened with `load_calcula`. Two of them
+are negative (a deleted report stays deleted; an undone one does not come back), because a deletion
+that fails to reach the file is the same bug wearing the other hat.
+
+**THE CLASS SWEEP.** The shape hunted: state SAVED from one representation and MUTATED through
+another, joined only by a call someone has to remember.
+
+* **Every source in `assemble_workbook_for_save` was walked.** All 25 of them read the canonical
+  store directly — §3ai's conversion is why. `report_definitions` was the last mirror on the Rust
+  save path and there is no second one.
+* **`animationStore.ts` — the same disease, in TypeScript. FIXED.** A module-level `let animations`
+  plus a `persist()` that each mutator had to remember; the extension-data blob is what the `.cala`
+  keeps. Both existing mutators were correct — again, the point is the third. The list now lives in a
+  `#private` field with three doors: `mutate()` (changes AND writes through, indivisibly), `adopt()`
+  (installs a list that CAME FROM the workbook — load and File > New — and says so in its name), and
+  a `readonly` `current`. Probe: `store.#animations = …` → `TS18013 not accessible outside class`;
+  `store.current.push(…)` → `TS2339 Property 'push' does not exist on type 'readonly AnimationSpec[]'`.
+  Three tests added, including the same acceptance shape (mutate → persist → reload → still there).
+* **`CellBookmarks` — the same shape done RIGHT, and worth naming.** Its write-through is driven by a
+  SUBSCRIPTION to the store's change notification, not by a remembered call at each mutator; its own
+  header records that it used to be a `BEFORE_SAVE` listener racing the serializer. Alongside
+  `relink_autofilter_owner` (recompute, don't maintain) and `persist_scheduled_jobs` (project at save
+  time from the one live registry), that is three worked examples of the right answer in this tree.
+* **Checked and CLEAN, single-representation:** `persist_saved_registries` (the file IS the store —
+  every command re-reads it), `persist_scheduled_jobs` (save-time projection of the scheduler
+  singleton, which unconditionally owns its `user_files` key), `rebuild_writeback_index` /
+  `rebuild_gather_cache` / `rebuild_all_dependencies` / `id_registry` / the spill maps (derived caches
+  rebuilt from truth, never saved), `monteCarloStore.ts` (transient playback state, never persisted).
+* **REPORTED, not fixed — `persist_security_config`.** The Script Security level and the AI access
+  ceiling live in `ScriptState` and are mirrored to `script-security.json` by a remembered call. Both
+  writers call it today, and the whole surface is two commands in one file, so the ratio of a type
+  change to the risk is wrong. **Recommendation:** if a third writer is ever added, fold the write
+  into a `set_security_level(state, level)` helper that does both, rather than adding a third
+  remembered call. Worth noting the failure mode is a REVERT to the persisted value on relaunch, not
+  a corruption — and the load path already refuses malformed or unrecognised levels.
+
+**Verification.** app-lib **1,186 passed / 3 ignored** (baseline 1,169). **This pass added 15**
+— 14 `report::tests` and 1 `document_effect_objects_tests` — so 2 of the +17 predate it and the
+stated baseline is stale by that much; every test in the suite passes either way, and with `git`
+unavailable in this session the pristine count could not be re-measured rather than inferred, which
+is why the discrepancy is written down instead of rounded off. core `cargo test` **1,285**
+(baseline 1,285) · script-engine
+**111** (baseline 111) · `test_pivot` **56** (baseline 56) · `cargo check --lib --tests` **0 warnings** ·
+vitest **742 files / 106,168** (baseline 742 / 106,165; +3 = the animation store tests) ·
+`check-types`, `lint:boundaries`, `check:line-endings` (0 mixed), `check:script-typings` (**39/736**)
+all clean. **No `.cala` `format_version` bump**: the reports slot's JSON is byte-identical to what the
+mirror wrote; the only shape change is that a workbook with no reports no longer carries an empty
+`"calcula.reports": []` key, which is an extension-data key like any other.
+
+
+### 3aw. §3av proved LIVE — the sabotage that gave it teeth, and the correctness item that checking the claim found (2026-08-09)
+
+§3av verified the collapse with Rust tests, a source-level test that no second copy is declared, and
+a four-arm compile probe. All three are blind to the same thing: none of them opens the product.
+They cannot show that the gesture a USER makes — Model ▸ Report from Design Query…, type a design
+query, press Create; then Edit Query, rename, Save & refresh — reaches that code, nor that what the
+user sees after Save and reopen is what they left.
+
+**`app/e2e/journeys/report-store.spec.ts` — 7 tests, 7 passing, from a cold app.** One test per
+mutation route, because the defect was that SOME route might forget the persist, so proving one route
+proves nothing about the others. Every test ends in a real `.cala` written with `save_file`, wiped
+through the app's own File ▸ New, and reopened with `openFileAtPath`. The assertion shape is
+`mutate -> save -> WIPE -> reopen -> still there`, never "the sync was called" — the latter is
+exactly the assertion that PASSED on the broken design.
+
+| # | route | the gesture, as a user makes it | time (s) |
+|---|---|---|---|
+| 1 | create + refresh (**THE HEADLINE**) | Model ▸ Report from Design Query…, then the contextual **Report** ribbon tab ▸ Edit Query: rename AND a new design query | 21.4 |
+| 2 | delete (the negative half) | Model ▸ Manage Reports… ▸ Delete — it must STAY deleted, and its cells stay cleared | 17.7 |
+| 3 | row insert — **no UI anywhere in the chain** | a sandboxed BUTTON object script in its worker realm calling `api.insertRows`, worker → broker → `insert_rows` → `sync_report_definitions_to_regions` | 16.9 |
+| 4 | sheet delete | the sheet-tab context menu ▸ Delete and its confirmation; the report's sheet index re-points 1 → 0 | 18.5 |
+| 5 | undo | a real Ctrl+Z on the grid undoing a RENAME — a positive value restored, not an emptiness | 23.9 |
+| 6 | the REVERSE route the fix closed | `set_extension_data("calcula.reports", …)` over IPC is REFUSED, and the reports survive the attempt | 13.4 |
+| 7 | the class sweep's other instance | View ▸ Animation Timeline ▸ + New — a saved animation survives the same cycle | 10.7 |
+
+Every "still there after reopen" is preceded by the PRE-SAVE assertion of the same value AND by an
+assertion that File ▸ New really emptied the store, so no test can pass on a report that was never
+modified or on a wipe that never happened.
+
+The BI fixture (a CSV-backed model built with the Model Editor's own commands) is `invoke`d on
+purpose: it is setup. Everything from "open the Model menu" onwards is the real UI. Two surfaces were
+deliberately not used and the spec says why: the Report tab's own Delete confirms through a NATIVE
+Windows message box (outside the WebView, so outside Playwright), and the Monaco content is replaced
+with `insertText` rather than typed newlines because the field names in `ROWS:` reliably open the
+autocomplete popup, which swallows Enter.
+
+**THE TEETH — both halves, because they answer different questions.**
+
+*Does the CODE refuse a forgetful mutation?* The "twelfth site forgot" defect was written into
+`structure::sync_report_definitions_to_regions` the obvious way — take the reports, edit them, never
+write back:
+
+```
+error[E0599]: no method named `retain` found for struct `Reports` in the current scope
+   --> src\commands\structure.rs:91:10
+```
+
+*Does the SPEC catch it?* Forced past the type with `read_reports(state).into_vec()` — which
+compiles — and run on a real rebuilt app: **exactly one test failed, and it was the sabotaged
+route.**
+
+```
+x 3. a NON-UI route - a sandboxed button script calling api.insertRows ...
+    Error: PRE-SAVE: two inserted rows moved the anchor 2 -> 4
+    Received: 2
+```
+
+Note WHERE it failed: at the PRE-SAVE assertion, not after the reload. That is the collapse's
+dividend stated as a measurement. In the old store/mirror design a forgetful route stayed correct
+until the user closed the file; with one representation it is wrong immediately, in the same gesture,
+where a test — or the user — can see it. The sabotage was reverted and the tree re-checked
+(`cargo check --lib --tests`, 0 warnings) before any reported run.
+
+**CHECKING "no correctness work remains" RATHER THAN ASSERTING IT — AND IT DOES NOT HOLD.**
+
+This section's predecessor rewrote that claim into its honest form: *"the tier is empty as far as
+every check in the tree can tell — and the last two things in it were each found by ADDING a check."*
+Probing this fix's neighbours added one more, and it found a live defect. **§2w below.** The report
+store's neighbour is the rest of the save path: §3av walked every source in
+`assemble_workbook_for_save` and asked "does this read the canonical store?". The question it did not
+ask is the other half — **"is that store scoped to the DOCUMENT?"** — and for three of them it is
+not.
+
+**WHY THE SWEEP MISSED IT — worth stating as its own lesson.** §3av's sweep hunted one shape
+("state SAVED from one representation and MUTATED through another") and cleared everything else. That
+shape was the right hunt for reports, and it missed §2w entirely, because §2w's stores have exactly
+ONE representation — a single live registry projected at save time, which the sweep explicitly
+praised as the RIGHT answer (`persist_scheduled_jobs`). Single-representation is necessary and not
+sufficient: a save-time projection is only correct if the thing it projects has the same lifetime as
+the thing being saved. Two of these three do not, and nothing checked.
+
+**One more thing the sweep did not name, reported and not fixed:
+`extensions/ScriptableObjects/lib/debugger.ts`.** It is the same module-level-mirror-plus-remembered-
+persist shape as `animationStore.ts` was: a module-level `Map` and a `persistBreakpoints()`. Every
+mutating path today funnels through one `commit()` that does both, and `reloadPersistedBreakpoints`
+is a correctly-named adopt door — so it is correct, and it is correct for the same unpurchased reason
+the reports were. The failure mode is losing BREAKPOINTS, not user data, which is why this is a
+recommendation and not a fix: if a fourth mutator is added, give the map the `#private`-field
+treatment `animationStore` got rather than adding a fourth remembered call.
+
+**Verification, every project from a COLD app.** journey **81 passed / 1 skipped** (baseline 74 + 1;
+the 7 new tests are the difference, and nothing else moved) · functional **542 passed / 3 failed / 11
+skipped** · macro **57 / 57** · scenario **24 / 24** · visual **18 / 18** ·
+`check:line-endings` 0 mixed · `cargo check --lib --tests` 0 warnings.
+
+**The third functional failure is a CASCADE, and the evidence is stated with its own limits.**
+`state-consistency.spec.ts:84` ("rapid create-delete cycles") tripped the `contextual-ribbon-tabs`
+invariant at step 32 of 32: *"Table Design" is visible but at least one table must exist (tables=0,
+charts=3)*, after a `table.create / table.delete / undo / sparkline.create / sparkline.delete`
+sequence. Run cold and alone, that test PASSES (and `:46`, the known flake, fails as it does at
+baseline). The usual criterion is met — but both tests in that file seed from `Date.now()`, so the
+isolated run walked a DIFFERENT sequence, which makes "passes in isolation" weaker evidence here than
+for a deterministic spec. The stronger evidence is that the invariant is about a contextual ribbon
+tab after a table delete, nothing in this pass touches ribbon or table code, and the failing walk ran
+in the shared accumulating workbook after ~450 prior tests. **The observation itself is worth
+keeping**: a contextual "Table Design" tab surviving the deletion of the last table is a real (if
+cosmetic) stale-tab bug the monkey did its job by finding, and the monkeys' `Date.now()` seeding is
+the reason it cannot simply be replayed — a seed env var would make findings like this actionable
+instead of anecdotal.
+
+**A macro run was thrown away rather than reported.** The first macro pass reported 9 failed / 13
+passed / 35 did not run. The root was `macro-link-model.spec.ts:489`, whose native-dialog driver
+(`answer-native-dialog.ps1`) returned non-zero; every failure after it was
+`worker process exited unexpectedly (code=3221225794 = STATUS_DLL_INIT_FAILED)` — the Playwright
+worker failing to start, not a test failing. Re-run cold and alone: **57 / 57**. Worth naming
+separately: that spec still hard-codes an ABSOLUTE path into one agent session's scratchpad
+(`.../claude/c--Dropbox-Projekt-Calcula/<session-uuid>/scratchpad/answer-native-dialog.ps1`) — the
+identical defect §3ak found and vendored in `dirty-flag-close.spec.ts`, in a second spec that the
+vendoring pass did not look at. It cannot run on another machine, or after this session's scratchpad
+is cleaned.
+
+
 ## 4. OWNER DECISIONS — not work, product calls
 
 **These are for the owner. Nothing in this section is a defect awaiting a fix; each is a choice
@@ -4895,7 +5217,19 @@ dialog-globals lint fires on all eight shapes. That is §3al.
 
 **Closed since the list was first written:** `1a`, `1b`, `2a` (**including the `saveLayout` residue**,
 §3aj), `2b`, `2c`, `2d`, `2e`, `2f`, `2g`, `2i`, `2j`, `2l`, `2m`, `3ab`, `3c`, `3af` (**including the
-scoping fix it left to the suite owner**, §3ak), and the whole `AppState` store conversion (`3ai`).
+scoping fix it left to the suite owner**, §3ak), the whole `AppState` store conversion (`3ai`), and
+**`3av` — `report_definitions`**, which was the last correctness item on this list *as it then read*;
+proving it live added a new one (`2w`, item 0 below).
+
+**CLOSED 2026-08-09 — the last correctness item, and the class under it (§3av).** Item 1 was
+`report_definitions`: a store plus a hand-synced mirror, where the mirror was what got saved. It was
+not fixed by disciplining the sync. The store was **deleted** — `extension_data["calcula.reports"]`
+is now the one representation, reached through two doors, and a report mutation that skips the
+persist does not exist because there is nothing left to skip. Four bypass arms were made to fail to
+compile, then removed. The sweep for the same shape elsewhere found one more real instance
+(`animationStore.ts`, fixed the same way with a `#private` field), three worked examples of the
+right answer already in the tree, and one small remembered call reported with a recommendation
+rather than converted.
 
 **CLOSED 2026-08-08, this pass — the last three work items on the list:**
 
@@ -4949,9 +5283,29 @@ So the honest form of the claim is narrower, and it is the form worth keeping:
 > about the checks, not about the product. The way to empty it again is to keep making guarantees
 > fail, and to probe the neighbours of every fix.
 
-With that said: as of 2026-08-09 the silently-wrong-answer tier is **again empty**, every unit suite
-is green, and what remains below is unchanged in shape — two test-signal items with owners to find,
-two pieces of structural debt, and the decisions in section 4.
+**A FIFTH CORRECTION, 2026-08-09 (later the same day) — the tier is NOT empty, and the way it was
+refilled is now a pattern with five instances.** The paragraph that stood here said the tier was
+"again empty". It was falsified within hours, by the pass that PROVED §3av on the running app
+(§3aw) — and, like the two before it, not by running anything on the list. §3av's own sweep asked of
+every source in `assemble_workbook_for_save` "does this read the canonical store?" and cleared them
+all. The question it did not ask is the other half — **"is that store scoped to the DOCUMENT?"** —
+and for three of them it is not. **§2w**: `new_file` never resets `PivotState`, `RibbonFilterState`
+or `BiState`, so a document created by File ▸ New and given a single typed cell is saved carrying the
+PREVIOUS document's pivot definitions, ribbon filters and BI model connections — the last of these
+including the whole embedded semantic model, and accumulating across every workbook opened in the
+session. Confirmed on the bytes of the saved `.cala`, not inferred.
+
+Note what makes §2w the mirror image of everything before it: it is data INJECTION, not data loss.
+Every hunt in this program has been for a write that goes missing. This is a write that appears. A
+sweep tuned to the first shape walked straight past it, and single-representation — the property
+§3av bought — is necessary and not sufficient: a save-time projection is only correct if the store
+it projects has the same LIFETIME as the document being saved.
+
+So the honest statement, as of the close of this pass: **the silently-wrong-answer tier holds one
+item, §2w, filed with a reproduction and with the invariant its fix must establish** ("a store that
+`assemble_workbook_for_save` reads is reset by `new_file`"). Every unit suite is green, every E2E
+project is at or better than baseline, and what remains below is otherwise unchanged in shape — two
+test-signal items with owners to find, two pieces of structural debt, and the decisions in section 4.
 
 **The one thing that WAS owed is now paid (§3au).** Both **D8** and **§2v** have been proved on a
 running app — `structural-recalc.spec.ts`, 10 tests through the real row/column-header context menu,
@@ -4964,34 +5318,35 @@ is stored and shown as `SHEET1!`, normalised at cell entry and nothing to do wit
 
 What remains, in order.
 
-1. **`report_definitions`, the one store §3ai deliberately did not fold in.** Its persisted form
-   (`extension_data`) IS gated, so nothing is lost by forgetting the dirty flag — but nothing forces
-   `sync_reports_to_extension_data` to be called either, and a report mutation that skips it is
-   silently dropped at save. Different defect, different fix: make the mirror unreachable except
-   through the sync.
+0. **§2w — `new_file` does not reset three stores that `assemble_workbook_for_save` writes.** The one
+   correctness item on this list, found by probing §3av's neighbours and confirmed on the saved
+   bytes. It is numbered 0 rather than appended because it outranks everything below it: a user's
+   file silently contains another workbook's pivots, ribbon filters and embedded model. Do NOT fix it
+   by clearing three more stores in `new_file` — that is the instance, not the class; item 3 below is
+   the class, and §2w is the reason item 3 is not merely structural debt.
 
-2. **The `visual` golden the `<textarea>` swap moved, and the `clickCell` drift under it.** §3ao(3).
+1. **The `visual` golden the `<textarea>` swap moved, and the `clickCell` drift under it.** §3ao(3).
    `visual` is **17/1**, not the 18/18 this register has been quoting: "editing mode - inline editor
    visible" fails COLD IN ISOLATION. Fix the drift first (`navigateTo` before the capture, the
    documented remedy) and only then re-record, with the reason written down — re-recording first
    just freezes an ambient selection into the baseline.
 
-3. **The three screenshot specs that were never isolated: `protection` (2), `ribbon-tabs` (1),
+2. **The three screenshot specs that were never isolated: `protection` (2), `ribbon-tabs` (1),
    `scrolling` (3).** Everything else in the 21 was classified by running it; these were not, because
    the per-spec cold loop hung on `protection`. `scrolling`'s diff looks like the `clickCell`
-   selection drift, which would make it the same item as (2) — but that is a hypothesis, and this
+   selection drift, which would make it the same item as (1) — but that is a hypothesis, and this
    register's record on hypotheses is now 0 for 6. Run them cold, one spec per app. **Do this AFTER
    the D5 re-record, not before:** `protection` and `scrolling` are `takeGridScreenshot` specs, so
    until their goldens are re-recorded at the new frame size every diff is a crop and tells you
    nothing about the drift. `ribbon-tabs` is unaffected and can be isolated now.
 
-4. **The successor to the `AppState` conversion: `BiState` / `PivotState` / `ScriptState` /
+3. **The successor to the `AppState` conversion: `BiState` / `PivotState` / `ScriptState` /
    `PaneControlState`.** `DocumentEffect` gates *stores*, and the app's stores are now covered; what
    is left ungated is a command mutating state that lives elsewhere. The **47** remaining
    `let _ = ...mutates(...)` sites across **13** files are a precise map of it, exactly as the 61
    were a map of §3c. Recounted this pass: still 47 / 13.
 
-5. **The seven decisions in section 4.** They are product calls, not work, and they are written up
+4. **The seven decisions in section 4.** They are product calls, not work, and they are written up
    for the owner rather than listed here. **D1 was decided and shipped 2026-08-09** — F9 = Calculate
    Now = the workbook, Shift+F9 = Calculate Sheet = the active sheet, under the owner's standing rule
    that Excel parity wins. The benchmark it was gated on came back the opposite way round from the

@@ -803,16 +803,15 @@ pub fn delete_sheet(
     // those above it (their regions were handled by the generic cleanup above).
     // Without this, the next refresh would materialize a deleted-sheet report
     // onto whichever sheet inherited its index.
-    {
-        let mut defs = state.report_definitions.lock().unwrap();
-        defs.retain(|d| d.sheet_index != index);
-        for d in defs.iter_mut() {
-            if d.sheet_index > index {
-                d.sheet_index -= 1;
-            }
+    crate::report::remap_report_sheets(&state, &effect, |i| {
+        if i == index {
+            None
+        } else if i > index {
+            Some(i - 1)
+        } else {
+            Some(i)
         }
-    }
-    crate::report::sync_reports_to_extension_data(&state, &effect);
+    });
 
     // The sheet-index-keyed HashMap stores (comments, scenarios, outlines,
     // conditional formats, data validations, cell types, on-grid controls,
@@ -1415,13 +1414,7 @@ pub fn move_sheet(
                 }
             }
         }
-        {
-            let mut defs = state.report_definitions.lock().unwrap();
-            for d in defs.iter_mut() {
-                d.sheet_index = remap(d.sheet_index);
-            }
-        }
-        crate::report::sync_reports_to_extension_data(&state, &effect);
+        crate::report::remap_report_sheets(&state, &effect, |i| Some(remap(i)));
 
         // Same remap for the sheet-index-keyed HashMap stores (comments,
         // scenarios, outlines, conditional formats, data validations, cell
@@ -1601,15 +1594,9 @@ pub fn copy_sheet(
                 }
             }
         }
-        {
-            let mut defs = state.report_definitions.lock().unwrap();
-            for d in defs.iter_mut() {
-                if d.sheet_index >= insert_at {
-                    d.sheet_index += 1;
-                }
-            }
-        }
-        crate::report::sync_reports_to_extension_data(&state, &effect);
+        crate::report::remap_report_sheets(&state, &effect, |i| {
+            Some(if i >= insert_at { i + 1 } else { i })
+        });
 
         // Same shift for the sheet-index-keyed HashMap stores (comments,
         // scenarios, outlines, conditional formats, data validations, cell

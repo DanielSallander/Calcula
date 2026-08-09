@@ -616,18 +616,43 @@ fn a_workbook_property_write_that_applies_nothing_stays_clean() {
 // ============================================================================
 
 #[test]
-fn syncing_report_definitions_dirties_through_the_commands_effect() {
+fn writing_a_report_dirties_through_the_commands_effect() {
     let (state, fs) = fixture();
     let effect = DocumentEffect::mutates(&fs);
 
-    crate::report::sync_reports_to_extension_data(&state, &effect);
+    crate::report::with_reports_mut(&state, &effect, |defs| {
+        defs.push(crate::report::tests::a_report(0));
+    });
 
     assert!(
         dirty(&fs),
-        "the report registry is not itself a Workbook field, but it is mirrored into \
-         `workbook.extension_data` (which is) and every report command also writes grid \
-         cells -- which is why create/refresh/delete/restore_report were all census \
-         misses despite the registry looking 'unsaved'"
+        "the report store IS `workbook.extension_data[\"calcula.reports\"]` (which is \
+         saved), and every report command also writes grid cells -- which is why \
+         create/refresh/delete/restore_report were all census misses back when the \
+         store looked like an 'unsaved' in-memory registry"
+    );
+}
+
+#[test]
+fn a_no_op_report_pass_does_not_stamp_an_empty_slot() {
+    let (state, fs) = fixture();
+
+    // `with_reports_mut` is called on every row/column insert and every sheet
+    // reorder, whether or not the workbook has any reports. Minting the effect
+    // is the CALLER's decision -- those commands dirty for their own reasons, so
+    // the effect here is a real `mutates` -- but the report slot itself must not
+    // be stamped with an empty `[]` on the way past.
+    let effect = DocumentEffect::mutates(&fs);
+    crate::report::with_reports_mut(&state, &effect, |defs| defs.retain(|_| true));
+
+    assert!(
+        !state
+            .extension_data
+            .read()
+            .unwrap()
+            .contains_key(crate::report::REPORTS_EXT_KEY),
+        "a no-op report pass stamped an empty reports slot into extension_data; \
+         every workbook that ever had a row inserted would carry one"
     );
 }
 

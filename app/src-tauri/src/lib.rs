@@ -483,9 +483,13 @@ pub struct AppState {
     pub reference_style: Mutex<String>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: document_effect::Persisted<Vec<::persistence::SavedPivotLayout>>,
-    /// Grid report definitions (design-query materialized into cells). Persisted
-    /// via extension_data["calcula.reports"]; see src/report.rs.
-    pub report_definitions: Mutex<Vec<crate::report::SavedReport>>,
+    // NOTE: grid report definitions are DELIBERATELY not a field here. They live
+    // in `extension_data["calcula.reports"]` and nowhere else, reached through
+    // `report::read_reports` / `report::with_reports_mut`. The field this comment
+    // replaces was a second copy of that slot, hand-synced by a call every
+    // mutation site had to remember; the saved bytes came from the slot, so a
+    // forgotten sync lost the user's report at save with no error. Re-adding a
+    // cached `Vec<SavedReport>` here re-opens that. See src/report.rs.
     /// Object scripts for scriptable objects (primitive + component scripts)
     pub object_scripts: document_effect::Persisted<Vec<::persistence::SavedObjectScript>>,
     /// Generic per-extension persisted state (extension id -> arbitrary JSON).
@@ -703,7 +707,6 @@ pub fn create_app_state() -> AppState {
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: document_effect::Persisted::new(Vec::new()),
-        report_definitions: Mutex::new(Vec::new()),
         object_scripts: document_effect::Persisted::new(Vec::new()),
         extension_data: document_effect::Persisted::new(std::collections::HashMap::new()),
         sheet_ids: document_effect::Persisted::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),

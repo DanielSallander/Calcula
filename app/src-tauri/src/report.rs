@@ -7,10 +7,33 @@
 //!
 //! Implemented here: create / refresh / delete / list / restore, row-capped
 //! block, overlap- and overwrite-guarded, region-tracked (region_type "report"),
-//! persistence via extension_data (`sync_reports_to_extension_data`), symmetric
-//! cell-based undo (`ReportUndoSnapshot` / undo_commands::apply_report_restore),
-//! and `.calp` distribution (`restore_report`). Interactive @param filters live
-//! frontend-side (Reports extension). Still open: true pagination.
+//! persistence in extension_data (`read_reports` / `with_reports_mut` — the ONLY
+//! two doors, see below), symmetric cell-based undo (`ReportUndoSnapshot` /
+//! undo_commands::apply_report_restore), and `.calp` distribution
+//! (`restore_report`). Interactive @param filters live frontend-side (Reports
+//! extension). Still open: true pagination.
+//!
+//! # THE REPORT STORE HAS EXACTLY ONE REPRESENTATION
+//!
+//! Reports used to live in `AppState.report_definitions` (a bare `Mutex<Vec<_>>`)
+//! AND in `extension_data["calcula.reports"]`, kept in step by a
+//! `sync_reports_to_extension_data` call that every mutation site had to
+//! REMEMBER. The saved bytes came from the mirror, so a mutation that forgot the
+//! sync was silently dropped at save: no error, no prompt, the user's report
+//! simply absent on reopen. Eleven call sites happened to be correct; nothing
+//! made the twelfth correct.
+//!
+//! The store is gone. `extension_data[REPORTS_EXT_KEY]` is now the ONE
+//! representation — the thing that is saved is the thing that is mutated — and
+//! it is reached only through [`read_reports`] (immutable, no effect) and
+//! [`with_reports_mut`] (requires a `DocumentEffect`, writes back before it
+//! returns). There is no sync to forget because there is nothing to sync, and a
+//! caller reaching for the old field does not compile.
+//!
+//! The slot is RESERVED against the generic extension-data tier
+//! (`persistence::set_extension_data`) and against the `.calp` extension-data
+//! merge, so the one remaining way to reach it — a dynamic string key over IPC —
+//! is refused rather than allowed to clobber the reports.
 
 use std::collections::HashSet;
 
@@ -31,14 +54,19 @@ pub type ReportId = identity::EntityId;
 /// Safety cap on materialized rows so a runaway query can't fill a sheet.
 const MAX_REPORT_ROWS: usize = 100_000;
 
-/// Extension-data key under which reports persist (the sanctioned, feature-neutral
-/// workbook persistence channel — no new typed .cala field needed).
+/// Extension-data key under which reports live (the sanctioned, feature-neutral
+/// workbook persistence channel — no new typed .cala field needed). This slot is
+/// the report store itself, not a copy of one: see the module header.
+///
+/// It is deliberately identical to the Reports extension's manifest id, which is
+/// exactly why it is RESERVED: `set_extension_data("calcula.reports", …)` would
+/// otherwise be a legal call that silently replaced every report in the workbook.
 pub const REPORTS_EXT_KEY: &str = "calcula.reports";
 
-/// A saved grid report. Lives in `AppState.report_definitions` (in-memory) and is
-/// mirrored into `extension_data["calcula.reports"]` so it persists with the
-/// workbook. The materialized cells persist as ordinary grid content.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// A saved grid report. Lives ONLY in `extension_data["calcula.reports"]`, read
+/// through [`read_reports`] and mutated through [`with_reports_mut`]. The
+/// materialized cells persist as ordinary grid content.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedReport {
     pub id: ReportId,
@@ -73,17 +101,115 @@ fn connection_data_source_id(bi_state: &BiState, connection_id: identity::Entity
     )
 }
 
-/// Mirror the in-memory report definitions into extension_data so they persist
-/// with the workbook (extension_data is saved + loaded automatically).
-pub fn sync_reports_to_extension_data(state: &AppState, effect: &crate::document_effect::DocumentEffect) {
-    let defs = state.report_definitions.lock().unwrap();
-    if let Ok(v) = serde_json::to_value(&*defs) {
-        state
-            .extension_data
-            .write(effect)
-            .unwrap()
-            .insert(REPORTS_EXT_KEY.to_string(), v);
+/// Decode the reports slot. A slot that is absent, or present but unreadable,
+/// reads as "no reports" — the same answer the loader gave before the collapse.
+fn decode_reports(data: &std::collections::HashMap<String, serde_json::Value>) -> Vec<SavedReport> {
+    data.get(REPORTS_EXT_KEY)
+        .and_then(|v| serde_json::from_value::<Vec<SavedReport>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// A snapshot of the workbook's reports, as of the moment [`read_reports`] was
+/// called. Derefs to `[SavedReport]`, so everything a reader wants — `iter`,
+/// `find`, `len`, indexing — works; nothing a WRITER wants does.
+///
+/// That is the whole reason it exists rather than being a plain `Vec`. A `Vec`
+/// handed out by a read is mutable, and `read_reports(&state).push(r)` compiles
+/// and does nothing: the mutation lands on a copy that is dropped on the next
+/// line. It is the same "my change did not survive" failure the collapse
+/// removed, one scope smaller, so it is refused at the same place — the type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reports(Vec<SavedReport>);
+
+impl std::ops::Deref for Reports {
+    type Target = [SavedReport];
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
+
+impl Reports {
+    /// Take the snapshot as an owned, mutable `Vec` — for callers that need to
+    /// STORE it (the undo snapshot, the command return value), not for callers
+    /// that want to change the workbook's reports. That is `with_reports_mut`.
+    pub fn into_vec(self) -> Vec<SavedReport> {
+        self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a Reports {
+    type Item = &'a SavedReport;
+    type IntoIter = std::slice::Iter<'a, SavedReport>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// READ the workbook's report definitions. Free — no `DocumentEffect`, no write.
+///
+/// Returns a snapshot rather than a guard on purpose: the slot is stored as
+/// JSON, so there is no `&Vec<SavedReport>` inside `AppState` to borrow, and a
+/// guard would only have handed callers a way to hold the `extension_data` lock
+/// across arbitrary work. Reports are a handful per workbook and nothing on a
+/// render path reads them.
+pub fn read_reports(state: &AppState) -> Reports {
+    let data = state.extension_data.read().unwrap();
+    Reports(decode_reports(&data))
+}
+
+/// MUTATE the workbook's report definitions.
+///
+/// This is the only door to a report write, and it writes the result back before
+/// it returns — so "the mutation happened but the workbook was not updated" is
+/// not a state this code can be in. The `DocumentEffect` is the same gate every
+/// other persisted store carries: a report change dirties the document.
+///
+/// Nothing is written when the closure changes nothing, so the callers that run
+/// on every row/column insert and every sheet reorder do not stamp an empty
+/// `"calcula.reports": []` into the extension-data of every workbook that has no
+/// reports. Emptying the list removes the slot rather than storing `[]`.
+///
+/// The `extension_data` write guard is held across the closure: pass a closure
+/// that touches the report list and nothing else.
+pub fn with_reports_mut<R>(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    f: impl FnOnce(&mut Vec<SavedReport>) -> R,
+) -> R {
+    let mut data = state.extension_data.write(effect).unwrap();
+    let before = decode_reports(&data);
+    let mut defs = before.clone();
+    let out = f(&mut defs);
+    if defs != before {
+        if defs.is_empty() {
+            data.remove(REPORTS_EXT_KEY);
+        } else if let Ok(v) = serde_json::to_value(&defs) {
+            data.insert(REPORTS_EXT_KEY.to_string(), v);
+        }
+    }
+    out
+}
+
+/// Re-point every report at its sheet's new index, dropping the reports whose
+/// sheet is gone (`f` returns `None`).
+///
+/// This is the report half of a sheet delete / move / copy, and it is the exact
+/// shape of `sheets::remap_sheet_keyed_stores`, which is called next to it at all
+/// three sites — the three used to be three hand-written loops, each followed by
+/// its own remembered persist call.
+pub fn remap_report_sheets(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    f: impl Fn(usize) -> Option<usize>,
+) {
+    with_reports_mut(state, effect, |defs| {
+        defs.retain(|d| f(d.sheet_index).is_some());
+        for d in defs.iter_mut() {
+            if let Some(i) = f(d.sheet_index) {
+                d.sheet_index = i;
+            }
+        }
+    });
 }
 
 /// Undo/redo snapshot for a report mutation: the affected grid cells (as they
@@ -200,7 +326,7 @@ fn record_report_undo(
     description: &str,
 ) {
     let cells = snapshot_box_cells(state, sheet_idx, bounds);
-    let definitions = state.report_definitions.lock().unwrap().clone();
+    let definitions = read_reports(state).into_vec();
     let merges = merges_in_box(state, sheet_idx, bounds);
     let snapshot = ReportUndoSnapshot { sheet_index: sheet_idx, cells, definitions, merges };
     let data = serde_json::to_vec(&snapshot).unwrap_or_default();
@@ -560,19 +686,20 @@ pub async fn create_report(
     );
 
     let data_source_id = connection_data_source_id(&bi_state, request.query.connection_id);
-    state.report_definitions.lock().unwrap().push(SavedReport {
-        id: report_id,
-        name: request.name,
-        dsl_text: request.dsl_text,
-        connection_id: request.query.connection_id,
-        sheet_index: request.sheet_index,
-        anchor_row: request.anchor_row,
-        anchor_col: request.anchor_col,
-        end_row,
-        end_col,
-        data_source_id,
+    with_reports_mut(&state, &effect, |defs| {
+        defs.push(SavedReport {
+            id: report_id,
+            name: request.name,
+            dsl_text: request.dsl_text,
+            connection_id: request.query.connection_id,
+            sheet_index: request.sheet_index,
+            anchor_row: request.anchor_row,
+            anchor_col: request.anchor_col,
+            end_row,
+            end_col,
+            data_source_id,
+        });
     });
-    sync_reports_to_extension_data(&state, &effect);
 
     Ok(ReportResult {
         report_id,
@@ -594,7 +721,7 @@ pub async fn refresh_report(
     request: RefreshReportRequest,
 ) -> Result<ReportResult, String> {
     let (sheet_idx, dest, old_bounds) = {
-        let defs = state.report_definitions.lock().unwrap();
+        let defs = read_reports(&state);
         let def = defs
             .iter()
             .find(|d| d.id == request.report_id)
@@ -657,8 +784,7 @@ pub async fn refresh_report(
         &view,
     );
 
-    {
-        let mut defs = state.report_definitions.lock().unwrap();
+    with_reports_mut(&state, &effect, |defs| {
         if let Some(d) = defs.iter_mut().find(|d| d.id == request.report_id) {
             d.end_row = end_row;
             d.end_col = end_col;
@@ -672,8 +798,7 @@ pub async fn refresh_report(
                 d.name = name.clone();
             }
         }
-    }
-    sync_reports_to_extension_data(&state, &effect);
+    });
 
     Ok(ReportResult {
         report_id: request.report_id,
@@ -696,18 +821,16 @@ pub fn delete_report(
     // Deleting a report clears its grid region and drops the definition.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // Undo snapshot: the report's cells + the current report list, before clearing.
-    if let Some((sheet_idx, bounds)) = {
-        let defs = state.report_definitions.lock().unwrap();
-        defs.iter().find(|d| d.id == report_id).map(|d| {
-            (d.sheet_index, (d.anchor_row, d.anchor_col, d.end_row, d.end_col))
-        })
-    } {
+    if let Some((sheet_idx, bounds)) = read_reports(&state)
+        .iter()
+        .find(|d| d.id == report_id)
+        .map(|d| (d.sheet_index, (d.anchor_row, d.anchor_col, d.end_row, d.end_col)))
+    {
         record_report_undo(&state, sheet_idx, bounds, "Delete report");
     }
 
     clear_report_region(&state, &effect, report_id);
-    state.report_definitions.lock().unwrap().retain(|d| d.id != report_id);
-    sync_reports_to_extension_data(&state, &effect);
+    with_reports_mut(&state, &effect, |defs| defs.retain(|d| d.id != report_id));
     recalculate_sheet_formulas(&state, &pivot_state, Some((&pane_control_state, &ribbon_filter_state)));
     Ok(())
 }
@@ -715,7 +838,7 @@ pub fn delete_report(
 /// List all report definitions.
 #[tauri::command]
 pub fn list_reports(state: State<'_, AppState>) -> Result<Vec<SavedReport>, String> {
-    Ok(state.report_definitions.lock().unwrap().clone())
+    Ok(read_reports(&state).into_vec())
 }
 
 /// Materialize a report on a `.calp` subscriber (via the distributable-object
@@ -777,12 +900,451 @@ pub fn restore_report(
         }
     }
 
-    {
-        let mut defs = state.report_definitions.lock().unwrap();
+    with_reports_mut(&state, &effect, |defs| {
         defs.retain(|d| d.id != report.id);
         defs.push(report.clone());
-    }
+    });
     reregister_report_region(&state, &report);
-    sync_reports_to_extension_data(&state, &effect);
     Ok(rebind_warning)
 }
+
+// ============================================================================
+// TESTS -- the report store, end to end
+// ============================================================================
+//
+// WHAT THESE EXIST FOR
+// --------------------
+// The bug they close was not a wrong value; it was a mutation that happened and
+// then was not there next time the workbook opened. So the acceptance criterion
+// is deliberately NOT "the persist helper was called" -- that is exactly the
+// assertion that would have passed on the broken code, because the broken code's
+// eleven call sites all called it. Every test below ends in a REAL `.cala` on
+// disk being reopened and asked for its reports.
+//
+// The routes are driven at the lowest production-owned function each one has.
+// `create_report` / `refresh_report` / `delete_report` / `restore_report` are
+// `#[tauri::command]`s taking `State<'_, _>`, which no test in this crate can
+// construct, so their store step is driven through the same door they use --
+// which is the point of the collapse: there is now exactly one such door, and
+// the compile-time half of this file's guarantee is what proves the commands go
+// through it.
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::document_effect::{CleanReason, DocumentEffect};
+    use crate::persistence::FileState;
+
+    /// A report on `sheet_index`, with a distinguishable name.
+    pub(crate) fn a_report(sheet_index: usize) -> SavedReport {
+        SavedReport {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: format!("Sales on sheet {}", sheet_index + 1),
+            dsl_text: "ROWS: Product\nVALUES: SUM(Amount)".to_string(),
+            connection_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            sheet_index,
+            anchor_row: 3,
+            anchor_col: 1,
+            end_row: 12,
+            end_col: 4,
+            data_source_id: Some("ds-sales".to_string()),
+        }
+    }
+
+    fn mutating() -> (AppState, FileState) {
+        (crate::create_app_state(), FileState::default())
+    }
+
+    /// THE ACCEPTANCE STEP: put this state's workbook on disk as a real `.cala`
+    /// and open it again, returning the state the user would be looking at.
+    ///
+    /// The two lines that move `extension_data` in and out are copied verbatim
+    /// from `build_workbook_for_save_with_slicers` and the loader, because those
+    /// are `State<'_, _>`-taking functions; everything between them is the real
+    /// format doing real work in a real ZIP.
+    fn saved_and_reloaded(state: &AppState) -> AppState {
+        let mut workbook = ::persistence::Workbook::new();
+        workbook.extension_data = state.extension_data.read().unwrap().clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reports.cala");
+        calcula_format::save_calcula(&workbook, &path).unwrap();
+        let loaded = calcula_format::load_calcula(&path).unwrap();
+
+        let reopened = crate::create_app_state();
+        let load = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+        *reopened.extension_data.write(&load).unwrap() = loaded.extension_data.clone();
+        reopened
+    }
+
+    /// The names of the reports a reopened workbook has, sorted.
+    fn reopened_report_names(state: &AppState) -> Vec<String> {
+        let mut names: Vec<String> = read_reports(&saved_and_reloaded(state))
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    // ------------------------------------------------------------------
+    // Route by route: mutate -> save -> reload -> still there
+    // ------------------------------------------------------------------
+
+    /// Route 1: `create_report`.
+    #[test]
+    fn a_created_report_survives_save_and_reload() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| defs.push(a_report(0)));
+
+        assert_eq!(reopened_report_names(&state), vec!["Sales on sheet 1"]);
+    }
+
+    /// Route 2: `refresh_report` -- the in-place edit (new bounds, and the Edit
+    /// Design Query rename + DSL replacement).
+    #[test]
+    fn a_refreshed_reports_new_bounds_and_text_survive_save_and_reload() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        let report = a_report(0);
+        let id = report.id;
+        with_reports_mut(&state, &effect, |defs| defs.push(report));
+
+        with_reports_mut(&state, &effect, |defs| {
+            let d = defs.iter_mut().find(|d| d.id == id).unwrap();
+            d.end_row = 40;
+            d.end_col = 7;
+            d.dsl_text = "ROWS: Region\nVALUES: SUM(Amount)".to_string();
+            d.name = "Sales by region".to_string();
+        });
+
+        let reopened = read_reports(&saved_and_reloaded(&state));
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].name, "Sales by region");
+        assert_eq!(reopened[0].dsl_text, "ROWS: Region\nVALUES: SUM(Amount)");
+        assert_eq!((reopened[0].end_row, reopened[0].end_col), (40, 7));
+    }
+
+    /// Route 3: `delete_report`. The negative half -- a deletion that does not
+    /// reach the file is the same bug wearing the other hat.
+    #[test]
+    fn a_deleted_report_stays_deleted_after_save_and_reload() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        let keep = a_report(0);
+        let drop = a_report(1);
+        let drop_id = drop.id;
+        with_reports_mut(&state, &effect, |defs| {
+            defs.push(keep);
+            defs.push(drop);
+        });
+
+        with_reports_mut(&state, &effect, |defs| defs.retain(|d| d.id != drop_id));
+
+        assert_eq!(reopened_report_names(&state), vec!["Sales on sheet 1"]);
+    }
+
+    /// Route 4: `restore_report` -- the `.calp` pull, which replaces by id.
+    #[test]
+    fn a_restored_report_replaces_by_id_and_survives_save_and_reload() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        let original = a_report(0);
+        with_reports_mut(&state, &effect, |defs| defs.push(original.clone()));
+
+        let mut pulled = original.clone();
+        pulled.name = "Sales (from package)".to_string();
+        with_reports_mut(&state, &effect, |defs| {
+            defs.retain(|d| d.id != pulled.id);
+            defs.push(pulled);
+        });
+
+        assert_eq!(reopened_report_names(&state), vec!["Sales (from package)"]);
+    }
+
+    /// Route 5: sheet DELETE -- reports on the deleted sheet go, the ones above
+    /// it slide down.
+    #[test]
+    fn deleting_a_sheet_drops_and_reindexes_reports_through_save_and_reload() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| {
+            defs.push(a_report(0));
+            defs.push(a_report(1));
+            defs.push(a_report(2));
+        });
+
+        // Sheet 2 (index 1) is deleted.
+        remap_report_sheets(&state, &effect, |i| match i.cmp(&1) {
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(i - 1),
+            std::cmp::Ordering::Less => Some(i),
+        });
+
+        let reopened = read_reports(&saved_and_reloaded(&state));
+        let mut sheets: Vec<usize> = reopened.iter().map(|r| r.sheet_index).collect();
+        sheets.sort();
+        assert_eq!(sheets, vec![0, 1]);
+        assert!(
+            !reopened.iter().any(|r| r.name == "Sales on sheet 2"),
+            "the deleted sheet's report came back on reopen -- the next refresh \
+             would materialize it onto whichever sheet inherited its index"
+        );
+    }
+
+    /// Route 6: sheet MOVE / COPY -- pure reindexing.
+    #[test]
+    fn moving_a_sheet_reindexes_reports_through_save_and_reload() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| defs.push(a_report(2)));
+
+        // A copy inserted at index 0 pushes everything up by one.
+        remap_report_sheets(&state, &effect, |i| Some(i + 1));
+
+        let reopened = read_reports(&saved_and_reloaded(&state));
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].sheet_index, 3);
+    }
+
+    /// Route 7: row/column insert + delete, which shift the report's protected
+    /// region and then pull the definition back onto it. Driven through the
+    /// production helper (`commands::structure::sync_report_definitions_to_regions`)
+    /// with the region already shifted, exactly as the insert/delete commands
+    /// leave it.
+    #[test]
+    fn a_row_insert_shift_reaches_the_file_not_just_the_region_index() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        let report = a_report(0);
+        let id = report.id;
+        with_reports_mut(&state, &effect, |defs| defs.push(report.clone()));
+        reregister_report_region(&state, &report);
+
+        // Two rows inserted above the report: the generic region shift has
+        // already moved the region.
+        {
+            let mut regions = state.protected_regions.lock().unwrap();
+            for r in regions.iter_mut() {
+                r.start_row += 2;
+                r.end_row += 2;
+            }
+        }
+        crate::commands::structure::sync_report_definitions_to_regions(&state, &effect);
+
+        let reopened = read_reports(&saved_and_reloaded(&state));
+        let d = reopened.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(
+            (d.anchor_row, d.end_row),
+            (5, 14),
+            "the shifted anchor never reached the file, so the next refresh after a \
+             reopen would re-materialize the report at its pre-insert coordinates"
+        );
+    }
+
+    /// Route 8: undo of a report mutation. `apply_report_restore` swaps the
+    /// whole list back and hands the previous one to the redo entry.
+    #[test]
+    fn undoing_a_report_creation_reaches_the_file() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| defs.push(a_report(0)));
+
+        // The undo snapshot was taken before the create: an empty list.
+        let redo_defs = with_reports_mut(&state, &effect, |defs| std::mem::take(defs));
+
+        assert_eq!(redo_defs.len(), 1, "the redo entry lost the created report");
+        assert!(
+            read_reports(&saved_and_reloaded(&state)).is_empty(),
+            "an undone report came back when the workbook was reopened"
+        );
+    }
+
+    /// Route 9: opening a workbook. The definitions need no restoring at all --
+    /// they arrive with `extension_data` -- so the loader only rebuilds the
+    /// derived region index.
+    #[test]
+    fn opening_a_workbook_registers_a_protected_region_per_saved_report() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| {
+            defs.push(a_report(0));
+            defs.push(a_report(1));
+        });
+
+        let reopened = saved_and_reloaded(&state);
+        for r in &read_reports(&reopened) {
+            reregister_report_region(&reopened, r);
+        }
+
+        let regions = reopened.protected_regions.lock().unwrap();
+        assert_eq!(
+            regions.iter().filter(|r| r.region_type == "report").count(),
+            2,
+            "a reopened report with no protected region is writable straight over"
+        );
+    }
+
+    /// Route 10: File > New. The reports go with `extension_data`, because they
+    /// ARE `extension_data` -- there is no second copy left holding the previous
+    /// workbook's reports into the blank one.
+    #[test]
+    fn a_new_workbook_starts_with_no_reports() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| defs.push(a_report(0)));
+
+        let reset = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+        state.extension_data.write(&reset).unwrap().clear();
+
+        assert!(read_reports(&state).is_empty());
+        assert!(reopened_report_names(&state).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // The slot is not free-form extension state
+    // ------------------------------------------------------------------
+
+    /// The Reports extension's manifest id IS `calcula.reports`. Every other
+    /// extension persists with `setExtensionData(EXTENSION_ID, ...)`, so this is
+    /// not a hypothetical collision -- it is the idiom, pointed at the store.
+    #[test]
+    fn the_generic_extension_data_tier_refuses_the_reserved_reports_key() {
+        let (state, fs) = mutating();
+        let effect = DocumentEffect::mutates(&fs);
+        with_reports_mut(&state, &effect, |defs| defs.push(a_report(0)));
+
+        let err = crate::persistence::set_extension_data_impl(
+            &state,
+            &fs,
+            REPORTS_EXT_KEY.to_string(),
+            Some(serde_json::json!({ "lastOpenedTab": "design" })),
+        )
+        .expect_err("the reports slot is not free-form extension state");
+        assert!(err.contains("reserved"), "unhelpful refusal: {}", err);
+
+        assert_eq!(
+            reopened_report_names(&state),
+            vec!["Sales on sheet 1"],
+            "an ordinary setExtensionData call replaced every report in the workbook"
+        );
+    }
+
+    /// An ordinary extension key is unaffected -- the guard is a reservation,
+    /// not a lockdown of the tier.
+    #[test]
+    fn an_ordinary_extension_key_still_writes() {
+        let (state, fs) = mutating();
+        crate::persistence::set_extension_data_impl(
+            &state,
+            &fs,
+            "calcula.animation".to_string(),
+            Some(serde_json::json!({ "drivers": [] })),
+        )
+        .expect("the sanctioned extension persistence tier still works");
+        assert!(state
+            .extension_data
+            .read()
+            .unwrap()
+            .contains_key("calcula.animation"));
+    }
+
+    // ------------------------------------------------------------------
+    // The structural guarantee
+    // ------------------------------------------------------------------
+
+    /// Lines with the `//` comment prefix stripped, so a mention of the key in
+    /// prose does not count as reaching it.
+    fn code_lines(src: &str) -> impl Iterator<Item = &str> {
+        src.lines().filter(|l| !l.trim_start().starts_with("//"))
+    }
+
+    /// THE STORE HAS ONE REPRESENTATION, AND THE CHECK IS ON THE SOURCE TEXT
+    /// BECAUSE THERE IS NOTHING ELSE TO CHECK.
+    ///
+    /// Re-adding `pub report_definitions: Mutex<Vec<SavedReport>>` to `AppState`
+    /// compiles, `.lock()` hands back a guard, and the whole defect is back --
+    /// a store whose contents reach the file only if somebody remembers to copy
+    /// them over. The failure this test exists for is a future author adding a
+    /// "cache so we don't deserialize on every read".
+    #[test]
+    fn appstate_holds_no_second_copy_of_the_report_store() {
+        let lib = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("lib.rs");
+
+        let offender = code_lines(&lib)
+            .map(str::trim)
+            .find(|l| l.starts_with("pub ") && l.contains("SavedReport"));
+        assert!(
+            offender.is_none(),
+            "AppState grew a second copy of the report store:\n      {}\n\
+             The reports live in extension_data[\"calcula.reports\"] and nowhere else \
+             (report::read_reports / report::with_reports_mut). A cached Vec here has \
+             to be hand-synced into that slot, and the saved bytes come from the slot \
+             -- which is precisely the data-loss shape this collapse removed.",
+            offender.unwrap_or_default()
+        );
+    }
+
+    /// The slot itself has ONE writer, and the files allowed to name it at all
+    /// carry their reason here -- so a new one has to be argued for rather than
+    /// merely made to compile.
+    #[test]
+    fn only_report_rs_reaches_the_reports_slot() {
+        // (file, why it may name the key)
+        let sanctioned: &[(&str, &str)] = &[
+            ("report.rs", "declares the key and owns both doors to it"),
+            (
+                "persistence.rs",
+                "REFUSES it in the generic extension-data tier (reject_reserved_extension_key)",
+            ),
+            (
+                "calp_commands.rs",
+                "SKIPS it in the .calp extension-data merge (reports arrive via restore_report)",
+            ),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if sanctioned.iter().any(|(f, _)| *f == name) || name.contains("tests") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).expect("source is readable");
+                for (n, line) in code_lines(&src).enumerate() {
+                    if line.contains("REPORTS_EXT_KEY") || line.contains("\"calcula.reports\"") {
+                        offenders.push(format!("{}:{}  {}", name, n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these reach the reports slot by key instead of through \
+             report::read_reports / report::with_reports_mut:\n  {}\n\
+             Only {} may name it.",
+            offenders.join("\n  "),
+            sanctioned
+                .iter()
+                .map(|(f, why)| format!("{} ({})", f, why))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+

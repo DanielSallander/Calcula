@@ -1992,6 +1992,14 @@ fn merge_pulled_extension_data(
     let mut data = state.extension_data.write(effect).map_err(|e| e.to_string())?;
     let mut inserted: Vec<String> = Vec::new();
     for (key, value) in pulled {
+        // The grid-report slot is a first-party store, not extension state, and
+        // reports are distributed through their own channel (`restore_report`,
+        // which rebinds the BI connection and registers the protected region).
+        // Letting the raw slot ride in here would seed the subscriber with the
+        // PUBLISHER's connection ids and sheet indices and no regions at all.
+        if key == crate::report::REPORTS_EXT_KEY {
+            continue;
+        }
         if !data.contains_key(key) {
             data.insert(key.clone(), value.clone());
             inserted.push(key.clone());

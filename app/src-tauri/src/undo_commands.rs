@@ -1576,8 +1576,9 @@ fn apply_report_restore(
     }
 
     // --- Restore report definitions + regions (capture current for redo) ---
-    let current_defs = state.report_definitions.lock().unwrap().clone();
-    *state.report_definitions.lock().unwrap() = snapshot.definitions.clone();
+    let current_defs = crate::report::with_reports_mut(state, effect, |defs| {
+        std::mem::replace(defs, snapshot.definitions.clone())
+    });
     {
         let mut regions = state.protected_regions.lock().unwrap();
         regions.retain(|r| r.region_type != "report");
@@ -1585,7 +1586,6 @@ fn apply_report_restore(
     for r in &snapshot.definitions {
         crate::report::reregister_report_region(state, r);
     }
-    crate::report::sync_reports_to_extension_data(state, effect);
 
     inverse_transaction.add_change(CellChange::CustomRestore {
         kind: "report_restore".to_string(),
