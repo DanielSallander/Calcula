@@ -2437,6 +2437,36 @@ pub fn open_file(
 
     let active_idx = workbook.active_sheet.min(workbook.sheets.len() - 1);
 
+    // THE OUTGOING DOCUMENT ENDS HERE. Every store the save path reads goes back
+    // to its blank-document value before a single byte of the new one is
+    // restored, so this command finishes holding exactly the opened document's
+    // state and nothing else. It is the same reset `new_file` runs.
+    //
+    // POSITION IS THE WHOLE POINT: after the file has been read and validated,
+    // never before. Every early return above this line — a wrong password, a
+    // corrupt archive, an empty workbook — must leave the user's current
+    // document exactly as it was. A reset at the top of the command would make a
+    // mistyped passphrase destroy the workbook on screen.
+    //
+    // Most of what follows clears its own store before refilling it, so this is
+    // usually a redundant pass. "Usually" is the defect: BI connections were only
+    // ever ADDED to, so they accumulated across every document opened in the
+    // process and every save embedded all of them, and the advanced-filter hidden
+    // rows were never cleared at all. A reset that runs for every store, whether
+    // or not the restore below happens to be careful, is what makes that class
+    // impossible rather than unlikely.
+    reset_document_scoped_stores(
+        state.inner(),
+        user_files_state.inner(),
+        slicer_state.inner(),
+        ribbon_filter_state.inner(),
+        pane_control_state.inner(),
+        script_state.inner(),
+        pivot_state.inner(),
+        bi_state.inner(),
+        &load_effect,
+    )?;
+
     // Restore tables from the workbook metadata
     let (new_tables, new_table_names) = restore_tables(&workbook.tables, &workbook);
 
@@ -3299,286 +3329,202 @@ pub(crate) fn reset_default_geometry(
     }
 }
 
-#[tauri::command]
-pub fn new_file(
-    state: State<AppState>,
-    file_state: State<FileState>,
-    user_files_state: State<UserFilesState>,
-    slicer_state: State<crate::slicer::SlicerState>,
-    pane_control_state: State<crate::pane_control::PaneControlState>,
-    script_state: State<crate::scripting::types::ScriptState>,
-    window: tauri::Window,
+// ============================================================================
+// THE DOCUMENT-SCOPED STORE RESET
+// ============================================================================
+
+/// Put every store `assemble_workbook_for_save` reads back to its blank-document
+/// value. THE ONE reset the document-replacing paths run.
+///
+/// THE INVARIANT THIS EXISTS TO BUY: *a store `assemble_workbook_for_save` reads
+/// is reset by the document-replacing paths.* Pinned by the census in
+/// `document_store_census_tests.rs`, which enumerates the save path's sources
+/// from the source tree and requires each to be reset in THIS function's body or
+/// to carry a written exemption. Nothing else is allowed to be the reset: a
+/// second, private clear somewhere else is how the defect described below got
+/// in, and a census with two answers to check is a census with none.
+///
+/// WHY IT IS ONE FUNCTION AND NOT A LIST OF CALLS IN TWO PLACES. `new_file` used
+/// to reset its stores inline, and it did not take `PivotState`,
+/// `RibbonFilterState` or `BiState` at all — so File > New left the previous
+/// document's pivots, ribbon filters and (whole embedded) BI models live, and
+/// the very next save wrote them into a document the user had typed one cell
+/// into. `restore_pivot_definitions` and `restore_ribbon_filters` happened to
+/// clear on the OPEN path, which is why only File > New leaked those two;
+/// nothing anywhere cleared `BiState`, so connections accumulated for the life
+/// of the process and every save embedded all of them. That is data INJECTION,
+/// not data loss: the file physically contains another project's semantic model.
+/// Collapsing the reset into one function makes "which stores does a new
+/// document start blank" a single answerable question instead of a claim about
+/// two call sites nobody had compared.
+///
+/// This resets DOCUMENT state only. Application state — the locale, the
+/// reference style, iterative-calculation settings, script security levels — is
+/// not the document's and survives, which is why those stores are not save
+/// sources either.
+///
+/// The caller supplies the `DocumentEffect`. Both callers pass a
+/// `deliberately_clean(LoadingFromDisk)` one: replacing the document is not an
+/// edit to it, and both end by marking the document saved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reset_document_scoped_stores(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    script_state: &crate::scripting::types::ScriptState,
+    pivot_state: &crate::pivot::types::PivotState,
+    bi_state: &crate::bi::types::BiState,
+    effect: &crate::document_effect::DocumentEffect,
 ) -> Result<(), String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // ---- Grid, styles and per-sheet geometry -------------------------------
+    *state.grid.write(effect).map_err(|e| e.to_string())? = engine::grid::Grid::new();
+    *state.style_registry.write(effect).map_err(|e| e.to_string())? =
+        engine::style::StyleRegistry::new();
+    state.column_widths.write(effect).map_err(|e| e.to_string())?.clear();
+    state.row_heights.write(effect).map_err(|e| e.to_string())?.clear();
 
-    // Tearing the old document down to build a new blank one. `new_file` ends by
-    // assigning is_modified = false, so none of the resets below may dirty -- ONE
-    // decision authorises them all. `rg deliberately_clean` lists every such decision.
-    let reset_effect = crate::document_effect::DocumentEffect::deliberately_clean(
-        crate::document_effect::CleanReason::LoadingFromDisk,
-    );
     {
-        let mut grid = state.grid.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut styles = state.style_registry.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut col_widths = state.column_widths.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut row_heights = state.row_heights.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut deps = state.dependents.lock().map_err(|e| e.to_string())?;
-        let mut tables = state.tables.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut table_names = state.table_names.write(&reset_effect).map_err(|e| e.to_string())?;
-
-        *grid = engine::grid::Grid::new();
-        *styles = engine::style::StyleRegistry::new();
-        col_widths.clear();
-        row_heights.clear();
-        deps.clear();
-
-        // Reset per-sheet grids to a single empty sheet
-        let mut grids = state.grids.write(&reset_effect).map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(effect).map_err(|e| e.to_string())?;
         grids.clear();
         grids.push(engine::grid::Grid::new());
+    }
+    *state.sheet_names.write(effect).map_err(|e| e.to_string())? = vec!["Sheet1".to_string()];
+    // A blank document gets a FRESH SheetId, and this is the one store whose
+    // absence from the old `new_file` was invisible rather than merely wrong:
+    // `build_workbook_for_save` reads `sheet_ids[i]`, so File > New used to hand
+    // the new document the PREVIOUS document's sheet identity — the key every
+    // .calp override, subscription ledger entry and writeback region is filed
+    // under. Two unrelated workbooks then claimed the same sheet.
+    *state.sheet_ids.write(effect).map_err(|e| e.to_string())? =
+        vec![SheetId::from_bytes(identity::generate_uuid_v7())];
+    *state.active_sheet.write(effect).map_err(|e| e.to_string())? = 0;
 
-        // Reset sheet names to a single "Sheet1"
-        let mut sheet_names = state.sheet_names.write(&reset_effect).map_err(|e| e.to_string())?;
-        *sheet_names = vec!["Sheet1".to_string()];
-
-        // Reset active sheet to 0
-        *state.active_sheet.write(&reset_effect).map_err(|e| e.to_string())? = 0;
-
-        // Reset per-sheet dimension storage
-        let mut all_cw = state.all_column_widths.write(&reset_effect).map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.write(&reset_effect).map_err(|e| e.to_string())?;
+    {
+        let mut all_cw = state.all_column_widths.write(effect).map_err(|e| e.to_string())?;
         all_cw.clear();
         all_cw.push(std::collections::HashMap::new());
+    }
+    {
+        let mut all_rh = state.all_row_heights.write(effect).map_err(|e| e.to_string())?;
         all_rh.clear();
         all_rh.push(std::collections::HashMap::new());
+    }
+    reset_default_geometry(state, effect);
 
-        // Clear table state
-        tables.clear();
-        table_names.clear();
-
-        // Reset default dimensions (see `reset_default_geometry`).
-        reset_default_geometry(state.inner(), &reset_effect);
-
-        // Reset freeze/split/scroll configs to single default sheet
-        let mut freeze_configs = state.freeze_configs.write(&reset_effect).map_err(|e| e.to_string())?;
+    // ---- Per-sheet view configuration --------------------------------------
+    {
+        let mut freeze_configs = state.freeze_configs.write(effect).map_err(|e| e.to_string())?;
         freeze_configs.clear();
         freeze_configs.push(crate::sheets::FreezeConfig { freeze_row: None, freeze_col: None });
-
-        let mut split_configs = state.split_configs.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut split_configs = state.split_configs.write(effect).map_err(|e| e.to_string())?;
         split_configs.clear();
         split_configs.push(crate::sheets::SplitConfig::default());
-
-        let mut sheet_zooms = state.sheet_zooms.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut sheet_zooms = state.sheet_zooms.write(effect).map_err(|e| e.to_string())?;
         sheet_zooms.clear();
         sheet_zooms.push(::persistence::DEFAULT_SHEET_ZOOM_PERCENT);
-
+    }
+    {
         let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
         scroll_areas.clear();
         scroll_areas.push(None);
-
-        // Reset tab colors and sheet visibility
-        let mut tab_colors = state.tab_colors.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut tab_colors = state.tab_colors.write(effect).map_err(|e| e.to_string())?;
         tab_colors.clear();
         tab_colors.push(String::new());
-
-        let mut sheet_visibility = state.sheet_visibility.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut sheet_visibility = state.sheet_visibility.write(effect).map_err(|e| e.to_string())?;
         sheet_visibility.clear();
         sheet_visibility.push("visible".to_string());
-
-        // Reset merged regions
-        state.merged_regions.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-        let mut all_merged = state.all_merged_regions.write(&reset_effect).map_err(|e| e.to_string())?;
-        all_merged.clear();
-        all_merged.push(std::collections::HashSet::new());
-
-        // Reset user-hidden rows/cols
-        state.user_hidden_rows.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-        state.user_hidden_cols.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-        let mut all_uhr = state.all_user_hidden_rows.write(&reset_effect).map_err(|e| e.to_string())?;
-        all_uhr.clear();
-        all_uhr.push(std::collections::HashSet::new());
-        let mut all_uhc = state.all_user_hidden_cols.write(&reset_effect).map_err(|e| e.to_string())?;
-        all_uhc.clear();
-        all_uhc.push(std::collections::HashSet::new());
-
-        // Reset gridlines visibility
-        let mut show_gridlines = state.show_gridlines.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut show_gridlines = state.show_gridlines.write(effect).map_err(|e| e.to_string())?;
         show_gridlines.clear();
         show_gridlines.push(true);
-
-        // Reset display flags
-        let mut display_flags = state.sheet_display_flags.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut display_flags = state.sheet_display_flags.write(effect).map_err(|e| e.to_string())?;
         display_flags.clear();
         display_flags.push(crate::api_types::SheetDisplayFlags::default());
-
-        // Reset page setups
-        let mut page_setups = state.page_setups.write(&reset_effect).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut page_setups = state.page_setups.write(effect).map_err(|e| e.to_string())?;
         page_setups.clear();
         page_setups.push(crate::api_types::PageSetup::default());
     }
 
-    // Clear notes, hyperlinks, comments
-    state.notes.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-    state.hyperlinks.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-    state.comments.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+    // ---- Merges and hidden rows/columns ------------------------------------
+    state.merged_regions.write(effect).map_err(|e| e.to_string())?.clear();
+    {
+        let mut all_merged = state.all_merged_regions.write(effect).map_err(|e| e.to_string())?;
+        all_merged.clear();
+        all_merged.push(std::collections::HashSet::new());
+    }
+    state.user_hidden_rows.write(effect).map_err(|e| e.to_string())?.clear();
+    state.user_hidden_cols.write(effect).map_err(|e| e.to_string())?.clear();
+    {
+        let mut all_uhr = state.all_user_hidden_rows.write(effect).map_err(|e| e.to_string())?;
+        all_uhr.clear();
+        all_uhr.push(std::collections::HashSet::new());
+    }
+    {
+        let mut all_uhc = state.all_user_hidden_cols.write(effect).map_err(|e| e.to_string())?;
+        all_uhc.clear();
+        all_uhc.push(std::collections::HashSet::new());
+    }
+    // The advanced-filter hidden rows are a save source too (they are folded
+    // into every sheet's persisted `hidden_rows`), and `open_file` never cleared
+    // them — so rows an advanced filter had hidden in the PREVIOUS document were
+    // written out as hidden in the one just opened.
+    state.advanced_filter_hidden_rows.lock().map_err(|e| e.to_string())?.clear();
 
-    // Clear named ranges
-    state.named_ranges.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+    // ---- Cell-level annotation stores --------------------------------------
+    state.notes.write(effect).map_err(|e| e.to_string())?.clear();
+    state.hyperlinks.write(effect).map_err(|e| e.to_string())?.clear();
+    state.comments.write(effect).map_err(|e| e.to_string())?.clear();
+    state.named_ranges.write(effect).map_err(|e| e.to_string())?.clear();
+    state.data_validations.write(effect).map_err(|e| e.to_string())?.clear();
+    state.conditional_formats.write(effect).map_err(|e| e.to_string())?.clear();
+    state.cell_types.write(effect).map_err(|e| e.to_string())?.clear();
+    state.cell_behaviors.write(effect).map_err(|e| e.to_string())?.clear();
+    state.sheet_protection.write(effect).map_err(|e| e.to_string())?.clear();
+    state.auto_filters.write(effect).map_err(|e| e.to_string())?.clear();
+    state.outlines.write(effect).map_err(|e| e.to_string())?.clear();
+    state.tables.write(effect).map_err(|e| e.to_string())?.clear();
+    state.scenarios.write(effect).map_err(|e| e.to_string())?.clear();
+    state.controls.write(effect).map_err(|e| e.to_string())?.clear();
+    // A new document carries no pictures, and leaving the previous document's
+    // blobs resident would both leak its content into the next save and hold its
+    // bytes in memory for the rest of the session.
+    state.media.write(effect).map_err(|e| e.to_string())?.clear();
+    state.charts.write(effect).map_err(|e| e.to_string())?.clear();
+    state.sparklines.write(effect).map_err(|e| e.to_string())?.clear();
 
-    // Clear data validations
-    state.data_validations.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear conditional formats
-    state.conditional_formats.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear cross-sheet dependencies
-    state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.cross_sheet_dependencies.lock().map_err(|e| e.to_string())?.clear();
-
-    // Reset undo stack
-    *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
-
-    // Clear sheet protection and cell protection
-    state.sheet_protection.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-    // Workbook structure protection must reset too — without this a File>New
-    // after opening a structure-protected workbook inherits the old password
-    // (and, now that protection persists, would even SAVE the old hash into
-    // the fresh document).
-    *state.workbook_protection.write(&reset_effect).map_err(|e| e.to_string())? =
-        crate::protection::WorkbookProtection::default();
-
-    // Clear auto filters
-    state.auto_filters.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear outlines/grouping
-    state.outlines.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear protected regions
-    state.protected_regions.lock().map_err(|e| e.to_string())?.clear();
-
-    // Clear computed properties
-    state.computed_properties.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+    // ---- Computed properties (store + its dependency maps + id counter) ----
+    state.computed_properties.write(effect).map_err(|e| e.to_string())?.clear();
     *state.next_computed_prop_id.lock().map_err(|e| e.to_string())? = 1;
     state.computed_prop_dependencies.lock().map_err(|e| e.to_string())?.clear();
     state.computed_prop_dependents.lock().map_err(|e| e.to_string())?.clear();
 
-    // Clear controls
-    state.controls.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+    // ---- Named styles ------------------------------------------------------
+    // Clear-then-reseed, in this order and in this function, because the seed
+    // mints style indices into the registry emptied a few lines above. The
+    // built-ins are the app's gallery, not the document's, so they must be
+    // present again the moment this returns.
+    state.named_styles.write(effect).map_err(|e| e.to_string())?.clear();
+    crate::named_styles_cmd::init_builtin_named_styles(state);
 
-    // Clear embedded media. A new document carries no pictures, and leaving the
-    // previous document's blobs resident would both leak its content into the
-    // next save and hold its bytes in memory for the rest of the session.
-    state.media.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear cell-type assignments
-    state.cell_types.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear cell-behavior bindings
-    state.cell_behaviors.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear spill tracking
-    state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
-    state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
-
-    // Clear advanced filter hidden rows
-    state.advanced_filter_hidden_rows.lock().map_err(|e| e.to_string())?.clear();
-
-    // Clear dependency maps
-    state.dependencies.lock().map_err(|e| e.to_string())?.clear();
-    state.column_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.row_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.column_dependencies.lock().map_err(|e| e.to_string())?.clear();
-    state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
-    // ...including the DEFINED-NAME edges, or a blank document would keep
-    // pointing the old workbook's names at cell coordinates that no longer mean
-    // anything (D2).
-    state.name_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.name_dependencies.lock().map_err(|e| e.to_string())?.clear();
-
-    // Reset conditional format ID counter
-    *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;
-
-    // Clear scenarios
-    state.scenarios.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear named styles
-    state.named_styles.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-    // Re-seed built-in styles: the clear above wiped them too, which left the
-    // Cell Styles gallery empty after File > New.
-    crate::named_styles_cmd::init_builtin_named_styles(&state);
-
-    // Reset theme to default
-    *state.theme.write(&reset_effect).map_err(|e| e.to_string())? = engine::ThemeDefinition::office();
-
-    // Clear slicer state
-    slicer_state.slicers.write(&reset_effect).unwrap().clear();
-    slicer_state.computed_properties.write(&reset_effect).unwrap().clear();
-    slicer_state.computed_prop_dependencies.lock().unwrap().clear();
-    slicer_state.computed_prop_dependents.lock().unwrap().clear();
-
-    // Clear pane control state (Controls pane)
-    pane_control_state.controls.lock().unwrap().clear();
-
-    // Clear chart state
-    state.charts.write(&reset_effect).unwrap().clear();
-
-    // Clear sparkline state (BUG-0004: sparklines survived File > New)
-    state.sparklines.write(&reset_effect).unwrap().clear();
-
-    // Clear script/notebook state
-    script_state.workbook_scripts.write(&reset_effect).unwrap().clear();
-    script_state.workbook_notebooks.write(&reset_effect).unwrap().clear();
-
-    // Drop the scheduled-job registry with the scripts that own it. Without
-    // this the previous workbook's schedule would survive into the blank
-    // document and be SAVED into it — the same leak family as the object-script
-    // leak fixed just below.
-    crate::scripting::scheduler::reset_jobs();
-
-    // Clear object scripts — otherwise the previous workbook's scripts
-    // (including distributed ones) leak into the new workbook and get saved
-    // with it. Same family as the writeback-index leak fixed in Wave 0.
-    state.object_scripts.write(&reset_effect).unwrap().clear();
-    // Clearing extension_data clears the grid reports with it — the slot IS the
-    // report store, so there is no second copy left holding the old workbook's
-    // reports (there used to be, and it had to be cleared by hand right here).
-    state.extension_data.write(&reset_effect).unwrap().clear();
-    state.pivot_layouts.write(&reset_effect).unwrap().clear();
-
-    // Clear subscription metadata
-    *state.subscriptions.write(&reset_effect).map_err(|e| e.to_string())? =
-        calp::manifest::SubscriptionManifest::default();
-
-    // Clear override layer
-    *state.override_layer.write(&reset_effect).map_err(|e| e.to_string())? =
-        calp::OverrideLayer::new();
-
-    // Reset audit log
-    *state.audit_log.write(&reset_effect).map_err(|e| e.to_string())? =
-        calp::audit::AuditLog::new();
-
-    // Reset writeback layer
-    *state.writeback_layer.write(&reset_effect).map_err(|e| e.to_string())? =
-        calp::writeback::WritebackLayer::new();
-
-    // Reset writeback index/declarations (otherwise the previous workbook's
-    // regions stay active in the new workbook)
-    *state.writeback_index.lock().map_err(|e| e.to_string())? =
-        calp::WritebackIndex::default();
-    state.writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
-    // The MODEL writeback mirror must be cleared with its grid sibling: new_file
-    // does not call rebuild_writeback_index, so a stale set would survive into
-    // the blank workbook and make the next refresh diff report the PREVIOUS
-    // workbook's columns as removed.
-    state.model_writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
-    state.writeback_draft_regions.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Clear user files
-    user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
-
-    // Reset workbook properties with defaults
+    // ---- Theme and document properties -------------------------------------
+    *state.theme.write(effect).map_err(|e| e.to_string())? = engine::ThemeDefinition::office();
     {
-        let mut props = state.workbook_properties.write(&reset_effect).unwrap();
+        let mut props = state.workbook_properties.write(effect).map_err(|e| e.to_string())?;
         let author = std::env::var("USERNAME")
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_default();
@@ -3590,6 +3536,165 @@ pub fn new_file(
             ..Default::default()
         };
     }
+
+    // ---- Distribution (.calp) stores ---------------------------------------
+    *state.subscriptions.write(effect).map_err(|e| e.to_string())? =
+        calp::manifest::SubscriptionManifest::default();
+    *state.override_layer.write(effect).map_err(|e| e.to_string())? = calp::OverrideLayer::new();
+    *state.audit_log.write(effect).map_err(|e| e.to_string())? = calp::audit::AuditLog::new();
+    *state.writeback_layer.write(effect).map_err(|e| e.to_string())? =
+        calp::writeback::WritebackLayer::new();
+    state.writeback_draft_regions.write(effect).map_err(|e| e.to_string())?.clear();
+    // The writeback COLUMN history is a save source (`model_writeback_values.json`)
+    // that `new_file` never reset, so a blank document saved the previous
+    // workbook's submitted values. The session floor goes with it: it is the
+    // "Blank columns start blank" marker for THIS document's session.
+    *state.model_writeback.write(effect).map_err(|e| e.to_string())? =
+        crate::bi::writeback::ModelWritebackStore::default();
+    *state.model_writeback_floor.lock().map_err(|e| e.to_string())? =
+        chrono::Utc::now().to_rfc3339();
+
+    // ---- Extension-owned document slots ------------------------------------
+    state.object_scripts.write(effect).map_err(|e| e.to_string())?.clear();
+    // Clearing extension_data clears the grid reports with it — the slot IS the
+    // report store, so there is no second copy left holding the old workbook's
+    // reports.
+    state.extension_data.write(effect).map_err(|e| e.to_string())?.clear();
+    state.pivot_layouts.write(effect).map_err(|e| e.to_string())?.clear();
+
+    // ---- Stores owned by the sibling States --------------------------------
+    user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
+
+    slicer_state.slicers.write(effect).map_err(|e| e.to_string())?.clear();
+    slicer_state.computed_properties.write(effect).map_err(|e| e.to_string())?.clear();
+    slicer_state.computed_prop_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    slicer_state.computed_prop_dependents.lock().map_err(|e| e.to_string())?.clear();
+
+    ribbon_filter_state.filters.write(effect).map_err(|e| e.to_string())?.clear();
+
+    pane_control_state.controls.lock().map_err(|e| e.to_string())?.clear();
+
+    script_state.workbook_scripts.write(effect).map_err(|e| e.to_string())?.clear();
+    script_state.workbook_notebooks.write(effect).map_err(|e| e.to_string())?.clear();
+    // The scheduled-job registry is bound to the scripts just dropped.
+    crate::scripting::scheduler::reset_jobs();
+
+    // Pivot definitions AND the session caches keyed by the same pivot ids —
+    // a view, a cancellation token or a "previous state" left behind names a
+    // pivot the new document has never heard of.
+    pivot_state.pivot_tables.write(effect).map_err(|e| e.to_string())?.clear();
+    pivot_state.bi_metadata.write(effect).map_err(|e| e.to_string())?.clear();
+    *pivot_state.active_pivot_id.lock().map_err(|e| e.to_string())? = None;
+    pivot_state.views.lock().map_err(|e| e.to_string())?.clear();
+    pivot_state.cancellation_tokens.lock().map_err(|e| e.to_string())?.clear();
+    pivot_state.previous_states.lock().map_err(|e| e.to_string())?.clear();
+
+    // BI connections are TORN DOWN, not cleared — see `reset_bi_connections`
+    // for why a `clear()` would strand an engine (and its open connectors) in
+    // the shared registry for the life of the process.
+    crate::bi::commands::reset_bi_connections(bi_state);
+
+    // Protected regions are not a save source, but every entry in the vector
+    // names an object of the document being replaced — a pivot, a chart, a
+    // report or a BI query — and the connections and pivots that owned them have
+    // just been dropped. `open_file` never cleared this at all, so the previous
+    // workbook's regions went on refusing edits to cells in the new one. Both
+    // callers restore their own regions after this returns
+    // (`reregister_report_region`, `update_pivot_region`).
+    state.protected_regions.lock().map_err(|e| e.to_string())?.clear();
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn new_file(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    bi_state: State<crate::bi::types::BiState>,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // Tearing the old document down to build a new blank one. `new_file` ends by
+    // assigning is_modified = false, so none of the resets below may dirty -- ONE
+    // decision authorises them all. `rg deliberately_clean` lists every such decision.
+    let reset_effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    // Every store the save path reads goes back to its blank-document value in
+    // ONE call, which both document-replacing paths share. `new_file` used to do
+    // this inline and did not even take `PivotState`, `RibbonFilterState` or
+    // `BiState` — see `reset_document_scoped_stores` for what that leaked.
+    reset_document_scoped_stores(
+        state.inner(),
+        user_files_state.inner(),
+        slicer_state.inner(),
+        ribbon_filter_state.inner(),
+        pane_control_state.inner(),
+        script_state.inner(),
+        pivot_state.inner(),
+        bi_state.inner(),
+        &reset_effect,
+    )?;
+
+    // ---- Session state that is NOT a save source ---------------------------
+    // Everything below is rebuilt from the grid rather than persisted, so it is
+    // outside the census's invariant — but it still describes the document that
+    // has just been thrown away, and leaving it would point the blank workbook's
+    // machinery at cells that no longer exist.
+
+    // Table NAMES (the reverse index of `tables`, never serialized on its own).
+    state.table_names.write(&reset_effect).map_err(|e| e.to_string())?.clear();
+
+    // Dependency graph, in every direction it is indexed.
+    state.dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.cross_sheet_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.column_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.row_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.column_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    // ...including the DEFINED-NAME edges, or a blank document would keep
+    // pointing the old workbook's names at cell coordinates that no longer mean
+    // anything (D2).
+    state.name_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.name_dependencies.lock().map_err(|e| e.to_string())?.clear();
+
+    // Reset undo stack
+    *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
+
+    // Workbook structure protection must reset too — without this a File>New
+    // after opening a structure-protected workbook inherits the old password
+    // (and, now that protection persists, would even SAVE the old hash into
+    // the fresh document).
+    *state.workbook_protection.write(&reset_effect).map_err(|e| e.to_string())? =
+        crate::protection::WorkbookProtection::default();
+
+    // Clear spill tracking
+    state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
+    state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
+
+    // Reset conditional format ID counter
+    *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;
+
+    // Reset writeback index/declarations (otherwise the previous workbook's
+    // regions stay active in the new workbook)
+    *state.writeback_index.lock().map_err(|e| e.to_string())? =
+        calp::WritebackIndex::default();
+    state.writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
+    // The MODEL writeback mirror must be cleared with its grid sibling: new_file
+    // does not call rebuild_writeback_index, so a stale set would survive into
+    // the blank workbook and make the next refresh diff report the PREVIOUS
+    // workbook's columns as removed.
+    state.model_writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
     crate::document_effect::mark_saved(&file_state);

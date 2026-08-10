@@ -960,6 +960,65 @@ pub(crate) fn collect_local_bi_caches(
     out
 }
 
+/// Tear down every BI connection this document owns, and the saved RLS roles
+/// waiting for one. Called only from `persistence::reset_document_scoped_stores`
+/// — the single reset the document-replacing paths run.
+///
+/// TEAR DOWN, DO NOT `clear()`. A `Connection` is not an inert record: it holds
+/// an `Arc<TokioMutex<Engine>>` counted by the shared `EngineRegistry`, and the
+/// engine owns the open database connectors. Dropping the map alone would leave
+/// every engine in the registry with a reference count that can never fall to
+/// zero — the model, its cached Arrow batches and its connectors resident for
+/// the life of the process, and the disk cache never flushed. So each connection
+/// is removed from the map, its registry reference is RELEASED (which flushes
+/// that engine's cache to disk and drops it on the last reference), and only
+/// then is the `Connection` — and with it the last `Arc` — dropped.
+///
+/// SAFE WHILE A QUERY IS IN FLIGHT. The established async pattern clones the
+/// engine `Arc` out from under the `connections` lock and then `.lock().await`s
+/// it, so an in-flight query holds its own `Arc` and its own guard. Removing the
+/// connection here cannot pull the engine out from under it: the clone keeps the
+/// engine alive until that task finishes, and this function never blocks on the
+/// engine lock (`release` uses `try_lock`, exactly as `bi_delete_connection`
+/// does). The query completes against the document that started it and then the
+/// engine drops.
+///
+/// The on-disk cache is deliberately NOT deleted, which is where this differs
+/// from `bi_delete_connection`. Deleting a connection is the user saying that
+/// data should be gone; closing a document is not. The cache is keyed by model
+/// path (or the connection's stable `local:{id}` identity, which `restore_local_bi_connections`
+/// reuses verbatim), so reopening the same workbook finds its offline data
+/// exactly where it left it.
+///
+/// The grid regions those connections' queries had locked are NOT dropped here.
+/// `reset_document_scoped_stores` clears `protected_regions` wholesale a moment
+/// later, because every entry in it — pivot, chart, report or BI query — belongs
+/// to the document being replaced. `bi_delete_connection` has to be selective
+/// only because it removes ONE connection from a document that carries on.
+pub(crate) fn reset_bi_connections(bi_state: &BiState) {
+    let torn_down: Vec<Connection> = {
+        let mut connections = match bi_state.connections.lock() {
+            Ok(c) => c,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        connections.drain().map(|(_, conn)| conn).collect()
+    };
+
+    for conn in torn_down {
+        if let Some(key) = conn.model_key.as_ref() {
+            // Flushes this engine's cache and drops it when the last connection
+            // using that model goes away.
+            bi_state.engine_registry.release(key);
+        }
+        drop(conn);
+    }
+
+    match bi_state.pending_roles.lock() {
+        Ok(mut pending) => pending.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+}
+
 /// Reconstruct locally-authored BI connections from the workbook on open.
 /// Each is rebuilt with its ORIGINAL id (so pivots' `data_source_id` keeps
 /// matching across save/open cycles), the embedded model goes into a fresh

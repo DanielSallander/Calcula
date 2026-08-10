@@ -39,8 +39,9 @@
 import { test, expect } from "../fixtures";
 import type { Page } from "@playwright/test";
 import { execFileSync } from "child_process";
-import * as os from "os";
+import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 
 // --- private patch -----------------------------------------------------------
 const MARKER = { row: 90, col: 65 }; // BN91 (0-based row/col)
@@ -288,17 +289,16 @@ async function answerPermission(page: Page, label: "Deny" | "Allow once"): Promi
 // above is React and was never broken; `confirmAsync` on a native dialog is the
 // exact construct that returned a Promise and made `if (!confirm(...))` a no-op.
 
-const DIALOG_DRIVER = path.join(
-  os.homedir(),
-  "AppData",
-  "Local",
-  "Temp",
-  "claude",
-  "c--Dropbox-Projekt-Calcula",
-  "ffc06ccd-ce77-42f8-bee3-71899bcec1e9",
-  "scratchpad",
-  "answer-native-dialog.ps1",
-);
+/**
+ * The native-dialog driver, IN THE REPO next to `launch-with-cdp.ps1`.
+ *
+ * It used to be an absolute path into one agent session's scratchpad, the same
+ * defect already vendored out of `dirty-flag-close.spec.ts`. `__dirname` does
+ * not exist in this ESM suite; referencing it throws at MODULE LOAD and
+ * Playwright reports a collection error for the whole project.
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DIALOG_DRIVER = path.join(HERE, "..", "answer-native-dialog.ps1");
 
 /**
  * Click OK or Cancel on the native dialog whose title contains `titleLike`.
@@ -308,12 +308,24 @@ const DIALOG_DRIVER = path.join(
  * than pattern-matched whole — matching the whole string against /^CLICKED:/
  * breaks the moment a TEXT line is emitted first, which is exactly how this
  * spec broke when the driver gained text reporting.
+ *
+ * THROWS when the driver itself is missing. A driver failure is folded into a
+ * `DRIVERERROR:` string because "no dialog appeared" is a legitimate outcome
+ * some callers assert on — so an absent script would otherwise be
+ * indistinguishable from a dialog that never came, and the spec would pass
+ * without ever having looked.
  */
 function answerNativeDialogRaw(
   titleLike: string,
   action: "ok" | "cancel",
   waitMs = 20_000,
 ): string {
+  if (!fs.existsSync(DIALOG_DRIVER)) {
+    throw new Error(
+      `the native-dialog driver is missing at ${DIALOG_DRIVER} — this spec ` +
+        `cannot tell "no dialog appeared" from "nothing looked"`,
+    );
+  }
   try {
     return execFileSync(
       "powershell",

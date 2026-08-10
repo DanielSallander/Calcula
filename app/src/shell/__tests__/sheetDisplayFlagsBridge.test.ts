@@ -166,12 +166,29 @@ describe("replacing the DOCUMENT resets the flags too", () => {
     }
   });
 
-  it("the Rust side really does reset them on new_file", () => {
+  it("the Rust side really does reset them when the document is replaced", () => {
     // Without this the announcement would faithfully re-read a stale authority.
+    //
+    // THE RESET IS SHARED, so this reads it where it lives. `new_file` used to
+    // reset every store inline; that inline block is now
+    // `reset_document_scoped_stores`, which `open_file` runs too (the store
+    // census in `document_store_census_tests.rs` is what holds that). Following
+    // the delegation rather than re-anchoring on `new_file`'s body is the point:
+    // the flags must be reset on BOTH document-replacing paths, and only the
+    // shared function can say so for both at once.
     const rust = read("../../../src-tauri/src/persistence.rs");
-    const fn = rust.slice(rust.indexOf("pub fn new_file("));
-    expect(fn.slice(0, 12000)).toMatch(
-      /sheet_display_flags\.write\(&reset_effect\)[\s\S]{0,400}SheetDisplayFlags::default\(\)/,
+    const reset = rust.slice(rust.indexOf("pub(crate) fn reset_document_scoped_stores("));
+    expect(reset.slice(0, 20000)).toMatch(
+      /sheet_display_flags\.write\(effect\)[\s\S]{0,400}SheetDisplayFlags::default\(\)/,
     );
+
+    // ...and every path that replaces the document reaches it.
+    for (const entry of ["pub fn new_file(", "pub fn open_file("]) {
+      const fn = rust.slice(rust.indexOf(entry));
+      expect(
+        fn.slice(0, 12000).replace(/^\s*\/\/.*$/gm, ""),
+        `${entry} must run the shared reset, or it leaves the previous document's display flags live`,
+      ).toContain("reset_document_scoped_stores(");
+    }
   });
 });

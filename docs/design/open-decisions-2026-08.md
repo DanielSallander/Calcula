@@ -2206,7 +2206,7 @@ correctness, and no caller holds an outer lookup pass that could go stale across
 Left alone: adding a cache is a performance change and this register does not make those without a
 measurement.
 
-### 2w. File ▸ New does not reset three stores the save path writes — so a NEW document silently saves the PREVIOUS one's pivots, ribbon filters and model connections (2026-08-09)
+### 2w. File ▸ New does not reset three stores the save path writes — so a NEW document silently saves the PREVIOUS one's pivots, ribbon filters and model connections (2026-08-09) — **FIXED, and the invariant is now a census; see 2w-FIXED at the end of this item**
 
 **Found by probing §3av's neighbours, and CONFIRMED on the bytes.** Not by reasoning: by opening the
 saved `.cala`.
@@ -2264,6 +2264,138 @@ answers are wrong and no test noticed.
 subsystems, arriving at the end of a pass whose job was reports; landing it unproved would be exactly
 the mistake this register keeps recording. It is filed with a reproduction, the byte-level evidence,
 and the invariant its fix must establish.
+
+---
+
+### 2w-FIXED (2026-08-09, later the same day). The invariant is bought, and it is CHECKED.
+
+**The enumeration came first, and it found more than the three.** Before anything was changed, the
+sources of `assemble_workbook_for_save` were enumerated from the source tree rather than by reading:
+follow every call out of the save path, and collect every `<store>.<field>.read()/.lock()` in the
+closure. **66 stores.** Then the same question of `new_file` and of `open_file`. Three of §2w's own
+answers were confirmed; **three more stores nobody had named** came out of the same walk.
+
+| store | leaked on File ▸ New | leaked on Open | what it costs |
+|---|---|---|---|
+| `PivotState.pivot_tables` / `.bi_metadata` | YES | no | §2w's pivot |
+| `RibbonFilterState.filters` | YES | no | §2w's ribbon filter |
+| `BiState.connections` (+ `pending_roles`) | YES | **YES** | §2w's whole embedded model, accumulating for the process lifetime |
+| **`AppState.sheet_ids`** | **YES** | no | **worse than a leak: a COLLISION.** `build_workbook_for_save` reads `sheet_ids[i]`, so File ▸ New handed the blank document the PREVIOUS document's `SheetId` — the key every `.calp` override, subscription ledger entry and writeback region is filed under. Two unrelated workbooks then claimed the same sheet, and no later save can detect it |
+| **`AppState.model_writeback`** | **YES** | no | the writeback COLUMN history (`model_writeback_values.json`): a blank document saved another workbook's submitted values |
+| **`AppState.advanced_filter_hidden_rows`** | no | **YES** | folded into every sheet's persisted `hidden_rows`, so rows an advanced filter hid in the PREVIOUS document were written out as hidden in the one just opened |
+
+Two further stores are outside the invariant (not save sources) and leaked anyway, so they were reset
+with the rest: **`AppState.protected_regions`** (`open_file` never cleared it, so the previous
+workbook's pivot/report/BI regions went on refusing edits to cells in the new one) and the
+**`PivotState` session caches** (`views`, `cancellation_tokens`, `previous_states`,
+`active_pivot_id`), each keyed by pivot ids the new document has never heard of.
+
+**THE FIX IS A COLLAPSE, not six more `clear()` calls** — the shape that closed the report store
+(§3av). There is now ONE `persistence::reset_document_scoped_stores`, taking all eight States, and
+`new_file`'s ~150 lines of inline resets are gone into it. **`open_file` calls it too**, immediately
+after the file is read and validated and before a single byte is restored — position deliberate: a
+wrong password or a corrupt archive must leave the document on screen untouched, so a reset at the
+top of the command would make a typo destroy the user's workbook. Most of `open_file`'s restores
+already cleared before refilling; "most" was the defect, and a reset that runs for every store
+whether or not the restore below is careful is what makes the class impossible rather than unlikely.
+
+**`BiState` is TORN DOWN, not cleared, and that distinction is load-bearing.** A `Connection` holds
+an `Arc<TokioMutex<Engine>>` reference-counted by the shared `EngineRegistry`, and the engine owns the
+open database connectors. Dropping the map alone leaves every engine in the registry with a count that
+can never reach zero — model, cached Arrow batches and connectors resident for the life of the
+process, disk cache never flushed. `reset_bi_connections` therefore drains the map, RELEASES each
+registry reference (which flushes that engine's cache and drops it on the last reference), and only
+then drops the `Connection`. It never blocks on the engine lock: `release` uses `try_lock`, exactly as
+`bi_delete_connection` does, so a query in flight — which holds its own `Arc` clone under the
+established take-the-Arc-out-then-`await` pattern — finishes against the document that started it and
+the engine drops after. Pinned by `the_teardown_does_not_block_on_an_engine_that_is_busy`, which
+asserts the in-flight caller holds the LAST reference once the reset has run.
+
+**The on-disk cache is deliberately NOT deleted**, which is where this differs from
+`bi_delete_connection`. Deleting a connection is the user saying that data should be gone; closing a
+document is not. The cache is keyed by model path, or by the connection's stable `local:{id}` identity
+which `restore_local_bi_connections` reuses verbatim, so reopening the workbook finds its offline data
+where it left it.
+
+**`.calp` subscriptions: decided, and nothing changed for them.** A subscribed report needs its model,
+and `load_embedded_data_sources` — reached only from `calp_pull` and `calp_refresh_data` — is the only
+thing that ever creates a connection for a package data source. Those flows materialize package
+content INTO the open document; they are not document-replacing, and running the reset there would
+delete the connection the pull had just created. So they do not call it. The connection now lives
+exactly as long as the document that pulled it, which is the correct lifetime and the one the census
+enforces at both ends. Note what this does NOT change: opening a subscribed `.cala` in a cold process
+never reconstructed its package connections in the first place (nothing re-materializes them on open),
+so the cold behaviour is untouched — all that is gone is the in-session accident where a package
+connection from an earlier document survived into an unrelated one.
+
+**THE CHECK — a census over the save path's sources, in `document_store_census_tests.rs`.** It reads
+the crate, follows every call out of `assemble_workbook_for_save`, collects the stores, and requires
+each to be reset in `reset_document_scoped_stores` or to sit in `EXEMPT` with a written reason.
+`EXEMPT` is **empty** and should stay so. Four companion tests hold the rest of it: every path in
+`DOCUMENT_REPLACING_PATHS` must actually CALL the reset (half a census is worthless — the reset could
+be perfect and never run); `RESET_FUNCTIONS` may only name helpers the reset really delegates to (that
+list is what lets the census see through a helper, so it is also the one place a store could be
+quietly excused); every exemption must carry a non-empty reason; and — the one that guards the census
+against its own hand-written half — **every `#[tauri::command]` holding both `PivotState` and
+`BiState` must be classified**, as document-replacing or, with a written reason, not. That signal is
+chosen because a command cannot replace the document without putting those two stores back to blank
+and cannot do that without being handed them, and because the frontend reaches the backend only
+through a command, so the candidate set is closed. It is deliberately wide: 23 commands are in it
+today, 2 replacing and 21 not, and each cost one sentence to decide. Without it,
+`DOCUMENT_REPLACING_PATHS` would be exactly the by-name list this register keeps recording the
+failure of.
+
+**Both of the recalculation census's hardening lessons were needed here, and both are asserted on
+synthetic sources.** (i) *It must see through a delegating helper* — and here BOTH sides delegate:
+`assemble_workbook_for_save` contains not one `bi_state.` of its own (the read is inside
+`capture_local_bi_connections`), and the reset reaches it only inside `reset_bi_connections`. A census
+reading the two top-level bodies would have credited the save path with reading nothing and passed
+forever. (ii) *A commented-out call must not satisfy it* — every call site is wrapped in a comment
+naming it, so both sides read comment-stripped code. A third trap was found while building it: the
+recalculation census's `indent <= 4` rule for `fn` headers resolves an `impl`'s `fn drop` as the
+`drop(guard)` every lock release calls, which walked the graph out of the save path and into the
+script executor, inventing four "save sources" that are application preferences. This census takes
+free functions only, and says so in a test.
+
+**Demonstrated firing, four ways, by sabotaging the real tree and restoring it.**
+
+| sabotage | what failed | message |
+|---|---|---|
+| the ribbon-filter reset COMMENTED OUT | the census | `RibbonFilterState.filters` |
+| a new `state.spill_hosts.lock()` read added to `assemble_workbook_for_save` | the census | `AppState.spill_hosts` |
+| `open_file`'s call to the reset commented out | `every_document_replacing_path_runs_the_reset` | "`open_file` replaces the open document but does not call `reset_document_scoped_stores`" |
+| the delegation `reset_bi_connections(bi_state)` removed, its name left in `RESET_FUNCTIONS` | `the_reset_delegates_to_every_helper_the_census_credits` + two behaviour tests | "…credits `reset_bi_connections` …but `reset_document_scoped_stores` does not call it" |
+| `calp_pull`'s classification entry deleted | `no_command_with_document_wide_reach_is_unclassified` | "these commands hold both `PivotState` and `BiState` … and nobody has said whether they do: `calp_commands.rs::calp_pull`" |
+
+The second sabotage also caught the census being honest in the other direction: placed first in
+`build_workbook_for_save_with_slicers` (which `assemble` does not call) it correctly did NOT fire.
+
+**And the LIVE spec was given teeth the same way, on a running build.** With the three resets removed
+from `reset_document_scoped_stores` and the app rebuilt, `document-store-leak.spec.ts` failed exactly
+where it should: test 1 with *"a document the user typed ONE CELL into carries the previous
+workbook's pivot"*, and test 2 on its own CONTROL precondition — a workbook that never had a model
+was already carrying one, which is the accumulation half of the defect showing up before the test
+even reached its assertion. Test 3, the counterweight (*reopening A still finds everything A owns*),
+passed throughout, so the two failures are the leak and not a broken fixture. Restored, all three
+pass.
+
+**The census is source-level, so behaviour is pinned separately** in
+`document_store_reset_tests.rs` — 18 tests that populate the real stores, run the real reset and
+assert emptiness, each with its populated-first precondition so none can pass on an empty store. Two
+of them are counterweights rather than leak checks: the reset must NOT touch application state (script
+security level, locale, reference style, iterative calculation, and the built-in Cell Styles gallery,
+which is re-seeded), and it must not mark the document modified. The byte-level half — that the saved
+`.cala` physically contains none of the previous document's entries, read out of the ZIP central
+directory — is `app/e2e/journeys/document-store-leak.spec.ts`, including the counterweight that
+reopening the original still finds everything it owns.
+
+**One unrelated item cleaned up in the same pass.** `macro-link-model.spec.ts` and
+`consent-refusal.spec.ts` both hard-coded `answer-native-dialog.ps1` as an absolute path into one agent
+session's scratchpad — the defect already vendored out of `dirty-flag-close.spec.ts`, still sitting in
+two specs. The script is now in the repo at `app/e2e/answer-native-dialog.ps1`, resolved from
+`import.meta.url` (`__dirname` does not exist in this ESM suite and throws at module load, which
+Playwright reports as a collection error for the whole project), and a missing driver now THROWS
+instead of yielding an empty answer that reads exactly like "no dialog appeared".
 
 
 ## 3. Test-infrastructure decisions
@@ -5307,6 +5439,18 @@ item, §2w, filed with a reproduction and with the invariant its fix must establ
 project is at or better than baseline, and what remains below is otherwise unchanged in shape — two
 test-signal items with owners to find, two pieces of structural debt, and the decisions in section 4.
 
+**A SIXTH CORRECTION, later on 2026-08-09.** §2w is fixed (§2w-FIXED), and the fix ENUMERATED before it
+changed anything — which is the only reason the entry above can now be read as an undercount. §2w
+named three stores; walking the save path's sources out of the source tree found **six**, and two more
+that leak without being save sources at all. The three nobody had named are not lesser: `sheet_ids` is
+a sheet-IDENTITY collision between unrelated workbooks, which is strictly worse than the injection
+§2w describes, because the injected object is at least visible in the archive and a duplicated
+`SheetId` is not. **The lesson is the same one this register keeps writing down and this is the
+seventh instance: a by-name list of instances is not a measurement of the class.** §2w said so about
+its own fix, and it was right about its own fix while being wrong about its own count. The invariant
+it demanded is now a check with an empty exemption list, so the count is no longer anybody's to get
+wrong.
+
 **The one thing that WAS owed is now paid (§3au).** Both **D8** and **§2v** have been proved on a
 running app — `structural-recalc.spec.ts`, 10 tests through the real row/column-header context menu,
 green, and given teeth by sabotaging a running build twice (D8 off: 8 of 10 fail with the exact stale
@@ -5318,12 +5462,17 @@ is stored and shown as `SHEET1!`, normalised at cell entry and nothing to do wit
 
 What remains, in order.
 
-0. **§2w — `new_file` does not reset three stores that `assemble_workbook_for_save` writes.** The one
-   correctness item on this list, found by probing §3av's neighbours and confirmed on the saved
-   bytes. It is numbered 0 rather than appended because it outranks everything below it: a user's
-   file silently contains another workbook's pivots, ribbon filters and embedded model. Do NOT fix it
-   by clearing three more stores in `new_file` — that is the instance, not the class; item 3 below is
-   the class, and §2w is the reason item 3 is not merely structural debt.
+0. ~~**§2w — `new_file` does not reset three stores that `assemble_workbook_for_save` writes.**~~
+   **CLOSED 2026-08-09 (§2w-FIXED).** It was not fixed by clearing three more stores, as the entry
+   insisted: the reset is COLLAPSED into one `reset_document_scoped_stores` that both `new_file` and
+   `open_file` run, and the invariant is now a census over the save path's sources with an empty
+   `EXEMPT` list. Enumerating first turned up **three more leaking stores** the entry had not named —
+   `sheet_ids` (a sheet-identity COLLISION, not merely a leak), `model_writeback`,
+   `advanced_filter_hidden_rows` — plus `protected_regions` and the `PivotState` session caches, which
+   are not save sources and leaked anyway. **The successor project below is unchanged**: the census
+   buys the LIFETIME half of the property; it says nothing about whether a mutation dirties the
+   document, which is what `DocumentEffect` on those States is for. §2w is still the reason that
+   project is not merely structural debt — it is just no longer the reason a user's file is wrong.
 
 1. **The `visual` golden the `<textarea>` swap moved, and the `clickCell` drift under it.** §3ao(3).
    `visual` is **17/1**, not the 18/18 this register has been quoting: "editing mode - inline editor

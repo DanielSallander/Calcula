@@ -212,6 +212,12 @@ mod document_effect_wave2_tests;
 #[cfg(test)]
 mod document_effect_objects_tests;
 
+#[cfg(test)]
+mod document_store_census_tests;
+
+#[cfg(test)]
+mod document_store_reset_tests;
+
 // ============================================================================
 // APPLICATION STATE
 // ============================================================================

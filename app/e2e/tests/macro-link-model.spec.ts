@@ -30,8 +30,26 @@
 import type { Page, Locator } from "@playwright/test";
 import { test, expect } from "../fixtures";
 import { execFileSync } from "child_process";
-import * as os from "os";
+import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
+
+/**
+ * The native-dialog driver, IN THE REPO next to `launch-with-cdp.ps1`.
+ *
+ * It used to be an absolute path into one agent session's scratchpad
+ * (`.../Temp/claude/<session-uuid>/scratchpad/`) — the same defect that was
+ * already vendored out of `dirty-flag-close.spec.ts`, still sitting here in a
+ * spec no pass had ever opened. That directory is session-scoped and
+ * machine-local, so on any other checkout the script is simply absent.
+ *
+ * `__dirname` DOES NOT EXIST HERE: this suite is ESM ("type": "module" in
+ * package.json), and referencing it throws at MODULE LOAD, which Playwright
+ * reports as a collection error for the whole PROJECT — every spec in it runs
+ * zero tests, which looks nothing like a suite that fails.
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DIALOG_DRIVER = path.join(HERE, "..", "answer-native-dialog.ps1");
 
 const SHEET = 0;
 
@@ -520,23 +538,27 @@ test.describe("Macro link model", () => {
     // user's mouse would. The helper reads the message via UI Automation (the
     // TaskDialog body is DirectUI, invisible to GetWindowText) and clicks a real
     // button.
-    const DIALOG_DRIVER = path.join(
-      os.homedir(),
-      "AppData",
-      "Local",
-      "Temp",
-      "claude",
-      "c--Dropbox-Projekt-Calcula",
-      "ffc06ccd-ce77-42f8-bee3-71899bcec1e9",
-      "scratchpad",
-      "answer-native-dialog.ps1",
-    );
-
-    /** Answer the pending native dialog. Returns { text, clicked }. */
+    /**
+     * Answer the pending native dialog. Returns { text, clicked }.
+     *
+     * THROWS when the driver itself is missing, rather than reporting an empty
+     * answer. This function swallows a driver FAILURE into a `DRIVERERROR:`
+     * string on purpose — a dialog that never appeared is a legitimate outcome
+     * the caller asserts on — so an absent script would otherwise be
+     * indistinguishable from "no dialog", which is the shape that let the
+     * vendoring defect hide: the caller would read a confident empty result and
+     * assert against nothing.
+     */
     function answerNativeDialog(
       action: "ok" | "cancel",
       waitMs = 20_000,
     ): { text: string; clicked: string } {
+      if (!fs.existsSync(DIALOG_DRIVER)) {
+        throw new Error(
+          `the native-dialog driver is missing at ${DIALOG_DRIVER} — this test ` +
+            `cannot tell "no dialog appeared" from "nothing looked"`,
+        );
+      }
       let out = "";
       try {
         out = execFileSync(
