@@ -2561,7 +2561,7 @@ so a reset that got enthusiastic and cleared the user's security decisions fails
 shipping.
 
 
-### 2y. Deleting the ORIGIN of a spilled array leaves the spill map behind — the spilled cells become permanently uneditable AND undeletable for the session, and save as orphan literals (2026-08-10) — **OPEN, with a live reproduction**
+### 2y. Deleting the ORIGIN of a spilled array leaves the spill map behind — the spilled cells become permanently uneditable AND undeletable for the session, and save as orphan literals (2026-08-10) — **FIXED 2026-08-10; see the closing note at the end of this section, which corrects the filed fix**
 
 Found while giving §2x's spill half a real-UI gesture, by asking a question §2x did not: the store-level
 spec cleared the stale origin with `update_cell(row, col, "")`, so the register's whole account of the
@@ -2611,10 +2611,522 @@ no undo entry at all — the deletion half of §2x); and (b) `check_spill_protec
 host whose ORIGIN is inside the same rectangle, or "select the spill and press Delete" stays refused
 after (a) fixes everything else. (b) changes a guard with three call sites and needs its own tests.
 
-**Not fixed in this pass, deliberately.** It is a different defect in a different command from the one
-this pass was sent to prove, the Delete key is one of the hottest paths in the suite, and half of it —
+**Not fixed in that pass, deliberately.** It is a different defect in a different command from the one
+that pass was sent to prove, the Delete key is one of the hottest paths in the suite, and half of it —
 removing cells without recording them for undo — is precisely the shape this register keeps filing
-against. It wants its own pass with its own teeth.
+against. It wanted its own pass with its own teeth.
+
+---
+
+#### The closing pass (2026-08-10). What the filed fix got wrong, and what the defect actually was
+
+**Half (a) as filed was wrong, and building it would have made undo destroy the array.** The filing
+said each cleared spill cell should get an `undo_stack.record_cell_change`, "strictly better than
+`update_cell`'s branch, which removes them with no undo entry at all". It is strictly worse, and the
+reason is `apply_changes`: it restores every recorded cell BEFORE it recalculates. Restore literal
+`2 3 4` into A2:A4 alongside the restored `=SEQUENCE(4)` in A1, and when the origin re-evaluates
+`reevaluate_formula_cell` finds occupied cells that are not its own spill — the map entry left with the
+clear — sets `spill_blocked`, and the undo lands on **`#VALUE!`** instead of the array. A spilled cell
+is DERIVED state: it carries no formula, no rich text, style 0. Undo restores the ORIGIN and the
+cascade re-spills it, which is exactly how `update_cell(A1, "")` has always undone correctly. Pinned
+both ways, in `commands/spill_map_tests.rs`: `a_swallowed_spill_cell_gets_no_undo_entry` asserts the
+transaction holds A1 and nothing else, and
+`restoring_spilled_literals_beside_a_restored_origin_is_what_blocks_the_respill` demonstrates the
+`#VALUE!` the filed version would have produced.
+
+**Half (b) was right but under-specified, and applied blindly it corrupts.** The exemption cannot be
+unconditional: `sort_range` also calls the guard, and letting a permutation swallow an origin shuffles
+spilled values among rows as if they were data. The guard now takes an explicit **`SpillOriginPolicy`**
+— `ReleasedByCaller` (the clears) or `Refuse` (everything else) — and
+`every_release_policy_call_site_actually_releases_the_spill` fails if a site takes the exemption
+without reaching a tear-down, because taking it without the removal it promises is worse than the
+refusal it replaces.
+
+**And the fix does not belong in `clear_range` at all.** The register asked for the sibling commands to
+be enumerated, and the enumeration is what changed the shape of the answer: `clear_range` was one of
+**eleven** writers that could orphan the map, and a twelfth was `update_cell` itself. So the tear-down
+moved to a CHOKE POINT — `recalc_after_active_sheet_bulk_rewrite`, where **a seed that no longer holds
+a formula releases whatever spill it owned**. Every bulk rewrite already ends there, so the Delete key,
+Clear Contents, a sort that moved an origin, an **undo** that cleared one and the **redo** that cleared
+it again are all covered by one rule rather than five remembered call sites. `undo_commands.rs` was not
+touched. The other half of the rule was already in place: a seed that DOES hold a formula goes through
+`reevaluate_formula_cell`, which tears the old range down and spills the new one. Together they cover
+"the origin went away" and "the origin changed", which is the whole of the maintenance problem.
+
+It runs BEFORE the manual-calculation return, deliberately: manual mode means the user accepted stale
+VALUES, never a map claiming cells for a formula that is gone — and F9 would not repair it, because
+`run_calculation_pass` is not spill-aware either (§2ab). Cost on the Delete key: one `spill_ranges` lock
+and one `is_empty()` when the workbook holds no dynamic array. The seed list is projected into a
+`CoordSet` only after that check has found something to release, so a 10,000-cell remove-duplicates
+seed list is never hashed for nothing.
+
+**Two defects this pass found that §2y had not, both in `update_cell` — the command the filing named as
+the map's one correct maintainer.** Its tear-down sat inside
+`if let Some(formula) = ... { match parser::parse(&formula) { Ok(parsed) => `, so:
+
+| gesture over a spill origin | before | now |
+|---|---|---|
+| type a **literal** (`7`) | map kept, A2:A4 uneditable + undeletable — §2y exactly | released |
+| type a formula that does not **parse** | same | released |
+| type `=A2*10` (a formula reading its own old spill) | stored **20**, read from the array it was destroying; a reload of the same file produces **0** | **0** from the edit path and the load path alike |
+
+The third is the worse one: an ORDER-DEPENDENT stored value, which is the failure this program's
+recalculation work exists to eliminate, and it was reachable by one keystroke. The release is now
+hoisted above every branch and runs BEFORE the new formula is evaluated — the array ceases to exist the
+moment its formula is replaced. `update_cells_batch_core` (the PASTE path) had the identical shape and
+got the identical hoist.
+
+**The enumeration, made mechanical rather than a list of names.** `every_cell_writing_function_either_
+maintains_the_spill_map_or_is_exempt_with_a_reason` walks the crate — the sibling of the recalculation
+census, with the same sabotage tests and the same delegating-helper modelling (which found three more
+writers on its own). Every function that writes cells must MAINTAIN, REFUSE, or be EXEMPT with a
+written reason:
+
+| command | before | now |
+|---|---|---|
+| `update_cell` (empty) | maintained | maintained (shared tear-down) |
+| `update_cell` (new formula) | maintained | maintained, and hoisted above the branch |
+| `update_cell` (literal / unparseable) | **leaked** | maintained |
+| `update_cells_batch_core` (paste) | leaked outside the formula branch | maintained |
+| `clear_range` (the Delete key) | **leaked** | released via the choke point; guard exempts a swallowed origin |
+| `clear_cell` | leaked | released via the choke point |
+| `clear_range_with_options` (Clear Contents/All) | leaked | as `clear_range` |
+| `clear_range_with_options_off_sheet` | leaked | released in its own critical section |
+| `clear_range_on_sheets` (group clear) | leaked, **and had no guard at all** | guarded + released |
+| `update_cell_on_sheets` (script off-sheet write) | leaked, **and had no guard at all** | guarded + released |
+| `sort_range` / `sort_range_off_sheet` | guarded for CELLS only; could still move an origin | `check_no_array_within` — refuses cells *and* origin |
+| `fill_range` (Ctrl+D / Ctrl+R) | **no spill guard whatsoever** | `check_no_array_within` |
+| `merge_cells` / `merge_cells_off_sheet` | no spill guard; deletes every non-master cell | `check_no_array_within` |
+| `replace_all` / `replace_single` (+ off-sheet) | rewrote spilled VALUES in place | `check_spill_protection_cells` over the match list |
+| `apply_script_modified_grids_core` (non-active install) | leaked | `release_spills_orphaned_by_grid` |
+| `calp_revert_override` / `calp_accept_upstream` / `calp_refresh_apply` | leaked | same |
+| insert/delete rows/columns | already moved both maps in lockstep | unchanged |
+| undo / redo (`apply_changes`) | **leaked** | covered by the choke point; the file was not touched |
+
+`check_no_array_within` exists because the spilled-CELL check alone is blind to one arrangement: a
+horizontal array in row 1 lies entirely outside any rectangle over column A **except for its origin**,
+so sorting column A moved the formula to another row while B1:D1 stayed put. Both questions, one
+helper, and `every_command_that_cannot_carry_an_array_refuses_one` pins that the five commands whose
+census answer is "it refuses" still refuse.
+
+**Verified.** 30 new tests in `app/src-tauri/src/commands/spill_map_tests.rs`, including the register's
+reproduction start to finish, undo restoring the spill AND the map, redo taking it down again, the
+exemption on both sides of the guard's adaptive scan, and the tear-down under manual calculation.
+
+| suite | result | vs. baseline |
+|---|---|---|
+| `npx vitest run` | **746 files / 106,211 passed, 0 failed** | 742 / 106,168 — the delta is other passes'; no TypeScript was touched here |
+| `check-types` (tsc) | clean | — |
+| `lint:boundaries` | clean | — |
+| `check:script-typings` | **39 interfaces / 736 members** | exact — no new command, no new capability id |
+| `check:line-endings` | **0 mixed** | exact |
+| core `cargo test` | **1,289 passed, 0 failed** | 1,285 (+4, another pass; nothing under `core/` touched here) |
+| `cargo test -p script-engine` | **111 passed, 0 failed** | exact |
+| app-lib `cargo test --lib` | **1,267 passed, 0 failed** | 1,221 (+30 this pass, +16 other passes) |
+| `test_pivot` | **56 passed, 0 failed** | exact |
+| `cargo check --lib --tests` (app) | clean, **0 warnings** | exact |
+
+**One flake observed, in another pass's area, recorded so it is not read as a regression.**
+`bi::model_editor::tests::an_abandoned_script_batch_is_reclaimed_and_rolled_back` failed on 2 of 7
+full-suite runs at `--test-threads=8` and passed 5 of 7, plus 3 of 3 in isolation. It drives a GLOBAL
+`script_batch_registry()` and a wall-clock deadline, so it is load-sensitive test isolation, not
+product behaviour, and nothing in this pass reaches `bi/`.
+
+**The live E2E projects were NOT re-run, and that is a gap, stated rather than papered over.** The
+brief's launch script (`scratchpad/launch-vba-batch.ps1`) does not exist in the tree, and the crate was
+being edited by other passes throughout this one — `persistence.rs` and
+`script_security_census_tests.rs` were each broken mid-edit long enough to block a build here, which is
+exactly the condition §2ab cites for not having run its own reproduction live. What that costs is
+smaller than usual: the tests above drive the REAL `update_cell_impl`, `reevaluate_formula_cell`,
+`recalc_after_active_sheet_bulk_rewrite` and `apply_changes` in-process, so the only reproduced piece is
+`clear_range`'s `#[tauri::command]` wrapper — and `clear_range_still_runs_the_four_phases_this_harness_
+reproduces` pins from source that the wrapper still performs the same four steps in the same order,
+guard before transaction. The two spill journey specs that DO exist
+(`document-store-leak.spec.ts`, `undo-across-open.spec.ts`) exercise §2x's cross-document case, not the
+Delete key.
+
+**Residual, and it belongs to §2ab:** off-sheet recalculation and the load path are not spill-aware
+(`reevaluate_formula_cell` is the only function in the crate that ever WRITES `spill_ranges`), so a
+spill torn down on a background sheet does not come back until that sheet is edited while active. This
+pass confirmed §2ab independently and added a running reproduction to it; see the addendum there.
+
+
+### 2z. A slicer's computed properties come back from a reload RESTORED AND DEAD — the property is there, the formula is there, and the cell it names can never move it again (2026-08-10) — **FIXED**, and the sibling sweep it triggered is below
+
+`restore_slicers` (`persistence.rs`) put `slicer_state.computed_properties` back and never rebuilt
+`computed_prop_dependencies` / `computed_prop_dependents`. Re-evaluation
+(`slicer::computed::re_evaluate_slicer_computed_properties`) is driven **entirely** by that reverse
+index: it looks the changed cells up there and re-evaluates nothing it does not find. So a restored
+property was present in the store, listed in the dialog with its formula, and inert.
+
+**Measured**: add a computed property `headerText "=DA1"`; edit DA1 — the header follows. Save,
+File ▸ New, reopen — the property is restored intact, and editing DA1 **never updates the header
+again**. Nothing errors; nothing is marked stale; the only symptom is a formula that has quietly
+stopped being a formula.
+
+**How it was found, and why that matters more than the fix.** The AppState twin,
+`computed_properties::restore_computed_properties`, rebuilds *its* index on the same load path, in a
+block whose comment says so out loud. Two sibling functions, one file apart, doing the same job for
+the same feature — one of them re-indexing and one not. Reading them side by side is the whole
+technique; no test and no type could have said it, because both functions individually look correct.
+
+**The fix removes the ability to make the mistake, rather than adding the missing line.** Properties
+and their index are now installed by ONE function,
+`slicer::computed::install_restored_computed_properties`, which both restore paths call — `.cala`
+load (`restore_slicers`) and `.calp` materialization (`calp_commands::materialize_pulled_slicers`).
+A future edit cannot restore one half without the other because there is only one half to call.
+`restore_slicers` also now CLEARS the index before rebuilding, which it never did: workbook A's
+reverse index used to survive into workbook B, so an edit in B could re-evaluate a property belonging
+to a document that was closed.
+
+Two smaller things fell out. `restore_slicers` takes plain `&SlicerState` / `&AppState` instead of
+`State<T>` — a `tauri::State` cannot be built outside a running app, and a defect provable only by
+running the real restore has to be reachable from a unit test. And `materialize_pulled_slicers`
+inserted computed properties with no index too; in practice `sanitize_distributed_slicers` strips
+them first (publisher-authored formulas never materialize on a subscriber), so it was a dead copy of
+the same defect — now routed through the same installer so it cannot wake up.
+
+Four regression tests in `app/src-tauri/src/slicer/tests.rs`, all four verified to FAIL on the
+pre-fix behaviour (the index rebuild was disabled and they were re-run):
+`a_restored_slicer_computed_property_still_re_evaluates` (behaviour: the header really moves),
+`restore_rebuilds_the_reverse_index_under_the_cell_key` (the key shape, so an index built with wrong
+keys is distinguishable from no index), `restore_clears_the_previous_documents_index`, and
+`slicer_property_and_cell_property_restore_alike` — which asserts the two sibling paths agree, i.e.
+pins the comparison that found this so a third property family has a shape to copy.
+
+**THE SIBLING SWEEP — every restore path checked for the same shape** ("a restored collection whose
+derived index is not rebuilt"). Walked `fn restore_*` across the app crate plus every non-`Persisted`
+`AppState`/`SlicerState`/`PivotState` field that is derived rather than loaded:
+
+| derived state | rebuilt on open? |
+|---|---|
+| slicer `computed_prop_dependents` / `_dependencies` | **NO — this item** |
+| AppState `computed_prop_dependents` / `_dependencies` | yes, `restore_computed_properties` |
+| formula `dependents` / `name_dependents` / stripe + cross-sheet maps | yes, `rebuild_all_dependencies` after load |
+| `writeback_index` / `writeback_declarations` / `model_writeback_declarations` | yes, `rebuild_writeback_index_deferring_http` |
+| `table_names` (name -> table) | yes, `restore_tables` builds both halves |
+| `auto_filter_id` on tables | yes, `relink_autofilter_owner`, per §AutoFilter-identity |
+| pivot `protected_regions` | yes, `update_pivot_region` in `restore_pivot_definitions` |
+| report `protected_regions` | yes, `reregister_report_region` per saved report |
+| BI query `protected_regions` | n/a — the owning `active_queries` are session state and go with them |
+| `id_registry` | yes, re-seeded from the override layer |
+| package BI connections | **NO — §2aa** |
+| `spill_ranges` / `spill_hosts` | **NO — §2ab** |
+
+Two of the twelve were wrong. Both are written up below.
+
+### 2aa. A subscribed `.calp` report cannot resolve its model after save + reopen — there is no path from a reopened subscriber workbook back to a live model at all (2026-08-10) — **FIXED**, design recorded
+
+`capture_local_bi_connections` skips package connections when saving a `.cala`, deliberately and
+correctly: a package's model belongs to the publisher and travels in the `.calp`, and embedding a
+copy in every subscriber's file would mean a subscriber's workbook could serve a model no publisher
+ever signed. What was missing is the other half — nothing ever put them back.
+
+**Measured on a saved subscriber workbook.** Reopen -> `bi_get_connections` = **0** (the subscription
+ledger itself restores fine). `calp_refresh_data` -> `{sourcesRefreshed: 0, needsConfiguration: […]}`
+and still 0 afterwards, because refresh only ever **updates** a connection that already exists. Only
+`calp_pull` and `refresh_embedded_data_sources` (reachable solely when a NEWER version exists) ever
+created one. Every BI pivot in the report pointed at `ConnectionId::ZERO`.
+
+There was even a comment in `load_embedded_data_sources` asserting it "runs on the OPEN path
+(restoring package connections from the file)". It did not. The comment described an intention with
+no implementation behind it — which is exactly how a gap this size stays invisible in review.
+
+**THE DESIGN DECISION.** Re-materialize on open from the **subscription ledger** (which package,
+which registry, which resolved version) plus the **local package cache**, through a new
+`calp::pull::load_verified_data_sources` that runs the SAME three gates `pull` runs, in the same
+order, under `PinPolicy::RequirePinned`:
+
+1. `verify_and_load_manifest_via` / `load_pinned_manifest_via` — Ed25519 signature over the single
+   trusted manifest copy, against the publisher key **this machine already pinned**.
+2. `check_min_app_version`.
+3. `verify_version_artifacts_via` — every artifact, including the `models/{id}/model.json` the
+   restore then reads by path, hashes to the digest the signed manifest published, and nothing
+   unlisted was dropped into the version directory after publish.
+
+The data-source resolution itself is **extracted out of `pull` and shared**, so restore and pull
+cannot resolve a model artifact differently.
+
+**This adds a restore; it does not weaken the rule that only a pull creates a package connection.**
+That rule was deliberate and still holds. `RequirePinned` makes first contact a hard error, so this
+can never create a connection for a package this machine never subscribed to, can never mint a pin,
+and can never advance a version — it re-materializes exactly the version the ledger says the user
+already accepted. The threat it must not become is precise and was the reason to think hard here: a
+`.cala` arrives **by email**, and it names a package and a registry of its author's choosing. Under
+`PinOnFirstUse` this restore would have been a way to make the recipient's machine trust a publisher
+it had never heard of, silently, by opening a file. That is the same hole the writeback rebuild was
+hardened against, and it is why the restore is not a trust decision.
+
+**The three failure modes, answered rather than assumed:**
+
+* **Package missing / registry gone / version deleted / offline** — the manifest read fails, the
+  subscription is skipped, **no connection is made**. The workbook still opens with the last pull's
+  cells (they are in the `.cala`) and its pivots report no connection, exactly as before. Nothing
+  stale is presented as live.
+* **Signature no longer verifies / publisher key changed / an artifact was tampered with** — skipped,
+  with **no fallback to the unverified bytes**. A subscriber that cannot prove which model it has
+  gets no model. This is the case the `.calp` integrity machinery exists for, so it is honoured, not
+  bypassed.
+* **HTTP registry** — skipped with **no network I/O at all**. Two independent reasons, and both had
+  to hold: `local_artifact_path` returns `None` for a non-local transport, so a package connection
+  has never materialized from an HTTP registry even on the pull path (nothing is lost that a pull
+  would have given); and verifying artifacts over HTTP means downloading every artifact behind a
+  30-second-timeout blocking read, on the open, before a cell is drawn — the precise hang
+  `rebuild_writeback_index_deferring_http` exists to avoid.
+
+**And it is not silent.** `state.package_connection_restore_skips` records every non-silent skip and
+`calp_get_package_connection_skips` surfaces it, with a per-reason sentence in the Subscriptions
+pane — modelled on the writeback-skip disclosure and for the identical reason: without it, "this
+package has no data source" and "this package's model could not be verified on this machine" are the
+same observable state, a pivot quietly reporting no connection. The reason vocabulary is one shared
+classifier (`writeback_skip_reason` renamed to `calp_skip_reason`) so the two on-open registry walks
+cannot answer the same question in two dialects.
+
+Placement matters and is pinned by a test: the restore runs AFTER `restore_distribution_user_files`
+(it reads the ledger that call restores) and after `load_pending_roles` (so a restored package
+connection picks up its saved "view as" RLS role, as the pull path does). BI pivots are re-pointed
+through a single `rebind_bi_pivots_to_connections`, called twice from two disjoint id spaces that
+share one field — local connections keyed by saved connection uuid, package connections keyed by
+package data-source id.
+
+Four tests in `core/calp/tests/lifecycle.rs`: the model resolves after a reopen **and to the same
+artifact the pull resolved**; an unpinned package is refused **and the pin store stays empty**; a
+tampered model is refused; a missing version fails cleanly rather than being reported as tampering.
+Five more in `writebackSkipDisclosure.test.ts` pin the disclosure surface and that the restore is
+actually wired into `open_file` in the right order.
+
+**FOUND ALONGSIDE, AND FIXED: three `.calp` commands read the version manifest with no signature
+check at all** — `calp_refresh_data`, `calp_save_data_source_config`, `calp_get_data_sources` all
+called `registry.get_version_manifest(...)` directly. The worst is `calp_refresh_data`: it takes
+`ds.server` / `ds.database` from that unverified manifest and opens a database connection to them,
+sending either a saved connection string or the user's Windows identity via SSPI. Anyone able to
+write the registry directory — a shared folder, a synced drive — could repoint a subscribed
+package's data source at a host they control and harvest credentials on the next Refresh, with no
+signature to break and nothing on screen to notice. All three now go through
+`load_pinned_manifest_via`, the same gate the writeback rebuild uses.
+
+Four other `get_version_manifest` call sites were reviewed and left: `calp_browse_registry` is
+pre-trust discovery, and `require_publisher` / `refresh_rollup_if_publisher` /
+`calp_region_response_status` read the manifest's asserted `publisher_key` only to ask whether THIS
+machine holds the matching private key — an authorization question about the local profile, not a
+trust statement about the package's contents. Worth a second opinion from whoever owns the writeback
+authorization model, but not this pass's call.
+
+### 2ab. `spill_ranges` / `spill_hosts` are reset when a document is replaced and never REBUILT — so a reopened workbook's dynamic arrays have no spill protection, and touching the formula turns it into `#VALUE!` (2026-08-10) — **OPEN, with a reproduction**
+
+The second miss from §2z's sweep, and the one that corrects a claim this register already makes.
+
+`reset_document_scoped_stores` clears both spill maps (§2x, correctly — a stale entry from the
+previous document destroys cells in the new one). Nothing on the open path fills them back in. A
+`.cala` stores the spilled cells as ordinary values with no `ast`, so after a reload the only record
+that A2:A4 belong to A1's array — the maps — is empty.
+
+**§2y states the opposite and should be corrected when this is fixed.** It says re-opening "rebuilds
+the spill map from the restored formulas, so `spill_ranges` comes back EMPTY and the cells are
+editable again". `spill_ranges` does come back empty and the cells are editable again — but because
+nothing rebuilt it, not because something did. §2y read the right observation off the wrong cause,
+which is why the consequences below were never noticed.
+
+**Reproduction** (code-level; not yet run against the live app because `commands/data.rs` is being
+rewritten by the spill-census work in flight — re-verify against that before fixing):
+
+```
+1. A1 = "=SEQUENCE(4)"                  A1:A4 -> 1 2 3 4,  spill_ranges [{origin 0,0 -> 3,0}]
+2. Save, close, reopen
+3. get_spill_ranges                     -> []            <-- no spill border, nothing protected
+4. Type into A2                         -> ACCEPTED      <-- Excel refuses this
+5. Re-enter the same formula in A1 (or edit any precedent so A1 re-evaluates)
+                                        -> A1 becomes #VALUE!
+```
+
+Step 5 is the sharp end. The re-evaluation path tears down "the range this cell used to own" from
+`spill_ranges` first — which is empty — so the restored literals in A2:A4 are still sitting there
+when the occupancy check runs. `is_own_spill` consults `spill_hosts`, also empty, so they read as
+foreign data and the spill is blocked. A working array formula becomes an error purely by being
+touched after a reload, and step 4 means the user may have already overwritten one of its cells
+without being stopped.
+
+**Why it is filed rather than fixed.** Rebuilding the maps means re-evaluating every array formula
+on load and writing its spill — that is a recalculation on the open path, which is a product
+decision (open cost vs. correctness) and must go through the shared entry points the recalculation
+census guards, not a private loop in `open_file`. It also collides directly with the spill-map
+census work currently in flight in `commands/data.rs` / `spill_map_tests.rs`, whose `EXEMPT` list
+already names `open_file` with the reason *"document replacement: `reset_document_scoped_stores`
+clears both spill maps for the outgoing document"* — true, and it covers only the outgoing half. The
+INCOMING half is this item, and the exemption's wording should be narrowed when it lands so it stops
+reading like full coverage.
+
+---
+
+#### Confirmed independently by the §2y closing pass, with the reproduction now RUNNING (2026-08-10)
+
+The §2y pass reached this from the other end of the same question — §2y is "who tears the map DOWN",
+this is "who builds it UP" — and arrived at the same place, so both halves of the sweep now agree.
+Four things to add.
+
+**1. The reproduction is no longer code-level.** It runs, in-process, as
+`commands/spill_map_tests.rs::a_reloaded_workbook_has_no_spill_map_and_the_origin_collapses_2ab`. It
+reproduces the reload STATE rather than doing file I/O — the two things that make it are the maps
+being empty and the spilled values being present as plain cells, which is exactly what `open_file`
+leaves behind — then drives the real cascade and asserts the `#VALUE!`. It is a CHARACTERISATION
+test: it asserts today's broken behaviour so this section cannot drift, and **its failure messages
+say so** ("if this now holds an entry, the load path rebuilds the spill map and §2ab is FIXED —
+invert this test").
+
+**2. The blocking mechanism is pinned separately, so the two sections cannot rot apart.**
+`restoring_spilled_literals_beside_a_restored_origin_is_what_blocks_the_respill` asserts that a
+formula spilling onto occupied cells it does not own reports `#VALUE!`. §2y's fix *depends* on that
+rule (it is why the swallowed spill cells get no undo entry) and this section's step 5 is the same
+rule firing where nobody wants it. If it ever changes, both fail loudly.
+
+**3. It is not only the OPEN path — F9 has it too, and that widens the fix.** `run_calculation_pass`
+and `recalculate_sheet_values` have no spill handling whatsoever; `reevaluate_formula_cell` is the
+only function in the crate that ever writes `spill_ranges`. So:
+* pressing F9 does not repair a reloaded workbook, and cannot;
+* the same blindness is why `recalc_after_off_sheet_write` cannot restore a spill on a BACKGROUND
+  sheet, which is the residual §2y's fix knowingly leaves behind (a spill torn down off-sheet stays
+  down until that sheet is edited while active).
+A rebuild that lives in the shared whole-sheet pass therefore fixes three things at once — open, F9,
+and off-sheet — which is an argument for putting it there rather than in `open_file`.
+
+**4. The `EXEMPT` wording was narrowed, as this section asked.** `open_file`'s entry in the spill
+census now reads: *"document replacement: `reset_document_scoped_stores` clears both spill maps for
+the outgoing document. It does not REBUILD them for the incoming one — see §2ab and
+`a_reloaded_workbook_has_no_spill_map_and_the_origin_collapses_2ab`."* `run_calculation_pass` and
+`recalculate_sheet_values` carry the same pointer.
+
+**One correction to step 4 of the reproduction above, measured on the fixed build.** "Type into A2 ->
+ACCEPTED" is right after a reload, and it is right for the reason given (the maps are empty). But it
+should not be read as a general statement that a spilled cell can be typed over: inside a live
+session it is refused, and §2y's pass extended that refusal to the seven commands that could
+previously reach a spilled cell without asking (`fill_range`, `merge_cells` ×2, `replace_all` /
+`replace_single` ×2, `clear_range_on_sheets`, `update_cell_on_sheets`). The hole in step 4 is
+specifically the reload's empty map, not a missing guard.
+
+
+#### Re-verified ON THE RUNNING APP (2026-08-10, the §3bd live-proof pass) — still OPEN, and F9 is worse than this section says
+
+Driven through the real backend on a cold build, `.cala` written and reopened for real (not a
+reproduced load STATE). `EA5 = 4`, `EB5 = "=SEQUENCE(EA5)"`:
+
+```
+1. live                       EB5:EB8 -> 1 2 3 4      spill_ranges [{origin 4,131 -> 7,131}]
+2. save, File > New, reopen   EB5:EB8 -> 1 2 3 4      spill_ranges []          <-- looks fine
+3. set EA5 = 4  (the SAME value)
+                              EB5     -> #VALUE!      spill_ranges []
+                              EB6:EB8 -> 2 3 4        (orphan literals from the file)
+4. Calculate Now              EB5:EB8 -> 1 2 3 4      spill_ranges []          <-- STILL empty
+5. set EA5 = 4 again          EB5     -> #VALUE!      spill_ranges []
+```
+
+**Two corrections to the account above.**
+
+**(a) The triggering edit does not have to change anything.** Step 3 writes `4` over a cell that
+already holds `4`. Re-evaluation of the origin is enough; the user has not altered a single value in
+the workbook and the array dies.
+
+**(b) "Pressing F9 does not repair a reloaded workbook, and cannot" is half right, and the half that
+is wrong is the dangerous half.** `Calculate Now` DOES put readable numbers back on the grid — the
+origin re-evaluates and the trailing cells still hold the literals the file restored — so the block
+*looks* repaired. It is not: `spill_ranges` is still empty, and the next touch of any precedent
+collapses it again (step 5). Worse, the block only looks right here because the restored literals
+happen to equal what the array would produce. Change `EA5` to a different length and step 4 leaves
+STALE LITERALS sitting under a live origin, presented as that origin's array — a wrong answer with
+no error on it, which is a worse outcome than the `#VALUE!` it replaces.
+
+So the user-visible cycle on a reopened workbook is: *fine -> touch anything -> `#VALUE!` -> press F9
+-> looks fine -> touch anything -> `#VALUE!`*, indefinitely. Nothing in that loop tells them the
+array stopped being protected.
+
+The fix and its cost are unchanged (rebuild on load, or stop persisting spilled cells and let the
+load recalculation re-spill them — a `format_version` decision, hence an owner call). What changes is
+the priority argument: this is not "no spill protection after a reload", it is "a dynamic array that
+breaks on the next keystroke and cannot be repaired from the UI".
+
+
+### 2ac. Undo and Redo were NEVER disabled — anywhere. The app offered an undo it did not have (2026-08-10) — **FIXED**
+
+**The finding is not mine; §3ax(1) made it while writing `undo-across-open.spec.ts`, and filed it as a
+"real (small) product gap".** The Home tab rendered `undo`/`redo` as plain `<Button>`s with no binding
+to `get_undo_state`; the Edit menu items carried no enablement; and nothing anywhere in `app/src` or
+`app/extensions` read `canUndo` for a UI state at all. Re-measured before touching anything:
+`rg "canUndo" app/src app/extensions` returned the tauri-api wrapper's type declaration and nothing
+else. Excel greys both out on an empty stack, and the owner's standing rule is Excel parity.
+
+**Why this is more than cosmetics.** The press on an empty stack is not merely ignored — until §2x
+landed it was the gesture that destroyed a cell of the open workbook with a value from a document the
+user had closed. §2x fixed the leak; the affordance still says "there is something here to undo" when
+there is not, which is the app asserting something false about its own state.
+
+**THE FIX IS ON THE STORE, NOT AT ~100 CALL SITES, and the argument is `DirtyFlag`'s one store over.**
+`AppState::undo_stack` is now `undo_history::UndoHistory` instead of `Mutex<UndoStack>`: `Mutex`-shaped
+(`lock()` returning a `Result` whose error is `Debug + Display`), so **all 97 existing `.unwrap()`,
+`.map_err(|e| e.to_string())?`, `if let Ok(..)` and `let Ok(..) else` call sites across 30 files are
+unchanged**, and the guard compares `(can_undo, can_redo)` at acquisition against the same pair at
+release. A transition emits `document:undo-state-changed`. Nothing has to remember anything, and a
+future writer cannot bypass it without replacing the field's type.
+
+* **ONLY TRANSITIONS.** A 10 000-cell paste that pushes one transaction onto a non-empty stack emits
+  nothing; typing into ten cells in a row emits at most one event, on the first.
+* **READS ARE FREE**, and that is load-bearing rather than an optimisation: the frontend calls
+  `get_undo_state` from inside the listener this event feeds, and a read that announced would be an
+  infinite loop. Same trap `DirtyFlag` documents.
+* **The guard releases the mutex BEFORE announcing**, for the same reason `DirtyGuard` does.
+
+**AND `document:dirty-changed` WAS NOT ENOUGH — checked rather than assumed, which is why this is its
+own channel and not a second subscriber to that one.** The two states move independently in both
+directions: undoing back to depth 0 leaves the document dirty, so the next edit re-arms `canUndo` with
+no dirty transition to ride on; and an edit after an undo clears the redo stack (`canRedo` true ->
+false) while the document was already dirty and stays dirty. Either one leaves a ribbon button lying
+about what pressing it will do.
+
+**The frontend half is one bridge and one store, mirroring `dirtyStateBridge`.**
+`shell/undoStateBridge.ts` re-emits onto `AppEvents.UNDO_STATE_CHANGED` (74th event); `@api/undoState`
+holds ONE cached answer that both consumers read, so a greyed ribbon button can never sit above an
+enabled menu entry for the same command. The Home tab binds `disabled`/`aria-disabled` on exactly the
+two ids; `StandardMenus` patches the two Edit items through `updateMenuItem` (in place — re-registering
+would rebuild Edit from this extension's own literal and drop anything another extension had
+contributed to it) and unsubscribes on deactivate.
+
+**Both fail OPEN, at both hops, and that is a decision.** A malformed payload and a backend that
+refuses to answer both yield `{canUndo: true, canRedo: true}`. A wrongly-ENABLED button costs a press
+that does nothing — exactly the behaviour that shipped until now. A wrongly-DISABLED one takes away an
+undo the user really has and gives them no way to argue with it.
+
+**The seed read is not a poll.** The first subscriber triggers one `getUndoState()`, because a listener
+that mounts BETWEEN transitions has no event to learn from; after that the store lives on events, and
+the bus subscription is dropped with the last subscriber.
+
+**BLAST RADIUS — what legitimately changed, and what did not.**
+
+* **`undo-across-open.spec.ts` REQUIRED a change, and it is the register's own prose that was wrong.**
+  Its `pressRibbon` helper carried a doc comment stating as measured fact that "Calcula's Undo/Redo
+  affordances are NEVER disabled", and it called `btn.click()` unconditionally — which now times out on
+  a correct build at the two sites where the stack is deliberately empty. The helper returns
+  `"pressed" | "refused"` instead, and **the teeth are unchanged**: on a LEAKING build the freshly
+  opened document still reports `canUndo`, so the button is enabled, the press happens and the byte
+  oracle sees the corruption. On a correct build the refusal is now asserted, which is a second,
+  independent statement of the same guarantee. The two sites inside the owning document assert
+  `"pressed"` — a fix that bought the spec by greying the button out would otherwise pass by doing
+  nothing.
+* **`ribbon-tabs.spec.ts` gained a `beforeEach`**, because the ribbon goldens now photograph undo
+  availability: a capture after a spec that ran `new_file` shows two greyed buttons and one taken
+  mid-suite shows two live ones. One write to a scratch cell the spec already owns (`X10`) pins the
+  stack non-empty. Deliberately not undone afterwards — an undo would light Redo up instead, which is
+  the same non-determinism from the other side.
+* **NOTHING ELSE.** `menu-interactions.spec.ts` only asserts the Edit items are visible (`toBeVisible`
+  is true of a disabled button), and no spec anywhere clicks Edit > Undo through the menu
+  (`rg "clickMenuItem" | rg -i "undo|redo"` is empty). The `undo-redo.spec.ts` and oracle routes drive
+  the Tauri commands, which are untouched.
+
+**Verification.** 6 Rust tests on the store (first edit announces; a second edit announces nothing;
+a READ announces nothing; undoing the last entry announces both halves in one event; replacing the
+stack wholesale — which is what `reset_document_scoped_stores` does — announces the reset; the payload
+serialises `{"canUndo":…,"canRedo":…}`). 27 frontend tests across four new files. The Home-tab file
+carries the counterweight that a NEIGHBOURING button is untouched, without which it would pass just as
+happily on a component that disabled the whole group, and asserts that a disabled press does not reach
+the handler at all. **Demonstrated firing:** removing `disabled={unavailable}` from the real component
+fails 5 of its 7 tests.
 
 
 ## 3. Test-infrastructure decisions
@@ -4739,6 +5251,533 @@ to be relaxed by hand last time to see the corruption; now it does not. Soft sti
 reaching into a session scratchpad — the defect §3ak found in `dirty-flag-close.spec.ts` and §3aw found
 still living in `macro-link-model.spec.ts`.
 
+### 3ay. The document-store census now roots at BOTH projection paths — and the claim that it costs nothing was MEASURED, not repeated (2026-08-10)
+
+**The gap.** `every_store_the_save_path_reads_is_reset_when_the_document_is_replaced` rooted at
+`assemble_workbook_for_save` alone, because the `.cala` save is the path §2w's leak was measured on.
+It is not the only path that projects the live stores into a file somebody else opens. **The `.calp`
+publish is the other**, and it is the one carrying the confidentiality edge that made §2w matter: a
+`.calp` is by construction sent to other people, so a store the publish path reads and the reset does
+not clear would put a closed document's content into a package a subscriber pulls, and nothing would
+have failed.
+
+**Rooted at `assemble_publish_workbook` as well. The cost was measured before the claim was made, and
+again after:**
+
+| | stores reached |
+|---|---|
+| `assemble_workbook_for_save` alone | **70** |
+| both roots | **71** |
+| publish-only | **1** — `AppState.protected_regions` (read to compute the package's excluded regions) |
+| publish-only AND unreset | **0** |
+
+So the second root demanded nothing on the day it was added — which is exactly why it had to be added
+on a day when it demanded nothing. (The register's earlier figure of "60 stores" is stale by the
+`workbook_protection` / `pending_recalc` chain-join fix and by §2x's additions; the two numbers that
+matter, 1 publish-only and 0 escaping, both hold.)
+
+**Two new guarantees, not one.** `the_two_projection_roots_are_both_real_and_the_publish_root_adds_no_demands`
+asserts (a) each root name resolves to **exactly one free function**, and (b) the publish root's
+private contribution is empty. (a) is not bureaucracy: `call_closure` silently yields nothing for a
+name it cannot resolve, so a root that is renamed, deleted, or turned into an `impl` method — which
+`parse_fn_header` deliberately does not index — would leave the census passing over half the surface
+with **no signal at all**. That is the exact failure mode this whole file exists to make impossible.
+(b) is what keeps the "costs nothing" claim honest: the day publish starts reading a store the save
+path does not, this test names it and the census above demands the decision.
+
+The test also refuses to pass vacuously in the other direction: it asserts the publish root really does
+contribute a store of its own, so a root that stopped reaching the carrier could not sit there
+contributing nothing while looking like coverage.
+
+**Demonstrated firing, twice, by sabotaging the real tree and restoring it.**
+
+| sabotage | what failed | message |
+|---|---|---|
+| `state.calculation_mode.read()` added to `assemble_publish_workbook` | **the census AND the new test** | "…projected into every saved workbook or **published package** but are NOT reset: `AppState.calculation_mode`" / "…read ONLY by the `.calp` publish path and are not reset" |
+| `SAVE_ROOTS` second entry renamed to a function that does not exist | the new test | "`assemble_publish_workbook_renamed` is a census ROOT and resolves to 0 free functions… a root that has been renamed… does not fail the census — it silently shrinks it" |
+
+The first sabotage is worth noting for what it says about the census's honesty: `calculation_mode` is
+`SESSION_SCOPED` in the FIELD census (an application preference the reset must not touch) and is
+therefore correctly not reset — so putting it on a projection path is exactly the shape of a real
+leak, and both halves of the census said so, by name, in one run.
+
+**Non-vacuity was extended with the publish root's own member.** `AppState.protected_regions` is now in
+the list of stores the census must find, alongside the five §2w members — so a walk that stopped
+reaching the publish path would fail on the enumeration rather than quietly reporting a clean bill over
+half the surface.
+
+
+### 3az. The four small recorded leftovers — each re-verified, and what each one actually was (2026-08-10)
+
+The instruction was to check whether each is still open and then close it or say why not. Two were
+still open and closed; one turned out to be hiding a real behavioural defect; one is still refused,
+and the refusal is now backed by a measurement rather than by a recollection.
+
+---
+
+**(1) `persist_security_config` — the trigger has NOT fired, so the recommendation stands. It is now a
+CHECK instead of a sentence.**
+
+§3av reported it and deliberately did not fix it: two writers, both correct, "if a third writer is ever
+added, fold the write into a `set_security_level(state, level)` helper". Re-counted:
+`rg "persist_security_config"` returns **three** hits — `set_script_security_level`,
+`set_mcp_access_level` and the definition. The other apparent writers are all inside `#[cfg(test)] mod`
+blocks, and `hydrate_security_level` writes both fields and must NOT persist because it is the load
+path. **So the code is unchanged, and rightly.**
+
+What changed is that a recommendation living only in a document decays, and this register has recorded
+that failure mode more than once. `script_security_census_tests.rs` classifies every PRODUCTION
+function that touches `security_level` or `mcp_access_level` as writer-that-persists, load-path or
+reader, each with a written reason; a fourth is unclassified until somebody decides, and the failure
+message IS the recommendation.
+
+**Writing it found two functions the by-hand list had missed** — `check_script_security` and
+`script_execution_status`, both readers — which is the same lesson as everywhere else in this program:
+a hand-written list of instances is not a measurement of the class. It also rejected an invented name
+(`is_script_execution_allowed`) through its own staleness check, which is the check working in the
+direction people forget to test.
+
+Deliberately NOT a call-count assertion. "`persist_security_config` has exactly two call sites" fires
+for the writer who REMEMBERS the persist and stays silent for the one who forgets — and forgetting is
+the defect. **Demonstrated firing:** deleting the persist from `set_mcp_access_level` fails
+`every_writer_of_the_security_levels_persists_the_choice` by name. The failure mode is stated next to
+the check so nobody over-reacts to it: this is a REVERT at next launch, not a corruption — but note the
+direction it can revert in, from a level the user TIGHTENED back to a looser persisted one, silently.
+
+---
+
+**(2) `ScriptableObjects/lib/debugger.ts` — collapsed, and it was not merely structural: the shape had
+already produced a live defect.**
+
+§3aw filed it as "correct today, for the same unpurchased reason the reports were", with the failure
+mode recorded as "losing BREAKPOINTS, not user data". Reading it to apply the `animationStore`
+treatment found that the third mutator the register was waiting for **was already there**:
+`clearAllBreakpoints()` went round `commit()` and did four fifths of its job. It cleared the map,
+announced and persisted — and never called `sendBreakpoints`. **So "Clear All Breakpoints" during a
+LIVE debug session emptied the gutter and left the runtime stopping at every one of them.**
+
+The map now lives in a `#private` field on a `BreakpointStore` with three doors: `mutate()` (changes,
+announces, persists and retargets a live session — all of it or none), `adopt()` (installs a set that
+came OUT of the workbook; does not persist, and the name says so) and `forget()` (the document was
+replaced; does not persist, because the document being loaded owns the answer). `clearAllBreakpoints`
+is now one `mutate` per script, so it cannot forget — forgetting is not one of the things `mutate` can
+do — and the persist is debounced, so N calls still make one write. `loadPersistedBreakpoints` also
+collects into a local before touching the store, so a backend that throws halfway through no longer
+installs half a workbook's breakpoints.
+
+Compile probe, run against the real tree and reverted: `store.#byScript` outside the class body ->
+`TS18013: Property '#byScript' is not accessible outside class 'BreakpointStore' because it has a
+private identifier`.
+
+**One test in `debugger.test.ts` had to change, and the change is evidence rather than an
+accommodation.** Its `beforeEach` called `clearAllBreakpoints()` while the previous test's session was
+still installed; the clear now schedules an async `hostSetDebugBreakpoints` that landed after the
+`mockClear()` and read as the next test's call. The session is torn down first, and a new test pins the
+fixed behaviour directly (`CLEAR ALL reaches a live session, not just the gutter`). 33 passing, was 32.
+
+---
+
+**(3) The `ribbon-tabs` Ctrl+F1 golden — the refusal reason has NOT evaporated. Measured.**
+
+§3ar refused to re-record `ribbon-minimized` because its diff was grid CONTENT left by whichever of the
+~450 preceding tests ran last. The question posed for this pass was whether D5's canvas-layer crop had
+dissolved that. **It has not, and the measurement is one command:**
+
+```
+ribbon-home-tab-default.png        1280 x 136
+ribbon-ribbon-before-minimize.png  1280 x 136
+ribbon-minimized.png               1280 x 800   <-- the whole window
+```
+
+Every other golden in the file is a ribbon-ELEMENT capture. This one alone is
+`takeCheckpoint(page, name)` with no target, which photographs the window. D5 cropped
+`takeGridScreenshot` to `[data-grid-canvas-layer]`; it does not touch `takeCheckpoint`. So the frame
+still contains the entire grid, and re-recording it would still freeze one run's residue.
+
+**What was done instead is to remove the CAUSE, so that recording it becomes legitimate**, which is the
+same move D5 made for grid captures:
+
+* the grid area is **masked** out of the frame (`mask: [locator("[data-grid-area]")]`). The mask is a
+  solid rectangle, so the grid's GEOMETRY — the thing a window-framed shot is for, since collapsing the
+  ribbon moves the grid area up and makes it taller — is still in frame and its contents are not. A
+  ribbon-only capture could not show that, which is why the instrument was not simply swapped;
+* the SELECTION is pinned with `navigateTo("W1")` before the capture, because the window frame also
+  contains the Name Box and the status bar, both of which render the current selection — the documented
+  `clickCell` drift, with its documented remedy;
+* undo availability is pinned by the same `beforeEach` §2ac added, since the Home tab's Undo/Redo
+  buttons are in frame and now follow the stack.
+
+**The baseline was deliberately NOT deleted or re-recorded here.** `softly()` swallows
+"snapshot doesn't exist" and writes the actual, so deleting it would have produced a green run and a
+baseline recorded by an agent who could not open the app to look at it — which is the failure this
+register keeps naming. **It goes to the re-record pass (§3aq's list) with the blocker removed**: after
+this change, recording it no longer freezes residue.
+
+---
+
+**(4) `inline-editor-live` test 8 — the upstream spec is STILL not identified, and the honest close is
+that the next failure will identify itself.**
+
+§3at recorded this twice and ended both times with "the upstream spec responsible is NOT identified".
+Re-reading the evidence narrowed it to two candidate mechanisms and eliminated neither by reasoning —
+which, per this register's own standing rule, means neither is a conclusion:
+
+* **a commit-timing race.** The test typed the word and its Enter at full speed, waited a flat 500 ms,
+  and then read the cell ONCE. In isolation the commit lands in far less than that; at the end of a
+  450-test run in a shared app it need not. This is the one candidate that can be removed by
+  construction rather than by investigation, and it has been: the assertion is now `expect.poll`
+  (10 s, backing-off intervals). A poll cannot fail for being early, and it keeps every tooth the fixed
+  wait had — the pre-fix build committed `"b"`, which no amount of waiting turns into `"tabbed"`.
+* **an upstream refusal.** Something makes the BACKEND reject a write to that coordinate. The candidate
+  set is real (sheet protection, a stale spill map — §2y — a validation rule, a merge, a hidden row)
+  and none of them is on a spec that alphabetically precedes `inline-editor-live` in a way that could
+  be confirmed statically. `data-validation.spec.ts` works in column V, not B; the protection and merge
+  specs sort AFTER it.
+
+**So the spec was made to diagnose itself.** On failure it now dumps the cell, the active sheet, the
+sheet list, the undo state, the validation rule, protection status, the user-hidden rows, whether an
+editor is open, what holds focus — and, the discriminator, **the result of a direct `update_cell` on the
+same coordinate**. If that write succeeds, the keystrokes never arrived (focus, timing, a sibling's
+editor); if it is REFUSED, the backend is rejecting writes to that cell and the error says why. The
+only evidence a shared 450-test run has ever left behind is `expected "tabbed", received ""`, which is
+compatible with all of the above and points at none of it; bisecting a shared-app suite costs hours,
+and this costs one function that runs only on the failure path.
+
+**Stated plainly so it is not read as a fix:** candidate one is eliminated, candidate two is not, and
+the next full run is what decides. This entry replaces "never identified" with "identifies itself".
+
+
+### 3ba. The hunt verification pass — ten findings checked, eight real, one refuted, and the two the hunt never saw (2026-08-10)
+
+A read-only hunt filed ten findings (F1–F10) with the honest caveat that it had run nothing: no build,
+no test, no app. This register's own record is why that caveat mattered — six hypotheses previously
+recorded here as conclusions were all wrong. So every finding was reproduced before anything was
+changed, and the results are given below including the one that evaporated.
+
+**The verification table.** "Evidence" is what was actually executed, not what was read.
+
+| # | Claim | Verdict | Evidence |
+|---|---|---|---|
+| F1 | Parentheses dropped by both renderers; save/reload changes the computed value | **REAL** | Probe: `=(A1+B1)*C1` rendered `A1+B1*C1`; 9 of 10 grouped forms failed to round-trip |
+| F2a | An unknown sheet resolves to the formula's OWN sheet, not `#REF!` | **REAL** | Probe: `=NoSuchSheet!A1` returned `100` — Sheet1's own A1 |
+| F2b | Deleting a sheet never repairs plain cross-sheet refs | **REAL** | Probe: `repair_3d_refs_on_delete("=Sheet2!A1", "Sheet2", …)` returned `Some("=SHEET2!A1")` |
+| F3 | File ▸ Open discards unsaved changes with no prompt | **REAL** | `fileOpen` has no `isModified` guard; `fileNew` and the close handler both do |
+| F4 | Renaming a sheet orphans incoming cross-sheet edges | **REAL** | New test fails without the fix: `Sheet2!B1` keeps `10` after `Data!A1 = 999` |
+| F5 | Move/delete never remap the sheet INDICES in the dependency maps | **REAL** | Two new tests, one per operation, both fail without the fix |
+| F6 | Sheet names unvalidated; the quoting rule is narrower than the lexer's escape | **REAL** | Probe: `John's` → `'John's'!A1`, `Q1-2026` → `Q1-2026!A1`, `2026` → `2026!A1` — none re-parse |
+| F7 | Named ranges' `refers_to` never updated on rename or delete | **REAL** | `grep named_ranges sheets.rs` is empty; the name table is untouched by every sheet operation |
+| F8 | The recalc census cannot see `repair_all_formulas` | **REAL** | Widening the detector surfaced it, plus `delete_sheet` and `rename_sheet` behind it |
+| F9 | `fill_range` has no spill check and misses the §2y choke point | **NOT REAL** | Already fixed. `check_no_array_within` sits at `data.rs:6852`, installed by the §2y pass while the hunt was reading |
+| F10 | A text literal cannot contain a double quote | **REAL** | Probe: `="a""b"` is a parse error — `read_string` has no `""` escape though `read_quoted_identifier` has `''` |
+
+**F9 is the useful negative.** The hunt flagged it as medium-high confidence "against a file that changed
+under me twice", and it was right to hedge: the §2y pass had already installed exactly the guard it
+predicted would be missing. A finding filed against a moving file is a finding about a moment, not
+about the tree.
+
+**THE TWO THE HUNT NEVER SAW, both worse than most of what it did file.** Both were found the same way:
+not by looking harder at the reported defect, but by asking what else went through the seam the defect
+sat in. The hunt correctly identified "there are two AST→text serialisers and no round-trip test" as the
+root pattern under F1/F6/F10. It then proposed a proptest. Comparing the two tables instead is what
+found these.
+
+1. **47 built-in functions rendered to text that is not their name.** The app crate's
+   `expression_to_formula` had 224 explicit arms and then `other => format!("{:?}", other)` — a
+   **debug-format catch-all covering 247 more functions**, which prints the Rust *variant identifier*.
+   `CELL` was written `CellFn`, `FORECAST` → `ForecastLinear`, `STDEV.S` → `StdevS`,
+   `NETWORKDAYS.INTL` → `NETWORKDAYSINTL`, and the whole `GATHER.*` writeback family likewise. For 47 of
+   them the produced text is not an accepted spelling. It does not fail loudly: re-parsing yields
+   `Custom("CELLFN")` — an *unknown user function* — so the formula becomes `#NAME?` with no error at
+   render time and none at parse time. Measured, then reproduced:
+   `=CELL("row",A1)` → `=CellFn("row",A1)` → `Custom("CELLFN")`.
+   Two further arms had simply drifted (`STDEV.P`/`VAR.P` against the canonical `STDEVP`/`VARP`), which
+   made `repair_all_formulas` rewrite untouched cells on every sheet operation because the two
+   serialisers disagreed about text they both round-tripped.
+   **Reach: renaming or deleting ANY sheet runs every formula on every sheet through this.**
+
+2. **Renaming any sheet destroyed every named-LAMBDA call in the workbook.** `repair_all_formulas`
+   read each cell with `formula_string()` — the DISPLAY form, which collapses the internal
+   `__INVOKE__("MyFn", <lambda>, args)` marker down to `MyFn(args)`. The repair re-parses that and
+   renders it back as `MYFN(A1)`; since the upper-cased result differs from the mixed-case original,
+   the cell is REWRITTEN and the resolved lambda is gone. It fires on sheets the rename never
+   mentioned. Pinned at the fix site by
+   `repair_all_formulas_preserves_a_named_lambda_call_it_does_not_need_to_touch`, which under sabotage
+   reports `the resolved lambda was destroyed by a repair that changed nothing: MYFN(A1)`.
+
+**A third, found while fixing F7:** a sheet-scoped defined name carries its scope as an INDEX, and
+`remap_sheet_keyed_stores` never remapped it. Moving or deleting a sheet silently re-scoped every
+sheet-local name onto whichever sheet inherited the number.
+
+#### What was fixed, and how each was made to fail first
+
+**One renderer, not two (F1 + F6 + F10 + both unseen findings).** `expression_to_formula` and its three
+private helpers (`builtin_function_to_name`, `expression_to_formula_no_sheet`,
+`table_specifier_to_string`, 386 lines) were **deleted**; the function is now a delegation to
+`engine::ast_render::render_formula_raw`. This is §3av's lesson one level down: single-representation
+was bought for stores, and the *formula* still had two. The engine renderer then gained:
+
+- **Precedence-aware parenthesisation.** A `binding_power` table mirroring the parser's descent chain,
+  with the right-operand-of-a-left-associative-operator case and `^`'s right-associativity handled, plus
+  the detail that `parse_power` takes its LEFT operand from `parse_primary` (so `(A1^B1)^C1` must keep
+  its parentheses) and that a *negative number literal* renders like a unary minus (so `Power(-5, 2)`
+  must render `(-5)^2` or it re-parses as `-(5^2)`: 25 becomes −25).
+- **A real sheet-name quoting rule.** Bare only when identifier-shaped; otherwise apostrophe-wrapped
+  with embedded apostrophes DOUBLED, the escape `read_quoted_identifier` already understood and the
+  serialiser never produced.
+- **`"` escaped as `""`** in text literals, and `read_string` taught the matching escape.
+
+**A refinement worth recording because the test caught it, not review:** the first version of the
+quoting rule also quoted reference-shaped names (`A1`, `ZZ100`). That is harmless in isolation and
+wrong in practice — it also captures `Sheet1`, `Sheet2`, `Q1`, the DEFAULT sheet names — and would have
+re-quoted the formula text of essentially every existing workbook. `=A1!B2` was checked and parses with
+sheet `A1`; the trailing `!` is what disambiguates. The guard was removed.
+
+**Teeth.** `every_three_leaf_operator_pairing_survives_render_and_re_parse` walks both associativity
+shapes for every ordered pair of the 8 binary operators — 128 groupings, asserted exhaustive. With
+parenthesisation disabled, **64 of 128 fail**. `every_builtin_function_survives_serialisation_as_itself`
+enumerates the function catalogue (520 entries) rather than sampling it; re-introducing the debug
+fallback for two functions makes it name them.
+
+**`#REF!` where a sheet is gone (F2a + F2b).** `get_grid_for_sheet`'s `.unwrap_or(self.grid)` is
+replaced at all ten sheet-QUALIFIED call sites by `resolve_grid_for_sheet`, which returns `#REF!`.
+`(Some(name), None)` — a qualified reference with no multi-sheet context at all — deliberately still
+resolves locally: that is single-sheet evaluation, where there is no sheet table to check against and
+the qualifier has always been ignored. `visibility_key_for_sheet`, which was written to MIRROR the old
+fallback, has its contract comment updated rather than left to rot. Separately,
+`repair_3d_delete_recursive` gained the four reference arms its rename twin always had.
+
+**The dependency maps follow their sheets (F4 + F5).** Two helpers, called from the places that already
+own the renumbering: `remap_cross_sheet_dependency_indices` from inside `remap_sheet_keyed_stores` (so
+`move_sheet` and `delete_sheet` are both covered by one choke point, not two call sites), and
+`rename_cross_sheet_dependency_keys` from `rename_sheet`. Both halves of the pair move together —
+`cross_sheet_dependents` is keyed by NAME with INDEX values, `cross_sheet_dependencies` the reverse —
+because a fix that moved only the forward index would leave the reverse one naming a sheet that no
+longer exists. `rename_sheet` also gained the `rebuild_all_dependencies` call every sibling already had.
+Four tests, all four fail with the helpers disabled.
+
+**Defined names follow their sheets (F7).** `refers_to` goes through the same repair the grid formulas
+do — the name follows a rename and becomes `=#REF!` when its sheet is deleted — and sheet-scoped names
+have their index remapped, or are removed with the sheet they were scoped to.
+
+**The census's third blind spot (F8).** `Grid::cells` is public and this crate writes into it directly
+in 42 places; the detector only knew `set_cell`/`clear_cell`. Widening it is not the whole story,
+because a naive widening reported `extract_references_recursive` — `ExtractedRefs` also has a field
+called `cells`, and collecting a reference into it is not writing a cell. A false positive is worse than
+a gap here: the only way to make the census green would have been to record a **false exemption**, which
+is how a census stops being believed. The detector is therefore receiver-aware, and that precision is
+itself guarded by `every_direct_cells_map_receiver_is_a_recognised_spelling`, which enumerates every
+receiver reaching `.cells.insert/remove/get_mut` and fails on any spelling it has not been told about.
+Renaming one `grid` binding to `target` makes it report `named_ranges.rs:1049 — receiver 'target'`.
+
+**And the census immediately earned it.** With `repair_all_formulas` visible, `delete_sheet` surfaced:
+it turns formulas across every sheet into `#REF!` and **recalculated nothing**, so every cell downstream
+of a broken reference kept the number it computed while the sheet existed, and that is what a save
+wrote. It now recalculates the workbook — whole-workbook rather than seeded, because the repaired cells
+are spread across every sheet and this is a rare, already-heavyweight operation. Removing that call
+makes the census fail by name. `rename_sheet` is EXEMPT with the reason a rename moves no value.
+
+**File ▸ Open asks (F3).** The six lines from `fileNew`, before the picker rather than after — asking
+afterwards makes the user choose a file and only then learn the choice costs them their edits. Five
+tests; four fail without the guard, and `the_prompt_precedes_the_picker` is the one a naive fix loses.
+
+#### Contract checks
+
+All five were run. (a) is satisfied by the **corrected** semantics, not the filed ones: the register's
+own §2y correction established that spilled cells get NO undo entry and that undo restores the ORIGIN
+which then re-spills — `a_swallowed_spill_cell_gets_no_undo_entry` and
+`undo_of_the_delete_restores_the_spill_and_the_map_agrees` pin both halves, and
+`restoring_spilled_literals_beside_a_restored_origin_is_what_blocks_the_respill` pins why the filed
+version would have destroyed the array. (b) `a_restored_slicer_computed_property_still_re_evaluates`.
+(c) four lifecycle tests including `reopening_refuses_a_package_this_machine_never_pinned` and
+`reopening_refuses_a_package_whose_model_was_tampered_with`. (d) all four censuses green, including
+`the_two_projection_roots_are_both_real_and_the_publish_root_adds_no_demands`. (e) six
+`undo_history` tests plus the two frontend suites.
+
+---
+
+### 3bb. §2ab sharpened — the collapse is EDIT-triggered, and the machinery to fix it already works
+
+§2ab (a reloaded workbook has no spill map) remains **OPEN**. It was probed rather than re-asserted, and
+two measurements change how it should be scheduled and fixed.
+
+**It is not the reload that breaks the array.** A reloaded workbook looks correct: the spilled literals
+came back from the file and the origin holds its value. The collapse happens on the FIRST recalculation
+that touches the origin — an edit to any precedent — at which point `spill_blocked` sees cells occupied
+by literals no map claims, and the array becomes `#VALUE!`. So the user-visible sequence is *open the
+file, everything is fine, change one input, the array dies*. That is worse to diagnose than a visible
+failure on open, and it means the reproduction must include an edit.
+
+**The spill machinery itself is not broken — only the load path lacks it.** Probed directly:
+`=SEQUENCE(B1)` with `B1 = 4`, then `B1 = 3` shrinks the array to three cells and the map with it, then
+`B1 = 5` grows it back to five. Both directions correct, map consistent throughout. The cascade knows
+how to write a spill; `recalculate_sheet_values` does not.
+
+**Which points at the cheaper fix.** The obvious repair is "rebuild the map on load", which needs the
+spill-writing logic lifted out of `update_cell_impl` (it is entangled with the cube prefetch, the UDF
+resolver, the pivot and gather callbacks, styles and locale). But §2y's own finding suggests a smaller
+one: **spilled cells are derived state** — that is exactly why they get no undo entry — and derived
+state need not be persisted at all. If `.cala` stopped saving spilled cells, the origins would re-spill
+during the load recalculation and the map would be rebuilt by the code that already works. That is a
+`format_version` decision and therefore an owner call, which is why this stays filed rather than fixed.
+
+---
+
+### 3bc. Two things left deliberately unfixed, with the reason
+
+**Sheet-name VALIDATION at entry.** F6's product half. The serialiser now round-trips any name, so
+nothing is destroyed by one — but `rename_sheet`/`add_sheet` still accept names Excel forbids
+(`[ ] * ? / \ :`, leading/trailing apostrophe) and names that collide with a reference. Quoting makes
+them safe; whether to allow them is a product call, and one that touches import/export compatibility.
+
+**`.ok()` swallowing a parse failure into a lost formula.** `repair_all_formulas` and
+`apply_names_to_formulas` both store `parser::parse(&text).ok().map(Box::new)`, so a formula whose
+repaired text does not parse silently becomes `ast = None` — a stale value with an empty formula bar and
+no error anywhere. Every *known* producer of unparseable text is now fixed (the 47 functions, the
+quoting rule, the apostrophe escape), which is why this is no longer urgent. It is still the mechanism
+that turned all of them into silent data loss rather than a visible failure, and it should become a
+logged `#REF!` rather than a swallow.
+
+### 3bd. The live-proof pass for §2y / §2z / §2aa / §2ac and the hunt fixes — six new journey specs, two product defects found while writing them, and one spec that had encoded the old behaviour (2026-08-10)
+
+Everything §3ba fixed, plus §2y, §2z, §2aa and §2ac, had been proved by unit and in-process tests and
+by nothing else: the §2y closing pass said so in as many words ("the live E2E projects were NOT
+re-run, and that is a gap"), and the reason given was that the brief's launch script did not exist in
+the tree. **It exists now** — `scratchpad/launch-vba-batch.ps1`, checked in, doing the four things
+`global-setup.ts` does that manual mode does not (kill stale instances and Vite squatters, put MSVC's
+`link.exe` ahead of Git's, point `CARGO_TARGET_DIR` outside the Dropbox tree, open the CDP port) and
+launching with `src-tauri/tauri.e2e.conf.json`, without which `window.__TAURI__` is absent and every
+spec that drives the app through it fails.
+
+#### What is now proved through the real UI
+
+| spec | tests | what it drives that no unit test can |
+|---|---|---|
+| `journeys/spill-delete.spec.ts` | 3 | the REAL Delete key on a spill origin; the painted strings AND the canvas pixels; the whole-block delete; the bytes on disk |
+| `journeys/undo-enablement.spec.ts` | 2 | the backend event -> shell bridge -> `@api/undoState` -> Home tab `disabled` -> Edit menu `disabled` wire, five hops |
+| `journeys/computed-property-restore.spec.ts` | 1 | a real `.cala` round trip, then a real cell edit reaching the re-evaluation through the commit path and `slicers:refresh` |
+| `journeys/subscription-restore.spec.ts` | 4 | publish -> pull -> save -> File > New -> reopen, plus the two unhappy paths performed on the registry's own bytes |
+| `journeys/formula-roundtrip.spec.ts` | 4 | a real sheet rename/delete running every formula through the serialiser, and the cross-sheet edge that must survive it |
+| `journeys/open-guard.spec.ts` | 3 | File ▸ Open's native prompt, its ORDER relative to the picker, and both answers |
+
+**§2y's exact reproduction, gesture for gesture.** `=SEQUENCE(4;1;424243)` typed into the origin
+through the real inline editor, the REAL **Delete** key, then: the spilled cells gone from the
+rendered grid (`get_viewport_cells` — the command the canvas paints from — AND a pixel comparison
+against the same block captured empty, which also catches the spill border), the map empty, the
+neighbour EDITABLE again, undo restoring the formula *and* its spill *and* the map, and redo taking
+all three down again. The start value is `424243` so the archive oracle is looking for THIS array and
+not for a stray `2`.
+
+**Teeth, measured rather than asserted.** `recalc_after_active_sheet_bulk_rewrite`'s tear-down was
+disabled on the running build (`let has_spills = false && …`), `tauri dev` rebuilt, and the spec was
+re-run:
+
+```
+the Delete key cleared the formula and left its spilled values painted on the grid
+  Expected  ["", "", "", ""]
+  Received  ["", "424244", "424245", "424246"]
+```
+
+and a direct probe on the sabotaged build reproduced the rest of §2y verbatim — `clear_range` returned
+OK, `spill_ranges` UNCHANGED, and `update_cell` on the neighbour was refused with *"Cannot edit cell
+(6, 132): it contains a spilled array value from cell (5, 132). Edit or delete the formula in the
+source cell instead."* against a source cell that is empty. The sabotage was then reverted and
+`data.rs` verified **byte-identical by sha256**
+(`8011d47389dd87500574beadffc087fd8dc6c5e4502047c6f119a51a89cc88e9` before and after), rebuilt, and
+the spec re-run green.
+
+#### TWO PRODUCT DEFECTS FOUND WHILE WRITING `formula-roundtrip.spec.ts` — both fixed
+
+Neither was among the hunt's ten findings, and neither is visible from the fixed code: they were found
+by driving `rename_sheet` on the running app and then reading the formula bar and the Name Manager.
+
+**1. Renaming or deleting a sheet RE-SPELLED every defined name in the workbook.** `=Anchor*2` came
+back `=ANCHOR*2`, on sheets the operation never mentioned. This is **§2t** (`BudgetTotal` ->
+`BUDGETTOTAL`) on a path §2t's fix does not reach — `restamp_workbook_name_casing` is called from
+`open_file` and from nowhere else. The mechanism: both repairs re-render the whole formula whether or
+not they touched it, the lexer upper-cases every bare identifier, and `repair_all_formulas` rewrites
+any cell whose repaired text DIFFERS from what it was given.
+
+**2. The same re-render rewrote a named LAMBDA's own definition** — a `refers_to` authored as
+`=LAMBDA(x, x*2)` came back `=LAMBDA(X,X*2)`. That re-spells a **local binding**, which is precisely
+what §2t's restamp refuses to do, and for the reason §2t gives: respelling a local after a workbook
+name that merely collides with it tells the reader something false. Here it was not even a collision —
+just the renderer.
+
+**The fix is two halves, and the first is the important one.** `repair_3d_refs_on_rename` and
+`repair_3d_refs_on_delete` now return the CALLER'S ORIGINAL TEXT when the repair produced the same
+tree it was given (`unchanged_or`, comparing rendered ASTs — not strings that look similar). A repair
+that changed nothing must leave the user's own spelling alone, and that covers the overwhelming
+majority of cells, since most formulas never mention the sheet being renamed. For the formulas a
+rename really does rewrite, `rename_sheet` and `delete_sheet` now call the SAME
+`restamp_workbook_name_casing` the load path calls, so entry, reload and a sheet operation cannot
+disagree about what a name is called. Five tests in `formula_serialisation_tests.rs`, including the
+two counterweights (a rename that DOES touch the formula still repairs it; a delete that does still
+produces `#REF!`) without which the preservation could have been bought by making the repair a no-op.
+
+#### ONE EXISTING SPEC HAD ENCODED THE OLD BEHAVIOUR — the F3 regression, found by running the suite
+
+`undo-across-open.spec.ts` failed 2 of 5 in the first ordered journey run after F3 landed:
+`the file dialog has no file-name edit box`. It opens BRAVO while ALPHA holds an unsaved edit, which
+is now exactly the gesture that raises the guard's native prompt — and its picker driver, which looks
+for a file-name `Edit` child, correctly reported that the visible dialog had none. The product is
+right; the spec was out of date.
+
+`openThroughFileMenu` now answers the prompt, and **the expectation is MEASURED, not assumed**: it
+reads `is_file_modified` immediately before the click and requires a prompt exactly when the document
+is dirty. The first version hard-coded a per-call-site expectation and was wrong about one of them —
+a spec asserting its author's model of the app rather than the app. Nothing else in the file changed;
+its teeth are unaffected, because the corruption §2x is about happens AFTER the open.
+
+#### A TEST-INFRASTRUCTURE DEFECT WORTH ITS OWN PARAGRAPH: a leaked native dialog poisons everything after it
+
+While `open-guard.spec.ts` was being written, one of its assertions aborted a test between raising the
+file picker and dismissing it. A file picker is **owned by the app process and outlives the spec**. The
+next run measured the debris rather than the product, and by the time it was diagnosed the app was
+holding **twelve stacked "Öppna" dialogs** — enumerated to be sure of it. Every downstream failure in
+between, including a chase after a phantom "the dirty flag is set on a freshly saved document", was
+that and nothing else.
+
+`open-guard.spec.ts` now dismisses every native window in BOTH `beforeEach` and `afterEach`, and the
+`beforeEach` asserts the app has none left before the test begins — so a leak fails the spec that
+caused it instead of the one after it. **Any future spec that raises a native dialog should copy that
+pair.** The related lesson for the enumeration itself: the unsaved-changes prompt is an rfd TASKDIALOG
+whose body is DirectUI, so a Win32 window walk cannot read it (that is why the shared driver uses UI
+Automation) — but a FILE dialog is a plain `#32770` with a file-name `Edit` child, and the presence or
+absence of that child is a reliable way to tell the two apart from outside the app.
+
+#### ONE GOLDEN RE-RECORDED, and §2ac's blast-radius analysis had missed it
+
+`visual` came back **17 passed / 1 failed**: `core-visual.spec.ts` -> *"edit menu open"*, **243
+differing pixels, identical to the pixel on two consecutive re-runs** — deterministic, not a flake.
+The diff image contains exactly four things: the Edit menu's **Undo** and **Redo** items, and the
+ribbon's **Undo** and **Redo** buttons. Nothing else in the frame moved.
+
+That is §2ac, and it is correct behaviour: the capture is taken immediately after
+`resetToNewWorkbook`, so the document has just been replaced and both affordances are properly
+greyed. The golden predates the enablement.
+
+**§2ac enumerated its blast radius and got this one wrong by omission.** It named
+`undo-across-open.spec.ts` and `ribbon-tabs.spec.ts` (which it fixed with a `beforeEach` that pins
+the stack non-empty), checked `menu-interactions.spec.ts` (`toBeVisible` is true of a disabled
+button) and concluded "NOTHING ELSE". The visual project's own menu golden photographs the Edit menu
+directly and was never considered.
+
+The golden was re-recorded rather than pinned, and the reason is the opposite of `ribbon-tabs`'s: the
+ribbon golden is taken mid-suite where the stack's depth is incidental, so it had to be pinned; this
+one is taken on a document that has *just been reset*, where "both disabled" is the only correct
+picture and is reached deterministically. Re-recorded golden:
+`e2e/visual/__screenshots__/core-visual.spec.ts/menu-edit-open.png`,
+`e81c8f44…` -> `22bf900b…`. The full project is **18/18** on a cold app afterwards.
+
+#### AND ONE SPEC-AUTHORING TRAP, recorded because the test caught it and review would not have
+
+`computed-property-restore.spec.ts` captures the slicer's header bar as pixels. `slicer.x/y` are SHEET
+coordinates, so that clip is only over the slicer while the grid is parked at the origin — and the
+spec's own edits go to `DA1`, a hundred columns away. The first version failed BOTH ways in one run:
+the pre-reload comparison "passed" because the whole viewport had scrolled between the two captures,
+and the post-reload one "failed" because both captures photographed the same empty patch of grid.
+**A pixel oracle that moves with the camera measures the camera.** The capture normalises scroll first.
+
 ## 4. OWNER DECISIONS — not work, product calls
 
 **These are for the owner. Nothing in this section is a defect awaiting a fix; each is a choice
@@ -5641,6 +6680,43 @@ refilled twice between 2026-08-09 and now is recorded as the SEVENTH and EIGHTH 
 read those before trusting any sentence in this section, because every version of the emptiness claim
 so far has been falsified within a day.**
 
+**NINTH CORRECTION, later on 2026-08-10.** It refilled again, and this time from a direction the
+eight corrections above never looked: not "does a mutation reach the file", but **"does opening the
+file put the derived state back"**. §2z (slicer computed properties restored and dead) and §2aa (a
+subscribed report with no path back to its model) are both FIXED. §2ab is not, and it is the one to
+schedule: after any reload, a workbook's dynamic arrays have **no spill protection at all**, a
+spilled cell can be typed over, and touching the array formula turns it into `#VALUE!` — and §2y's
+own text asserts the opposite, having read the right observation off the wrong cause. The technique
+that found all three is worth more than the three: read a restore function **next to its sibling**.
+Both look correct alone; the asymmetry is only visible in the pair. §2z carries the full sweep of
+twelve pieces of derived state, ten of which turned out fine.
+
+**TENTH CORRECTION, later still on 2026-08-10.** It refilled a fourth time, and the eleven findings that
+did it were filed by a READ-ONLY hunt that had run nothing. Nine of the ten it filed reproduced (F9 had
+already been fixed by the §2y pass mid-read). The tier's contents were, in severity order: a renderer
+that dropped parentheses so `=(A1+B1)*C1` came back from disk computing 21 instead of 30; an evaluator
+that resolved an unknown sheet to the formula's OWN sheet instead of `#REF!`; cross-sheet dependency
+maps that nothing re-keyed when a sheet was renamed, moved or deleted; and defined names that no sheet
+operation touched at all. All are FIXED, each with a test made to fail first.
+
+**But the two worst were not on the hunt's list, and the way they were found is the transferable part.**
+The hunt named the right ROOT — "two AST-to-text serialisers and no round-trip test" — and then proposed
+testing the property. Comparing the two implementations against each other instead found that one of
+them ended in `other => format!("{:?}", other)`: **47 built-in functions, `CELL` and `FORECAST` and
+`STDEV.S` among them, rendered to text that is not their name and re-parsed as unknown user functions.**
+Renaming any sheet ran every formula in the workbook through it. The same seam then gave up a second:
+the repair read the DISPLAY form of each formula, so **renaming any sheet also destroyed every
+named-LAMBDA call**, including on sheets the rename never mentioned. Neither is exotic; both are one
+`grep` away from the finding that was filed. The lesson to carry: when a hunt identifies a duplicated
+representation, DIFF the duplicates before writing a property test over them — the drift is the defect,
+and it is already enumerable.
+
+**The count is not the point, but it is the evidence:** the recalculation census has now been widened
+three times (delegating helpers, comments-are-not-code, free-functions-only) and this is the fourth —
+direct `grid.cells` writes — and the fourth widening immediately surfaced `delete_sheet`, which turned
+formulas into `#REF!` across the workbook and recalculated nothing. A census that has been wrong four
+times about its own scope should be assumed to be wrong a fifth.
+
 **The silently-wrong-answer tier is empty, and this time the claim is checked rather than asserted.**
 The last rewrite made that claim and was wrong within a day (§2m's F9 half). What is different now is
 that the five guarantees the claim rests on were each made to FAIL before being trusted — the recalc
@@ -5814,14 +6890,26 @@ is stored and shown as `SHEET1!`, normalised at cell entry and nothing to do wit
 
 What remains, in order.
 
-0. **§2y — deleting the ORIGIN of a spilled array leaves the spill map behind.** OPEN, with a live
-   reproduction. `clear_range` (what the Delete key runs) checks `check_spill_protection` and never
-   removes a spill range; only `update_cell` does. Delete the origin of a `=SEQUENCE(4)` and its three
-   spilled cells are uneditable AND undeletable for the session, showing values no formula produces,
-   with both offered remedies impossible to follow; they save as orphan literals. The fix is two parts
-   (remove the owned range through `clear_range`'s own undo-recording loop; stop refusing a host whose
-   ORIGIN is inside the same rectangle) and it wants its own pass. Found by asking which COMMAND the
-   user's gesture actually runs — §3ax.
+0. ~~**§2y — deleting the ORIGIN of a spilled array leaves the spill map behind.**~~
+   **CLOSED 2026-08-10.** And the filed two-part fix was HALF WRONG, which is the entry's own lesson
+   recurring: part (a) said to record each cleared spill cell for undo, and doing that would have made
+   Ctrl+Z land on `#VALUE!` instead of the array, because `apply_changes` restores every recorded cell
+   BEFORE it recalculates and the restored literals then block the re-spill. Spilled cells are DERIVED
+   state and get no undo entry; undo restores the ORIGIN and the cascade re-spills it. Part (b) was
+   right but had to become an explicit `SpillOriginPolicy` — applied unconditionally it lets a SORT
+   swallow an origin and shuffle values no formula owns.
+   **And the fix does not live in `clear_range`.** Enumerating the siblings, as the entry asked, found
+   `clear_range` was one of ELEVEN writers that could orphan the map — and a twelfth was `update_cell`
+   itself, which leaked whenever the replacement was a literal or an unparseable formula, and which
+   evaluated a replacement formula against the array it was destroying (`=A2*10` stored 20 where a
+   reload produces 0 — an order-dependent value from one keystroke). So the tear-down moved to a CHOKE
+   POINT, `recalc_after_active_sheet_bulk_rewrite`, where a seed that no longer holds a formula releases
+   whatever it owned; that covers the Delete key, Clear Contents, sort, undo AND redo without touching
+   `undo_commands.rs`. Seven commands that could reach a spilled cell with no guard at all now refuse.
+   The class is checkable at both ends: a crate-wide spill census (MAINTAIN / REFUSE / EXEMPT-with-a-
+   reason, with the recalculation census's sabotage tests and delegating-helper modelling) plus a
+   wiring test that a call site taking the origin exemption actually releases. 30 tests in
+   `commands/spill_map_tests.rs`. Residual is §2ab. §2y.
 
 0. ~~**§2x — the undo stack (and eighteen other stores) outlived its document across File ▸ Open.**~~
    **CLOSED 2026-08-10.** `new_file`'s inline "session state that is NOT a save source" block is gone
@@ -5859,6 +6947,15 @@ What remains, in order.
    the D5 re-record, not before:** `protection` and `scrolling` are `takeGridScreenshot` specs, so
    until their goldens are re-recorded at the new frame size every diff is a crop and tells you
    nothing about the drift. `ribbon-tabs` is unaffected and can be isolated now.
+   **`ribbon-tabs`' own golden is now RECORDABLE (§3az(3)).** Its `ribbon-minimized` baseline is the
+   one window-framed capture in the file (measured: 1280x800 where every sibling is 1280x136), which
+   is why §3ar refused it and why D5's canvas-layer crop never touched it. The grid is now masked out
+   of that frame, the selection is pinned with `navigateTo`, and undo availability is pinned by a
+   `beforeEach` — so recording it no longer freezes one run's residue. **It joins the re-record list;
+   it was deliberately not recorded by an agent who could not open the app to look at the result.**
+   Note the new coupling while you are there: every ribbon golden now photographs Undo/Redo
+   ENABLEMENT (§2ac), so a capture taken after a spec that ran `new_file` differs from one taken
+   mid-suite.
 
 3. **The successor to the `AppState` conversion: `BiState` / `PivotState` / `ScriptState` /
    `PaneControlState`.** `DocumentEffect` gates *stores*, and the app's stores are now covered; what

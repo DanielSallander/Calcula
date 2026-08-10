@@ -920,6 +920,45 @@ export function getWritebackRebuildSkips(): Promise<WritebackRebuildSkip[]> {
   return invokeBackend("calp_get_writeback_rebuild_skips");
 }
 
+/**
+ * Why opening this workbook could NOT re-materialize a subscribed package's BI
+ * connections.
+ *
+ * Mirrors `PackageConnectionRestoreSkip` in app/src-tauri/src/calp_commands.rs.
+ *
+ * A package's BI connection is not stored in the subscriber's `.cala` — the
+ * model belongs to the publisher and travels in the `.calp` — so it is rebuilt
+ * on open from the subscription ledger plus the local package cache, under the
+ * same signature + pin + checksum gates a pull runs. When that cannot be done
+ * the report keeps its cells but has no live model, and without this list
+ * "this package has no data source" and "this package's model could not be
+ * verified here" look identical: a pivot that says it has no connection.
+ *
+ * An empty list means every subscribed package's model is live (or it declares
+ * no data source).
+ */
+export interface PackageConnectionRestoreSkip {
+  packageName: string;
+  registryUrl: string;
+  /**
+   * `"unreachable"` | `"notPinned"` | `"publisherChanged"` | `"badManifest"`
+   * | `"appTooOld"` | `"unsupportedTransport"` | `"unknown"`.
+   *
+   * `"unsupportedTransport"` is an HTTP registry: it exposes no local model
+   * artifact, so a package connection cannot be built from it — true of the
+   * pull path too, not a regression of the restore.
+   */
+  reason: string;
+  /** Underlying error text, for the pane's details line. */
+  detail: string;
+}
+
+/** Reasons opening this workbook could not restore a subscribed package's BI
+ *  connections. Re-read whenever the subscription list is re-read. */
+export function getPackageConnectionSkips(): Promise<PackageConnectionRestoreSkip[]> {
+  return invokeBackend("calp_get_package_connection_skips");
+}
+
 /** Subscriber identity attached to writeback submissions. */
 export interface SubmitterIdentity {
   displayName: string;

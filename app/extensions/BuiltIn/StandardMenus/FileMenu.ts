@@ -40,6 +40,20 @@ export async function fileNew(): Promise<void> {
 
 export async function fileOpen(): Promise<void> {
   try {
+    // UNSAVED-CHANGES GUARD, same as `fileNew` above. Opening replaces the
+    // whole document and resets the undo stack, so without this a single
+    // Ctrl+O discarded unsaved work with no prompt and nothing to undo -- the
+    // one document-replacing gesture in the app that did not ask. It runs
+    // BEFORE the picker: asking afterwards makes the user choose a file and
+    // only then tells them the choice costs them their edits.
+    const modified = await workspace.isModified();
+    if (modified) {
+      const confirmed = await confirmAsync(
+        'You have unsaved changes. Open another file anyway?',
+        { title: 'Unsaved changes', kind: 'warning' },
+      );
+      if (!confirmed) return;
+    }
     const cells = await workspace.open();
     if (cells) {
       window.location.reload();

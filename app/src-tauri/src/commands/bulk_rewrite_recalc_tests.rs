@@ -732,6 +732,9 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("commands/data.rs", "recalc_walked_cell", "the cross-sheet walk's per-cell step"),
         ("pivot/operations.rs", "recalculate_sheet_formulas", "a whole-sheet evaluation"),
         ("persistence.rs", "open_file", "the load path recalculates the workbook it just read"),
+        // -- Rewrites a formula's TEXT without moving any value -------------
+        ("named_ranges.rs", "apply_names_to_formulas", "substitutes a defined name for the reference it already denoted: the same cell, so no value moves (it does rebuild the name dependency edges)"),
+        ("sheets.rs", "rename_sheet", "a rename rewrites references to spell the new name; every reference still denotes the same cell, so no value moves (it does re-key the cross-sheet dependency maps and rebuild the single-sheet ones)"),
         // -- Own evaluation loop over the cells it writes -------------------
         ("data_tables.rs", "data_table_one_var", "what-if table: evaluates each substitution itself"),
         ("data_tables.rs", "data_table_two_var", "what-if table: evaluates each substitution itself"),
@@ -768,6 +771,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("tables.rs", "write_table_formula_cell", "helper: writes ONE totals cell with its resolved AST + edges; `set_totals_row_function` and `toggle_totals_row` seed the cascade over every cell they hand it"),
         ("calp_commands.rs", "apply_override_value_to_grid", "helper of the three override commands; calp_revert_override, calp_accept_upstream and calp_refresh_apply each run recalculate_sheet_values after"),
         ("commands/structure.rs", "shift_per_sheet_cell_stores", "helper of the four structural edits; wraps shift_per_sheet_cell_map over every per-sheet store"),
+        ("lib.rs", "repair_all_formulas", "helper: rewrites formula ASTs across every sheet for a caller-supplied repair; `delete_sheet` recalculates the workbook after it and `rename_sheet` is exempt because a rename moves no value"),
+        ("commands/data.rs", "erase_released_spill_cells", "helper: erases the cells a released spill owned; every caller is inside, or immediately followed by, the shared cascade"),
         ("undo_commands.rs", "apply_changes", "drives the cascade for every restore kind"),
         ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes recalculates"),
         ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes recalculates"),
@@ -1125,7 +1130,63 @@ const DELEGATING_HELPERS: &[&str] = &[
     // structural edits.
     "apply_override_value_to_grid",
     "shift_per_sheet_cell_stores",
+    // Found once the census learned to see direct `grid.cells` writes.
+    // `repair_all_formulas` rewrites formula ASTs across EVERY sheet -- including
+    // the arm that sets a cell to `#REF!` -- so its callers (`delete_sheet`,
+    // `rename_sheet`) own the recalculation decision, exactly like a direct
+    // writer. `erase_released_spill_cells` is the spill tear-down's write.
+    "repair_all_formulas",
+    "erase_released_spill_cells",
 ];
+
+/// The direct-map mutations of a `Grid`: `grid.cells.insert(...)`,
+/// `grids[i].cells.remove(...)`, `grid.cells.get_mut(...)`.
+///
+/// Deliberately RECEIVER-AWARE. `Grid::cells` is a public map and this crate
+/// writes into it in 42 places, but `ExtractedRefs` also has a field called
+/// `cells` and collecting a reference into it is not writing a cell. Matching
+/// `.cells.insert(` alone reported `extract_references_recursive` as a cell
+/// writer, and the only way to make the census pass would have been to record a
+/// false exemption -- which is how a census stops being believed.
+///
+/// The receiver must therefore name a grid. `unrecognised_cells_receivers`
+/// below is the tripwire that keeps this precision from quietly becoming
+/// blindness: if a `Grid` is ever held in a variable not named for one, that
+/// test fails and forces the decision rather than silently dropping the write.
+fn writes_cells_map(line: &str) -> bool {
+    for method in [".cells.insert(", ".cells.remove(", ".cells.get_mut("] {
+        let mut rest = line;
+        while let Some(at) = rest.find(method) {
+            if receiver_is_a_grid(&rest[..at]) {
+                return true;
+            }
+            rest = &rest[at + method.len()..];
+        }
+    }
+    false
+}
+
+/// The identifier immediately before `.cells`, with any `[index]` stripped.
+fn cells_receiver(before: &str) -> String {
+    let base = before.rsplit('[').next_back().unwrap_or(before);
+    let base = base.trim_end_matches(|c: char| c == ']' || c.is_whitespace());
+    let base = if let Some(open) = base.rfind('[') {
+        &base[..open]
+    } else {
+        base
+    };
+    base.chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn receiver_is_a_grid(before: &str) -> bool {
+    cells_receiver(before).to_lowercase().contains("grid")
+}
 
 fn cell_writing_functions_with_helpers(text: &str, helpers: &[&str]) -> Vec<(String, bool)> {
     const RECALC: [&str; 5] = [
@@ -1161,7 +1222,16 @@ fn cell_writing_functions_with_helpers(text: &str, helpers: &[&str]) -> Vec<(Str
             if t.starts_with("//") {
                 return false;
             }
-            if l.contains(".set_cell(") || l.contains(".clear_cell(") {
+            // THE THIRD BLIND SPOT IN THIS DETECTOR (after delegating helpers
+            // and comments-are-not-code). `set_cell`/`clear_cell` are the
+            // Grid's API, but a `Grid`'s `cells` map is PUBLIC and a good deal
+            // of this crate writes straight into it. `repair_all_formulas` is
+            // the one that mattered: it rewrites formula ASTs across EVERY
+            // sheet through `grid.cells.get_mut(...)`, including the arm that
+            // sets a cell to `#REF!`, and it contains neither token -- so
+            // neither it nor its callers (`delete_sheet`, `rename_sheet`) was
+            // ever enumerated. An entire subsystem sat outside the census.
+            if l.contains(".set_cell(") || l.contains(".clear_cell(") || writes_cells_map(l) {
                 return true;
             }
             // Delegating to a helper that exists only to do the write is
@@ -1251,4 +1321,98 @@ fn strip_test_modules(text: &str) -> Vec<String> {
         i += 1;
     }
     lines
+}
+
+/// The census's cell-write detector is RECEIVER-AWARE for direct `cells` map
+/// mutations (see `writes_cells_map`): `grid.cells.insert(..)` is a cell write,
+/// `refs.cells.insert(..)` -- the reference collector -- is not. That precision
+/// is what keeps the census free of false exemptions, and it is bought with an
+/// assumption: a `Grid` is always held in a variable named for one.
+///
+/// This is the tripwire on that assumption. It enumerates every receiver in the
+/// crate that reaches `.cells.insert/remove/get_mut` and fails on any spelling
+/// it has not been told about. Without it, holding a `Grid` in a variable called
+/// `sheet` or `target` would silently drop that function out of the census --
+/// the exact failure mode the receiver check was added to avoid, reintroduced
+/// one rename later and with no signal at all.
+#[test]
+fn every_direct_cells_map_receiver_is_a_recognised_spelling() {
+    /// Receivers known NOT to be grids. Anything else must be a grid, or be
+    /// added here with the reason it is not.
+    const NOT_A_GRID: &[(&str, &str)] = &[(
+        "refs",
+        "ExtractedRefs: `cells` is the SET of coordinates a formula references, \
+         not a sheet's contents",
+    )];
+
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(
+        files.len() > 50,
+        "only {} source files found — the walk is broken, not the crate",
+        files.len()
+    );
+
+    let mut unrecognised: Vec<String> = Vec::new();
+    let mut grid_receivers = 0usize;
+    let mut non_grid_receivers = 0usize;
+
+    for path in &files {
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.ends_with("_tests.rs") || rel == "tests.rs" || rel.starts_with("tests/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for method in [".cells.insert(", ".cells.remove(", ".cells.get_mut("] {
+                let mut consumed = 0usize;
+                while let Some(at) = line[consumed..].find(method) {
+                    let abs = consumed + at;
+                    let receiver = cells_receiver(&line[..abs]);
+                    consumed = abs + method.len();
+                    if receiver.to_lowercase().contains("grid") {
+                        grid_receivers += 1;
+                    } else if NOT_A_GRID.iter().any(|(r, _)| *r == receiver) {
+                        non_grid_receivers += 1;
+                    } else {
+                        unrecognised.push(format!("{}:{} — receiver `{}`", rel, n + 1, receiver));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        unrecognised.is_empty(),
+        "these lines mutate a `cells` map through a receiver the recalculation \
+         census does not recognise:\n  {}\n\nIf it holds a `Grid`, rename it so \
+         its name contains \"grid\" (the census keys on that, and every one of \
+         the {} existing grid writes already reads that way). If it does NOT, \
+         add it to NOT_A_GRID with the reason. Leaving it as-is silently drops \
+         the enclosing function out of \
+         `every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason`.",
+        unrecognised.join("\n  "),
+        grid_receivers
+    );
+
+    // Non-vacuity, both ways: the walk must actually be finding both kinds, or
+    // this test would pass on an empty crate.
+    assert!(
+        grid_receivers >= 20,
+        "only {} grid `cells` writes found — the scan is broken",
+        grid_receivers
+    );
+    assert!(
+        non_grid_receivers > 0,
+        "no non-grid `cells` receiver found, yet NOT_A_GRID lists one: it is \
+         stale, and the census's precision check is now guarding nothing"
+    );
 }

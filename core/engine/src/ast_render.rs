@@ -10,7 +10,75 @@
 //! - Absolute reference markers ($) are preserved
 //! - Sheet names with spaces or apostrophes are quoted
 
-use parser::ast::{BuiltinFunction, Expression, TableSpecifier, Value};
+use parser::ast::{BinaryOperator, BuiltinFunction, Expression, TableSpecifier, Value};
+
+// ---------------------------------------------------------------------------
+// OPERATOR PRECEDENCE
+//
+// The AST has no parenthesis node: `parse_primary`'s `Token::LParen` arm
+// returns the inner expression and the grouping is gone. That is fine as long
+// as the RENDERER puts the parentheses back wherever the tree binds more
+// tightly than the flat text would. It did not, so `=(A1+B1)*C1` rendered
+// `A1+B1*C1` — the formula bar showed a formula the user never typed, and
+// because persistence stores the RENDERED text and re-parses it on load, the
+// saved workbook came back computing a different number.
+//
+// These levels mirror the parser's descent chain exactly, lowest first:
+//   parse_comparison -> parse_concatenation -> parse_additive
+//     -> parse_multiplicative -> parse_unary -> parse_power -> parse_primary
+// If that chain ever changes, these must change with it; the round-trip
+// property test in this file is what enforces the pairing.
+// ---------------------------------------------------------------------------
+
+const PREC_COMPARE: u8 = 1;
+const PREC_CONCAT: u8 = 2;
+const PREC_ADD: u8 = 3;
+const PREC_MUL: u8 = 4;
+const PREC_UNARY: u8 = 5;
+const PREC_POWER: u8 = 6;
+/// Anything that parses as a primary and can never need guarding.
+const PREC_ATOM: u8 = 7;
+
+fn binding_power(op: &BinaryOperator) -> u8 {
+    match op {
+        BinaryOperator::Equal
+        | BinaryOperator::NotEqual
+        | BinaryOperator::LessThan
+        | BinaryOperator::GreaterThan
+        | BinaryOperator::LessEqual
+        | BinaryOperator::GreaterEqual => PREC_COMPARE,
+        BinaryOperator::Concat => PREC_CONCAT,
+        BinaryOperator::Add | BinaryOperator::Subtract => PREC_ADD,
+        BinaryOperator::Multiply | BinaryOperator::Divide => PREC_MUL,
+        BinaryOperator::Power => PREC_POWER,
+    }
+}
+
+/// How tightly `expr` binds once rendered — i.e. the precedence level a reader
+/// of the produced TEXT would assign to it.
+fn precedence(expr: &Expression) -> u8 {
+    match expr {
+        Expression::BinaryOp { op, .. } => binding_power(op),
+        Expression::UnaryOp { .. } => PREC_UNARY,
+        // A negative number literal renders with a leading `-`, so in text it
+        // behaves exactly like a unary negation: `-5^2` would re-parse as
+        // `-(5^2)`. The parser can never produce this node, but a script or a
+        // constant-folding pass can.
+        Expression::Literal(Value::Number(n)) if *n < 0.0 => PREC_UNARY,
+        _ => PREC_ATOM,
+    }
+}
+
+/// Render `child` as an operand, parenthesising it when the surrounding
+/// position demands at least `min_prec` and the child binds looser than that.
+fn render_child(child: &Expression, min_prec: u8, collapse: bool) -> String {
+    let text = render_expr(child, collapse);
+    if precedence(child) < min_prec {
+        format!("({})", text)
+    } else {
+        text
+    }
+}
 
 /// Render a formula AST to its canonical string representation.
 /// Does NOT include a leading '=' — the caller adds it if needed for display.
@@ -74,11 +142,28 @@ fn render_expr(expr: &Expression, collapse: bool) -> String {
         }
 
         Expression::BinaryOp { left, op, right } => {
-            format!("{}{}{}", render_expr(left, collapse), op, render_expr(right, collapse))
+            let p = binding_power(op);
+            // `^` is the one RIGHT-associative operator, and `parse_power` takes
+            // its LEFT operand from `parse_primary` rather than `parse_unary`,
+            // so anything carrying its own operator on the left of a `^` must be
+            // parenthesised or it re-parses as something else.
+            let (left_min, right_min) = if *op == BinaryOperator::Power {
+                (PREC_ATOM, p)
+            } else {
+                (p, p + 1)
+            };
+            format!(
+                "{}{}{}",
+                render_child(left, left_min, collapse),
+                op,
+                render_child(right, right_min, collapse)
+            )
         }
 
         Expression::UnaryOp { op, operand } => {
-            format!("{}{}", op, render_expr(operand, collapse))
+            // `parse_unary`'s operand is itself `parse_unary`, so a nested unary
+            // or a `^` needs no parentheses; anything looser does.
+            format!("{}{}", op, render_child(operand, PREC_UNARY, collapse))
         }
 
         Expression::FunctionCall { func, args, .. } => {
@@ -98,11 +183,16 @@ fn render_expr(expr: &Expression, collapse: bool) -> String {
         Expression::NamedRef { name, .. } => name.clone(),
 
         Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            let combined = format!("{}:{}", start_sheet, end_sheet);
             let prefix = if needs_quoting(start_sheet) || needs_quoting(end_sheet) {
-                format!("'{}'!", combined)
+                // ONE pair of apostrophes wraps the whole `A:B` bookend pair, so
+                // each half is escaped but not separately quoted.
+                format!(
+                    "'{}:{}'!",
+                    start_sheet.replace('\'', "''"),
+                    end_sheet.replace('\'', "''")
+                )
             } else {
-                format!("{}!", combined)
+                format!("{}:{}!", start_sheet, end_sheet)
             };
             format!("{}{}", prefix, render_expr(reference, collapse))
         }
@@ -117,7 +207,13 @@ fn render_expr(expr: &Expression, collapse: bool) -> String {
         }
 
         Expression::IndexAccess { target, index } => {
-            format!("{}[{}]", render_expr(target, collapse), render_expr(index, collapse))
+            // The subscript chain is parsed off a primary; the index sits inside
+            // brackets and so needs no guarding.
+            format!(
+                "{}[{}]",
+                render_child(target, PREC_ATOM, collapse),
+                render_expr(index, collapse)
+            )
         }
 
         Expression::ListLiteral { elements } => {
@@ -133,11 +229,12 @@ fn render_expr(expr: &Expression, collapse: bool) -> String {
         }
 
         Expression::SpillRef { cell, .. } => {
-            format!("{}#", render_expr(cell, collapse))
+            format!("{}#", render_child(cell, PREC_ATOM, collapse))
         }
 
         Expression::ImplicitIntersection { operand } => {
-            format!("@{}", render_expr(operand, collapse))
+            // `@` takes a `parse_primary`, so its operand must be atom-level.
+            format!("@{}", render_child(operand, PREC_ATOM, collapse))
         }
     }
 }
@@ -183,21 +280,58 @@ fn render_value(val: &Value) -> String {
                 format!("{}", n)
             }
         }
-        Value::String(s) => format!("\"{}\"", s),
+        // A `"` inside the text is written `""` -- the escape the lexer reads
+        // back. Without it a string carrying a quote rendered to text that does
+        // not re-parse, and was lost on save/reload.
+        Value::String(s) => format!("\"{}\"", s.replace('"', "\"\"")),
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
     }
 }
 
 fn render_sheet_prefix(sheet: &Option<String>) -> String {
     match sheet {
-        Some(name) if needs_quoting(name) => format!("'{}'!", name),
-        Some(name) => format!("{}!", name),
+        Some(name) => format!("{}!", quote_sheet_name(name)),
         None => String::new(),
     }
 }
 
+/// A sheet name as it must appear in formula text: bare when it lexes as a
+/// plain identifier, otherwise wrapped in apostrophes with every embedded
+/// apostrophe DOUBLED -- the escape `read_quoted_identifier` already reads.
+///
+/// The old rule quoted only names containing a space or an apostrophe, and it
+/// never doubled. Both halves lost data. `John's` was emitted as
+/// `'John's'!A1`, which does not lex; `Q1-2026` and `2026` were emitted
+/// bare, which lexes as arithmetic. `repair_all_formulas` turns a formula that
+/// fails to re-parse into a plain value, so renaming a sheet to any such name
+/// silently destroyed every formula that referred to it.
+pub fn quote_sheet_name(name: &str) -> String {
+    if is_bare_sheet_name(name) {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+/// True when `name` can be written without apostrophes: identifier-shaped, and
+/// not itself a cell reference (a bare `A1` would lex as one).
+fn is_bare_sheet_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    // A reference-SHAPED name (`A1`, `ZZ100`) needs no quoting: the trailing
+    // `!` is what tells the lexer this is a sheet, and `=A1!B2` parses with
+    // sheet `A1`. Quoting them would have been harmless in isolation but it
+    // also captures `Sheet1`, `Sheet2`, `Q1` -- the DEFAULT sheet names -- and
+    // would have re-quoted the formula text of essentially every existing
+    // workbook for nothing.
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
 fn needs_quoting(name: &str) -> bool {
-    name.contains(' ') || name.contains('\'')
+    !is_bare_sheet_name(name)
 }
 
 /// Render a TableSpecifier to its bracket notation.
@@ -405,5 +539,176 @@ mod tests {
             ref_site_id: Default::default(),
         };
         assert_eq!(render_formula(&inline), "__INVOKE__(SUM(1),5)");
+    }
+
+    // -----------------------------------------------------------------------
+    // ROUND-TRIP PROPERTY
+    //
+    // The AST has no parenthesis node, so the ONLY thing keeping a formula's
+    // meaning intact across render -> re-parse is this renderer putting the
+    // parentheses back. Persistence saves rendered text and re-parses it on
+    // load, so a renderer that drops a grouping does not merely mis-display a
+    // formula: it changes the number the workbook computes, silently, on the
+    // next open.
+    //
+    // Nothing checked that before. Every renderer test above is a FLAT
+    // expression, and the whole repo -- app, e2e, engine, parser -- never once
+    // typed a grouped arithmetic expression, which is why `=(A1+B1)*C1`
+    // rendering as `A1+B1*C1` survived. These two tests are the check that
+    // makes the class unshippable: they enumerate the shapes rather than
+    // sampling them.
+    // -----------------------------------------------------------------------
+
+    /// Every binary operator, at every precedence level the parser has.
+    const OPS: [&str; 8] = ["+", "-", "*", "/", "^", "&", "=", "<"];
+
+    fn round_trips(src: &str) -> Result<(), String> {
+        let first = parser::parse(src).map_err(|e| format!("source did not parse: {:?}", e))?;
+        let rendered = render_formula_raw(&first);
+        let second = parser::parse(&format!("={}", rendered))
+            .map_err(|e| format!("`{}` rendered `{}`, which does not parse: {:?}", src, rendered, e))?;
+        if first != second {
+            return Err(format!(
+                "`{}` rendered `{}`, which re-parses to a DIFFERENT tree\n  before: {:?}\n  after:  {:?}",
+                src, rendered, first, second
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_three_leaf_operator_pairing_survives_render_and_re_parse() {
+        // Both associativity shapes for every ordered pair of operators. This
+        // is the full cross-product of "parent binds tighter / looser / same"
+        // against "child on the left / on the right", which is exactly the
+        // matrix a precedence bug lives in.
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for a in OPS {
+            for b in OPS {
+                for src in [
+                    format!("=(A1{}B2){}C3", a, b),
+                    format!("=A1{}(B2{}C3)", a, b),
+                ] {
+                    checked += 1;
+                    if let Err(e) = round_trips(&src) {
+                        failures.push(e);
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 128, "the matrix must stay exhaustive");
+        assert!(
+            failures.is_empty(),
+            "{} of {} groupings did not survive:\n{}",
+            failures.len(),
+            checked,
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn unary_power_strings_and_sheet_names_survive_render_and_re_parse() {
+        let cases = [
+            // Unary negation against every precedence level.
+            "=-(A1+B2)",
+            "=-(A1*B2)",
+            "=-(A1^B2)",
+            "=-A1^B2",
+            "=--A1",
+            "=(-A1)^B2",
+            // `^` is right-associative and takes its LEFT operand from
+            // `parse_primary`, so a left-nested power must stay parenthesised.
+            "=(A1^B2)^C3",
+            "=A1^B2^C3",
+            "=(A1*B2)^C3",
+            // Same-precedence, right-hand side: the classic subtraction trap.
+            "=A1-(B2-C3)",
+            "=A1/(B2/C3)",
+            "=A1&(B2&C3)",
+            // Grouping nested inside a call argument.
+            "=SUM((A1+B2)*C3,A1)",
+            "=IF((A1+B2)>C3,\"y\",\"n\")",
+            // Text literals carrying the delimiter.
+            "=\"a\"\"b\"",
+            "=\"\"\"quoted\"\"\"",
+            "=A1&\"x\"\"y\"",
+            // Sheet names that are not bare identifiers.
+            "='My Sheet'!A1",
+            "='John''s'!A1",
+            "='Q1-2026'!A1",
+            "='2026'!A1",
+            "='A1'!B2",
+            "=SUM('My Sheet'!A1:B2)",
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .filter_map(|c| round_trips(c).err())
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_negative_number_literal_is_guarded_where_a_unary_minus_would_be() {
+        // The parser can never build this node -- `-5` parses as a negation of
+        // `5` -- but a script or a folding pass can, and rendered flat it would
+        // re-parse as `-(5^2)`: 25 becomes -25.
+        let expr = Expression::BinaryOp {
+            left: Box::new(Expression::Literal(Value::Number(-5.0))),
+            op: BinaryOperator::Power,
+            right: Box::new(Expression::Literal(Value::Number(2.0))),
+        };
+        assert_eq!(render_formula_raw(&expr), "(-5)^2");
+    }
+
+    #[test]
+    fn a_sheet_name_that_would_lex_as_something_else_is_quoted_and_escaped() {
+        // `needs_quoting` used to ask only "does it contain a space or an
+        // apostrophe". Each name here was emitted BARE or emitted with an
+        // unescaped apostrophe, producing formula text that does not lex --
+        // and `repair_all_formulas` turns a formula that fails to re-parse into
+        // a plain value, so a rename to any of these silently destroyed every
+        // formula that named the sheet.
+        for name in ["Q1-2026", "2026", "John's", "a b", "Sales+", "x!y", "'", "a''b"] {
+            let rendered = quote_sheet_name(name);
+            assert!(
+                rendered.starts_with('\'') && rendered.ends_with('\''),
+                "`{}` must be quoted, got `{}`",
+                name,
+                rendered
+            );
+            let formula = format!("={}!A1", rendered);
+            let parsed = parser::parse(&formula).unwrap_or_else(|e| {
+                panic!("`{}` produced `{}`, which does not parse: {:?}", name, formula, e)
+            });
+            match parsed {
+                Expression::CellRef { sheet: Some(got), .. } => assert_eq!(
+                    got, name,
+                    "`{}` rendered `{}` and read back as a different sheet",
+                    name, rendered
+                ),
+                other => panic!("`{}` produced `{}` -> {:?}", name, formula, other),
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_identifier_sheet_name_is_left_unquoted() {
+        // The widened rule must not start quoting everything. In particular it
+        // must not capture the DEFAULT sheet names, or every saved formula in
+        // every existing workbook would be rewritten for no reason.
+        for name in ["Sheet1", "Sheet2", "Data", "_hidden", "Q1_2026", "a.b", "A1", "ZZ100"] {
+            assert_eq!(quote_sheet_name(name), name);
+            // Bare names are upper-cased by the lexer (this predates the
+            // change and `normalize_cross_sheet_refs` is what canonicalises
+            // them); what matters is that the sheet survives the trip.
+            let parsed = parser::parse(&format!("={}!A1", name)).expect("parses");
+            match parsed {
+                Expression::CellRef { sheet: Some(got), .. } => {
+                    assert_eq!(got.to_uppercase(), name.to_uppercase())
+                }
+                other => panic!("`{}` -> {:?}", name, other),
+            }
+        }
     }
 }

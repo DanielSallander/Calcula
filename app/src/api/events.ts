@@ -221,6 +221,19 @@ export const AppEvents = {
   // Dirty state events
   DIRTY_STATE_CHANGED: "app:dirty-state-changed",
 
+  // Undo/redo AVAILABILITY changed in the backend. Payload
+  // `{ canUndo, canRedo }` — the whole authority, which is why it is carried
+  // rather than re-read: a boolean pair cannot go partially stale, and the
+  // subscriber is a disabled attribute on a button.
+  //
+  // Bridged from the Rust `document:undo-state-changed`, which
+  // `undo_history::UndoHistory` emits from inside the store's own lock guard on
+  // a real transition. Deliberately NOT folded into DIRTY_STATE_CHANGED: the
+  // two move independently (an edit after an undo clears the redo stack while
+  // the document was already dirty, and the first edit after undoing back to
+  // depth 0 re-arms Undo with no dirty transition at all).
+  UNDO_STATE_CHANGED: "app:undo-state-changed",
+
   // Linked sheet events
   LINKED_SHEETS_REFRESHED: "app:linked-sheets-refreshed",
 

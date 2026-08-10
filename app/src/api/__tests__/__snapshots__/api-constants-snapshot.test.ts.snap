@@ -71,6 +71,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "TABLE_CREATED": "app:table-created",
   "TABLE_DEFINITIONS_UPDATED": "app:table-definitions-updated",
   "THEME_CHANGED": "app:theme-changed",
+  "UNDO_STATE_CHANGED": "app:undo-state-changed",
   "VALIDATIONS_CHANGED": "app:validations-changed",
   "VIEW_MODE_CHANGED": "app:view-mode-changed",
   "WRITEBACK_SUBMISSION_RECEIVED": "app:writeback-submission-received",

@@ -1190,6 +1190,9 @@ pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> 
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::PivotState>(),
+        handle.state::<crate::persistence::UserFilesState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
+        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
         index,
     )?;
 

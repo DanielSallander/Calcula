@@ -322,6 +322,59 @@ fn update_slicer_prop_dependencies(
     }
 }
 
+/// Install a RESTORED slicer's computed properties into the live stores.
+///
+/// ONE function so the properties and the index they are re-evaluated through
+/// can never be restored apart. Both restore paths — `.cala` load
+/// (`persistence::restore_slicers`) and `.calp` materialization
+/// (`calp_commands::materialize_pulled_slicers`) — go through here.
+///
+/// WHY IT EXISTS. `re_evaluate_slicer_computed_properties` is driven
+/// ENTIRELY by `computed_prop_dependents`: it looks the changed cells up in
+/// that reverse index and re-evaluates nothing it does not find there. A
+/// restore that put the properties back but left the index empty therefore
+/// produced a property that was present, listed in the dialog, and DEAD —
+/// editing the cell its formula names never moved the slicer again. The
+/// AppState twin (`computed_properties::restore_computed_properties`) had
+/// always rebuilt its index on the same load path; the slicer twin had not.
+///
+/// `grids` is the workbook's grids, needed because reference extraction
+/// resolves table/name references against a sheet. The slicer's own sheet is
+/// used, falling back to sheet 0 exactly as `add_slicer_computed_property`
+/// does; with no grids at all the properties are still installed and the
+/// index is simply left empty (there is nothing to resolve against).
+pub(crate) fn install_restored_computed_properties(
+    slicer_id: identity::EntityId,
+    props: Vec<SlicerComputedProperty>,
+    sheet_index: usize,
+    grids: &[Grid],
+    storage: &mut SlicerComputedPropertiesStorage,
+    dependencies: &mut SlicerComputedPropDependencies,
+    dependents: &mut SlicerComputedPropDependents,
+) {
+    if props.is_empty() {
+        return;
+    }
+    let grid = if sheet_index < grids.len() {
+        grids.get(sheet_index)
+    } else {
+        grids.first()
+    };
+    if let Some(grid) = grid {
+        for prop in &props {
+            update_slicer_prop_dependencies(
+                prop.id,
+                &prop.formula,
+                sheet_index,
+                grid,
+                dependencies,
+                dependents,
+            );
+        }
+    }
+    storage.insert(slicer_id, props);
+}
+
 // ============================================================================
 // Tauri commands
 // ============================================================================

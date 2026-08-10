@@ -1191,3 +1191,215 @@ fn every_cascade_path_uses_the_shared_cross_sheet_walk() {
         );
     }
 }
+
+// ===========================================================================
+// SHEET RENAME / MOVE / DELETE vs THE CROSS-SHEET DEPENDENCY MAPS
+//
+// `cross_sheet_dependents` is keyed by sheet NAME; `cross_sheet_dependencies`
+// is keyed by sheet INDEX, and `cross_sheet_dependents`' VALUES carry one too.
+// Renaming a sheet changed the name, and moving or deleting one renumbered the
+// indices, and NOTHING re-keyed either map. `rebuild_all_dependencies` is not a
+// substitute: it deliberately rebuilds only the ACTIVE sheet's cross-sheet
+// edges, so it repairs at most one of the sheets a renumbering invalidated.
+//
+// These drive the helpers `rename_sheet` / `remap_sheet_keyed_stores` call,
+// because those commands take a Tauri `State` and cannot run in-process. The
+// grid-side work they also do (repairing the ASTs, moving the grids) is
+// reproduced here so the sequence under test is the one a user performs.
+// ===========================================================================
+
+/// Rename sheet `index` the way `rename_sheet` does: rewrite the official name,
+/// repair every formula's AST, then re-key the dependency maps.
+fn rename_sheet_like_the_command(wb: &Workbook, index: usize, new_name: &str) {
+    let old_name = wb.state.sheet_names.read().unwrap()[index].clone();
+    let effect = crate::document_effect::test_seed_effect();
+    let clean = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    {
+        wb.state.sheet_names.write(&effect).unwrap()[index] = new_name.to_string();
+        let mut grids = wb.state.grids.write(&clean).unwrap();
+        let active = *wb.state.active_sheet.read().unwrap();
+        grids[active] = wb.state.grid.read().unwrap().clone();
+        let old = old_name.clone();
+        let new_n = new_name.to_string();
+        crate::repair_all_formulas(&mut grids, &|formula| {
+            Some(crate::repair_3d_refs_on_rename(formula, &old, &new_n))
+        });
+        *wb.state.grid.write(&clean).unwrap() = grids[active].clone();
+    }
+    crate::sheets::rename_cross_sheet_dependency_keys(&wb.state, &old_name, new_name);
+    crate::undo_commands::rebuild_all_dependencies(&wb.state);
+}
+
+/// The index-renumbering half of `move_sheet`.
+fn move_sheet_indices_like_the_command(wb: &Workbook, remap: impl Fn(usize) -> Option<usize>) {
+    let effect = crate::document_effect::test_seed_effect();
+    let clean = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    {
+        let mut grids = wb.state.grids.write(&clean).unwrap();
+        let active = *wb.state.active_sheet.read().unwrap();
+        grids[active] = wb.state.grid.read().unwrap().clone();
+        let mut names = wb.state.sheet_names.write(&effect).unwrap();
+        let mut new_grids = grids.clone();
+        let mut new_names = names.clone();
+        for old in 0..grids.len() {
+            if let Some(new) = remap(old) {
+                new_grids[new] = grids[old].clone();
+                new_names[new] = names[old].clone();
+            }
+        }
+        *grids = new_grids;
+        *names = new_names;
+        let new_active = remap(active).expect("the active sheet survives a move");
+        *wb.state.active_sheet.write(&effect).unwrap() = new_active;
+        *wb.state.grid.write(&clean).unwrap() = grids[new_active].clone();
+    }
+    crate::sheets::remap_cross_sheet_dependency_indices_for_test(&wb.state, &remap);
+    crate::undo_commands::rebuild_all_dependencies(&wb.state);
+}
+
+/// The index-renumbering half of `delete_sheet`.
+fn delete_sheet_indices_like_the_command(wb: &Workbook, removed: usize) {
+    let effect = crate::document_effect::test_seed_effect();
+    let clean = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    {
+        let mut grids = wb.state.grids.write(&clean).unwrap();
+        let active = *wb.state.active_sheet.read().unwrap();
+        grids[active] = wb.state.grid.read().unwrap().clone();
+        grids.remove(removed);
+        wb.state.sheet_names.write(&effect).unwrap().remove(removed);
+        let new_active = if active > removed { active - 1 } else { active };
+        *wb.state.active_sheet.write(&effect).unwrap() = new_active;
+        *wb.state.grid.write(&clean).unwrap() = grids[new_active].clone();
+    }
+    crate::sheets::remap_cross_sheet_dependency_indices_for_test(&wb.state, &|i| {
+        if i == removed {
+            None
+        } else if i > removed {
+            Some(i - 1)
+        } else {
+            Some(i)
+        }
+    });
+    crate::undo_commands::rebuild_all_dependencies(&wb.state);
+}
+
+#[test]
+fn renaming_a_sheet_keeps_its_dependents_on_other_sheets_live() {
+    // Sheet1!A1 = 10, Sheet2!B1 = "=Sheet1!A1". Rename Sheet1 to Data, then
+    // edit Data!A1. Before the fix Sheet2!B1 kept 10: the map still held the key
+    // ("Sheet1",0,0), the cascade asked for ("Data",0,0) and missed. That stale
+    // 10 is what a save then wrote to disk.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "10");
+    wb.switch_to(1);
+    wb.set(0, 1, "=Sheet1!A1");
+    assert_eq!(wb.number(1, 0, 1), 10.0, "fixture");
+    wb.switch_to(0);
+
+    rename_sheet_like_the_command(&wb, 0, "Data");
+
+    wb.set(0, 0, "999");
+    assert_eq!(
+        wb.number(1, 0, 1),
+        999.0,
+        "Sheet2!B1 must follow Data!A1 after the rename"
+    );
+}
+
+#[test]
+fn renaming_a_sheet_re_keys_both_halves_of_the_dependency_pair() {
+    // The unit-level statement. The two maps are maintained in lockstep
+    // everywhere else, so a fix that moved only the forward index would leave
+    // the reverse one naming a sheet that no longer exists, and the next edge
+    // cleanup would fail to find what it was meant to remove.
+    let wb = Workbook::new(2);
+    wb.set(0, 0, "1");
+    wb.switch_to(1);
+    wb.set(0, 0, "=Sheet1!A1");
+    wb.switch_to(0);
+
+    rename_sheet_like_the_command(&wb, 0, "Data");
+
+    let dependents = wb.state.cross_sheet_dependents.lock().unwrap();
+    assert!(
+        dependents.contains_key(&("Data".to_string(), 0, 0)),
+        "forward map is still keyed by the old name: {:?}",
+        dependents.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !dependents.contains_key(&("Sheet1".to_string(), 0, 0)),
+        "the old key survived the rename"
+    );
+    drop(dependents);
+
+    let dependencies = wb.state.cross_sheet_dependencies.lock().unwrap();
+    let named: Vec<String> = dependencies
+        .values()
+        .flat_map(|refs| refs.iter().map(|(sheet, _, _)| sheet.clone()))
+        .collect();
+    assert!(
+        named.iter().all(|s| s != "Sheet1"),
+        "reverse map still names the old sheet: {:?}",
+        named
+    );
+}
+
+#[test]
+fn moving_a_sheet_keeps_a_dependent_on_a_renumbered_sheet_live() {
+    // Sheet1(0) Sheet2(1) Sheet3(2); Sheet3!A1 = "=Sheet1!B1", so the dependent
+    // is recorded at sheet index 2. Move Sheet3 to the front and the dependent
+    // lives at index 0, but the map still said 2: the cascade recalculated
+    // whatever now sits at index 2 and left the real dependent stale.
+    let wb = Workbook::new(3);
+    wb.set(0, 1, "10");
+    wb.switch_to(2);
+    wb.set(0, 0, "=Sheet1!B1");
+    assert_eq!(wb.number(2, 0, 0), 10.0, "fixture");
+    wb.switch_to(0);
+
+    // Sheet3 to position 0: old 2 -> 0, old 0 -> 1, old 1 -> 2.
+    move_sheet_indices_like_the_command(&wb, |i| {
+        Some(match i {
+            2 => 0,
+            0 => 1,
+            _ => 2,
+        })
+    });
+
+    // Sheet1 is now index 1 and is the active sheet.
+    wb.set(0, 1, "999");
+    assert_eq!(
+        wb.number(0, 0, 0),
+        999.0,
+        "the moved sheet's formula must still follow its precedent"
+    );
+}
+
+#[test]
+fn deleting_a_sheet_keeps_a_dependent_that_is_not_the_new_active_sheet_live() {
+    // Sheet1(0) Sheet2(1) Sheet3(2) Sheet4(3); Sheet4!A1 = "=Sheet1!B1", so the
+    // dependent is recorded at index 3. Delete Sheet2 and Sheet4 becomes index
+    // 2 while grids.len() becomes 3, so the stale index 3 was filtered out by
+    // the cascade's bounds guard and the dependent silently died.
+    let wb = Workbook::new(4);
+    wb.set(0, 1, "10");
+    wb.switch_to(3);
+    wb.set(0, 0, "=Sheet1!B1");
+    assert_eq!(wb.number(3, 0, 0), 10.0, "fixture");
+    wb.switch_to(0);
+
+    delete_sheet_indices_like_the_command(&wb, 1);
+
+    wb.set(0, 1, "999");
+    assert_eq!(
+        wb.number(2, 0, 0),
+        999.0,
+        "Sheet4, now index 2, must still follow Sheet1!B1"
+    );
+}

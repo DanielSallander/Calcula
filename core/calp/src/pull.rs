@@ -151,6 +151,11 @@ pub struct PulledCustomObject {
 }
 
 /// A data source pulled from a package, ready for connection resolution.
+///
+/// `Debug` (unlike its `PullResult` parent, which carries deep `persistence`
+/// types that have none) so callers can `unwrap_err()` on a restore that was
+/// supposed to be refused and see what came back instead.
+#[derive(Debug)]
 pub struct PulledDataSource {
     /// The data source definition from the version manifest.
     pub definition: PackageDataSource,
@@ -223,6 +228,123 @@ pub fn resolve_sheet_name_collisions(
         taken_lower.insert(resolved.to_lowercase());
         taken.push(resolved);
     }
+}
+
+/// Resolve a verified version manifest's data sources to on-disk artifact
+/// paths. Split out of [`pull`] so the RESTORE path
+/// ([`load_verified_data_sources`]) resolves them through exactly the same
+/// code — a package connection re-materialized when a subscribed workbook is
+/// reopened must see the same model artifact, snapshot list and writeback
+/// baseline a fresh pull would have seen.
+///
+/// `manifest` must be the SIGNATURE-VERIFIED manifest and its artifacts must
+/// already have passed `verify_version_artifacts_via`; this function does no
+/// verification of its own, exactly as the inline block in `pull` did not.
+///
+/// A non-local transport (HTTP) has no local artifact path, so its data
+/// sources resolve to an empty `model_path` — the same value `pull` produced,
+/// and the reason a package connection has never materialized from an HTTP
+/// registry.
+fn resolve_pulled_data_sources(
+    registry: &dyn RegistryTransport,
+    pkg: &str,
+    ver: &str,
+    manifest: &VersionManifest,
+) -> Result<Vec<PulledDataSource>, CalpError> {
+    manifest
+        .data_sources
+        .iter()
+        .map(|ds| {
+            let model_path = registry
+                .local_artifact_path(pkg, ver, &ds.model_path)?
+                .unwrap_or_default();
+            let calculated_table_snapshots = ds
+                .calculated_table_snapshots
+                .iter()
+                .map(|snap| {
+                    Ok((
+                        snap.table.clone(),
+                        registry
+                            .local_artifact_path(pkg, ver, &snap.path)?
+                            .unwrap_or_default(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, CalpError>>()?;
+            // Writeback-column baseline is optional: probe by manifest-derived
+            // path; absent (or non-local transport) resolves to None.
+            let writeback_history_path = registry
+                .local_artifact_path(
+                    pkg,
+                    ver,
+                    &format!("models/{}/writeback_history.json", ds.id),
+                )?
+                .filter(|p| p.exists());
+            Ok(PulledDataSource {
+                definition: ds.clone(),
+                model_path,
+                calculated_table_snapshots,
+                writeback_history_path,
+            })
+        })
+        .collect()
+}
+
+/// Re-resolve JUST the data sources of a version this machine has already
+/// agreed to trust — the DATA-SOURCE half of [`pull`], with nothing else.
+///
+/// WHY THIS EXISTS. A `.cala` persists locally-authored BI connections inside
+/// itself (`capture_local_bi_connections`), but deliberately does NOT persist
+/// PACKAGE connections: their model belongs to the publisher and travels in the
+/// `.calp`, not in the subscriber's file. Only `pull` ever created one, so a
+/// subscribed report that was saved and reopened came back with the
+/// subscription ledger intact and ZERO connections — every BI pivot in it
+/// pointing at a connection that no longer existed, and no command able to
+/// bring one back (`calp_refresh_data` only UPDATES connections that already
+/// exist). This is the restore path that closes that gap.
+///
+/// IT ADDS A RESTORE, IT DOES NOT WEAKEN THE PULL RULE. Creating a connection
+/// still requires a version this machine pulled and pinned: the gate chain here
+/// is the same one `pull` runs, in the same order —
+///
+///   1. `verify_and_load_manifest_via` under [`PinPolicy::RequirePinned`], so
+///      an unsigned package, a tampered manifest, a publisher key that changed,
+///      and a package this machine never deliberately subscribed to are all
+///      hard errors. Restore is NOT a trust decision, so it can never mint a
+///      pin — a `.cala` arriving by email cannot make this machine trust a
+///      publisher it has never seen.
+///   2. `check_min_app_version`, so a package needing a newer Calcula says so
+///      instead of half-materializing.
+///   3. `verify_version_artifacts_via`, so every artifact — including the
+///      `models/{id}/model.json` the caller then reads by path — hashes to the
+///      digest the signed manifest published, and nothing unlisted was dropped
+///      into the version directory after publish.
+///
+/// A failure at any gate returns `Err` and NO data sources. There is no partial
+/// success and no fallback to an unverified copy: a subscriber that cannot
+/// prove which model it has gets no model at all, which is visible (pivots
+/// report no connection) rather than silently wrong.
+pub fn load_verified_data_sources(
+    registry: &dyn RegistryTransport,
+    package_name: &str,
+    version: &str,
+    scope: &RegistryScope,
+    profile_dir: &Path,
+) -> Result<Vec<PulledDataSource>, CalpError> {
+    let manifest = crate::integrity::load_pinned_manifest_via(
+        registry,
+        package_name,
+        version,
+        scope,
+        profile_dir,
+    )?;
+    crate::compat::check_min_app_version(
+        package_name,
+        version,
+        &manifest.min_app_version,
+        crate::compat::host_app_version(),
+    )?;
+    crate::integrity::verify_version_artifacts_via(registry, package_name, version, &manifest)?;
+    resolve_pulled_data_sources(registry, package_name, version, &manifest)
 }
 
 /// Pull a package from the registry. Returns sheets and metadata for the
@@ -721,42 +843,10 @@ pub fn pull(
     // absolute on-disk path (those bytes were already integrity-verified above).
     // A non-local transport returns None here — it would instead surface bytes
     // via read_artifact (a later HTTP effort, out of scope).
-    let pulled_data_sources: Vec<PulledDataSource> = ver_manifest
-        .data_sources
-        .iter()
-        .map(|ds| {
-            let model_path = registry
-                .local_artifact_path(pkg, ver, &ds.model_path)?
-                .unwrap_or_default();
-            let calculated_table_snapshots = ds
-                .calculated_table_snapshots
-                .iter()
-                .map(|snap| {
-                    Ok((
-                        snap.table.clone(),
-                        registry
-                            .local_artifact_path(pkg, ver, &snap.path)?
-                            .unwrap_or_default(),
-                    ))
-                })
-                .collect::<Result<Vec<_>, CalpError>>()?;
-            // Writeback-column baseline is optional: probe by manifest-derived
-            // path; absent (or non-local transport) resolves to None.
-            let writeback_history_path = registry
-                .local_artifact_path(
-                    pkg,
-                    ver,
-                    &format!("models/{}/writeback_history.json", ds.id),
-                )?
-                .filter(|p| p.exists());
-            Ok(PulledDataSource {
-                definition: ds.clone(),
-                model_path,
-                calculated_table_snapshots,
-                writeback_history_path,
-            })
-        })
-        .collect::<Result<Vec<_>, CalpError>>()?;
+    //
+    // SHARED with the reopen restore path (`load_verified_data_sources`), so a
+    // re-materialized package connection resolves its artifacts identically.
+    let pulled_data_sources = resolve_pulled_data_sources(registry, pkg, ver, &ver_manifest)?;
 
     // Generic custom objects (brick 4): read each declared payload via the
     // transport. The artifacts were integrity-verified above (their SHA-256s

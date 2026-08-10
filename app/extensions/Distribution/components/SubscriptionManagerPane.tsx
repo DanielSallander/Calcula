@@ -28,10 +28,12 @@ import {
   exportPackageHtml,
   resetSubscription,
   getWritebackRebuildSkips,
+  getPackageConnectionSkips,
   WRITEBACK_INDEX_CHANGED_EVENT,
   type Subscription,
   type SubscriptionTrustInfo,
   type WritebackRebuildSkip,
+  type PackageConnectionRestoreSkip,
 } from "@api/distribution";
 import { pivot } from "@api/pivot";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
@@ -106,6 +108,57 @@ const WRITEBACK_SKIP_NOTICE: Record<string, { tone: "warn" | "danger"; text: str
 
 const skipKey = (s: WritebackRebuildSkip) => `${s.packageName}@${s.registryUrl}`;
 
+/**
+ * How each `PackageConnectionRestoreSkip.reason` reads.
+ *
+ * The distinction this draws: a package BI connection is NOT stored in the
+ * subscriber's `.cala` (the model is the publisher's and travels in the
+ * `.calp`), so reopening a subscribed report rebuilds it from the local package
+ * cache under the same signature + pin + checksum gates a pull runs. When that
+ * fails the report still shows its last-pulled cells, and the only other symptom
+ * is a pivot quietly reporting no connection — indistinguishable from a package
+ * that never had a data source. Same "unknown reason renders as a warning, never
+ * as nothing" rule as the two tables above.
+ */
+const CONNECTION_SKIP_NOTICE: Record<string, { tone: "warn" | "danger"; text: string }> = {
+  unreachable: {
+    tone: "danger",
+    text:
+      "Registry unreachable, so this package's data model could not be verified. " +
+      "Its report shows the data from the last refresh; nothing is live.",
+  },
+  notPinned: {
+    tone: "danger",
+    text:
+      "This computer has never agreed to trust this package's publisher, so its " +
+      "data model was not loaded. Subscribe to it once to activate it.",
+  },
+  publisherChanged: {
+    tone: "danger",
+    text:
+      "The publisher's signing key does not match the one this computer trusted. " +
+      "Calcula is refusing to load this package's data model.",
+  },
+  badManifest: {
+    tone: "danger",
+    text:
+      "This package's contents no longer match what its publisher signed, so its " +
+      "data model was NOT loaded.",
+  },
+  appTooOld: {
+    tone: "danger",
+    text: "This package needs a newer version of Calcula; its data model was not loaded.",
+  },
+  unsupportedTransport: {
+    tone: "warn",
+    text:
+      "This package is served over HTTP, which does not yet provide a local model " +
+      "file, so its data model is not connected. Its report cells are unaffected.",
+  },
+};
+
+const connSkipKey = (s: PackageConnectionRestoreSkip) => `${s.packageName}@${s.registryUrl}`;
+
 const TRUST_NOTICE: Record<
   SubscriptionTrustInfo["trustStatus"],
   { tone: "ok" | "warn" | "danger"; text: (t: SubscriptionTrustInfo) => string } | null
@@ -165,6 +218,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [trust, setTrust] = useState<Record<string, SubscriptionTrustInfo>>({});
   const [skips, setSkips] = useState<Record<string, WritebackRebuildSkip>>({});
+  const [connSkips, setConnSkips] = useState<Record<string, PackageConnectionRestoreSkip>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDetach, setConfirmingDetach] = useState(false);
@@ -227,6 +281,14 @@ export function SubscriptionManagerPane(): React.ReactElement {
         setSkips(Object.fromEntries(rows.map((r) => [skipKey(r), r])));
       } catch {
         setSkips({});
+      }
+      // ...and which subscribed packages' BI connections this open could not
+      // re-materialize. Same non-fatal treatment: the list itself must survive.
+      try {
+        const rows = await getPackageConnectionSkips();
+        setConnSkips(Object.fromEntries(rows.map((r) => [connSkipKey(r), r])));
+      } catch {
+        setConnSkips({});
       }
     } catch (e: unknown) {
       setError(String(e));
@@ -376,6 +438,27 @@ export function SubscriptionManagerPane(): React.ReactElement {
                     notice?.text ??
                     `This package's writeback form rules were not loaded ('${skip.reason}'), ` +
                       `so its deadlines and value checks are not in force.`;
+                  const tone = notice?.tone ?? "danger";
+                  return (
+                    <div
+                      style={tone === "danger" ? styles.trustDanger : styles.trustWarn}
+                      title={skip.detail || undefined}
+                    >
+                      {text}
+                    </div>
+                  );
+                })()}
+                {(() => {
+                  const skip = connSkips[subKey(s)];
+                  if (!skip) return null;
+                  const notice = CONNECTION_SKIP_NOTICE[skip.reason];
+                  // Unknown reason: warn rather than render nothing. Silence
+                  // here reads as "your model is live", which is the one thing a
+                  // skip record proves is not true.
+                  const text =
+                    notice?.text ??
+                    `This package's data model was not loaded ('${skip.reason}'), so its ` +
+                      `report is not connected to live data.`;
                   const tone = notice?.tone ?? "danger";
                   return (
                     <div

@@ -52,6 +52,20 @@ pub(crate) fn merge_cells_off_sheet(
         state, "merge these cells", &[target], start_row, start_col, end_row, end_col,
     )?;
 
+    // SPILL PROTECTION (§2y), on the TARGET sheet. Merging DELETES every cell
+    // but the master, so it is the bluntest gesture there is: run over a
+    // dynamic array it erased values the array still claimed, and the next
+    // recalculation of the origin wrote them straight back inside the merged
+    // region. Refused whole — see `check_no_array_within`.
+    crate::commands::data::check_no_array_within(
+        state,
+        target,
+        start_row.min(end_row),
+        start_col.min(end_col),
+        start_row.max(end_row),
+        start_col.max(end_col),
+    )?;
+
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
@@ -254,6 +268,21 @@ pub fn merge_cells(
     crate::calp_commands::ensure_range_unclaimed(
         &state, "merge these cells", start_row, start_col, end_row, end_col,
     )?;
+
+    // SPILL PROTECTION (§2y) — see the off-sheet twin. Merging deletes every
+    // non-master cell in the range, which is not something half an array can
+    // survive.
+    {
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        crate::commands::data::check_no_array_within(
+            &state,
+            active_sheet,
+            start_row.min(end_row),
+            start_col.min(end_col),
+            start_row.max(end_row),
+            start_col.max(end_col),
+        )?;
+    }
 
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty

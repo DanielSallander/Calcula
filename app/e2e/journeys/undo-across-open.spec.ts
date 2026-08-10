@@ -30,10 +30,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
 import type { GridHelper } from "../helpers/grid";
 
+/** This spec's own directory. The ESM suite has no `__dirname`. */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORK = path.join(os.tmpdir(), "calcula-undo-across-open");
 /** The PowerShell helper that answers the native file picker; written at setup. */
 const DIALOG_PS1 = path.join(WORK, "answer-file-dialog.ps1");
@@ -129,6 +132,50 @@ function answerNativeDialog(filePath: string | null): string {
   } catch (err) {
     return `PSERROR ${err instanceof Error ? err.message : String(err)}`;
   }
+}
+
+/**
+ * Press "Ok" on the unsaved-changes prompt `fileOpen` raises, if it is up.
+ *
+ * Returns the driver's verdict verbatim — `CLICKED:...` when it answered a
+ * prompt, `NOTFOUND` when there was none. Both are legitimate outcomes here and
+ * the CALLER decides which one it expected, so this must not throw on absence.
+ *
+ * The shared driver is used rather than a fourth copy of the Win32 plumbing: it
+ * matches by window TITLE, so it cannot pick up the file picker by accident.
+ */
+function answerUnsavedChangesPrompt(): string {
+  const driver = path.join(HERE, "..", "answer-native-dialog.ps1");
+  if (!fs.existsSync(driver)) {
+    throw new Error(
+      `the native-dialog driver is missing at ${driver} — this spec cannot tell ` +
+        `"no prompt appeared" from "nothing looked"`,
+    );
+  }
+  let out: string;
+  try {
+    out = execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        driver,
+        "-TitleLike",
+        "Unsaved changes",
+        "-Action",
+        "ok",
+        "-TimeoutMs",
+        "6000",
+      ],
+      { encoding: "utf-8", timeout: 60_000 },
+    );
+  } catch (e) {
+    out = `DRIVERERROR:${String(e)}`;
+  }
+  const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  return lines.find((l) => !l.startsWith("TEXT:")) ?? lines.join("|");
 }
 
 /** Poll until the app raises the native picker, then answer it. THROWS if it never appears. */
@@ -374,11 +421,55 @@ async function waitForAppReady(page: Page, expectedPath: string | null): Promise
   await page.waitForTimeout(800);
 }
 
-/** File ▸ Open... → the native picker → the app reloads onto the opened document. */
+/**
+ * File ▸ Open... → (the unsaved-changes prompt) → the native picker → the app
+ * reloads onto the opened document.
+ *
+ * THE PROMPT IS NEW AND IT IS CORRECT. `fileOpen` used to replace the document
+ * with no question asked; F3 gave it the guard `fileNew` and the close handler
+ * already had, raised BEFORE the picker. This spec deliberately opens BRAVO
+ * while ALPHA holds an unsaved edit, so from now on that gesture asks — and it
+ * asks with a native message box, which the picker driver correctly reports as
+ * `NOEDIT` (a message box has no file-name Edit child). That is what broke the
+ * two Ctrl+Z / Ctrl+Y tests here in the first ordered run after F3 landed.
+ *
+ * ANSWERING "Ok" IS THE RIGHT ANSWER FOR THIS SPEC AND CHANGES NOTHING IT
+ * ASSERTS: discarding the edit is exactly the user gesture under test (open
+ * another workbook and press undo). The teeth are unaffected — the corruption
+ * §2x is about happens AFTER the open, in the opened document.
+ *
+ * `expectPrompt` is explicit rather than best-effort, so the prompt is ASSERTED
+ * where the document is dirty and asserted ABSENT where it is clean. A helper
+ * that merely swallowed whichever dialog turned up would hide a guard that had
+ * started firing on clean documents, or stopped firing on dirty ones.
+ */
 async function openThroughFileMenu(grid: GridHelper, target: string): Promise<void> {
   const page = grid.page;
+  // MEASURED, not assumed. The expectation is derived from the document's ACTUAL
+  // dirty state at the moment of the click, so this helper states the guard's
+  // contract ("it asks exactly when there is something to lose") instead of
+  // encoding an assumption about how clean each caller left the fixture. The
+  // first version hard-coded per-call-site expectations and was wrong about one
+  // of them, which is a spec asserting its author's model of the app rather than
+  // the app.
+  const dirty = await invoke<boolean>(page, "is_file_modified");
   await grid.openMenu("File");
   await clickFileMenuItem(page, "Open...");
+  const answered = answerUnsavedChangesPrompt();
+  if (dirty) {
+    expect(
+      answered,
+      "File ▸ Open on a document with unsaved changes did not ask before " +
+        "replacing it — the one document-replacing gesture in the app that used " +
+        "to discard work silently",
+    ).toMatch(/^CLICKED:/);
+  } else {
+    expect(
+      answered,
+      "File ▸ Open interrogated a document that reports nothing unsaved " +
+        `(is_file_modified = ${dirty})`,
+    ).toBe("NOTFOUND");
+  }
   await answerWhenRaised(page, target);
   await waitForAppReady(page, target);
 }
@@ -423,20 +514,32 @@ async function typeIntoCell(grid: GridHelper, ref: string, value: string): Promi
  * THROWS when the button is not on the ribbon: "I could not find it" must never
  * read as "the gesture was harmless".
  *
- * MEASURED, and worth stating because it is why this helper does not assert a
- * disabled state: Calcula's Undo/Redo affordances are NEVER disabled. The Home
- * tab renders them as plain buttons with no binding to `get_undo_state`, and the
- * Edit menu item has no enablement either. So the button is pressable on a
- * freshly-opened document with an empty stack — which is precisely why what the
- * press DOES is the thing that has to be pinned.
+ * RETURNS "refused" when the button is DISABLED, rather than pressing it. When
+ * this spec was written the affordance was never disabled anywhere in the app —
+ * the Home tab rendered plain `<Button>`s with no binding to `get_undo_state`
+ * and the Edit menu item had no enablement — and this helper's doc said so.
+ * That is now wired (`@api/undoState`, fed by the backend's
+ * `document:undo-state-changed`), so on a CORRECT build the button is greyed out
+ * exactly when the stack is empty.
+ *
+ * The distinction is load-bearing for this spec's teeth. On a LEAKING build the
+ * freshly-opened document still reports `canUndo`, so the button is enabled, the
+ * press happens, and the byte oracle below sees the corruption — nothing is
+ * weakened. On a correct build the press is refused, which is a second,
+ * independent statement of the same guarantee. Returning the outcome instead of
+ * throwing is what lets the caller assert BOTH.
  */
-async function pressRibbon(page: Page, which: "undo" | "redo"): Promise<void> {
+async function pressRibbon(page: Page, which: "undo" | "redo"): Promise<"pressed" | "refused"> {
   const btn = page.locator(`[data-testid="fmt-${which}"]`).first();
   if ((await btn.count()) === 0) {
     throw new Error(`the ribbon has no [data-testid="fmt-${which}"] button`);
   }
+  if (await btn.isDisabled()) {
+    return "refused";
+  }
   await btn.click();
   await page.waitForTimeout(600);
+  return "pressed";
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +598,8 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
     ).toBe(true);
     expect(inAlpha.undoDepth, "ALPHA's stack must hold the edit just made").toBeGreaterThan(0);
 
-    // ---- File ▸ Open BRAVO. The document on screen has never been edited.
+    // ---- File ▸ Open BRAVO. ALPHA holds an unsaved edit, so F3's guard asks
+    // first; answering Ok discards it, which is the gesture under test.
     await openThroughFileMenu(grid, FILE_BRAVO);
     expect(await cellDisplay(page, CELL), "precondition: BRAVO is the document on screen").toBe(
       BRAVO_VALUE,
@@ -524,8 +628,11 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
     expect.soft(inBravo.undoDepth, "a freshly-opened workbook has no undo history").toBe(0);
 
     // ---- THE GESTURE: one Ctrl+Z on the grid, which a user presses without
-    // thinking. The Undo affordance is never disabled anywhere in this app (see
-    // `pressRibbon`), so there is nothing between the user and this press.
+    // thinking. The KEYBOARD route has no enablement to consult — Ctrl+Z reaches
+    // the registered command whatever the ribbon looks like — so there is
+    // nothing between the user and this press even now that the buttons grey
+    // out. That asymmetry is why the store-level guarantee, not the disabled
+    // attribute, is what makes this safe.
     await grid.undo();
     await page.waitForTimeout(400);
 
@@ -563,7 +670,16 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
     // ---- THE OTHER ROUTE TO THE SAME GESTURE: the ribbon's Undo button, which
     // runs the registered command rather than the grid's key handler. Same
     // question, second gesture, and the archive is re-read after it.
-    await pressRibbon(page, "undo");
+    const ribbonUndo = await pressRibbon(page, "undo");
+    expect
+      .soft(
+        ribbonUndo,
+        "the ribbon offered an Undo this freshly-opened document has not earned. " +
+          "The button is bound to the backend's undo availability, so an ENABLED " +
+          "one here means the stack outlived its document — the press below then " +
+          "proves what that costs",
+      )
+      .toBe("refused");
     expect
       .soft(
         await cellDisplay(page, CELL),
@@ -616,7 +732,13 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
 
     // THE RIBBON'S OWN BUTTON, deliberately — test 1 presses Ctrl+Z, so between
     // them both routes are shown to work on the document that owns the history.
-    await pressRibbon(page, "undo");
+    // ENABLED is asserted, not assumed: a wrongly-greyed button would make this
+    // whole test pass by doing nothing at all, which is the failure mode the
+    // enablement work could introduce.
+    expect(
+      await pressRibbon(page, "undo"),
+      "the ribbon's Undo was greyed out on a document that HAS an undo entry",
+    ).toBe("pressed");
 
     expect(
       await cellDisplay(page, CELL),
@@ -660,7 +782,8 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
     ).toBe(true);
     expect(inAlpha.redoDepth).toBeGreaterThan(0);
 
-    // File ▸ Open BRAVO.
+    // File ▸ Open BRAVO. The edit-then-undo above left ALPHA modified, so the
+    // unsaved-changes guard asks before replacing it.
     await openThroughFileMenu(grid, FILE_BRAVO);
     expect(await cellDisplay(page, CELL), "precondition: BRAVO is on screen").toBe(BRAVO_VALUE);
 
@@ -702,7 +825,14 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
     );
 
     // And the ribbon's Redo button, the second route.
-    await pressRibbon(page, "redo");
+    const ribbonRedo = await pressRibbon(page, "redo");
+    expect
+      .soft(
+        ribbonRedo,
+        "the ribbon offered a Redo this freshly-opened document has not earned — " +
+          "the enablement half of the same guarantee, on the other half of the store",
+      )
+      .toBe("refused");
     expect
       .soft(
         await cellDisplay(page, CELL),
@@ -741,8 +871,12 @@ test.describe("§2x through the real UI: the undo stack dies with its document",
     expect(await cellDisplay(page, CELL), "precondition: the undo took").toBe(BRAVO_VALUE);
 
     // The ribbon's Redo button, deliberately — test 3 presses Ctrl+Y, so both
-    // routes are shown to work on the document that owns the history.
-    await pressRibbon(page, "redo");
+    // routes are shown to work on the document that owns the history. ENABLED is
+    // asserted for the same reason as test 2.
+    expect(
+      await pressRibbon(page, "redo"),
+      "the ribbon's Redo was greyed out on a document that HAS a redo entry",
+    ).toBe("pressed");
     expect(
       await cellDisplay(page, CELL),
       "the ribbon's Redo button inside the document did NOT redo the document's " +

@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/Distribution/__tests__/writebackSkipDisclosure.test.ts
-// PURPOSE: The Subscriptions pane must tell the user when a package's writeback
-//          form rules were NOT loaded — and must name every reason the backend
-//          can report.
+// PURPOSE: The Subscriptions pane must tell the user when something a package
+//          declares was NOT loaded — its writeback form rules, or its data
+//          model — and must name every reason the backend can report.
 // CONTEXT: "This package declares no writeback" and "this package's writeback
 //          regions could not be read, so its deadlines / required fields /
 //          value checks are NOT in force" used to be the SAME observable state:
@@ -15,6 +15,12 @@
 //          the deferred-rebuild event bridge are checked here too: without the
 //          bridge the pane would sit on "Loading..." forever, which reads as
 //          broken rather than as protected.
+//
+//          The second half of the file applies the identical rule to the
+//          package's BI CONNECTION, which is rebuilt on open rather than stored
+//          in the `.cala`. "This package has no data source" and "this
+//          package's model could not be verified on this machine" were the same
+//          silent screen for the same reason.
 
 import fs from "fs";
 import path from "path";
@@ -36,12 +42,18 @@ const PANE = code(read("extensions/Distribution/components/SubscriptionManagerPa
 const DIST_TS = read("src/api/distribution.ts");
 const BOOTSTRAP = code(read("src/shell/bootstrap.ts"));
 
-/** Every reason string `writeback_skip_reason` can return, read from Rust. */
+/**
+ * Every reason string `calp_skip_reason` can return, read from Rust.
+ *
+ * ONE classifier, two on-open registry walks: the writeback-index rebuild and
+ * the package-BI-connection restore both ask "why could this subscription's
+ * signed manifest not be loaded?" and must not answer it in two vocabularies.
+ */
 const RUST_REASONS: string[] = (() => {
-  const fn = CALP_RS.match(/fn writeback_skip_reason\([\s\S]*?\n\}/);
-  expect(fn, "writeback_skip_reason moved or was renamed").toBeTruthy();
+  const fn = CALP_RS.match(/fn calp_skip_reason\([\s\S]*?\n\}/);
+  expect(fn, "calp_skip_reason moved or was renamed").toBeTruthy();
   const found = [...fn![0].matchAll(/=>\s*\{?\s*"([a-zA-Z]+)"/g)].map((m) => m[1]);
-  expect(found.length, "no reason literals parsed out of writeback_skip_reason").toBeGreaterThan(0);
+  expect(found.length, "no reason literals parsed out of calp_skip_reason").toBeGreaterThan(0);
   return [...new Set(found)];
 })();
 
@@ -118,5 +130,91 @@ describe("the deferred half of the open-path rebuild reaches the UI", () => {
 
   it("the pane re-reads on it", () => {
     expect(PANE).toContain("onAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, refresh)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The SAME disclosure rule for the package's DATA MODEL.
+//
+// A package BI connection is not stored in the subscriber's `.cala` — the model
+// belongs to the publisher and travels in the `.calp` — so it is rebuilt on open
+// from the local package cache under the same signature + pin + checksum gates a
+// pull runs. When that cannot be done, the report still shows its last-pulled
+// cells and the only other symptom is a pivot quietly reporting no connection:
+// indistinguishable from a package that never had a data source. Exactly the
+// state the writeback disclosure above exists to end.
+// ---------------------------------------------------------------------------
+
+describe("the pane names every package-connection skip reason", () => {
+  it("has a notice row for each classifier reason", () => {
+    const table = PANE.match(/const CONNECTION_SKIP_NOTICE[\s\S]*?\n\};/);
+    expect(table, "CONNECTION_SKIP_NOTICE moved or was renamed").toBeTruthy();
+    const rows = [...table![0].matchAll(/^\s{2}([a-zA-Z]+):\s*\{/gm)].map((m) => m[1]);
+    for (const reason of RUST_REASONS.filter((r) => r !== "unknown")) {
+      expect(rows, `no CONNECTION_SKIP_NOTICE row for reason '${reason}'`).toContain(reason);
+    }
+    // Set by the restore walk itself, not by the classifier: an HTTP registry
+    // exposes no local model artifact, so no connection can be built from it.
+    expect(rows).toContain("unsupportedTransport");
+  });
+
+  it("an unrecognised reason still warns instead of rendering nothing", () => {
+    const flat = PANE.replace(/\s+/g, " ");
+    expect(flat).toMatch(/data model was not loaded \('\$\{skip\.reason\}'\)/);
+  });
+
+  it("says the report is not live, not merely that something failed", () => {
+    const flat = PANE.replace(/\s+/g, " ");
+    expect(flat).toMatch(/nothing is live|not connected to live data/);
+  });
+});
+
+describe("the Rust -> TS mirror of PackageConnectionRestoreSkip", () => {
+  it("declares the same fields, camelCased", () => {
+    const rust = CALP_RS.match(/pub struct PackageConnectionRestoreSkip \{([\s\S]*?)\n\}/);
+    expect(rust, "PackageConnectionRestoreSkip moved or was renamed").toBeTruthy();
+    const rustFields = [...rust![1].matchAll(/^\s*pub ([a-z_]+):/gm)]
+      .map((m) => m[1].replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()))
+      .sort();
+
+    const ts = DIST_TS.match(/export interface PackageConnectionRestoreSkip \{([\s\S]*?)\n\}/);
+    expect(ts, "PackageConnectionRestoreSkip mirror missing from @api/distribution").toBeTruthy();
+    const tsFields = [...ts![1].matchAll(/^\s{2}([a-zA-Z]+):/gm)].map((m) => m[1]).sort();
+
+    expect(tsFields).toEqual(rustFields);
+  });
+
+  it("the command the binding invokes is the command Rust registers", () => {
+    expect(DIST_TS).toContain('invokeBackend("calp_get_package_connection_skips")');
+    const LIB_RS = read("src-tauri/src/lib.rs");
+    expect(LIB_RS).toContain("calp_commands::calp_get_package_connection_skips");
+  });
+});
+
+describe("the package-connection restore actually runs on the open path", () => {
+  it("open_file calls it, after the subscription ledger it reads is restored", () => {
+    const PERSISTENCE = code(read("src-tauri/src/persistence.rs"));
+    const restoreLedger = PERSISTENCE.indexOf("restore_distribution_user_files(&state, &mut workbook)");
+    const restoreConns = PERSISTENCE.indexOf("restore_package_bi_connections(");
+    expect(restoreLedger, "the subscription-ledger restore moved").toBeGreaterThan(-1);
+    expect(
+      restoreConns,
+      "open_file no longer restores package BI connections, so a reopened subscribed " +
+        "report has no path back to a live model",
+    ).toBeGreaterThan(-1);
+    expect(
+      restoreConns,
+      "the package-connection restore runs BEFORE the subscription ledger it reads",
+    ).toBeGreaterThan(restoreLedger);
+  });
+
+  it("it re-verifies rather than taking the workbook's word", () => {
+    // The restore reads a manifest for a package named by a FILE that can arrive
+    // by email. RequirePinned is what stops that file from minting a publisher
+    // pin; `load_verified_data_sources` is where the gate chain lives.
+    expect(CALP_RS).toContain("calp::pull::load_verified_data_sources(");
+    const PULL_RS = read("../core/calp/src/pull.rs");
+    expect(PULL_RS).toContain("load_pinned_manifest_via(");
+    expect(PULL_RS).toContain("verify_version_artifacts_via(registry, package_name, version, &manifest)");
   });
 });

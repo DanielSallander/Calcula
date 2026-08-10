@@ -70,6 +70,7 @@ pub mod formula;
 pub mod logging;
 pub mod sheets;
 pub mod undo_commands;
+pub mod undo_history;
 pub mod merge_commands;
 pub mod pivot;
 pub mod bi;
@@ -218,6 +219,15 @@ mod document_store_census_tests;
 #[cfg(test)]
 mod document_store_reset_tests;
 
+#[cfg(test)]
+mod script_security_census_tests;
+
+#[cfg(test)]
+mod defined_name_sheet_ops_tests;
+
+#[cfg(test)]
+mod formula_serialisation_tests;
+
 // ============================================================================
 // APPLICATION STATE
 // ============================================================================
@@ -342,7 +352,13 @@ pub struct AppState {
     pub cross_sheet_dependents: Mutex<CrossSheetDependentsMap>,
     /// Track which cross-sheet cells each formula depends on (for cleanup)
     pub cross_sheet_dependencies: Mutex<CrossSheetDependenciesMap>,
-    pub undo_stack: Mutex<UndoStack>,
+    /// The undo/redo history. `undo_history::UndoHistory`, not a bare
+    /// `Mutex<UndoStack>`: it is `Mutex`-shaped (so every existing `.lock()`
+    /// site is unchanged) and announces `document:undo-state-changed` whenever
+    /// `(can_undo, can_redo)` actually MOVES. That is what lets the ribbon's
+    /// Undo/Redo buttons and the Edit menu items be greyed out the way Excel
+    /// greys them, including for mutations that never touched the frontend.
+    pub undo_stack: undo_history::UndoHistory,
     /// Freeze pane configurations per sheet
     pub freeze_configs: document_effect::Persisted<Vec<FreezeConfig>>,
     /// Split window configurations per sheet
@@ -533,6 +549,16 @@ pub struct AppState {
     /// in force" are the same observable state. Surfaced by
     /// `calp_get_writeback_rebuild_skips`.
     pub writeback_rebuild_skips: Mutex<Vec<crate::calp_commands::WritebackRebuildSkip>>,
+    /// Why opening this workbook could NOT re-materialize a subscribed
+    /// package's BI connections (same failure vocabulary as
+    /// `writeback_rebuild_skips`). Package connections are not stored in the
+    /// `.cala` — they are rebuilt from the subscription ledger + the local
+    /// package cache under `PinPolicy::RequirePinned` — so "this package has no
+    /// data source" and "this package's model could not be verified here" would
+    /// otherwise be the same observable state: a pivot with no connection.
+    /// Surfaced by `calp_get_package_connection_skips`.
+    pub package_connection_restore_skips:
+        Mutex<Vec<crate::calp_commands::PackageConnectionRestoreSkip>>,
     /// Subscriber identity for writeback submissions.
     pub subscriber_identity: Mutex<Option<calp::SubmitterIdentity>>,
     /// Central cell identity registry for stable CellId tracking.
@@ -645,7 +671,7 @@ pub fn create_app_state() -> AppState {
         name_dependencies: Mutex::new(name_resolution::NameDependenciesMap::default()),
         cross_sheet_dependents: Mutex::new(CrossSheetDependentsMap::default()),
         cross_sheet_dependencies: Mutex::new(CrossSheetDependenciesMap::default()),
-        undo_stack: Mutex::new(UndoStack::new()),
+        undo_stack: undo_history::UndoHistory::new(UndoStack::new()),
         freeze_configs: document_effect::Persisted::new(vec![FreezeConfig::default()]),
         split_configs: document_effect::Persisted::new(vec![SplitConfig::default()]),
         sheet_zooms: document_effect::Persisted::new(vec![::persistence::DEFAULT_SHEET_ZOOM_PERCENT]),
@@ -723,6 +749,7 @@ pub fn create_app_state() -> AppState {
         writeback_declarations: Mutex::new(Vec::new()),
         model_writeback_declarations: Mutex::new(Vec::new()),
         writeback_rebuild_skips: Mutex::new(Vec::new()),
+        package_connection_restore_skips: Mutex::new(Vec::new()),
         gather_cache: Mutex::new(None),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
@@ -2386,409 +2413,28 @@ fn make_range(
 
 /// Converts a parser AST node back to a formula string.
 /// Used by Convert to Range to rewrite table references as A1-style references.
+/// Converts a parser AST node back to a formula string.
+///
+/// DELEGATES to the engine's canonical renderer. This file used to carry a
+/// SECOND, hand-maintained serialiser: 224 explicit function-name arms plus
+/// `other => format!("{:?}", other)`, a debug-format catch-all that covered 247
+/// more. That fallback printed the RUST VARIANT NAME, so `CELL` was written
+/// `CellFn`, `FORECAST` became `ForecastLinear` and `STDEV.S` became `StdevS` —
+/// 47 built-ins whose rendered text is not an accepted spelling. Re-parsing
+/// turned each into `Custom("CELLFN")`, an unknown user function, so every
+/// sheet rename or delete silently converted those formulas into `#NAME?`
+/// across the whole workbook. Two explicit arms had drifted as well
+/// (`STDEV.P`/`VAR.P` against the canonical `STDEVP`/`VARP`), which made
+/// `repair_all_formulas` rewrite untouched cells on every sheet operation
+/// because the two serialisers disagreed about text they both round-tripped.
+///
+/// One renderer removes that whole class. `render_formula_raw` is the same
+/// function persistence and the formula bar use, so what a sheet rename writes
+/// is now what a save writes and what the user is shown.
 pub fn expression_to_formula(expr: &ParserExpr) -> String {
-    match expr {
-        ParserExpr::Literal(val) => match val {
-            ParserValue::Number(n) => {
-                // Format without trailing zeros for integers
-                if *n == (*n as i64) as f64 && n.abs() < 1e15 {
-                    format!("{}", *n as i64)
-                } else {
-                    format!("{}", n)
-                }
-            }
-            ParserValue::String(s) => format!("\"{}\"", s),
-            ParserValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        },
-        ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute, .. } => {
-            let mut s = String::new();
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') || sheet_name.contains('\'') {
-                    s.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    s.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            if *col_absolute { s.push('$'); }
-            s.push_str(col);
-            if *row_absolute { s.push('$'); }
-            s.push_str(&row.to_string());
-            s
-        }
-        ParserExpr::Range { sheet, start, end, .. } => {
-            let mut s = String::new();
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') || sheet_name.contains('\'') {
-                    s.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    s.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            // Start CellRef without sheet prefix (sheet is on the Range node)
-            s.push_str(&expression_to_formula_no_sheet(start));
-            s.push(':');
-            s.push_str(&expression_to_formula_no_sheet(end));
-            s
-        }
-        ParserExpr::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute, .. } => {
-            let mut s = String::new();
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') || sheet_name.contains('\'') {
-                    s.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    s.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            if *start_absolute { s.push('$'); }
-            s.push_str(start_col);
-            s.push(':');
-            if *end_absolute { s.push('$'); }
-            s.push_str(end_col);
-            s
-        }
-        ParserExpr::RowRef { sheet, start_row, end_row, start_absolute, end_absolute, .. } => {
-            let mut s = String::new();
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') || sheet_name.contains('\'') {
-                    s.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    s.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            if *start_absolute { s.push('$'); }
-            s.push_str(&start_row.to_string());
-            s.push(':');
-            if *end_absolute { s.push('$'); }
-            s.push_str(&end_row.to_string());
-            s
-        }
-        ParserExpr::BinaryOp { left, op, right } => {
-            format!("{}{}{}", expression_to_formula(left), op, expression_to_formula(right))
-        }
-        ParserExpr::UnaryOp { op, operand } => {
-            format!("{}{}", op, expression_to_formula(operand))
-        }
-        ParserExpr::FunctionCall { func, args, .. } => {
-            let func_name = builtin_function_to_name(func);
-            let arg_strs: Vec<String> = args.iter().map(|a| expression_to_formula(a)).collect();
-            format!("{}({})", func_name, arg_strs.join(","))
-        }
-        ParserExpr::NamedRef { name, .. } => name.clone(),
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            let mut s = String::new();
-            let combined = format!("{}:{}", start_sheet, end_sheet);
-            // Quote if either sheet name contains spaces or special chars
-            if start_sheet.contains(' ') || end_sheet.contains(' ')
-                || start_sheet.contains('\'') || end_sheet.contains('\'')
-            {
-                s.push_str(&format!("'{}'!", combined));
-            } else {
-                s.push_str(&format!("{}!", combined));
-            }
-            s.push_str(&expression_to_formula(reference));
-            s
-        }
-        ParserExpr::TableRef { table_name, specifier, .. } => {
-            // Should not appear after resolution, but handle gracefully.
-            // table_specifier_to_string already wraps in brackets, e.g. [@sales] or [Column].
-            let spec_str = table_specifier_to_string(specifier);
-            if table_name.is_empty() {
-                spec_str
-            } else {
-                format!("{}{}", table_name, spec_str)
-            }
-        }
-        ParserExpr::IndexAccess { target, index } => {
-            format!("{}[{}]", expression_to_formula(target), expression_to_formula(index))
-        }
-        ParserExpr::ListLiteral { elements } => {
-            let inner: Vec<String> = elements.iter().map(|e| expression_to_formula(e)).collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-        ParserExpr::DictLiteral { entries } => {
-            let inner: Vec<String> = entries.iter().map(|(k, v)| {
-                format!("{}: {}", expression_to_formula(k), expression_to_formula(v))
-            }).collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-        ParserExpr::SpillRef { cell, .. } => {
-            format!("{}#", expression_to_formula(cell))
-        }
-        ParserExpr::ImplicitIntersection { operand } => {
-            format!("@{}", expression_to_formula(operand))
-        }
-    }
+    engine::ast_render::render_formula_raw(expr)
 }
 
-/// Helper: serializes a CellRef without its sheet prefix (for Range start/end).
-fn expression_to_formula_no_sheet(expr: &ParserExpr) -> String {
-    match expr {
-        ParserExpr::CellRef { col, row, col_absolute, row_absolute, .. } => {
-            let mut s = String::new();
-            if *col_absolute { s.push('$'); }
-            s.push_str(col);
-            if *row_absolute { s.push('$'); }
-            s.push_str(&row.to_string());
-            s
-        }
-        _ => expression_to_formula(expr),
-    }
-}
-
-/// Converts a BuiltinFunction enum variant back to its canonical name string.
-fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
-    match func {
-        ParserBuiltinFn::Sum => "SUM".to_string(),
-        ParserBuiltinFn::Average => "AVERAGE".to_string(),
-        ParserBuiltinFn::Min => "MIN".to_string(),
-        ParserBuiltinFn::Max => "MAX".to_string(),
-        ParserBuiltinFn::Count => "COUNT".to_string(),
-        ParserBuiltinFn::CountA => "COUNTA".to_string(),
-        ParserBuiltinFn::SumIf => "SUMIF".to_string(),
-        ParserBuiltinFn::SumIfs => "SUMIFS".to_string(),
-        ParserBuiltinFn::CountIf => "COUNTIF".to_string(),
-        ParserBuiltinFn::CountIfs => "COUNTIFS".to_string(),
-        ParserBuiltinFn::AverageIf => "AVERAGEIF".to_string(),
-        ParserBuiltinFn::AverageIfs => "AVERAGEIFS".to_string(),
-        ParserBuiltinFn::CountBlank => "COUNTBLANK".to_string(),
-        ParserBuiltinFn::MinIfs => "MINIFS".to_string(),
-        ParserBuiltinFn::MaxIfs => "MAXIFS".to_string(),
-        ParserBuiltinFn::If => "IF".to_string(),
-        ParserBuiltinFn::And => "AND".to_string(),
-        ParserBuiltinFn::Or => "OR".to_string(),
-        ParserBuiltinFn::Not => "NOT".to_string(),
-        ParserBuiltinFn::True => "TRUE".to_string(),
-        ParserBuiltinFn::False => "FALSE".to_string(),
-        ParserBuiltinFn::IfError => "IFERROR".to_string(),
-        ParserBuiltinFn::IfNa => "IFNA".to_string(),
-        ParserBuiltinFn::Ifs => "IFS".to_string(),
-        ParserBuiltinFn::Switch => "SWITCH".to_string(),
-        ParserBuiltinFn::Xor => "XOR".to_string(),
-        ParserBuiltinFn::Abs => "ABS".to_string(),
-        ParserBuiltinFn::Round => "ROUND".to_string(),
-        ParserBuiltinFn::Floor => "FLOOR".to_string(),
-        ParserBuiltinFn::Ceiling => "CEILING".to_string(),
-        ParserBuiltinFn::Sqrt => "SQRT".to_string(),
-        ParserBuiltinFn::Power => "POWER".to_string(),
-        ParserBuiltinFn::Mod => "MOD".to_string(),
-        ParserBuiltinFn::Int => "INT".to_string(),
-        ParserBuiltinFn::Sign => "SIGN".to_string(),
-        ParserBuiltinFn::SumProduct => "SUMPRODUCT".to_string(),
-        ParserBuiltinFn::SumX2MY2 => "SUMX2MY2".to_string(),
-        ParserBuiltinFn::SumX2PY2 => "SUMX2PY2".to_string(),
-        ParserBuiltinFn::SumXMY2 => "SUMXMY2".to_string(),
-        ParserBuiltinFn::Product => "PRODUCT".to_string(),
-        ParserBuiltinFn::Rand => "RAND".to_string(),
-        ParserBuiltinFn::RandBetween => "RANDBETWEEN".to_string(),
-        ParserBuiltinFn::Pi => "PI".to_string(),
-        ParserBuiltinFn::Log => "LOG".to_string(),
-        ParserBuiltinFn::Log10 => "LOG10".to_string(),
-        ParserBuiltinFn::Ln => "LN".to_string(),
-        ParserBuiltinFn::Exp => "EXP".to_string(),
-        ParserBuiltinFn::Sin => "SIN".to_string(),
-        ParserBuiltinFn::Cos => "COS".to_string(),
-        ParserBuiltinFn::Tan => "TAN".to_string(),
-        ParserBuiltinFn::Asin => "ASIN".to_string(),
-        ParserBuiltinFn::Acos => "ACOS".to_string(),
-        ParserBuiltinFn::Atan => "ATAN".to_string(),
-        ParserBuiltinFn::Atan2 => "ATAN2".to_string(),
-        ParserBuiltinFn::RoundUp => "ROUNDUP".to_string(),
-        ParserBuiltinFn::RoundDown => "ROUNDDOWN".to_string(),
-        ParserBuiltinFn::Trunc => "TRUNC".to_string(),
-        ParserBuiltinFn::Even => "EVEN".to_string(),
-        ParserBuiltinFn::Odd => "ODD".to_string(),
-        ParserBuiltinFn::Gcd => "GCD".to_string(),
-        ParserBuiltinFn::Lcm => "LCM".to_string(),
-        ParserBuiltinFn::Combin => "COMBIN".to_string(),
-        ParserBuiltinFn::Fact => "FACT".to_string(),
-        ParserBuiltinFn::Degrees => "DEGREES".to_string(),
-        ParserBuiltinFn::Radians => "RADIANS".to_string(),
-        ParserBuiltinFn::Len => "LEN".to_string(),
-        ParserBuiltinFn::Upper => "UPPER".to_string(),
-        ParserBuiltinFn::Lower => "LOWER".to_string(),
-        ParserBuiltinFn::Trim => "TRIM".to_string(),
-        ParserBuiltinFn::Concatenate => "CONCATENATE".to_string(),
-        ParserBuiltinFn::Left => "LEFT".to_string(),
-        ParserBuiltinFn::Right => "RIGHT".to_string(),
-        ParserBuiltinFn::Mid => "MID".to_string(),
-        ParserBuiltinFn::Rept => "REPT".to_string(),
-        ParserBuiltinFn::Text => "TEXT".to_string(),
-        ParserBuiltinFn::Find => "FIND".to_string(),
-        ParserBuiltinFn::Search => "SEARCH".to_string(),
-        ParserBuiltinFn::Substitute => "SUBSTITUTE".to_string(),
-        ParserBuiltinFn::Replace => "REPLACE".to_string(),
-        ParserBuiltinFn::ValueFn => "VALUE".to_string(),
-        ParserBuiltinFn::Exact => "EXACT".to_string(),
-        ParserBuiltinFn::Proper => "PROPER".to_string(),
-        ParserBuiltinFn::Char => "CHAR".to_string(),
-        ParserBuiltinFn::Code => "CODE".to_string(),
-        ParserBuiltinFn::Clean => "CLEAN".to_string(),
-        ParserBuiltinFn::NumberValue => "NUMBERVALUE".to_string(),
-        ParserBuiltinFn::TFn => "T".to_string(),
-        ParserBuiltinFn::Today => "TODAY".to_string(),
-        ParserBuiltinFn::Now => "NOW".to_string(),
-        ParserBuiltinFn::Date => "DATE".to_string(),
-        ParserBuiltinFn::Year => "YEAR".to_string(),
-        ParserBuiltinFn::Month => "MONTH".to_string(),
-        ParserBuiltinFn::Day => "DAY".to_string(),
-        ParserBuiltinFn::Hour => "HOUR".to_string(),
-        ParserBuiltinFn::Minute => "MINUTE".to_string(),
-        ParserBuiltinFn::Second => "SECOND".to_string(),
-        ParserBuiltinFn::DateValue => "DATEVALUE".to_string(),
-        ParserBuiltinFn::TimeValue => "TIMEVALUE".to_string(),
-        ParserBuiltinFn::EDate => "EDATE".to_string(),
-        ParserBuiltinFn::EOMonth => "EOMONTH".to_string(),
-        ParserBuiltinFn::NetworkDays => "NETWORKDAYS".to_string(),
-        ParserBuiltinFn::WorkDay => "WORKDAY".to_string(),
-        ParserBuiltinFn::DateDif => "DATEDIF".to_string(),
-        ParserBuiltinFn::Weekday => "WEEKDAY".to_string(),
-        ParserBuiltinFn::WeekNum => "WEEKNUM".to_string(),
-        ParserBuiltinFn::IsNumber => "ISNUMBER".to_string(),
-        ParserBuiltinFn::IsText => "ISTEXT".to_string(),
-        ParserBuiltinFn::IsBlank => "ISBLANK".to_string(),
-        ParserBuiltinFn::IsError => "ISERROR".to_string(),
-        ParserBuiltinFn::IsNa => "ISNA".to_string(),
-        ParserBuiltinFn::IsErr => "ISERR".to_string(),
-        ParserBuiltinFn::IsLogical => "ISLOGICAL".to_string(),
-        ParserBuiltinFn::IsOdd => "ISODD".to_string(),
-        ParserBuiltinFn::IsEven => "ISEVEN".to_string(),
-        ParserBuiltinFn::TypeFn => "TYPE".to_string(),
-        ParserBuiltinFn::NFn => "N".to_string(),
-        ParserBuiltinFn::Na => "NA".to_string(),
-        ParserBuiltinFn::IsFormula => "ISFORMULA".to_string(),
-        ParserBuiltinFn::XLookup => "XLOOKUP".to_string(),
-        ParserBuiltinFn::XLookups => "XLOOKUPS".to_string(),
-        ParserBuiltinFn::Index => "INDEX".to_string(),
-        ParserBuiltinFn::Match => "MATCH".to_string(),
-        ParserBuiltinFn::Choose => "CHOOSE".to_string(),
-        ParserBuiltinFn::Indirect => "INDIRECT".to_string(),
-        ParserBuiltinFn::Offset => "OFFSET".to_string(),
-        ParserBuiltinFn::Address => "ADDRESS".to_string(),
-        ParserBuiltinFn::Rows => "ROWS".to_string(),
-        ParserBuiltinFn::Columns => "COLUMNS".to_string(),
-        ParserBuiltinFn::Transpose => "TRANSPOSE".to_string(),
-        ParserBuiltinFn::Median => "MEDIAN".to_string(),
-        ParserBuiltinFn::Stdev => "STDEV".to_string(),
-        ParserBuiltinFn::StdevP => "STDEV.P".to_string(),
-        ParserBuiltinFn::Var => "VAR".to_string(),
-        ParserBuiltinFn::VarP => "VAR.P".to_string(),
-        ParserBuiltinFn::Large => "LARGE".to_string(),
-        ParserBuiltinFn::Small => "SMALL".to_string(),
-        ParserBuiltinFn::Rank => "RANK".to_string(),
-        ParserBuiltinFn::Percentile => "PERCENTILE".to_string(),
-        ParserBuiltinFn::Quartile => "QUARTILE".to_string(),
-        ParserBuiltinFn::Mode => "MODE".to_string(),
-        ParserBuiltinFn::Frequency => "FREQUENCY".to_string(),
-        ParserBuiltinFn::Pmt => "PMT".to_string(),
-        ParserBuiltinFn::Pv => "PV".to_string(),
-        ParserBuiltinFn::Fv => "FV".to_string(),
-        ParserBuiltinFn::Npv => "NPV".to_string(),
-        ParserBuiltinFn::Irr => "IRR".to_string(),
-        ParserBuiltinFn::Rate => "RATE".to_string(),
-        ParserBuiltinFn::Nper => "NPER".to_string(),
-        ParserBuiltinFn::Sln => "SLN".to_string(),
-        ParserBuiltinFn::Db => "DB".to_string(),
-        ParserBuiltinFn::Ddb => "DDB".to_string(),
-        ParserBuiltinFn::GetRowHeight => "GET.ROW.HEIGHT".to_string(),
-        ParserBuiltinFn::GetColumnWidth => "GET.COLUMN.WIDTH".to_string(),
-        ParserBuiltinFn::GetCellFillColor => "GET.CELL.FILLCOLOR".to_string(),
-        ParserBuiltinFn::Row => "ROW".to_string(),
-        ParserBuiltinFn::Column => "COLUMN".to_string(),
-        ParserBuiltinFn::Let => "LET".to_string(),
-        ParserBuiltinFn::TextJoin => "TEXTJOIN".to_string(),
-        ParserBuiltinFn::Filter => "FILTER".to_string(),
-        ParserBuiltinFn::Sort => "SORT".to_string(),
-        ParserBuiltinFn::SortBy => "SORTBY".to_string(),
-        ParserBuiltinFn::Unique => "UNIQUE".to_string(),
-        ParserBuiltinFn::Sequence => "SEQUENCE".to_string(),
-        ParserBuiltinFn::RandArray => "RANDARRAY".to_string(),
-        ParserBuiltinFn::GroupBy => "GROUPBY".to_string(),
-        ParserBuiltinFn::PivotBy => "PIVOTBY".to_string(),
-        ParserBuiltinFn::GetPivotData => "GETPIVOTDATA".to_string(),
-        ParserBuiltinFn::Collect => "COLLECT".to_string(),
-        ParserBuiltinFn::DictFn => "DICT".to_string(),
-        ParserBuiltinFn::Keys => "KEYS".to_string(),
-        ParserBuiltinFn::Values => "VALUES".to_string(),
-        ParserBuiltinFn::Contains => "CONTAINS".to_string(),
-        ParserBuiltinFn::IsList => "ISLIST".to_string(),
-        ParserBuiltinFn::IsDict => "ISDICT".to_string(),
-        ParserBuiltinFn::Flatten => "FLATTEN".to_string(),
-        ParserBuiltinFn::Take => "TAKE".to_string(),
-        ParserBuiltinFn::Drop => "DROP".to_string(),
-        ParserBuiltinFn::Append => "APPEND".to_string(),
-        ParserBuiltinFn::Merge => "MERGE".to_string(),
-        ParserBuiltinFn::HStack => "HSTACK".to_string(),
-        ParserBuiltinFn::FileRead => "FILEREAD".to_string(),
-        ParserBuiltinFn::FileLines => "FILELINES".to_string(),
-        ParserBuiltinFn::FileExists => "FILEEXISTS".to_string(),
-        ParserBuiltinFn::Lambda => "LAMBDA".to_string(),
-        ParserBuiltinFn::Map => "MAP".to_string(),
-        ParserBuiltinFn::Reduce => "REDUCE".to_string(),
-        ParserBuiltinFn::Scan => "SCAN".to_string(),
-        ParserBuiltinFn::MakeArray => "MAKEARRAY".to_string(),
-        ParserBuiltinFn::ByRow => "BYROW".to_string(),
-        ParserBuiltinFn::ByCol => "BYCOL".to_string(),
-        ParserBuiltinFn::Subtotal => "SUBTOTAL".to_string(),
-        // Hyperbolic & reciprocal trig
-        ParserBuiltinFn::Sinh => "SINH".to_string(),
-        ParserBuiltinFn::Cosh => "COSH".to_string(),
-        ParserBuiltinFn::Tanh => "TANH".to_string(),
-        ParserBuiltinFn::Cot => "COT".to_string(),
-        ParserBuiltinFn::Coth => "COTH".to_string(),
-        ParserBuiltinFn::Csc => "CSC".to_string(),
-        ParserBuiltinFn::Csch => "CSCH".to_string(),
-        ParserBuiltinFn::Sec => "SEC".to_string(),
-        ParserBuiltinFn::Sech => "SECH".to_string(),
-        ParserBuiltinFn::Acot => "ACOT".to_string(),
-        // Rounding variants
-        ParserBuiltinFn::CeilingMath => "CEILING.MATH".to_string(),
-        ParserBuiltinFn::CeilingPrecise => "CEILING.PRECISE".to_string(),
-        ParserBuiltinFn::FloorMath => "FLOOR.MATH".to_string(),
-        ParserBuiltinFn::FloorPrecise => "FLOOR.PRECISE".to_string(),
-        ParserBuiltinFn::IsoCeiling => "ISO.CEILING".to_string(),
-        // Additional math (Group 3)
-        ParserBuiltinFn::Multinomial => "MULTINOMIAL".to_string(),
-        ParserBuiltinFn::Combina => "COMBINA".to_string(),
-        ParserBuiltinFn::FactDouble => "FACTDOUBLE".to_string(),
-        ParserBuiltinFn::SqrtPi => "SQRTPI".to_string(),
-        // Aggregate
-        ParserBuiltinFn::Aggregate => "AGGREGATE".to_string(),
-        // Web
-        ParserBuiltinFn::EncodeUrl => "ENCODEURL".to_string(),
-        // Database functions
-        ParserBuiltinFn::DAverage => "DAVERAGE".to_string(),
-        ParserBuiltinFn::DCount => "DCOUNT".to_string(),
-        ParserBuiltinFn::DCountA => "DCOUNTA".to_string(),
-        ParserBuiltinFn::DGet => "DGET".to_string(),
-        ParserBuiltinFn::DMax => "DMAX".to_string(),
-        ParserBuiltinFn::DMin => "DMIN".to_string(),
-        ParserBuiltinFn::DProduct => "DPRODUCT".to_string(),
-        ParserBuiltinFn::DStdev => "DSTDEV".to_string(),
-        ParserBuiltinFn::DStdevP => "DSTDEVP".to_string(),
-        ParserBuiltinFn::DSum => "DSUM".to_string(),
-        ParserBuiltinFn::DVar => "DVAR".to_string(),
-        ParserBuiltinFn::DVarP => "DVARP".to_string(),
-        ParserBuiltinFn::Custom(name) => name.clone(),
-        other => format!("{:?}", other),
-    }
-}
-
-/// Converts a TableSpecifier to its string representation for formula display.
-fn table_specifier_to_string(spec: &ParserTableSpecifier) -> String {
-    match spec {
-        ParserTableSpecifier::Column(name) => format!("[{}]", name),
-        ParserTableSpecifier::ThisRow(name) => format!("[@{}]", name),
-        ParserTableSpecifier::ColumnRange(start, end) => format!("[{}]:[{}]", start, end),
-        ParserTableSpecifier::ThisRowRange(start, end) => format!("[@{}]:[@{}]", start, end),
-        ParserTableSpecifier::AllRows => "[#All]".to_string(),
-        ParserTableSpecifier::DataRows => "[#Data]".to_string(),
-        ParserTableSpecifier::Headers => "[#Headers]".to_string(),
-        ParserTableSpecifier::Totals => "[#Totals]".to_string(),
-        ParserTableSpecifier::SpecialColumn(special, col) => {
-            format!("{},{}", table_specifier_to_string(special), col)
-        }
-    }
-}
 
 // ============================================================================
 // 3D REFERENCE BOOKEND REPAIR
@@ -2816,7 +2462,34 @@ pub fn repair_3d_refs_on_delete(
     }
 
     let new_formula = format!("={}", expression_to_formula(&new_ast));
-    Some(new_formula)
+    Some(unchanged_or(formula, &ast, new_formula))
+}
+
+/// The repaired text, or the CALLER'S ORIGINAL TEXT when the repair changed
+/// nothing.
+///
+/// WHY THIS EXISTS. Both sheet repairs re-render the whole formula whether or
+/// not they touched it, and the render is not the identity on text a user
+/// typed: the lexer upper-cases every bare identifier, so `=Anchor` came back
+/// `=ANCHOR` and `=LAMBDA(x, x*2)` came back `=LAMBDA(X,X*2)`. `repair_all_
+/// formulas` then sees text that DIFFERS and rewrites the cell, so renaming or
+/// deleting ANY sheet re-spelled every defined-name reference in the workbook —
+/// including on sheets the operation never mentioned. That is §2t's defect
+/// (`BudgetTotal` -> `BUDGETTOTAL`) on a path §2t's fix does not reach:
+/// `restamp_workbook_name_casing` is called from `open_file`, not from here.
+///
+/// The test is on the AST, not on the text, so this is not "skip if the strings
+/// look similar": if the repair produced the same tree it was given, the repair
+/// did nothing, and doing nothing must leave the user's own spelling alone.
+/// Formulas the rename really does touch are still rewritten — and their names
+/// are put back into the Name Manager's spelling by the restamp the two callers
+/// now run, which is the same function `open_file` uses.
+fn unchanged_or(original_text: &str, original_ast: &ParserExpr, repaired: String) -> String {
+    if format!("={}", expression_to_formula(original_ast)) == repaired {
+        original_text.to_string()
+    } else {
+        repaired
+    }
 }
 
 /// Recursively walks a parser AST and repairs Sheet3DRef bookends after sheet deletion.
@@ -2891,6 +2564,9 @@ fn repair_3d_delete_recursive(
             (ParserExpr::FunctionCall { func: func.clone(), args: new_args, ref_site_id: Default::default() }, any_err)
         }
         ParserExpr::Range { sheet, start, end, .. } => {
+            if names_deleted_sheet(sheet, deleted_name) {
+                return (ast.clone(), true);
+            }
             let (new_start, s_err) = repair_3d_delete_recursive(start, deleted_name, sheet_names_after);
             let (new_end, e_err) = repair_3d_delete_recursive(end, deleted_name, sheet_names_after);
             (ParserExpr::Range {
@@ -2900,9 +2576,35 @@ fn repair_3d_delete_recursive(
                 ref_site_id: Default::default(),
             }, s_err || e_err)
         }
+
+        // PLAIN CROSS-SHEET REFERENCES.
+        //
+        // These four arms used to fall through to the `_` leaf arm below, so
+        // `=Sheet2!A1` survived Sheet2's deletion VERBATIM. Nothing then
+        // reported an error: the evaluator's `get_grid_for_sheet` resolved the
+        // now-unknown name to the formula's OWN sheet, so the cell quietly
+        // reported the local A1 instead of `#REF!` and saved that number to
+        // disk. The rename twin (`repair_3d_rename_recursive`) has always
+        // handled all four; the asymmetry between the two was the tell.
+        ParserExpr::CellRef { sheet, .. }
+        | ParserExpr::ColumnRef { sheet, .. }
+        | ParserExpr::RowRef { sheet, .. }
+            if names_deleted_sheet(sheet, deleted_name) =>
+        {
+            (ast.clone(), true)
+        }
+
         // Leaf nodes — no 3D refs to repair
         _ => (ast.clone(), false),
     }
+}
+
+/// True when a reference's sheet qualifier names the sheet being deleted.
+/// Case-insensitive, matching how sheets are resolved everywhere else.
+fn names_deleted_sheet(sheet: &Option<String>, deleted_name: &str) -> bool {
+    sheet
+        .as_ref()
+        .is_some_and(|s| s.to_uppercase() == deleted_name.to_uppercase())
 }
 
 /// Finds the sheet adjacent to the deleted one, constrained by the other bookend.
@@ -2951,7 +2653,9 @@ pub fn repair_3d_refs_on_rename(formula: &str, old_name: &str, new_name: &str) -
     };
 
     let new_ast = repair_3d_rename_recursive(&ast, old_name, new_name);
-    format!("={}", expression_to_formula(&new_ast))
+    // See `unchanged_or`: a rename that touches nothing must not re-spell the
+    // formula the user typed.
+    unchanged_or(formula, &ast, format!("={}", expression_to_formula(&new_ast)))
 }
 
 /// Recursively walks a parser AST and updates Sheet3DRef bookend names.
@@ -3067,9 +2771,18 @@ pub fn repair_all_formulas(
     repair_fn: &dyn Fn(&str) -> Option<String>,
 ) {
     for grid in grids.iter_mut() {
+        // RAW, not the display form. `formula_string()` COLLAPSES the internal
+        // `__INVOKE__("MyFn", <lambda>, args)` marker a named LAMBDA call
+        // carries down to `MyFn(args)`. Repairing that text and re-parsing it
+        // produced `Custom("MYFN")` with no lambda attached, and since the
+        // upper-cased result differs from the mixed-case original the cell was
+        // REWRITTEN -- so renaming or deleting any sheet silently destroyed
+        // every named-function call in the workbook, on every sheet, whether or
+        // not it mentioned the sheet being changed. The raw form round-trips
+        // through the repair untouched.
         let formula_cells: Vec<((u32, u32), String)> = grid.cells.iter()
             .filter_map(|((r, c), cell)| {
-                cell.formula_string().map(|f| ((*r, *c), f))
+                cell.formula_string_raw().map(|f| ((*r, *c), f))
             })
             .collect();
 
@@ -5445,6 +5158,7 @@ pub fn run() {
             library_commands::library_resolve,
             calp_commands::calp_get_subscriptions,
             calp_commands::calp_get_writeback_rebuild_skips,
+            calp_commands::calp_get_package_connection_skips,
             calp_commands::calp_subscription_trust,
             calp_commands::calp_list_trusted_publishers,
             calp_commands::calp_get_package_objects,
@@ -5514,6 +5228,14 @@ pub fn run() {
     // mutation -- the defect this closes. Must be installed BEFORE `app.run`,
     // since a package pull or a script can dirty the document during startup.
     document_effect::install_dirty_announcer(app.handle().clone());
+
+    // Install the handle the undo history announces availability transitions
+    // through. Without it `UndoHistory` still tracks the stack correctly but
+    // emits nothing, and the Undo/Redo affordances go back to being always
+    // enabled -- offering the user an undo that does not exist. Installed
+    // BEFORE `app.run` for the same reason as the dirty flag: a package pull or
+    // a startup script can push undo entries during startup.
+    undo_history::install_undo_announcer(app.handle().clone());
 
     app.run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {

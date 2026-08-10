@@ -5,6 +5,14 @@
  * and ribbon minimize/expand behavior.
  *
  * Uses cells in columns W-X, rows 1-10 to avoid collision.
+ *
+ * UNDO STATE IS PART OF EVERY RIBBON GOLDEN NOW. The Home tab's Undo and Redo
+ * buttons follow real undo/redo availability (they are greyed out on an empty
+ * stack, as Excel greys them), so a capture taken after a spec that ran
+ * `new_file` photographs two greyed buttons and one taken mid-suite photographs
+ * two live ones. That is a property of the shared app, not of the ribbon, so
+ * `beforeEach` puts the stack in a KNOWN state instead of leaving the goldens to
+ * whatever ran before them.
  */
 import { test, expect } from "../fixtures";
 import {
@@ -13,7 +21,24 @@ import {
   softly,
 } from "../helpers/screenshots";
 
+/**
+ * Guarantee at least one undo entry, so Undo renders enabled in every capture
+ * below and Redo renders disabled.
+ *
+ * One write to a scratch cell this spec already owns (X10 is inside its
+ * declared W-X / rows 1-10 block). It is deliberately NOT undone afterwards: an
+ * undo would push the entry onto the REDO stack and light the other button up,
+ * which is the same non-determinism from the other side.
+ */
+async function pinUndoState(grid: { setCellValueDirect(ref: string, value: string): Promise<void> }): Promise<void> {
+  await grid.setCellValueDirect("X10", "ribbon-undo-anchor");
+}
+
 test.describe("Ribbon tab navigation", () => {
+  test.beforeEach(async ({ grid }) => {
+    await pinUndoState(grid);
+  });
+
   test("Home tab is visible and active by default", async ({
     appPage,
     grid,
@@ -114,6 +139,13 @@ test.describe("Ribbon tab navigation", () => {
     appPage,
     grid,
   }) => {
+    // PIN THE SELECTION. The window-framed capture below also contains the Name
+    // Box and the status bar, both of which render the CURRENT selection — so
+    // without this the golden carries whatever cell the previous ~450 tests
+    // left selected, which is the `clickCell` drift this suite has already
+    // documented. `navigateTo` is that defect's recorded remedy.
+    await grid.navigateTo("W1");
+
     // Take baseline screenshot
     await softly(takeRibbonScreenshot(appPage, "ribbon-before-minimize"));
 
@@ -136,7 +168,28 @@ test.describe("Ribbon tab navigation", () => {
         );
         expect(minimizedDisplay).toBe("none");
 
-        await softly(takeCheckpoint(appPage, "ribbon-minimized"));
+        // THE GRID IS MASKED OUT OF THIS FRAME, and that is the whole point.
+        //
+        // This is the one capture in the file that is not a ribbon-element
+        // shot: the golden is 1280x800 (the window) where every other one is
+        // 1280x136 (the ribbon). §3ar REFUSED to re-record it for that reason —
+        // its diff was grid CONTENT left behind by whichever of the ~450
+        // preceding tests ran last, so recording it would have frozen one run's
+        // residue into the baseline. D5 later cropped GRID captures to the
+        // canvas layer, which does nothing here, because `takeCheckpoint`
+        // without a target photographs the window. Measured, not assumed: the
+        // committed baseline really is 1280x800.
+        //
+        // Masking the grid area removes the residue by CONSTRUCTION while
+        // keeping what the full-window frame was for — that collapsing the
+        // ribbon moves the grid area UP and makes it taller, which a
+        // ribbon-only capture cannot show. The mask is a solid rectangle, so
+        // the grid's geometry is still in frame and its contents are not.
+        await softly(
+          takeCheckpoint(appPage, "ribbon-minimized", {
+            mask: [appPage.locator("[data-grid-area]")],
+          })
+        );
       }
     } finally {
       // Always re-expand, even if the assertion/screenshot above threw.

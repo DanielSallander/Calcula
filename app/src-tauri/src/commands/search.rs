@@ -210,6 +210,11 @@ pub(crate) fn replace_all_off_sheet(
         state, "replace all here", target, &matches,
     )?;
 
+    // SPILL PROTECTION against the match list, on the TARGET sheet — see the
+    // active twin. It matters MORE here: this path recalculates through the
+    // whole-sheet `recalc_after_off_sheet_write`, which is not spill-aware.
+    crate::commands::data::check_spill_protection_cells(state, target, &matches)?;
+
     let grids = state.grids.lock_pending().unwrap();
     let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -368,6 +373,19 @@ pub fn replace_all(
     // action). Checked against the MATCH LIST, not a bounding box, so a replace
     // that never lands in the form still runs.
     crate::calp_commands::ensure_cells_unclaimed(&state, "replace all here", &matches)?;
+
+    // SPILL PROTECTION over the MATCH LIST (§2y). Formula cells are skipped
+    // below, so the origin of an array is never rewritten here — but a spilled
+    // VALUE is an ordinary non-formula cell and was being rewritten in place,
+    // where typing the same character into it is refused. The write did not
+    // even survive: the map still said the array owned the cell, so the next
+    // recalculation of the origin restored the old value and the replacement
+    // vanished with no error. Checked against the match list, and refused for
+    // the whole gesture, exactly like the two guards above.
+    {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        crate::commands::data::check_spill_protection_cells(&state, active_sheet, &matches)?;
+    }
 
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
@@ -578,6 +596,9 @@ pub(crate) fn replace_single_off_sheet(
         state, "replace in this cell", &[target], row, col, row, col,
     )?;
 
+    // SPILL PROTECTION on the TARGET sheet — see `replace_all_off_sheet`.
+    crate::commands::data::check_spill_protection_cells(state, target, &[(row, col)])?;
+
     let replaced = {
         let grids = state.grids.lock_pending().unwrap();
         let styles = state.style_registry.read().unwrap();
@@ -737,6 +758,14 @@ pub fn replace_single(
     // not a drafted value-entry, so the range guard (which ignores drafts)
     // applies rather than the single-cell draft guard.
     crate::calp_commands::ensure_range_unclaimed(&state, "replace in this cell", row, col, row, col)?;
+
+    // SPILL PROTECTION — see `replace_all`. A spilled value is a non-formula
+    // cell, so it is exactly what this command is willing to rewrite, and
+    // exactly what nothing else in the product lets the user rewrite.
+    {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        crate::commands::data::check_spill_protection_cells(&state, active_sheet, &[(row, col)])?;
+    }
 
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();

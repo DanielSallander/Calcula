@@ -50,7 +50,14 @@ describe('AppEvents', () => {
     // `new_file` moved them — so the grid kept painting the previous document's
     // headings. It carries no payload deliberately; the single hydration path
     // re-reads `get_sheet_display_flags`.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`73`);
+    //
+    // 74 since UNDO_STATE_CHANGED. Until now nothing in `app/src` or
+    // `app/extensions` read `canUndo` for a UI state at all, so the ribbon
+    // offered an Undo the document might not have. This one DOES carry its
+    // payload ({ canUndo, canRedo }) — unlike SHEET_DISPLAY_FLAGS_CHANGED,
+    // because the payload IS the whole authority rather than a partial copy of
+    // it, and the subscriber is a `disabled` attribute.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`74`);
   });
 
   it('all values use the app: prefix', () => {

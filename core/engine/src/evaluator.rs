@@ -753,6 +753,12 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
+    ///
+    /// ONLY for callers that pass `&None` — an unqualified reference, which
+    /// always means the formula's own sheet and cannot fail. Every
+    /// sheet-QUALIFIED site must go through [`Self::resolve_grid_for_sheet`],
+    /// which reports an unknown name instead of silently substituting the
+    /// local sheet.
     fn get_grid_for_sheet(&self, sheet: &Option<String>) -> &'a Grid {
         match (sheet, &self.multi_sheet) {
             (Some(sheet_name), Some(ctx)) => {
@@ -762,16 +768,47 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Resolves the grid a sheet-qualified reference names, or `#REF!`.
+    ///
+    /// THE FALLBACK THIS REPLACES WAS A SILENT WRONG ANSWER. `get_grid_for_sheet`
+    /// ended in `.unwrap_or(self.grid)`, so a reference to a sheet that does not
+    /// exist read the FORMULA'S OWN SHEET at the same coordinates:
+    /// `=NoSuchSheet!A1` returned the local A1 and reported no error at all.
+    /// That was reachable without a typo — deleting a sheet left plain
+    /// `=Sheet2!A1` references verbatim, so the next recalculation (or the
+    /// recalculation every file open performs) turned them into the local
+    /// value and saved it.
+    ///
+    /// `(Some(name), None)` — a qualified reference evaluated with no
+    /// multi-sheet context at all — deliberately still resolves to `self.grid`.
+    /// That is single-sheet evaluation (scope-injected chart expressions and
+    /// the like), where there is no sheet table to check the name against and
+    /// the qualifier has always been ignored.
+    fn resolve_grid_for_sheet(&self, sheet: &Option<String>) -> Result<&'a Grid, CellError> {
+        match (sheet, &self.multi_sheet) {
+            (Some(sheet_name), Some(ctx)) => {
+                ctx.get_grid(sheet_name).copied().ok_or(CellError::Ref)
+            }
+            _ => Ok(self.grid),
+        }
+    }
+
     /// The row-visibility key for the sheet whose grid `get_grid_for_sheet`
     /// would return for the same argument.
     ///
     /// THE TWO MUST AGREE, ALWAYS: if this resolved a different sheet than the
     /// grid did, `SUBTOTAL(109, Sheet2!A1:A10)` would filter Sheet2's values
     /// through some other sheet's hidden rows — the exact failure mode a flat,
-    /// sheet-blind hidden set produces. Every fallback branch below therefore
-    /// mirrors `get_grid_for_sheet`'s fallback to `self.grid` by returning the
-    /// CURRENT sheet's key. The empty string is the key of an evaluator with no
-    /// multi-sheet context (see `row_visibility::RowVisibility::single_sheet`).
+    /// sheet-blind hidden set produces. The empty string is the key of an
+    /// evaluator with no multi-sheet context (see
+    /// `row_visibility::RowVisibility::single_sheet`).
+    ///
+    /// The "name with no grid" branch no longer has a grid-side twin to mirror:
+    /// `resolve_grid_for_sheet` now returns `#REF!` for an unknown sheet and
+    /// every caller returns before it reads a visibility key, so that branch is
+    /// unreachable for qualified references and survives only for the
+    /// no-multi-sheet-context case, where `get_grid_for_sheet` still answers
+    /// with the current grid.
     fn visibility_key_for_sheet(&self, sheet: &Option<String>) -> String {
         match (sheet, &self.multi_sheet) {
             // Named sheet that actually resolves to a grid: that sheet's key.
@@ -900,7 +937,10 @@ impl<'a> Evaluator<'a> {
         // Try to determine the range start position from the operand
         match operand {
             Expression::Range { start, end, sheet, .. } => {
-                let grid = self.get_grid_for_sheet(sheet);
+                let grid = match self.resolve_grid_for_sheet(sheet) {
+                    Ok(grid) => grid,
+                    Err(err) => return EvalResult::Error(err),
+                };
                 let (start_col_s, start_row) = if let Expression::CellRef { col, row, .. } = start.as_ref() {
                     (col.clone(), *row)
                 } else {
@@ -979,7 +1019,10 @@ impl<'a> Evaluator<'a> {
 
     /// Evaluates a cell reference by looking up its value in the grid.
     fn eval_cell_ref(&self, sheet: &Option<String>, col: &str, row: u32) -> EvalResult {
-        let grid = self.get_grid_for_sheet(sheet);
+        let grid = match self.resolve_grid_for_sheet(sheet) {
+            Ok(grid) => grid,
+            Err(err) => return EvalResult::Error(err),
+        };
         let col_idx = col_to_index(col);
         let row_idx = row - 1; // Convert 1-based to 0-based
 
@@ -1013,7 +1056,10 @@ impl<'a> Evaluator<'a> {
         start: &Expression,
         end: &Expression,
     ) -> EvalResult {
-        let grid = self.get_grid_for_sheet(sheet);
+        let grid = match self.resolve_grid_for_sheet(sheet) {
+            Ok(grid) => grid,
+            Err(err) => return EvalResult::Error(err),
+        };
 
         // Extract start and end coordinates
         let (start_col, start_row) = if let Expression::CellRef { col, row, .. } = start {
@@ -1103,7 +1149,10 @@ impl<'a> Evaluator<'a> {
         start_col: &str,
         end_col: &str,
     ) -> EvalResult {
-        let grid = self.get_grid_for_sheet(sheet);
+        let grid = match self.resolve_grid_for_sheet(sheet) {
+            Ok(grid) => grid,
+            Err(err) => return EvalResult::Error(err),
+        };
         let start_col_idx = col_to_index(start_col);
         let end_col_idx = col_to_index(end_col);
 
@@ -1200,7 +1249,10 @@ impl<'a> Evaluator<'a> {
     /// OPTIMIZED: Instead of iterating 0..max_col, we iterate directly over the
     /// grid's HashMap and filter by row range. This is O(n) where n = number of cells.
     fn eval_row_ref(&self, sheet: &Option<String>, start_row: u32, end_row: u32) -> EvalResult {
-        let grid = self.get_grid_for_sheet(sheet);
+        let grid = match self.resolve_grid_for_sheet(sheet) {
+            Ok(grid) => grid,
+            Err(err) => return EvalResult::Error(err),
+        };
         let start_row_idx = start_row - 1; // Convert to 0-based
         let end_row_idx = end_row - 1;
 
@@ -2548,7 +2600,10 @@ impl<'a> Evaluator<'a> {
         for arg in args {
             match arg {
                 Expression::Range { sheet, start, end, .. } => {
-                    let grid = self.get_grid_for_sheet(sheet);
+                    let grid = match self.resolve_grid_for_sheet(sheet) {
+                        Ok(grid) => grid,
+                        Err(err) => return Err(err),
+                    };
                     let key = self.visibility_key_for_sheet(sheet);
                     if let (
                         Expression::CellRef { col: start_col, row: start_row, .. },
@@ -2591,7 +2646,10 @@ impl<'a> Evaluator<'a> {
                     let row_idx = row - 1;
                     let key = self.visibility_key_for_sheet(sheet);
                     if !Self::row_is_hidden(&visibility, &key, row_idx, scope.hidden) {
-                        let grid = self.get_grid_for_sheet(sheet);
+                        let grid = match self.resolve_grid_for_sheet(sheet) {
+                            Ok(grid) => grid,
+                            Err(err) => return Err(err),
+                        };
                         let col_idx = col_to_index(col);
                         match grid.get_cell(row_idx, col_idx) {
                             Some(cell) => {
@@ -2604,7 +2662,10 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 Expression::ColumnRef { sheet, start_col, end_col, .. } => {
-                    let grid = self.get_grid_for_sheet(sheet);
+                    let grid = match self.resolve_grid_for_sheet(sheet) {
+                        Ok(grid) => grid,
+                        Err(err) => return Err(err),
+                    };
                     let key = self.visibility_key_for_sheet(sheet);
                     if self
                         .budget
@@ -2628,7 +2689,10 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 Expression::RowRef { sheet, start_row, end_row, .. } => {
-                    let grid = self.get_grid_for_sheet(sheet);
+                    let grid = match self.resolve_grid_for_sheet(sheet) {
+                        Ok(grid) => grid,
+                        Err(err) => return Err(err),
+                    };
                     let key = self.visibility_key_for_sheet(sheet);
                     if self
                         .budget
@@ -3330,7 +3394,10 @@ impl<'a> Evaluator<'a> {
         // Check if the cell reference points to an empty cell
         match &args[0] {
             Expression::CellRef { sheet, col, row, .. } => {
-                let grid = self.get_grid_for_sheet(sheet);
+                let grid = match self.resolve_grid_for_sheet(sheet) {
+                    Ok(grid) => grid,
+                    Err(err) => return EvalResult::Error(err),
+                };
                 let col_idx = col_to_index(col);
                 let row_idx = row - 1;
                 let is_blank = grid.get_cell(row_idx, col_idx).is_none();
@@ -14639,6 +14706,74 @@ mod tests {
             ref_site_id: Default::default(),
         };
         assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Name));
+    }
+
+    // -----------------------------------------------------------------------
+    // UNKNOWN SHEET NAMES
+    //
+    // `get_grid_for_sheet` ended in `.unwrap_or(self.grid)`: a reference to a
+    // sheet that does not exist read the FORMULA'S OWN sheet at the same
+    // coordinates and reported no error. Silent, and reachable without a typo
+    // -- deleting a sheet left plain `=Sheet2!A1` references verbatim.
+    // -----------------------------------------------------------------------
+
+    /// Sheet1!A1 = 100, Sheet2!A1 = 5, evaluating on Sheet1.
+    fn two_sheet_eval(f: &str, body: impl Fn(EvalResult)) {
+        let mut s1 = Grid::new();
+        s1.set_cell(0, 0, Cell::new_number(100.0));
+        let mut s2 = Grid::new();
+        s2.set_cell(0, 0, Cell::new_number(5.0));
+        let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+        ctx.add_grid("Sheet1".to_string(), &s1);
+        ctx.add_grid("Sheet2".to_string(), &s2);
+        ctx.sheet_order = vec!["Sheet1".to_string(), "Sheet2".to_string()];
+        let eval = Evaluator::with_multi_sheet(&s1, ctx);
+        let ast = parser::parse(f).expect("parses");
+        body(eval.evaluate(&ast));
+    }
+
+    #[test]
+    fn a_reference_to_a_sheet_that_does_not_exist_is_ref_not_the_local_sheet() {
+        // Each of these used to return 100 -- Sheet1's own A1.
+        for f in [
+            "=NoSuchSheet!A1",
+            "=SUM(NoSuchSheet!A1:A9)",
+            "=SUM(NoSuchSheet!A:A)",
+            "=SUM(NoSuchSheet!1:1)",
+            "=ISBLANK(NoSuchSheet!A1)",
+        ] {
+            two_sheet_eval(f, |r| {
+                assert_eq!(
+                    r,
+                    EvalResult::Error(CellError::Ref),
+                    "`{}` must be #REF!, not the local sheet",
+                    f
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn a_reference_to_a_sheet_that_does_exist_still_resolves() {
+        // The guard must not start refusing real references.
+        two_sheet_eval("=Sheet2!A1", |r| assert_eq!(r, EvalResult::Number(5.0)));
+        two_sheet_eval("=Sheet1!A1", |r| assert_eq!(r, EvalResult::Number(100.0)));
+        two_sheet_eval("=A1", |r| assert_eq!(r, EvalResult::Number(100.0)));
+        two_sheet_eval("=SUM(Sheet2!A1:A9)", |r| assert_eq!(r, EvalResult::Number(5.0)));
+        // Case-insensitive, as sheet resolution is everywhere else.
+        two_sheet_eval("=SHEET2!A1", |r| assert_eq!(r, EvalResult::Number(5.0)));
+    }
+
+    #[test]
+    fn a_qualified_reference_with_no_multi_sheet_context_still_resolves_locally() {
+        // Single-sheet evaluation (scope-injected chart expressions and the
+        // like) has no sheet table to check a name against, and the qualifier
+        // has always been ignored there. That must not become #REF!.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(7.0));
+        let eval = Evaluator::new(&grid);
+        let ast = parser::parse("=Whatever!A1").expect("parses");
+        assert_eq!(eval.evaluate(&ast), EvalResult::Number(7.0));
     }
 
     #[test]

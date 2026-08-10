@@ -310,6 +310,173 @@ fn remap_sheet_keyed_stores(
     // index, so its criteria hid rows on an unrelated sheet and the owning
     // table's id no longer matched anything on its own sheet.
     remap_indexed_map(&mut state.auto_filters.write(effect).unwrap(), &remap);
+    // CROSS-SHEET DEPENDENCY EDGES. Neither map was ever remapped, and both
+    // carry a sheet INDEX: `cross_sheet_dependencies` in its KEY, and
+    // `cross_sheet_dependents` in the values of its sets. Moving or deleting a
+    // sheet renumbers those indices under them, so the cascade either walked to
+    // the WRONG sheet or (once an index ran past `grids.len()`) dropped the
+    // dependent entirely -- a formula on another sheet silently stopped
+    // recalculating, and the stale number was what got saved.
+    //
+    // `rebuild_all_dependencies` cannot stand in for this: it deliberately
+    // rebuilds only the ACTIVE sheet's cross-sheet edges (clearing the rest
+    // would orphan every other sheet's), so it repairs at most one of the
+    // sheets a renumbering just invalidated.
+    remap_cross_sheet_dependency_indices(state, &remap);
+    // DEFINED NAMES. A sheet-scoped name carries the sheet it is scoped to as
+    // an INDEX, and no sheet operation had ever remapped it: moving or deleting
+    // a sheet silently re-scoped every sheet-local name onto whichever sheet
+    // inherited the index, so `=SUM(Sales)` on one sheet started resolving to a
+    // different sheet's name -- or, for a deleted sheet, to a name that could
+    // never match again.
+    {
+        let mut names = state.named_ranges.write(effect).unwrap();
+        names.retain(|_, nr| match nr.sheet_index {
+            None => true, // workbook-scoped: no index to move
+            Some(old) => match remap(old) {
+                Some(new) => {
+                    nr.sheet_index = Some(new);
+                    true
+                }
+                // The sheet the name was scoped to is gone, and so is the name.
+                None => false,
+            },
+        });
+    }
+}
+
+/// Re-key the two cross-sheet dependency maps after sheet indices are
+/// renumbered. `remap` returns the new index for an old one, or `None` when
+/// that sheet is gone.
+///
+/// Locks in the same order as `rebuild_all_dependencies_from_grid`
+/// (dependents, then dependencies) so the two can never deadlock against each
+/// other.
+#[cfg(test)]
+pub(crate) fn remap_cross_sheet_dependency_indices_for_test(
+    state: &AppState,
+    remap: &impl Fn(usize) -> Option<usize>,
+) {
+    remap_cross_sheet_dependency_indices(state, remap)
+}
+
+fn remap_cross_sheet_dependency_indices(
+    state: &AppState,
+    remap: &impl Fn(usize) -> Option<usize>,
+) {
+    let mut dependents = state.cross_sheet_dependents.lock().unwrap();
+    let mut dependencies = state.cross_sheet_dependencies.lock().unwrap();
+
+    // Dependents: the sheet index sits in the VALUES. A dependent on a deleted
+    // sheet is dropped; an emptied source key is dropped with it so the map
+    // does not accumulate dead entries across repeated sheet operations.
+    dependents.retain(|_source, deps| {
+        let moved: rustc_hash::FxHashSet<(usize, u32, u32)> = deps
+            .iter()
+            .filter_map(|&(idx, r, c)| remap(idx).map(|new_idx| (new_idx, r, c)))
+            .collect();
+        *deps = moved;
+        !deps.is_empty()
+    });
+
+    // Dependencies: the sheet index is the first element of the KEY.
+    let moved: crate::CrossSheetDependenciesMap = dependencies
+        .drain()
+        .filter_map(|((idx, r, c), refs)| remap(idx).map(|new_idx| ((new_idx, r, c), refs)))
+        .collect();
+    *dependencies = moved;
+}
+
+/// Repair the `refers_to` formula of every defined name after a sheet is
+/// renamed or deleted, using the SAME repair the grid formulas go through.
+///
+/// Nothing touched the name table on any sheet operation. A name is a formula
+/// STRING re-parsed at every evaluation, so `Sales = Sheet1!$A$1:$A$10` outlived
+/// its sheet verbatim -- and because an unknown sheet used to resolve to the
+/// formula's OWN sheet, `=SUM(Sales)` on another sheet quietly summed that
+/// sheet's A1:A10 instead. The evaluator now answers `#REF!` for an unknown
+/// sheet, so the worst case became visible rather than wrong; this makes the
+/// name follow its sheet instead, which is what the user asked for.
+///
+/// `repair` returns `None` when the name can no longer be resolved (its sheet
+/// was deleted); the name's text is then set to `#REF!` so it reports the same
+/// error a cell would, rather than being deleted out from under formulas that
+/// still mention it.
+#[cfg(test)]
+pub(crate) fn repair_named_ranges_for_test(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    repair: &dyn Fn(&str) -> Option<String>,
+) {
+    repair_named_ranges(state, effect, repair)
+}
+
+#[cfg(test)]
+pub(crate) fn remap_sheet_keyed_stores_for_test(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    remap: impl Fn(usize) -> Option<usize>,
+) {
+    remap_sheet_keyed_stores(state, effect, remap)
+}
+
+fn repair_named_ranges(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    repair: &dyn Fn(&str) -> Option<String>,
+) {
+    let mut names = state.named_ranges.write(effect).unwrap();
+    for nr in names.values_mut() {
+        match repair(&nr.refers_to) {
+            Some(repaired) => nr.refers_to = repaired,
+            None => nr.refers_to = "=#REF!".to_string(),
+        }
+    }
+}
+
+/// Re-key the two cross-sheet dependency maps after a sheet is RENAMED.
+///
+/// The other half of the same defect. `cross_sheet_dependents` is keyed by
+/// sheet NAME under the workbook's official spelling (see
+/// `normalize_cross_sheet_refs`), and `rename_sheet` changed that spelling
+/// without touching the map. The cascade then looked up the NEW name, missed,
+/// and every dependent on another sheet stopped updating: `Sheet2!B1 =
+/// Sheet1!A1`, rename Sheet1 to Data, edit Data!A1 -- B1 kept its old value and
+/// saved it. Visiting Sheet2 rebuilt that one sheet's edges but did not
+/// re-evaluate anything, so the wrong value simply persisted.
+pub(crate) fn rename_cross_sheet_dependency_keys(state: &AppState, old_name: &str, new_name: &str) {
+    let mut dependents = state.cross_sheet_dependents.lock().unwrap();
+    let mut dependencies = state.cross_sheet_dependencies.lock().unwrap();
+
+    let renamed: crate::CrossSheetDependentsMap = dependents
+        .drain()
+        .map(|((sheet, r, c), deps)| {
+            let sheet = if sheet.eq_ignore_ascii_case(old_name) {
+                new_name.to_string()
+            } else {
+                sheet
+            };
+            ((sheet, r, c), deps)
+        })
+        .collect();
+    *dependents = renamed;
+
+    // The reverse index holds the same names inside its value sets; the two are
+    // maintained in lockstep everywhere else and must move together here.
+    for refs in dependencies.values_mut() {
+        let renamed: rustc_hash::FxHashSet<(String, u32, u32)> = refs
+            .drain()
+            .map(|(sheet, r, c)| {
+                let sheet = if sheet.eq_ignore_ascii_case(old_name) {
+                    new_name.to_string()
+                } else {
+                    sheet
+                };
+                (sheet, r, c)
+            })
+            .collect();
+        *refs = renamed;
+    }
 }
 
 // ============================================================================
@@ -671,6 +838,11 @@ pub fn delete_sheet(
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
+    // Injected by Tauri; needed only for the recalculation at the end, which
+    // deleting a sheet owes because it turns formulas into `#REF!`.
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     index: usize,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "delete a sheet")?;
@@ -858,10 +1030,16 @@ pub fn delete_sheet(
         }
     }
 
-    // Repair 3D reference bookends in all formulas
+    // Repair 3D reference bookends AND plain cross-sheet references in all
+    // formulas. A reference to the deleted sheet becomes #REF!.
     let names_after = sheet_names.clone();
     crate::repair_all_formulas(&mut grids, &|formula| {
         crate::repair_3d_refs_on_delete(formula, &deleted_name, &names_after)
+    });
+    // Defined names hold their target as formula TEXT and go through the same
+    // repair; one whose sheet just vanished becomes `=#REF!`.
+    repair_named_ranges(&state, &effect, &|refers_to| {
+        crate::repair_3d_refs_on_delete(refers_to, &deleted_name, &names_after)
     });
     if index < freeze_configs.len() {
         freeze_configs.remove(index);
@@ -972,6 +1150,38 @@ pub fn delete_sheet(
     // dependency maps (see set_active_sheet / BUG-0016).
     crate::undo_commands::rebuild_all_dependencies(&state);
 
+    // A formula the delete really DID rewrite came back out of the renderer with
+    // every bare identifier in capitals — §2t's `BudgetTotal` -> `BUDGETTOTAL`,
+    // on a path §2t's fix (which lives on `open_file`) never reached. Same
+    // function as the load path and as `rename_sheet`, so the three cannot
+    // disagree about what a name is called. Must run AFTER the locks above are
+    // dropped: it takes `grid` and `grids` for writing itself.
+    crate::persistence::restamp_workbook_name_casing(&state, &effect);
+
+    // RECALCULATE THE WORKBOOK. Deleting a sheet is the one structural edit
+    // that changes VALUES it does not write: `repair_all_formulas` above turned
+    // every formula referencing the deleted sheet into `#REF!`, and everything
+    // downstream of those cells still held the number it computed while the
+    // sheet existed. Nothing recalculated, so the stale values simply stayed --
+    // and were what a save then wrote.
+    //
+    // Whole-workbook rather than a seeded cascade: the repaired cells are
+    // spread across every sheet, this is a rare and already-heavyweight
+    // operation, and it is the same treatment the load path gives a workbook
+    // whose formulas it has just re-read. Runs LAST, after every lock above is
+    // dropped and after the dependency rebuild, so the pass sees the finished
+    // workbook.
+    let sheet_count = state.sheet_names.read().unwrap().len();
+    for idx in 0..sheet_count {
+        crate::calculation::recalculate_sheet_values(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            idx,
+            Some((&*pane_control_state, &*ribbon_filter_state)),
+        );
+    }
+
     Ok(result)
 }
 
@@ -1038,10 +1248,48 @@ pub fn rename_sheet(
         *current_grid = grids[active_sheet].clone();
     }
 
-    Ok(SheetsResult {
+    let result = SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: active_sheet,
-    })
+    };
+
+    // DROP EVERY LOCK before touching the dependency maps: both helpers below
+    // take their own, and `rebuild_all_dependencies` takes the grid and the
+    // name tables as well.
+    drop(current_grid);
+    drop(grids);
+    drop(sheet_names);
+    drop(sheet_visibility);
+    drop(tab_colors);
+    drop(freeze_configs);
+
+    // The cross-sheet dependents map is keyed by sheet NAME, and the name just
+    // changed. Without this the cascade looks up the new spelling, misses, and
+    // every dependent living on another sheet silently stops recalculating.
+    rename_cross_sheet_dependency_keys(&state, &old_name, &trimmed_name);
+    // Defined names hold their target as formula TEXT and must follow the
+    // rename exactly as the grid formulas just did.
+    {
+        let old = old_name.clone();
+        let new_n = trimmed_name.clone();
+        repair_named_ranges(&state, &effect, &|refers_to| {
+            Some(crate::repair_3d_refs_on_rename(refers_to, &old, &new_n))
+        });
+    }
+    // A formula the rename really DID rewrite came back out of the renderer with
+    // every bare identifier in capitals, so `=Anchor+Data!A1` became
+    // `=ANCHOR+Facts!A1`. That is §2t (`BudgetTotal` -> `BUDGETTOTAL`) on a path
+    // §2t's fix never reached — it is called from `open_file`. Same function
+    // here, so entry, reload and a sheet rename cannot disagree about what a
+    // name is called. Costs nothing when the workbook defines no names (the
+    // restamp returns on the first `is_empty()`).
+    crate::persistence::restamp_workbook_name_casing(&state, &effect);
+    // `repair_all_formulas` above rewrote formula ASTs across every sheet, so
+    // the ACTIVE sheet's sheet-less dependency maps describe the pre-repair
+    // trees. This is the same call `delete_sheet` and `add_sheet` already make.
+    crate::undo_commands::rebuild_all_dependencies(&state);
+
+    Ok(result)
 }
 
 #[tauri::command]

@@ -137,9 +137,15 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, effect: &crate::document
                 if src_start_row >= from_row {
                     definition.source_start = (src_start_row + count, src_start_col);
                 }
+                // The `else if` that used to follow tested the SAME condition
+                // with the SAME body — dead by construction, and a `deny`-level
+                // clippy error (`ifs_same_cond`) that made `cargo clippy` fail
+                // on the whole app crate. Removing it changes nothing: this pair
+                // of independent `if`s already gives the intended shift (start
+                // at/after the insert moves both ends, since end >= start; an
+                // insert INSIDE the source range moves only the end, expanding
+                // it over the new rows).
                 if src_end_row >= from_row {
-                    definition.source_end = (src_end_row + count, src_end_col);
-                } else if src_end_row >= from_row {
                     definition.source_end = (src_end_row + count, src_end_col);
                 }
             }
@@ -185,9 +191,8 @@ fn shift_pivot_regions_for_col_insert(state: &AppState, effect: &crate::document
                 if src_start_col >= from_col {
                     definition.source_start = (src_start_row, src_start_col + count);
                 }
+                // Same dead `else if` as the row-insert twin above.
                 if src_end_col >= from_col {
-                    definition.source_end = (src_end_row, src_end_col + count);
-                } else if src_end_col >= from_col {
                     definition.source_end = (src_end_row, src_end_col + count);
                 }
             }

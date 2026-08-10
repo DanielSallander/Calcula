@@ -32,6 +32,10 @@ use calp::publish::{self, PublishRequest};
 use calp::pull::{self, PullRequest};
 use calp::registry::LocalRegistry;
 use calp::version::{SemVer, VersionPin};
+// `local_artifact_path` is a RegistryTransport method — the restore path
+// resolves model artifacts through it, so a test that tampers with one must
+// find it the same way.
+use calp::transport::RegistryTransport;
 use calp::writeback::{
     RegionSelector, SubmissionState, SubmissionValue, ValueSchema, ValueType, VersionBinding,
     VisibilityPolicy, SubmissionPolicy, WritebackRegionDeclaration,
@@ -664,4 +668,219 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
         PinPolicy::RequirePinned,
     )
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 8. REOPENING a subscribed workbook re-materializes its package data sources.
+//
+//    A package BI connection is not stored in the subscriber's `.cala` (the
+//    model belongs to the publisher and travels in the `.calp`), so reopening a
+//    subscribed report used to leave it with NO connection and no command able
+//    to make one: `calp_refresh_data` only updates connections that already
+//    exist, and only `pull` ever created one. `load_verified_data_sources` is
+//    the restore path, and these tests pin the four outcomes that matter:
+//    it works for a package this machine pulled; it refuses one it never
+//    pinned; it refuses one whose artifacts were tampered with; and it refuses
+//    a version that is no longer in the registry. Anything other than the first
+//    must yield NO data source — a subscriber that cannot prove which model it
+//    has must get no model rather than a stale or unverified one.
+// ---------------------------------------------------------------------------
+
+/// A package data source carrying a minimal (host-opaque) model document.
+fn a_data_source(id: &str) -> publish::PublishDataSource {
+    publish::PublishDataSource {
+        id: id.to_string(),
+        name: "Sales".to_string(),
+        connection_type: "PostgreSQL".to_string(),
+        server: "db.example.com".to_string(),
+        database: "sales".to_string(),
+        model_json: serde_json::json!({ "name": "SalesModel", "tables": [] }),
+        bindings: vec![calp::manifest::PackageBinding {
+            model_table: "Orders".to_string(),
+            schema: "public".to_string(),
+            source_table: "orders".to_string(),
+            source_query: None,
+        }],
+        calculated_table_snapshots: Vec::new(),
+        writeback_history_json: None,
+    }
+}
+
+/// `publish_version` with one embedded data source.
+fn publish_with_data_source(
+    reg: &LocalRegistry,
+    prof: &Path,
+    wb: &Workbook,
+    package: &str,
+    version: SemVer,
+    ds_id: &str,
+) {
+    let request = PublishRequest {
+        model_writebacks: None,
+        workbook: wb,
+        package_name: package.to_string(),
+        version,
+        kind: "report".to_string(),
+        sheet_indices: vec![0],
+        now: "2026-06-15T00:00:00Z".to_string(),
+        published_by: "publisher".to_string(),
+        writeback_regions: None,
+        object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
+        data_sources: vec![a_data_source(ds_id)],
+        excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
+        include_comments: false,
+        min_app_version: String::new(),
+    };
+    publish::publish(reg, &request, prof).unwrap();
+}
+
+#[test]
+fn reopening_a_subscribed_workbook_resolves_its_model() {
+    let reg_dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+
+    let wb = make_budget_workbook();
+    publish_with_data_source(&reg, prof.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
+
+    // The user subscribes — the one action allowed to create the pin.
+    let pulled = pull::pull(
+        &reg,
+        &pull_version("budget", SemVer::new(1, 0, 0)),
+        &scope_of(&reg_dir),
+        prof.path(),
+        PinPolicy::PinOnFirstUse,
+    )
+    .unwrap();
+    assert_eq!(pulled.data_sources.len(), 1);
+    let pulled_model_path = pulled.data_sources[0].model_path.clone();
+
+    // The workbook is saved and reopened: no pull runs, only the restore. It
+    // must resolve the SAME model artifact the pull did.
+    let restored = pull::load_verified_data_sources(
+        &reg,
+        "budget",
+        "1.0.0",
+        &scope_of(&reg_dir),
+        prof.path(),
+    )
+    .unwrap();
+    assert_eq!(restored.len(), 1, "the reopened workbook resolved no data source");
+    assert_eq!(restored[0].definition.id, "ds-sales");
+    assert_eq!(restored[0].definition.bindings.len(), 1);
+    assert_eq!(
+        restored[0].model_path, pulled_model_path,
+        "restore must resolve the same model artifact a pull does"
+    );
+    assert!(
+        restored[0].model_path.exists(),
+        "the resolved model artifact does not exist on disk"
+    );
+}
+
+#[test]
+fn reopening_refuses_a_package_this_machine_never_pinned() {
+    let reg_dir = TempDir::new().unwrap();
+    // Publisher profile holds the signing key; the SUBSCRIBER's profile has
+    // never pinned anything — the shape a `.cala` received by email produces.
+    let pubp = TempDir::new().unwrap();
+    let subp = TempDir::new().unwrap();
+    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+
+    let wb = make_budget_workbook();
+    publish_with_data_source(&reg, pubp.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
+
+    let err = pull::load_verified_data_sources(
+        &reg,
+        "budget",
+        "1.0.0",
+        &scope_of(&reg_dir),
+        subp.path(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CalpError::PublisherNotPinned { .. }),
+        "opening a workbook must not trust a publisher on its say-so; got {err:?}"
+    );
+    assert!(
+        calp::signing::load_pins(subp.path()).unwrap().is_empty(),
+        "a restore is not a trust decision and must never mint a pin"
+    );
+}
+
+#[test]
+fn reopening_refuses_a_package_whose_model_was_tampered_with() {
+    let reg_dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+
+    let wb = make_budget_workbook();
+    publish_with_data_source(&reg, prof.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
+    pull::pull(
+        &reg,
+        &pull_version("budget", SemVer::new(1, 0, 0)),
+        &scope_of(&reg_dir),
+        prof.path(),
+        PinPolicy::PinOnFirstUse,
+    )
+    .unwrap();
+
+    // Rewrite the MODEL the subscriber would reconnect to, after publish. The
+    // signature still verifies (it covers the manifest, not the artifact), so
+    // only the checksum gate stands between the subscriber and a model the
+    // publisher never sent.
+    let model_path = reg
+        .local_artifact_path("budget", "1.0.0", "models/ds-sales/model.json")
+        .unwrap()
+        .expect("the local registry must expose the model artifact path");
+    std::fs::write(&model_path, b"{\"name\":\"Tampered\",\"tables\":[]}").unwrap();
+
+    let err = pull::load_verified_data_sources(
+        &reg,
+        "budget",
+        "1.0.0",
+        &scope_of(&reg_dir),
+        prof.path(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CalpError::ChecksumMismatch { .. }),
+        "a tampered model must not be restored; got {err:?}"
+    );
+}
+
+#[test]
+fn reopening_when_the_package_is_gone_yields_no_model() {
+    let reg_dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+
+    let wb = make_budget_workbook();
+    publish_with_data_source(&reg, prof.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
+    pull::pull(
+        &reg,
+        &pull_version("budget", SemVer::new(1, 0, 0)),
+        &scope_of(&reg_dir),
+        prof.path(),
+        PinPolicy::PinOnFirstUse,
+    )
+    .unwrap();
+
+    // The subscriber is offline, or the registry no longer holds the version
+    // the ledger names: the restore must fail cleanly, not serve something else.
+    let err = pull::load_verified_data_sources(
+        &reg,
+        "budget",
+        "9.9.9",
+        &scope_of(&reg_dir),
+        prof.path(),
+    )
+    .unwrap_err();
+    assert!(
+        !matches!(err, CalpError::ChecksumMismatch { .. }),
+        "a missing version must not be reported as tampering; got {err:?}"
+    );
 }

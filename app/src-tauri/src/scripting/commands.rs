@@ -730,6 +730,20 @@ pub(crate) fn apply_script_modified_grids_core(
         let mut app_grids = app_grids.authorize(&effect);
         for w in non_active_writes.iter_mut() {
             app_grids[w.sheet_index] = w.prepared.take().expect("planned grid");
+            // SPILL CLAIMS ON THE INSTALLED SHEET (§2y). A wholesale install can
+            // replace the FORMULA that owns a dynamic array, and this path has
+            // no cascade seeds and recalculates through the whole-sheet
+            // `recalculate_sheet_values`, which is not spill-aware. Any origin
+            // that no longer holds a formula in the grid just installed has its
+            // claim dropped, or the cells it covered stay uneditable AND
+            // undeletable for the session, naming a source cell the script
+            // emptied. The CELLS are left alone deliberately — the installed
+            // grid is authoritative about content; see the helper's doc.
+            crate::commands::data::release_spills_orphaned_by_grid(
+                state,
+                w.sheet_index,
+                &app_grids[w.sheet_index],
+            );
         }
         drop(app_grids);
     }

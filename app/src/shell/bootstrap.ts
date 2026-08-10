@@ -28,6 +28,7 @@ import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type Mutation
 import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/distribution";
 import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
 import { bridgeSheetDisplayFlagsAnnouncement } from "./sheetDisplayFlagsBridge";
+import { bridgeUndoStateAnnouncement } from "./undoStateBridge";
 
 import {
   registerExtensionRegistryService,
@@ -483,6 +484,13 @@ export function bootstrapShell(): void {
   // other than the View menu (a script, an MCP tool, a package pull, an E2E
   // spec). See shell/sheetDisplayFlagsBridge.ts for the defect this closes.
   void bridgeSheetDisplayFlagsAnnouncement();
+
+  // Bridge the backend's undo/redo AVAILABILITY announcement, so the ribbon's
+  // Undo/Redo buttons and the Edit menu items reflect a stack the user really
+  // has. The announcement comes from inside the undo store's own lock guard, so
+  // a backend-only mutation (script, MCP tool, package pull, scheduled job)
+  // greys the buttons exactly like a typed edit. See shell/undoStateBridge.ts.
+  void bridgeUndoStateAnnouncement();
 
   // Model-extensibility Phase 1: bridge the Rust-emitted BI model lifecycle
   // events onto the @api event bus. The backend is the single emitter (its

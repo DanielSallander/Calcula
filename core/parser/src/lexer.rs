@@ -114,10 +114,19 @@ impl<'a> Lexer<'a> {
 
     fn read_string(&mut self) -> Token {
         let mut result = String::new();
-        // Consume chars until we hit another quote or EOF
+        // Consume chars until an UNDOUBLED quote or EOF.
         while let Some(&ch) = self.input.peek() {
             if ch == '"' {
-                self.input.next(); // Consume the closing quote
+                self.input.next();
+                // `""` is one literal quote, exactly as `read_quoted_identifier`
+                // treats `''`. Without this a text literal could not contain a
+                // quote at all, and any value that did carry one rendered to
+                // formula text that would not lex back.
+                if self.input.peek() == Some(&'"') {
+                    result.push('"');
+                    self.input.next();
+                    continue;
+                }
                 return Token::String(result);
             }
             result.push(ch);

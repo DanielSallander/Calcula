@@ -65,10 +65,15 @@ async function flushPersist(): Promise<void> {
 describe("breakpoint store", () => {
   beforeEach(() => {
     stored = null;
+    // The session goes FIRST. `clearAllBreakpoints` now retargets a live
+    // session (that is the fix, not an accident), so clearing while the
+    // previous test's session is still installed schedules an async
+    // `hostSetDebugBreakpoints` that lands AFTER the mockClear below and reads
+    // as this test's call.
+    hostSession = null;
     dbg.clearAllBreakpoints();
     getExtensionData.mockClear();
     setExtensionData.mockClear();
-    hostSession = null;
     hostSetDebugBreakpoints.mockClear();
   });
 
@@ -176,8 +181,9 @@ describe("breakpoints stay anchored across edits", () => {
 describe("session control (local transport)", () => {
   beforeEach(() => {
     stored = null;
-    dbg.clearAllBreakpoints();
+    // See the store's beforeEach: the session is torn down before the clear.
     hostSession = null;
+    dbg.clearAllBreakpoints();
     hostStartDebugSession.mockClear();
     hostStopDebugSession.mockClear();
     hostDebugControl.mockClear();
@@ -214,6 +220,29 @@ describe("session control (local transport)", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(hostSetDebugBreakpoints).toHaveBeenCalledWith(SCRIPT, [11]);
     expect(hostStartDebugSession).not.toHaveBeenCalled();
+  });
+
+  it("CLEAR ALL reaches a live session, not just the gutter", async () => {
+    // The defect this pins: `clearAllBreakpoints` used to go round `commit`,
+    // so it cleared the map, announced and persisted — and never told the
+    // RUNNING session. The gutter emptied and the runtime went on stopping at
+    // every line. It is now one `mutate` per script, which cannot forget,
+    // because forgetting is not one of the things `mutate` can do.
+    hostSession = { scriptId: SCRIPT, status: "running" };
+    window.dispatchEvent(
+      new CustomEvent(dbg.DebugEvents.STATE_CHANGED, {
+        detail: { scriptId: SCRIPT, session: hostSession },
+      }),
+    );
+    dbg.toggleBreakpoint(SCRIPT, 7);
+    await new Promise((r) => setTimeout(r, 0));
+    hostSetDebugBreakpoints.mockClear();
+
+    dbg.clearAllBreakpoints();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(hostSetDebugBreakpoints).toHaveBeenCalledWith(SCRIPT, []);
+    expect(dbg.getBreakpointLines(SCRIPT)).toEqual([]);
   });
 
   it("does not touch the host when there is no session", async () => {

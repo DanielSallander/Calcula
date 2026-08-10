@@ -20,6 +20,7 @@ import {
   useSurfaceLayout,
 } from "@api/layout";
 import type { RibbonContext } from "@api/extensions";
+import { useUndoAvailability } from "@api/undoState";
 import { ITEMS_BY_ID } from "../homeTabConfig";
 import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
 import { FONT_LIST, FONT_SIZES } from "../../../_shared/lib/fontList";
@@ -162,6 +163,11 @@ interface HomeTabGroupComponentProps {
 export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): React.ReactElement {
   const state = useHomeTabState();
   const layout = useSurfaceLayout();
+  // Excel greys Undo/Redo out when the stack is empty; until this binding
+  // existed the app invited the user to press an Undo it might not have. The
+  // store is event-driven (see @api/undoState), so a mutation that never
+  // touched the frontend moves these buttons too.
+  const undoAvailability = useUndoAvailability();
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
   const [cellStylesOpen, setCellStylesOpen] = useState(false);
 
@@ -319,12 +325,23 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
       );
     }
 
+    // `undefined` rather than `false` for everything else: an explicit
+    // `disabled={false}` would still write the attribute's absence, but leaving
+    // it undefined keeps the DOM of the other 40-odd buttons byte-identical,
+    // which is what the visual goldens photograph.
+    const unavailable =
+      item.id === "undo" ? !undoAvailability.canUndo
+      : item.id === "redo" ? !undoAvailability.canRedo
+      : undefined;
+
     return (
       <Button
         key={item.id}
         size={size}
         title={item.tooltip}
         data-testid={`fmt-${item.id}`}
+        disabled={unavailable}
+        aria-disabled={unavailable}
         onClick={() => state.handleItemClick(item)}
         style={itemStyle}
       >

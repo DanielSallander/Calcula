@@ -4,8 +4,9 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenu, registerShellComponent, unregisterShellComponent, showDialog, type MenuDefinition } from "@api/ui";
+import { registerMenu, registerShellComponent, unregisterShellComponent, showDialog, updateMenuItem, type MenuDefinition } from "@api/ui";
 import { CoreCommands } from "@api/commands";
+import { getUndoAvailability, subscribeToUndoAvailability } from "@api/undoState";
 import {
   IconUndo, IconRedo, IconCut, IconCopy, IconPaste, IconPasteValues,
   IconPasteFormulas, IconPasteFormatting, IconPasteLink, IconPasteSpecial,
@@ -31,6 +32,9 @@ const MENU_ACTION_COMMANDS = "core.file.new core.file.open core.file.save core.f
 
 let isActivated = false;
 let activeContext: ExtensionContext | null = null;
+/** Torn down on deactivate; the store drops its own bus listener with the last
+ *  subscriber, so a deactivated extension leaves nothing running. */
+let unsubscribeUndoAvailability: (() => void) | null = null;
 
 function registerMenuActionCommands(context: ExtensionContext): void {
   context.commands.register("core.file.new", () => fileNew());
@@ -110,6 +114,24 @@ function registerEditMenu(context: ExtensionContext): void {
   registerMenu(editMenu);
 }
 
+/**
+ * Keep Edit > Undo / Edit > Redo greyed out when there is nothing to undo or
+ * redo — the same rule the Home tab's buttons follow, from the same store, so
+ * the two surfaces cannot disagree about one command.
+ *
+ * Patched in place through `updateMenuItem` rather than by re-registering the
+ * menu: re-registration would rebuild every item and lose anything another
+ * extension had contributed to Edit in the meantime.
+ */
+function bindUndoEnablement(): void {
+  const apply = (availability: { canUndo: boolean; canRedo: boolean }): void => {
+    updateMenuItem("edit", "edit:undo", { disabled: !availability.canUndo });
+    updateMenuItem("edit", "edit:redo", { disabled: !availability.canRedo });
+  };
+  apply(getUndoAvailability());
+  unsubscribeUndoAvailability = subscribeToUndoAvailability(apply);
+}
+
 // ============================================================================
 // Activation
 // ============================================================================
@@ -125,6 +147,7 @@ function activate(context: ExtensionContext): void {
   // Only register Edit and Format menus here
   // File, View, Insert are handled by StandardMenus.tsx component (hook-based)
   registerEditMenu(context);
+  bindUndoEnablement();
   registerFormatMenu();
   registerMenuActionCommands(context);
   activeContext = context;
@@ -148,6 +171,8 @@ function deactivate(): void {
 
   console.log("[StandardMenusExtension] Deactivating...");
   unregisterShellComponent(SHELL_COMPONENT_ID);
+  unsubscribeUndoAvailability?.();
+  unsubscribeUndoAvailability = null;
   for (const id of MENU_ACTION_COMMANDS) activeContext?.commands.unregister(id);
   activeContext = null;
   isActivated = false;

@@ -7,8 +7,10 @@
 //! # The invariants — there are two, and the second one is why the first was
 //! # not enough
 //!
-//! > 1. **A store `assemble_workbook_for_save` reads is reset by the
-//! >    document-replacing paths.**
+//! > 1. **A store that either PROJECTION path reads — the `.cala` save
+//! >    (`assemble_workbook_for_save`) or the `.calp` publish
+//! >    (`assemble_publish_workbook`) — is reset by the document-replacing
+//! >    paths.**
 //! > 2. **Every field of every State those paths reset is either reset by the
 //! >    shared function, or written down as session- or machine-scoped.**
 //!
@@ -114,6 +116,35 @@ const RECEIVERS: &[(&str, &str)] = &[
     ("pivot_state", "PivotState"),
     ("bi_state", "BiState"),
 ];
+
+/// THE ROOTS OF THE SAVE-SOURCE CENSUS — both of them.
+///
+/// The census used to root at `assemble_workbook_for_save` alone, because the
+/// `.cala` save is the path §2w's leak was measured on. It is not the only path
+/// that PROJECTS the live stores into a file somebody else opens.
+/// `assemble_publish_workbook` is the other: it builds the `.calp` carrier for
+/// `calp_publish`, and a `.calp` is by construction sent to other people, so it
+/// carries the confidentiality edge that made §2w matter *more* than the save
+/// path does, not less. A store the publish path reads and the reset does not
+/// clear would put the previous document's content into a package a subscriber
+/// pulls, and until now nothing would have failed.
+///
+/// **Rooting it here was measured to cost nothing**, which is the whole reason
+/// it can be done as a one-line hardening instead of a project: the two paths'
+/// source sets overlap almost completely (publish calls
+/// `build_workbook_for_save_with_slicers`, `collect_pane_controls_for_save`,
+/// `collect_scripts_for_save`, `collect_notebooks_for_save`,
+/// `collect_pivot_definitions` and `capture_local_bi_connections` — the save
+/// path's own collectors), and every store only the publish path reads was
+/// already reset. `the_two_projection_roots_are_both_real_and_the_publish_root_adds_no_demands`
+/// pins that measurement so the claim is re-checked on every build rather than
+/// believed because it was true once.
+///
+/// A THIRD projection path (a new export format, a new package kind) belongs
+/// here the day it is written. The test below asserts each name resolves to
+/// exactly one free function, so a rename cannot silently drop a root and leave
+/// the census passing over half the surface.
+const SAVE_ROOTS: &[&str] = &["assemble_workbook_for_save", "assemble_publish_workbook"];
 
 /// The reset, and the helpers it delegates to.
 ///
@@ -723,18 +754,18 @@ fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 // 1. THE CENSUS
 // ---------------------------------------------------------------------------
 
-/// EVERY store the save path reads, classified — the census the hand-written
-/// list cannot be.
+/// EVERY store either PROJECTION path reads, classified — the census the
+/// hand-written list cannot be.
 ///
-/// A new store read by `assemble_workbook_for_save` (or by anything it calls)
-/// fails this test until somebody decides, in writing, whether replacing the
-/// document must reset it.
+/// A new store read by `assemble_workbook_for_save` or `assemble_publish_workbook`
+/// (or by anything either calls) fails this test until somebody decides, in
+/// writing, whether replacing the document must reset it.
 #[test]
 fn every_store_the_save_path_reads_is_reset_when_the_document_is_replaced() {
     let sources = read_crate_sources();
     let fns = index_functions(&sources);
 
-    let save_closure = call_closure(&fns, &["assemble_workbook_for_save"]);
+    let save_closure = call_closure(&fns, SAVE_ROOTS);
     let reads = store_accesses(&save_closure);
     let reset_closure = call_closure(&fns, RESET_FUNCTIONS);
     let resets = store_accesses(&reset_closure);
@@ -748,14 +779,14 @@ fn every_store_the_save_path_reads_is_reset_when_the_document_is_replaced() {
 
     assert!(
         unreset.is_empty(),
-        "these stores are written into every saved workbook but are NOT reset \
-         when the document is replaced:\n  {}\n\nThis is the PivotState / \
-         RibbonFilterState / BiState class: an unreset store is an UNSCOPED \
-         store, and the save path cannot tell the difference — the next \
-         document the user saves will physically contain this one's content. \
-         Either reset it in `persistence::reset_document_scoped_stores` (which \
-         both `new_file` and `open_file` run) or add it to EXEMPT with the \
-         reason it needs no reset.",
+        "these stores are projected into every saved workbook or published \
+         package but are NOT reset when the document is replaced:\n  {}\n\nThis \
+         is the PivotState / RibbonFilterState / BiState class: an unreset store \
+         is an UNSCOPED store, and neither projection path can tell the \
+         difference — the next document the user saves, or PUBLISHES, will \
+         physically contain this one's content. Either reset it in \
+         `persistence::reset_document_scoped_stores` (which both `new_file` and \
+         `open_file` run) or add it to EXEMPT with the reason it needs no reset.",
         unreset.join("\n  ")
     );
 
@@ -768,12 +799,14 @@ fn every_store_the_save_path_reads_is_reset_when_the_document_is_replaced() {
         .collect();
     assert!(
         stale.is_empty(),
-        "EXEMPT names stores the save path no longer reads:\n  {}",
+        "EXEMPT names stores no projection path reads any more:\n  {}",
         stale.join("\n  ")
     );
 
     // NON-VACUITY. The census must be finding the members it was built for —
-    // the three §2w named, plus the two the enumeration itself turned up.
+    // the three §2w named, plus the two the enumeration itself turned up, plus
+    // one the PUBLISH root contributes and the save root does not
+    // (`protected_regions`, read to build the package's excluded regions).
     for known in [
         "PivotState.pivot_tables",
         "RibbonFilterState.filters",
@@ -781,19 +814,97 @@ fn every_store_the_save_path_reads_is_reset_when_the_document_is_replaced() {
         "AppState.sheet_ids",
         "AppState.model_writeback",
         "AppState.advanced_filter_hidden_rows",
+        "AppState.protected_regions",
     ] {
         assert!(
             reads.contains_key(known),
-            "the census did not even find `{}` among the save path's sources — \
-             it is not measuring what it claims to",
+            "the census did not even find `{}` among the projection paths' \
+             sources — it is not measuring what it claims to",
             known
         );
     }
     assert!(
         reads.len() > 50,
-        "the save path was found to read only {} stores; it reads dozens, so \
-         the walk is broken rather than the crate",
+        "the projection paths were found to read only {} stores; they read \
+         dozens, so the walk is broken rather than the crate",
         reads.len()
+    );
+}
+
+/// BOTH ROOTS ARE REAL, AND THE SECOND ONE COSTS NOTHING — measured, not assumed.
+///
+/// Two separate claims, and both are load-bearing.
+///
+/// **(a) Each root resolves to exactly one free function.** `SAVE_ROOTS` is
+/// hand-written, and `call_closure` silently yields nothing for a name it cannot
+/// resolve — so a rename (or a root turned into an `impl` method, which
+/// `parse_fn_header` deliberately does not index) would leave the census passing
+/// over half the surface with no signal at all. That is the exact failure mode
+/// this whole file exists to make impossible.
+///
+/// **(b) The publish root adds no unreset store today.** This is the claim that
+/// justified rooting the census at both paths as a hardening rather than as a
+/// project: the `.calp` carrier is built from the save path's own collectors, so
+/// its sources are nearly the same set, and the ones that differ were already
+/// reset. MEASURED when this was added, rather than assumed: the save root
+/// reaches **70** stores, both roots together reach **71**, and the single
+/// publish-only store is `AppState.protected_regions` (read to compute the
+/// package's excluded regions), which `reset_document_scoped_stores` already
+/// clears. So the second root demanded nothing on the day it was added — which
+/// is exactly why it must be added on a day when it demands nothing. Asserting
+/// it keeps the claim honest: the day publish starts reading a store the save
+/// path does not, this test says so by name and the census above demands the
+/// decision.
+#[test]
+fn the_two_projection_roots_are_both_real_and_the_publish_root_adds_no_demands() {
+    let sources = read_crate_sources();
+    let fns = index_functions(&sources);
+
+    for root in SAVE_ROOTS {
+        let defs: Vec<&FnDef> = fns.iter().filter(|f| f.name == *root).collect();
+        assert_eq!(
+            defs.len(),
+            1,
+            "`{}` is a census ROOT and resolves to {} free functions. \
+             `call_closure` yields nothing for a name it cannot resolve, so a \
+             root that has been renamed, deleted or turned into an `impl` method \
+             does not fail the census — it silently shrinks it.",
+            root,
+            defs.len()
+        );
+    }
+
+    let save_only = store_accesses(&call_closure(&fns, &["assemble_workbook_for_save"]));
+    let both = store_accesses(&call_closure(&fns, SAVE_ROOTS));
+    let resets = store_accesses(&call_closure(&fns, RESET_FUNCTIONS));
+
+    // The publish root really does reach stores of its own — otherwise this
+    // test would be asserting "nothing changed" about a root that contributes
+    // nothing, which is a vacuous pass dressed as a measurement.
+    let publish_only: Vec<&String> = both.keys().filter(|k| !save_only.contains_key(*k)).collect();
+    assert!(
+        !publish_only.is_empty(),
+        "the publish root contributed no store the save path does not already \
+         read. Either `assemble_publish_workbook` no longer builds the package \
+         carrier, or the walk is not reaching it — a root that adds nothing \
+         cannot fail for anything"
+    );
+
+    let publish_only_unreset: Vec<&str> = publish_only
+        .iter()
+        .map(|k| k.as_str())
+        .filter(|k| !resets.contains_key(*k))
+        .filter(|k| !EXEMPT.iter().any(|(name, _)| name == k))
+        .collect();
+    assert!(
+        publish_only_unreset.is_empty(),
+        "these stores are read ONLY by the `.calp` publish path and are not \
+         reset when the document is replaced:\n  {}\n\nA package is sent to \
+         other people, so this is the §2w leak with the confidentiality edge \
+         turned up: a subscriber would pull content from a document the \
+         publisher had already closed. Reset it in \
+         `persistence::reset_document_scoped_stores`, or EXEMPT it with a reason.",
+        publish_only_unreset.join("\n  ")
     );
 }
 

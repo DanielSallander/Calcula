@@ -41,9 +41,36 @@ fn formula_display(cell: &engine::Cell, locale: &engine::LocaleSettings) -> Opti
 /// their exact current behavior) and dropped for wide ones.
 pub(crate) const CASCADE_FORMULA_LIMIT: usize = 64;
 
+/// What a caller does with a spill whose ORIGIN lies inside its OWN rectangle
+/// (§2y). This is a decision each call site has to make explicitly, because the
+/// two answers differ in exactly the way that produced §2y: a guard that always
+/// refuses makes "select the spill and press Delete" impossible, and a guard
+/// that always allows lets a command move or overwrite an origin while the map
+/// keeps claiming cells no formula produces.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SpillOriginPolicy {
+    /// The caller RELEASES a spill it swallows whole: the origin goes, and the
+    /// spilled cells go with it through `take_spills_owned_*` (directly, or via
+    /// the shared cascade's tear-down phase). Deleting a spilled block is the
+    /// gesture this exists for — the origin is inside the selection, so there
+    /// is nothing left to "edit or delete in the source cell".
+    ReleasedByCaller,
+    /// The caller cannot release it, so a spilled cell is refused exactly as if
+    /// its origin were somewhere else. `sort_range` is the case: permuting a
+    /// block that contains part of an array would shuffle values no formula
+    /// owns, and swallowing the origin does not make that meaningful.
+    Refuse,
+}
+
 /// Check if any cell in the given range is a spilled value (not the spill origin).
 /// Returns Ok(()) if the range is safe to modify, or Err with a user-facing message
 /// identifying the origin formula cell.
+///
+/// `policy` decides the ORIGIN-INSIDE case; see [`SpillOriginPolicy`]. Every
+/// `ReleasedByCaller` site is required by
+/// `every_release_policy_call_site_actually_releases_the_spill` to reach a
+/// tear-down, so the exemption can never be taken without the removal it
+/// promises.
 fn check_spill_protection(
     spill_hosts: &std::collections::HashMap<(usize, u32, u32), (u32, u32)>,
     active_sheet: usize,
@@ -51,6 +78,7 @@ fn check_spill_protection(
     start_col: u32,
     end_row: u32,
     end_col: u32,
+    policy: SpillOriginPolicy,
 ) -> Result<(), String> {
     fn spill_err(origin_r: u32, origin_c: u32) -> String {
         let col_letter = crate::pivot::utils::col_index_to_letter(origin_c);
@@ -61,9 +89,22 @@ fn check_spill_protection(
         )
     }
 
+    // An ORIGIN inside the rectangle is released by the caller, so the cells it
+    // owns are not obstacles — they are about to leave with it. The origin is
+    // never itself a `spill_hosts` key (`reevaluate_formula_cell` skips the
+    // (0,0) offset), so this can only ever exempt a cell the same gesture takes.
+    let origin_released = |origin_r: u32, origin_c: u32| {
+        policy == SpillOriginPolicy::ReleasedByCaller
+            && origin_r >= start_row
+            && origin_r <= end_row
+            && origin_c >= start_col
+            && origin_c <= end_col
+    };
+
     // Fast path: single-cell ranges (batch writes and clear_cell check one
     // cell at a time) — the map key IS the cell, so one probe replaces a scan
-    // over every spilled cell in the workbook.
+    // over every spilled cell in the workbook. The origin of a spilled cell is
+    // never that cell itself, so `origin_released` cannot fire here.
     if start_row == end_row && start_col == end_col {
         if let Some(&(origin_r, origin_c)) =
             spill_hosts.get(&(active_sheet, start_row, start_col))
@@ -87,6 +128,9 @@ fn check_spill_protection(
         for r in start_row..=end_row {
             for c in start_col..=end_col {
                 if let Some(&(origin_r, origin_c)) = spill_hosts.get(&(active_sheet, r, c)) {
+                    if origin_released(origin_r, origin_c) {
+                        continue;
+                    }
                     return Err(spill_err(origin_r, origin_c));
                 }
             }
@@ -99,10 +143,293 @@ fn check_spill_protection(
             && r >= start_row && r <= end_row
             && c >= start_col && c <= end_col
         {
+            if origin_released(origin_r, origin_c) {
+                continue;
+            }
             return Err(spill_err(origin_r, origin_c));
         }
     }
     Ok(())
+}
+
+/// THE ONE PLACE the spill map is torn down (§2y).
+///
+/// Removes every `spill_ranges` entry on `sheet` whose ORIGIN satisfies
+/// `origin_affected`, drops the `spill_hosts` claims those entries made, and
+/// returns the spilled coordinates that are now unowned so the caller can erase
+/// them from the grid.
+///
+/// COST. It iterates `spill_ranges`, never the caller's rectangle or seed list:
+/// the map holds one entry per SPILLING FORMULA in the workbook, which is zero
+/// in every document that uses no dynamic array and a handful in one that does,
+/// while a caller's rectangle can be a whole column and its seed list can be a
+/// ten-thousand-cell block. The empty-map case — the overwhelmingly common one,
+/// and the one on the Delete key's hot path — costs one lock and one
+/// `is_empty()`, and never touches `spill_hosts` at all.
+///
+/// LOCKING. Takes `spill_ranges` then `spill_hosts`, the order `update_cell`
+/// and `reevaluate_formula_cell` already use, and takes neither while the other
+/// is held by the caller. Callers may hold the grid guards (these two are
+/// acquired AFTER the grid everywhere in this module).
+fn take_spills_where(
+    state: &AppState,
+    sheet: usize,
+    origin_affected: impl Fn(u32, u32) -> bool,
+) -> Vec<(u32, u32)> {
+    let mut spill_ranges = state.spill_ranges.lock().unwrap();
+    if spill_ranges.is_empty() {
+        return Vec::new();
+    }
+    let origins: Vec<(usize, u32, u32)> = spill_ranges
+        .keys()
+        .filter(|&&(s, r, c)| s == sheet && origin_affected(r, c))
+        .copied()
+        .collect();
+    if origins.is_empty() {
+        return Vec::new();
+    }
+    let mut spill_hosts = state.spill_hosts.lock().unwrap();
+    let mut released: Vec<(u32, u32)> = Vec::new();
+    for key in origins {
+        let Some(cells) = spill_ranges.remove(&key) else {
+            continue;
+        };
+        for (r, c) in cells {
+            spill_hosts.remove(&(sheet, r, c));
+            released.push((r, c));
+        }
+    }
+    released.sort_unstable();
+    released.dedup();
+    released
+}
+
+/// [`take_spills_where`] for a RECTANGLE of origins — the shape every clear and
+/// every single-cell rewrite has.
+pub(crate) fn take_spills_owned_within(
+    state: &AppState,
+    sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Vec<(u32, u32)> {
+    take_spills_where(state, sheet, |r, c| {
+        r >= start_row && r <= end_row && c >= start_col && c <= end_col
+    })
+}
+
+/// [`take_spills_where`] for an arbitrary SET of origins — the shape a cascade
+/// seed list has, where the cells a command rewrote are not a rectangle.
+pub(crate) fn take_spills_owned_by_any(
+    state: &AppState,
+    sheet: usize,
+    cells: &crate::CoordSet,
+) -> Vec<(u32, u32)> {
+    take_spills_where(state, sheet, |r, c| cells.contains(&(r, c)))
+}
+
+/// Drop the spill claims of every ORIGIN on `sheet` that no longer holds a
+/// formula in `grid`.
+///
+/// FOR WHOLESALE WRITERS — the ones that install a whole grid or write straight
+/// into a background sheet and then recalculate it end to end: the script
+/// surface's non-active-sheet install, and the three `.calp` override commands.
+/// They cannot use the seed-based tear-down in
+/// `recalc_after_active_sheet_bulk_rewrite` because they never produce seeds,
+/// and they recalculate through `recalculate_sheet_values`, which is
+/// whole-sheet and not spill-aware.
+///
+/// IT DROPS THE CLAIM AND LEAVES THE CELLS. That is the deliberate difference
+/// from `take_spills_owned_within` + `erase_released_spill_cells`. The grid
+/// being installed is authoritative about cell CONTENT — a script may have
+/// written its own values into the coordinates the old array covered — so
+/// erasing them would destroy the write this function is cleaning up after.
+/// Dropping the claim is what removes §2y's dead end: the cells stop being
+/// uneditable and undeletable, and stop naming an empty source cell. What they
+/// do NOT do is come back as an array, which is the same residual a reload
+/// leaves (§2ab) and has the same fix.
+///
+/// Returns the coordinates whose claim was dropped, for logging/reporting.
+/// Costs one lock and one `is_empty()` on a workbook with no dynamic array.
+pub(crate) fn release_spills_orphaned_by_grid(
+    state: &AppState,
+    sheet: usize,
+    grid: &Grid,
+) -> Vec<(u32, u32)> {
+    take_spills_where(state, sheet, |r, c| {
+        grid.get_cell(r, c)
+            .is_none_or(|cell| cell.formula_string().is_none())
+    })
+}
+
+/// Refuse a gesture whose target CELLS include a spilled value.
+///
+/// The match-list form of [`check_spill_protection`], for commands that act on
+/// a set of cells rather than a rectangle — Replace All and Replace, which are
+/// checked against their match list for exactly the reason the writeback and
+/// sheet-protection gates are (a bounding box would refuse replaces that never
+/// land in the array).
+///
+/// The ORIGIN never needs a policy here: both replace paths skip formula cells
+/// outright ("Skip formula cells for safety"), so the only spill cell they can
+/// reach is a spilled VALUE, whose origin is by definition somewhere else.
+///
+/// WHY IT IS A REFUSAL AND NOT A SKIP. Rewriting a spilled value in place is
+/// allowed nowhere else in the product — typing into that cell is refused with
+/// a message naming the source formula — and the write does not even survive:
+/// the map still says the array owns the cell, so the next recalculation of the
+/// origin puts the old value back and the user's replacement is gone with no
+/// error. Refusing the whole gesture is also the policy this command already
+/// applies to locked cells and writeback claims, argued there at length: a
+/// Replace All applied to the allowed subset is half a job dressed up as
+/// success.
+pub(crate) fn check_spill_protection_cells(
+    state: &AppState,
+    sheet: usize,
+    cells: &[(u32, u32)],
+) -> Result<(), String> {
+    let spill_hosts = state.spill_hosts.lock().unwrap();
+    if spill_hosts.is_empty() {
+        return Ok(());
+    }
+    for &(row, col) in cells {
+        check_spill_protection(
+            &spill_hosts, sheet, row, col, row, col,
+            SpillOriginPolicy::Refuse,
+        )?;
+    }
+    Ok(())
+}
+
+/// Refuse a rectangle that holds ANY part of a dynamic array — a spilled cell
+/// or the ORIGIN formula that produces them.
+///
+/// THE GUARD FOR COMMANDS THAT CANNOT CARRY AN ARRAY. `sort_range` permutes its
+/// rectangle, `fill_range` overwrites it cell by cell, `merge_cells` deletes
+/// every cell but one: none of those is a meaningful thing to do to half an
+/// array, and none of them can re-derive one. So they refuse, exactly as Excel
+/// does ("You can't change part of an array"), and in exchange they never have
+/// to maintain the spill map at all.
+///
+/// BOTH questions are needed, and this is the point of the helper. The
+/// spilled-CELL check alone lets through the arrangement where every spilled
+/// cell lies outside the rectangle and only the origin is inside it — a
+/// horizontal array in row 1 is entirely outside any rectangle over column A
+/// except for its origin. Sorting column A would then move the FORMULA to
+/// another row while B1:D1 stayed where they were.
+///
+/// Costs two locks and two `is_empty()` calls on a workbook with no dynamic
+/// array, which is every workbook that uses none.
+pub(crate) fn check_no_array_within(
+    state: &AppState,
+    sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        check_spill_protection(
+            &spill_hosts, sheet, start_row, start_col, end_row, end_col,
+            SpillOriginPolicy::Refuse,
+        )?;
+    }
+    check_no_spill_origin_within(state, sheet, start_row, start_col, end_row, end_col)
+}
+
+/// The ORIGIN half of [`check_no_array_within`], separate so the two questions
+/// can be tested against each other — the spilled-cell check is deliberately
+/// blind to the arrangement this one catches.
+fn check_no_spill_origin_within(
+    state: &AppState,
+    sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    let spill_ranges = state.spill_ranges.lock().unwrap();
+    if spill_ranges.is_empty() {
+        return Ok(());
+    }
+    if let Some(&(_, r, c)) = spill_ranges.keys().find(|&&(s, r, c)| {
+        s == sheet && r >= start_row && r <= end_row && c >= start_col && c <= end_col
+    }) {
+        let cell_ref = format!("{}{}", crate::pivot::utils::col_index_to_letter(c), r + 1);
+        return Err(format!(
+            "We can't change part of an array\n\nThe formula in {} produces a spilled array. Move or remove it before rearranging these cells.",
+            cell_ref
+        ));
+    }
+    Ok(())
+}
+
+/// Read-only companion to [`take_spills_owned_within`]: which cells a clear
+/// must NOT record for undo, because they are spilled values whose origin the
+/// same gesture is removing.
+///
+/// WHY THEY GET NO UNDO ENTRY, which is the half of §2y most likely to be got
+/// backwards. A spilled cell is DERIVED state — it carries no formula, no rich
+/// text and style 0 — and recording it would not restore the spill, it would
+/// BREAK it: `apply_changes` puts every recorded cell back before it
+/// recalculates, so the restored literals would be sitting in A2:A4 when the
+/// restored `=SEQUENCE(4)` in A1 re-evaluates, `reevaluate_formula_cell` would
+/// see occupied cells that are not its own spill (the map entry went with the
+/// clear), and the undo would land on `#VALUE!` instead of the array. Undo
+/// restores the ORIGIN, and the shared cascade re-spills it — the same route by
+/// which `update_cell(A1, "")` has always undone correctly.
+fn spilled_cells_owned_within(
+    state: &AppState,
+    sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> crate::CoordSet {
+    let spill_ranges = state.spill_ranges.lock().unwrap();
+    if spill_ranges.is_empty() {
+        return crate::CoordSet::default();
+    }
+    spill_ranges
+        .iter()
+        .filter(|(&(s, r, c), _)| {
+            s == sheet && r >= start_row && r <= end_row && c >= start_col && c <= end_col
+        })
+        .flat_map(|(_, cells)| cells.iter().copied())
+        .collect()
+}
+
+/// Erase cells released by [`take_spills_owned_within`] from the ACTIVE-sheet
+/// mirror and its `grids` entry, reporting each as blank so the caller's IPC
+/// reply repaints it.
+fn erase_released_spill_cells(
+    grid: &mut Grid,
+    grids: &mut [Grid],
+    sheet: usize,
+    released: &[(u32, u32)],
+    updated_cells: &mut Vec<CellData>,
+) {
+    for &(r, c) in released {
+        grid.cells.remove(&(r, c));
+        if sheet < grids.len() {
+            grids[sheet].cells.remove(&(r, c));
+        }
+        updated_cells.push(CellData {
+            row: r,
+            col: c,
+            display: String::new(),
+            display_color: None,
+            formula: None,
+            style_index: 0,
+            row_span: 1,
+            col_span: 1,
+            sheet_index: None,
+            rich_text: None,
+            accounting_layout: None,
+        });
+    }
 }
 
 /// User-facing name of a protected region's owner object.
@@ -1004,30 +1331,40 @@ fn update_cell_impl(
     // Record previous state for undo BEFORE making any changes
     let previous_cell = grid.get_cell(row, col).cloned();
 
+    // ---- THE SPILL THIS CELL USED TO OWN DIES HERE, WHATEVER REPLACES IT ---
+    //
+    // ONE release for every branch below, hoisted out of them (§2y). It used to
+    // sit in TWO places — the empty-value branch, and deep inside
+    // `if let Some(formula) = ... { match parser::parse(&formula) { Ok(..) =>`
+    // — which left two ways to overwrite a spill ORIGIN and keep its claim:
+    //
+    //   * type a LITERAL over it (`7` where `=SEQUENCE(4)` was). No formula, so
+    //     neither branch ran; A2:A4 kept showing 2 3 4 that nothing produced,
+    //     uneditable and undeletable for the session. §2y through the command
+    //     the register named as the map's one correct maintainer.
+    //   * type a formula that does not PARSE. Same leak, one level deeper.
+    //
+    // Hoisting also fixes an ORDER-DEPENDENT value, which is the worse half.
+    // The formula branch released the old range AFTER evaluating the new
+    // formula, so `=A2*10` typed over the origin of a spill covering A2 read
+    // the OLD spilled 2 and stored 20 — then erased A2. Recalculating the same
+    // workbook produced 0. A number that depends on the order the edit happened
+    // to run in is precisely what the recalculation work exists to eliminate;
+    // the array ceases to exist the moment its formula is replaced, so the new
+    // formula must evaluate against cells that are already empty.
+    {
+        let released = take_spills_owned_within(&state, active_sheet, row, col, row, col);
+        erase_released_spill_cells(
+            &mut grid,
+            &mut grids,
+            active_sheet,
+            &released,
+            &mut updated_cells,
+        );
+    }
+
     // Handle empty value - clear the cell
     if value.trim().is_empty() {
-        // Clear any spill range owned by this cell
-        {
-            let mut spill_ranges = state.spill_ranges.lock().unwrap();
-            let mut spill_hosts = state.spill_hosts.lock().unwrap();
-            if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, row, col)) {
-                for (sr, sc) in &old_spill_cells {
-                    spill_hosts.remove(&(active_sheet, *sr, *sc));
-                    grid.cells.remove(&(*sr, *sc));
-                    if active_sheet < grids.len() {
-                        grids[active_sheet].cells.remove(&(*sr, *sc));
-                    }
-                    updated_cells.push(CellData {
-                        row: *sr, col: *sc, display: String::new(),
-                        display_color: None, formula: None, style_index: 0,
-                        row_span: 1, col_span: 1, sheet_index: None,
-                        rich_text: None,
-                        accounting_layout: None,
-                    });
-                }
-            }
-        }
-
         grid.clear_cell(row, col);
         // Also update the grids vector
         if active_sheet < grids.len() {
@@ -1207,27 +1544,8 @@ fn update_cell_impl(
                     udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
                 );
 
-                // Clear any previous spill range for this cell
-                {
-                    let mut spill_ranges = state.spill_ranges.lock().unwrap();
-                    let mut spill_hosts = state.spill_hosts.lock().unwrap();
-                    if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, row, col)) {
-                        for (sr, sc) in &old_spill_cells {
-                            spill_hosts.remove(&(active_sheet, *sr, *sc));
-                            grid.cells.remove(&(*sr, *sc));
-                            if active_sheet < grids.len() {
-                                grids[active_sheet].cells.remove(&(*sr, *sc));
-                            }
-                            updated_cells.push(CellData {
-                                row: *sr, col: *sc, display: String::new(),
-                                display_color: None, formula: None, style_index: 0,
-                                row_span: 1, col_span: 1, sheet_index: None,
-                                rich_text: None,
-                                accounting_layout: None,
-                            });
-                        }
-                    }
-                }
+                // The range this cell used to own was already released, above,
+                // BEFORE the formula was evaluated — see the hoisted tear-down.
 
                 // Handle spill for array results
                 let (spill_rows, spill_cols) = raw_result.spill_dimensions();
@@ -1793,25 +2111,11 @@ pub(crate) fn reevaluate_formula_cell(
         }
     };
 
-    // Clear any previous spill range for this dependent cell
+    // Clear any previous spill range for this dependent cell, through the ONE
+    // tear-down.
     {
-        let mut spill_ranges = state.spill_ranges.lock().unwrap();
-        let mut spill_hosts = state.spill_hosts.lock().unwrap();
-        if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, dep_row, dep_col)) {
-            for (sr, sc) in &old_spill_cells {
-                spill_hosts.remove(&(active_sheet, *sr, *sc));
-                grid.cells.remove(&(*sr, *sc));
-                if active_sheet < grids.len() {
-                    grids[active_sheet].cells.remove(&(*sr, *sc));
-                }
-                updated_cells.push(CellData {
-                    row: *sr, col: *sc, display: String::new(),
-                    display_color: None, formula: None, style_index: 0,
-                    row_span: 1, col_span: 1, sheet_index: None,
-                    rich_text: None, accounting_layout: None,
-                });
-            }
-        }
+        let released = take_spills_owned_within(state, active_sheet, dep_row, dep_col, dep_row, dep_col);
+        erase_released_spill_cells(grid, grids, active_sheet, &released, updated_cells);
     }
 
     // Handle spill for array results
@@ -2482,7 +2786,14 @@ pub(crate) fn update_cells_batch_core(
         let active_sheet = *state.active_sheet.read().unwrap();
         let spill_hosts = state.spill_hosts.lock().unwrap();
         for update in &updates {
-            check_spill_protection(&spill_hosts, active_sheet, update.row, update.col, update.row, update.col)?;
+            // Single cell: `Refuse` and `ReleasedByCaller` are the same answer
+            // here (a spilled cell's origin is never that cell), and this
+            // writer replaces content rather than swallowing a block.
+            check_spill_protection(
+                &spill_hosts, active_sheet,
+                update.row, update.col, update.row, update.col,
+                SpillOriginPolicy::Refuse,
+            )?;
         }
     }
 
@@ -2597,6 +2908,24 @@ pub(crate) fn update_cells_batch_core(
 
         // Record previous state for undo
         let previous_cell = grid.get_cell(row, col).cloned();
+
+        // The spill this cell used to own dies here, whatever replaces it —
+        // one release for every branch below, exactly as in `update_cell_impl`
+        // and for the same two reasons (§2y). This is the PASTE path, and it
+        // had no release outside the formula branch at all: pasting a literal
+        // over the origin of a dynamic array left the map claiming cells that
+        // no formula produced. One `spill_ranges` lock and one `is_empty()` per
+        // written cell when the workbook holds no array.
+        {
+            let released = take_spills_owned_within(&state, active_sheet, row, col, row, col);
+            erase_released_spill_cells(
+                &mut grid,
+                &mut grids,
+                active_sheet,
+                &released,
+                &mut updated_cells,
+            );
+        }
 
         // Handle empty value - clear the cell
         if value.trim().is_empty() {
@@ -2752,27 +3081,9 @@ pub(crate) fn update_cells_batch_core(
                         udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
                     );
 
-                    // Clear any previous spill range for this cell
-                    {
-                        let mut spill_ranges = state.spill_ranges.lock().unwrap();
-                        let mut spill_hosts = state.spill_hosts.lock().unwrap();
-                        if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, row, col)) {
-                            for (sr, sc) in &old_spill_cells {
-                                spill_hosts.remove(&(active_sheet, *sr, *sc));
-                                grid.cells.remove(&(*sr, *sc));
-                                if active_sheet < grids.len() {
-                                    grids[active_sheet].cells.remove(&(*sr, *sc));
-                                }
-                                updated_cells.push(CellData {
-                                    row: *sr, col: *sc, display: String::new(),
-                                    display_color: None, formula: None, style_index: 0,
-                                    row_span: 1, col_span: 1, sheet_index: None,
-                                    rich_text: None,
-                                    accounting_layout: None,
-                                });
-                            }
-                        }
-                    }
+                    // The range this cell used to own was already released, at
+                    // the top of the loop, BEFORE the formula was evaluated —
+                    // see the hoisted tear-down there.
 
                     // Handle spill for array results
                     let (spill_rows, spill_cols) = raw_result.spill_dimensions();
@@ -3190,7 +3501,13 @@ pub fn clear_cell(
     // Check if cell is a spilled value
     {
         let spill_hosts = state.spill_hosts.lock().unwrap();
-        check_spill_protection(&spill_hosts, active_sheet, row, col, row, col)?;
+        // Single cell: see the note in `update_cells_batch_core`. Clearing the
+        // ORIGIN is allowed (it is not a `spill_hosts` key) and the spill it
+        // owns is released by the shared cascade this command seeds.
+        check_spill_protection(
+            &spill_hosts, active_sheet, row, col, row, col,
+            SpillOriginPolicy::Refuse,
+        )?;
     }
 
     // Sheet protection (clearing a locked cell on a protected sheet).
@@ -3333,7 +3650,10 @@ pub fn clear_range(
     // Check if any cell in the range is a spill host (part of a spilled array, not the origin)
     {
         let spill_hosts = state.spill_hosts.lock().unwrap();
-        check_spill_protection(&spill_hosts, active_sheet, start_row, start_col, end_row, end_col)?;
+        check_spill_protection(
+            &spill_hosts, active_sheet, start_row, start_col, end_row, end_col,
+            SpillOriginPolicy::ReleasedByCaller,
+        )?;
     }
 
     // Sheet protection (delete-key clear over locked cells).
@@ -3369,6 +3689,20 @@ pub fn clear_range(
     let effective_end_row = end_row.min(grid.max_row);
     let effective_end_col = end_col.min(grid.max_col);
 
+    // SPILLED VALUES ARE NOT THIS LOOP'S BUSINESS (§2y). The guard above let
+    // the rectangle through because it swallows the ORIGIN, so the cells that
+    // origin owns leave with it — released from the map and erased from the
+    // grid by the shared cascade's tear-down phase. They are excluded here so
+    // they get no `record_cell_change`: restoring a spilled LITERAL is not
+    // undoing the delete, it is blocking the re-spill that undoing the delete
+    // performs (see `spilled_cells_owned_within` for the full argument).
+    //
+    // Empty in every workbook with no dynamic array, at the cost of one lock
+    // and one `is_empty()`.
+    let owned_spill = spilled_cells_owned_within(
+        &state, active_sheet, start_row, start_col, effective_end_row, effective_end_col,
+    );
+
     // Collect cells to clear (we need to collect first to avoid borrow issues)
     let cells_to_clear: Vec<(u32, u32)> = grid
         .cells
@@ -3376,6 +3710,7 @@ pub fn clear_range(
         .filter(|(r, c)| {
             *r >= start_row && *r <= effective_end_row && *c >= start_col && *c <= effective_end_col
         })
+        .filter(|coord| !owned_spill.contains(coord))
         .cloned()
         .collect();
 
@@ -3514,7 +3849,10 @@ pub(crate) fn clear_range_with_options_off_sheet(
     if !matches!(apply_to, ClearApplyTo::Formats) {
         {
             let spill_hosts = state.spill_hosts.lock().unwrap();
-            check_spill_protection(&spill_hosts, target, min_row, min_col, max_row, max_col)?;
+            check_spill_protection(
+                &spill_hosts, target, min_row, min_col, max_row, max_col,
+                SpillOriginPolicy::ReleasedByCaller,
+            )?;
         }
         check_region_range_protection(state, target, min_row, min_col, max_row, max_col)?;
         crate::calp_commands::ensure_range_unclaimed_on_sheets(
@@ -3541,12 +3879,31 @@ pub(crate) fn clear_range_with_options_off_sheet(
         let effective_end_row = max_row.min(grid.max_row);
         let effective_end_col = max_col.min(grid.max_col);
 
+        // SPILL TEAR-DOWN, off-sheet half (§2y). The active twin gets this from
+        // `recalc_after_active_sheet_bulk_rewrite`; this path recalculates
+        // through `recalc_after_off_sheet_write`, which is whole-sheet and NOT
+        // spill-aware, so the release happens here, in the same critical
+        // section as the clear. The released cells are erased below and never
+        // recorded for undo, exactly as on the active sheet.
+        let released_spill = if matches!(apply_to, ClearApplyTo::Formats) {
+            Vec::new()
+        } else {
+            take_spills_owned_within(
+                state, target, min_row, min_col, effective_end_row, effective_end_col,
+            )
+        };
+        let released_set: crate::CoordSet = released_spill.iter().copied().collect();
+        for &(r, c) in &released_spill {
+            grid.cells.remove(&(r, c));
+        }
+
         let mut cells_in_range: Vec<(u32, u32)> = grid
             .cells
             .keys()
             .filter(|(r, c)| {
                 *r >= min_row && *r <= effective_end_row && *c >= min_col && *c <= effective_end_col
             })
+            .filter(|coord| !released_set.contains(coord))
             .cloned()
             .collect();
 
@@ -3724,7 +4081,10 @@ pub fn clear_range_with_options(
         let max_row = params.start_row.max(params.end_row);
         let min_col = params.start_col.min(params.end_col);
         let max_col = params.start_col.max(params.end_col);
-        check_spill_protection(&spill_hosts, active_sheet, min_row, min_col, max_row, max_col)?;
+        check_spill_protection(
+            &spill_hosts, active_sheet, min_row, min_col, max_row, max_col,
+            SpillOriginPolicy::ReleasedByCaller,
+        )?;
         // Object-output protection: content clears cannot touch a pivot/report
         // region (format-only clears stay allowed, matching Excel).
         check_region_range_protection(&state, active_sheet, min_row, min_col, max_row, max_col)?;
@@ -3777,6 +4137,18 @@ pub fn clear_range_with_options(
     let effective_end_row = max_row.min(grid.max_row);
     let effective_end_col = max_col.min(grid.max_col);
 
+    // Spilled values whose ORIGIN this rectangle swallows: excluded from the
+    // loop for the same reason as in `clear_range` (§2y) — the cascade releases
+    // them, and recording them for undo would block the re-spill. A FORMATS
+    // clear removes no origin, so it keeps restyling them.
+    let owned_spill = if matches!(apply_to, ClearApplyTo::Formats) {
+        crate::CoordSet::default()
+    } else {
+        spilled_cells_owned_within(
+            &state, active_sheet, min_row, min_col, effective_end_row, effective_end_col,
+        )
+    };
+
     // Collect cells in the range (both existing and potential)
     let mut cells_in_range: Vec<(u32, u32)> = grid
         .cells
@@ -3784,6 +4156,7 @@ pub fn clear_range_with_options(
         .filter(|(r, c)| {
             *r >= min_row && *r <= effective_end_row && *c >= min_col && *c <= effective_end_col
         })
+        .filter(|coord| !owned_spill.contains(coord))
         .cloned()
         .collect();
 
@@ -4146,14 +4519,15 @@ pub(crate) fn sort_range_off_sheet(
         params.start_row.min(params.end_row), params.start_col.min(params.end_col),
         params.start_row.max(params.end_row), params.start_col.max(params.end_col),
     )?;
-    {
-        let spill_hosts = state.spill_hosts.lock().unwrap();
-        check_spill_protection(
-            &spill_hosts, target,
-            params.start_row, params.start_col,
-            params.end_row, params.end_col,
-        )?;
-    }
+    // A sort PERMUTES the block, so it refuses any rectangle holding part of an
+    // array — cells or origin — rather than trying to carry one. That matters
+    // more here than on the active sheet: this path recalculates through
+    // `recalc_after_off_sheet_write`, which is whole-sheet and not spill-aware.
+    check_no_array_within(
+        state, target,
+        params.start_row.min(params.end_row), params.start_col.min(params.end_col),
+        params.start_row.max(params.end_row), params.start_col.max(params.end_col),
+    )?;
     crate::calp_commands::ensure_range_unclaimed_on_sheets(
         state, "sort this range", &[target],
         params.start_row, params.start_col, params.end_row, params.end_col,
@@ -4443,14 +4817,14 @@ pub fn sort_range(
         )?;
     }
 
-    // Check if any cell in the sort range is a spilled value
+    // A permutation cannot carry an array: refuse a range holding any part of
+    // one, cells or origin. See the off-sheet twin.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
-        let spill_hosts = state.spill_hosts.lock().unwrap();
-        check_spill_protection(
-            &spill_hosts, active_sheet,
-            params.start_row, params.start_col,
-            params.end_row, params.end_col,
+        check_no_array_within(
+            &state, active_sheet,
+            params.start_row.min(params.end_row), params.start_col.min(params.end_col),
+            params.start_row.max(params.end_row), params.start_col.max(params.end_col),
         )?;
     }
 
@@ -5775,6 +6149,58 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
+    // ---- SPILL TEAR-DOWN, THE CHOKE POINT (§2y) --------------------------
+    //
+    // A spill lives only as long as the FORMULA that produced it. Every path
+    // that removes or overwrites a spill ORIGIN used to have to remember to
+    // tear the map down itself, and only `update_cell` ever did — so the Delete
+    // key (`clear_range`), Clear Contents, a sort that moved the origin, an
+    // undo that cleared it and the redo that cleared it again all left
+    // `spill_ranges` claiming cells no formula produces. Those cells then
+    // refused every edit AND every delete, naming a source cell that was
+    // already empty, and saved as orphan literals (§2y).
+    //
+    // Rather than another list of commands to remember, the removal happens
+    // HERE, where every one of them already ends up: a seed that no longer
+    // holds a formula cannot own a spill, so whatever it owned is released and
+    // erased. Seeds that DO hold a formula are handled downstream by
+    // `reevaluate_formula_cell`, which tears the old range down and re-spills
+    // the new one — the two halves together cover "the origin went away" and
+    // "the origin changed", which is the whole of the maintenance problem.
+    //
+    // It runs BEFORE the manual-calculation return, deliberately. Manual mode
+    // means the user accepted STALE VALUES; it never meant a map that claims
+    // cells for a formula that is gone, which is corruption rather than
+    // staleness and cannot be resolved by pressing F9.
+    //
+    // COST on the Delete key, which is the hottest path in the suite: one
+    // `spill_ranges` lock and one `is_empty()` when the workbook has no dynamic
+    // array (`take_spills_owned_by_any` returns before it looks at anything
+    // else). The seed set is only projected into a `CoordSet` once that check
+    // has already found something to release — so a 10,000-cell remove-
+    // duplicates seed list is never hashed for nothing.
+    {
+        let has_spills = !state.spill_ranges.lock().unwrap().is_empty();
+        if has_spills {
+            let vacated: crate::CoordSet = seeds
+                .iter()
+                .copied()
+                .filter(|&(r, c)| {
+                    grid.get_cell(r, c)
+                        .is_none_or(|cell| cell.formula_string().is_none())
+                })
+                .collect();
+            let released = take_spills_owned_by_any(state, active_sheet, &vacated);
+            erase_released_spill_cells(
+                &mut grid,
+                &mut grids,
+                active_sheet,
+                &released,
+                updated_cells,
+            );
+        }
+    }
+
     // Manual calculation mode: the user asked for stale values until F9.
     if *calc_mode != "automatic" {
         return;
@@ -6043,6 +6469,21 @@ pub fn update_cell_on_sheets(
         col,
     )?;
 
+    // SPILL PROTECTION, off-sheet half (§2y). The active twin
+    // (`update_cell_impl`) has always refused to overwrite a spilled value; this
+    // command reached the same cells with no check at all, so a script's
+    // `range("Sheet2!A2").setValue(...)` could scribble over an array Sheet2
+    // owns. Refused for the whole group, like protection and writeback above.
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        for &sheet_idx in &sheet_indices {
+            check_spill_protection(
+                &spill_hosts, sheet_idx, row, col, row, col,
+                SpillOriginPolicy::Refuse,
+            )?;
+        }
+    }
+
     // Every AppState lock is scoped to this block: `recalc_after_off_sheet_write`
     // below takes its own locks and would deadlock against these.
     // Every gate above has passed; the group write below commits. This command
@@ -6057,6 +6498,22 @@ pub fn update_cell_on_sheets(
         let active_sheet = *state.active_sheet.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
+
+        // SPILL TEAR-DOWN, off-sheet single-cell half (§2y). Whether the cell
+        // is cleared or overwritten, a spill it USED to own dies with the
+        // formula. `recalc_after_off_sheet_write` is whole-sheet and not
+        // spill-aware, so — as in `clear_range_with_options_off_sheet` — the
+        // release happens in the same critical section as the write, and the
+        // erased cells get no undo entry (the origin's entry plus a re-spill is
+        // what undo restores; see `spilled_cells_owned_within`).
+        for &sheet_idx in &sheet_indices {
+            if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+                continue;
+            }
+            for (r, c) in take_spills_owned_within(&state, sheet_idx, row, col, row, col) {
+                grids[sheet_idx].cells.remove(&(r, c));
+            }
+        }
 
         // Handle empty value - clear the cell on each target sheet. A clear
         // changes dependents exactly like a write, so it falls through to the
@@ -6203,6 +6660,22 @@ pub fn clear_range_on_sheets(
         &state, "clear this range", &sheet_indices, start_row, start_col, end_row, end_col,
     )?;
 
+    // SPILL PROTECTION, group half (§2y). The paired `clear_range` has always
+    // refused a rectangle that cuts an array in two; this one had no check at
+    // all, so a group Delete over a background sheet's spilled block erased
+    // values whose formula still claimed them. `ReleasedByCaller`, like the
+    // single-sheet clears: a rectangle that swallows the ORIGIN takes the whole
+    // spill with it, released below.
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        for &sheet_idx in &sheet_indices {
+            check_spill_protection(
+                &spill_hosts, sheet_idx, start_row, start_col, end_row, end_col,
+                SpillOriginPolicy::ReleasedByCaller,
+            )?;
+        }
+    }
+
     // Past every per-sheet protection + writeback-claim refusal above. This writes
     // USER CONTENT to non-active sheets, which the paired `clear_range` never covered.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -6221,19 +6694,43 @@ pub fn clear_range_on_sheets(
         let effective_end_row = end_row.min(grid.max_row);
         let effective_end_col = end_col.min(grid.max_col);
 
+        // SPILL TEAR-DOWN (§2y), in the same critical section as the clear —
+        // `recalc_after_off_sheet_write` is whole-sheet and not spill-aware, so
+        // there is no later phase to do it in. Released cells are erased and
+        // never recorded for undo (see `spilled_cells_owned_within`).
+        let released_spill = take_spills_owned_within(
+            &state, sheet_idx, start_row, start_col, effective_end_row, effective_end_col,
+        );
+        let released_set: crate::CoordSet = released_spill.iter().copied().collect();
+
         let cells_to_clear: Vec<(u32, u32)> = grid
             .cells
             .keys()
             .filter(|(r, c)| {
                 *r >= start_row && *r <= effective_end_row && *c >= start_col && *c <= effective_end_col
             })
+            .filter(|coord| !released_set.contains(coord))
             .cloned()
             .collect();
 
-        if cells_to_clear.is_empty() {
+        if cells_to_clear.is_empty() && released_spill.is_empty() {
             continue;
         }
         cleared_sheets.push(sheet_idx);
+
+        {
+            let grid = &mut grids[sheet_idx];
+            for (r, c) in &released_spill {
+                grid.cells.remove(&(*r, *c));
+            }
+        }
+
+        if cells_to_clear.is_empty() {
+            // Only derived spill cells went; nothing to record. Opening a
+            // transaction here would leave an empty step on the stack, so the
+            // next Ctrl+Z would appear to do nothing.
+            continue;
+        }
 
         undo_stack.begin_transaction(format!(
             "Clear range on sheet {}",
@@ -6341,6 +6838,26 @@ pub fn fill_range(
         target_end_row,
         target_end_col,
     )?;
+
+    // SPILL PROTECTION over the FILL TARGET (§2y). `fill_range` had NONE — the
+    // one range-rewriting command in this file that could scribble straight
+    // over a dynamic array. Ctrl+D across a spilled block overwrote cells the
+    // array still claimed, and the map went on claiming them, so the next
+    // recalculation of the origin put the array's values back and the fill was
+    // gone with no error. Refused whole, like `sort_range`: a fill REPLACES the
+    // target cell by cell, so an origin inside it would be overwritten one
+    // moment and re-spilled by the same pass the next.
+    {
+        let active = *state.active_sheet.read().unwrap();
+        check_no_array_within(
+            &state,
+            active,
+            target_start_row.min(target_end_row),
+            target_start_col.min(target_end_col),
+            target_start_row.max(target_end_row),
+            target_start_col.max(target_end_col),
+        )?;
+    }
 
     // Every gate above has passed; the fill below commits.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -7052,6 +7569,14 @@ mod d3_cascade_seed_tests;
 #[cfg(test)]
 #[path = "d2_named_range_tests.rs"]
 mod d2_named_range_tests;
+
+/// §2y — the spill map has ONE maintainer, and every path that removes or
+/// overwrites a spill ORIGIN reaches it. A CHILD module of `data` for the same
+/// reason as above: it drives `check_spill_protection`, the shared tear-down
+/// and `recalc_after_active_sheet_bulk_rewrite`, all private here.
+#[cfg(test)]
+#[path = "spill_map_tests.rs"]
+mod spill_map_tests;
 
 /// D8 / §2s — a structural edit must recalculate, because a formula whose value
 /// depends on the SHAPE or POSITION of its reference (or of its own cell) goes

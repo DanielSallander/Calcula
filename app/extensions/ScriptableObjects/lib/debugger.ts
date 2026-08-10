@@ -100,13 +100,101 @@ interface PersistedDebugState {
   breakpoints: Record<string, number[]>;
 }
 
-const breakpoints = new Map<string, Breakpoint[]>();
 let loadPromise: Promise<void> | null = null;
 let loaded = false;
 
-function toLines(bps: Breakpoint[]): number[] {
+function toLines(bps: readonly Breakpoint[]): number[] {
   return bps.filter((bp) => bp.enabled).map((bp) => bp.line);
 }
+
+/**
+ * THE BREAKPOINT SET IS NOT REACHABLE WITHOUT THE WRITE-THROUGH.
+ *
+ * This used to be a module-level `Map` plus a `persistBreakpoints()` that every
+ * mutator had to remember - the same store-plus-remembered-persist shape that
+ * silently dropped grid reports at save (`report.rs`) and that `animationStore`
+ * was collapsed out of. `commit()` did the whole job; `clearAllBreakpoints()`
+ * went round it and did four fifths of the job, which is the failure this shape
+ * produces every time: it cleared the map, announced and persisted, and did NOT
+ * tell a RUNNING debug session. So "Clear All Breakpoints" during a live debug
+ * left the runtime still stopping at every breakpoint the gutter had just
+ * stopped drawing.
+ *
+ * The map now lives in a `#private` field with three doors, and `#byScript` is
+ * inaccessible outside the class body - not by convention, by the language:
+ *   * `mutate()`  - changes the set for one script AND announces AND persists
+ *                   AND retargets a live session. It does all of it or none.
+ *   * `adopt()`   - installs a set that CAME FROM the workbook (the load path).
+ *                   Deliberately does not persist; the name says so.
+ *   * `forget()`  - drops everything because the DOCUMENT was replaced. Also
+ *                   does not persist: the document being loaded owns the
+ *                   answer, and an empty write would erase it.
+ */
+class BreakpointStore {
+  #byScript = new Map<string, Breakpoint[]>();
+
+  /** The breakpoints for one script. Read-only by type. */
+  for(scriptId: string): readonly Breakpoint[] {
+    return this.#byScript.get(scriptId) ?? [];
+  }
+
+  /** Every script id that currently has breakpoints. */
+  get scriptIds(): string[] {
+    return [...this.#byScript.keys()];
+  }
+
+  /** scriptId -> enabled lines, for the persist payload. */
+  linesByScript(): Record<string, number[]> {
+    const out: Record<string, number[]> = {};
+    for (const [scriptId, bps] of this.#byScript) {
+      const lines = toLines(bps);
+      if (lines.length > 0) out[scriptId] = lines;
+    }
+    return out;
+  }
+
+  /**
+   * Set one script's breakpoints and carry the change everywhere it has to go,
+   * as one step. Returns the list that was installed.
+   */
+  mutate(scriptId: string, bps: Breakpoint[]): Breakpoint[] {
+    if (bps.length === 0) this.#byScript.delete(scriptId);
+    else this.#byScript.set(scriptId, bps);
+    emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: bps });
+    persistBreakpoints();
+    // A live session takes new breakpoints immediately - no remount, no restart.
+    if (getDebugSession(scriptId)) {
+      void sendBreakpoints(scriptId, toLines(bps));
+    }
+    return bps;
+  }
+
+  /**
+   * Install a set that came OUT of the workbook. Announces, does not persist:
+   * persisting here would write back the value just read, with whatever the
+   * parser had to discard silently folded in.
+   */
+  adopt(entries: Iterable<[string, Breakpoint[]]>): void {
+    for (const [scriptId, bps] of entries) this.#byScript.set(scriptId, bps);
+    for (const [scriptId, bps] of this.#byScript) {
+      emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: bps });
+    }
+  }
+
+  /**
+   * Drop everything because the DOCUMENT was replaced (File > New / File >
+   * Open). Announces so every gutter clears; does not persist.
+   */
+  forget(): void {
+    const ids = this.scriptIds;
+    this.#byScript.clear();
+    for (const scriptId of ids) {
+      emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: [] });
+    }
+  }
+}
+
+const store = new BreakpointStore();
 
 /**
  * Load the workbook's persisted breakpoints. Idempotent; safe to call from
@@ -115,6 +203,10 @@ function toLines(bps: Breakpoint[]): number[] {
 export function loadPersistedBreakpoints(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
+    // Collected before the store is touched, so a backend that throws halfway
+    // through leaves the previous (already-announced) set alone rather than
+    // installing half of a workbook's breakpoints.
+    let pending: Array<[string, Breakpoint[]]> = [];
     try {
       const data = await getExtensionData<PersistedDebugState>(DEBUG_EXTENSION_DATA_ID);
       if (data && data.breakpoints && typeof data.breakpoints === "object") {
@@ -124,10 +216,7 @@ export function loadPersistedBreakpoints(): Promise<void> {
             (a, b) => a - b,
           );
           if (clean.length === 0) continue;
-          breakpoints.set(
-            scriptId,
-            clean.map((line) => ({ scriptId, line, enabled: true })),
-          );
+          pending.push([scriptId, clean.map((line) => ({ scriptId, line, enabled: true }))]);
         }
       }
     } catch {
@@ -135,9 +224,7 @@ export function loadPersistedBreakpoints(): Promise<void> {
       // that refuses to answer must not stop the editor from opening.
     } finally {
       loaded = true;
-      for (const [scriptId, bps] of breakpoints) {
-        emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: bps });
-      }
+      store.adopt(pending);
     }
   })();
   return loadPromise;
@@ -156,13 +243,9 @@ export function breakpointsLoaded(): boolean {
  * breakpoints hanging in a gutter they no longer belong to.
  */
 export function reloadPersistedBreakpoints(): Promise<void> {
-  const ids = [...breakpoints.keys()];
-  breakpoints.clear();
+  store.forget();
   loadPromise = null;
   loaded = false;
-  for (const scriptId of ids) {
-    emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: [] });
-  }
   return loadPersistedBreakpoints();
 }
 
@@ -174,11 +257,7 @@ function persistBreakpoints(): void {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    const payload: PersistedDebugState = { breakpoints: {} };
-    for (const [scriptId, bps] of breakpoints) {
-      const lines = toLines(bps);
-      if (lines.length > 0) payload.breakpoints[scriptId] = lines;
-    }
+    const payload: PersistedDebugState = { breakpoints: store.linesByScript() };
     void setExtensionData(DEBUG_EXTENSION_DATA_ID, payload).catch(() => {
       /* best effort — a breakpoint that fails to persist still works this session */
     });
@@ -187,7 +266,7 @@ function persistBreakpoints(): void {
 
 /** Get all breakpoints for a script. */
 export function getBreakpoints(scriptId: string): Breakpoint[] {
-  return breakpoints.get(scriptId) ?? [];
+  return [...store.for(scriptId)];
 }
 
 /** Enabled breakpoint lines for a script. */
@@ -195,41 +274,34 @@ export function getBreakpointLines(scriptId: string): number[] {
   return toLines(getBreakpoints(scriptId));
 }
 
-function commit(scriptId: string, bps: Breakpoint[]): Breakpoint[] {
-  if (bps.length === 0) breakpoints.delete(scriptId);
-  else breakpoints.set(scriptId, bps);
-  emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: bps });
-  persistBreakpoints();
-  // A live session takes new breakpoints immediately — no remount, no restart.
-  if (getDebugSession(scriptId)) {
-    void sendBreakpoints(scriptId, toLines(bps));
-  }
-  return bps;
-}
-
 /** Toggle a breakpoint on a line. Returns the updated breakpoints. */
 export function toggleBreakpoint(scriptId: string, line: number): Breakpoint[] {
-  const bps = breakpoints.get(scriptId) ?? [];
+  const bps = store.for(scriptId);
   const existing = bps.find((bp) => bp.line === line);
   const next = existing
     ? bps.filter((bp) => bp.line !== line)
     : [...bps, { scriptId, line, enabled: true }].sort((a, b) => a.line - b.line);
-  return commit(scriptId, next);
+  return store.mutate(scriptId, next);
 }
 
 /** Clear all breakpoints for a script. */
 export function clearBreakpoints(scriptId: string): void {
-  commit(scriptId, []);
+  store.mutate(scriptId, []);
 }
 
-/** Clear every breakpoint in the workbook. */
+/**
+ * Clear every breakpoint in the workbook.
+ *
+ * One `mutate` per script rather than a bulk clear, and that is a FIX rather
+ * than a tidy-up: the hand-rolled version cleared the map, announced and
+ * persisted but never told a RUNNING debug session, so "Clear All" during a
+ * live debug left the runtime stopping at every breakpoint the gutter had just
+ * stopped drawing. The persist is debounced, so N calls still make one write.
+ */
 export function clearAllBreakpoints(): void {
-  const ids = [...breakpoints.keys()];
-  breakpoints.clear();
-  for (const scriptId of ids) {
-    emitAppEvent(DebugEvents.BREAKPOINTS_CHANGED, { scriptId, breakpoints: [] });
+  for (const scriptId of store.scriptIds) {
+    store.mutate(scriptId, []);
   }
-  persistBreakpoints();
 }
 
 /**
@@ -240,8 +312,8 @@ export function clearAllBreakpoints(): void {
  * statement the moment the author inserts a line above it.
  */
 export function shiftBreakpoints(scriptId: string, fromLine: number, delta: number): Breakpoint[] {
-  const bps = breakpoints.get(scriptId);
-  if (!bps || bps.length === 0 || delta === 0) return bps ?? [];
+  const bps = store.for(scriptId);
+  if (bps.length === 0 || delta === 0) return [...bps];
   const moved: Breakpoint[] = [];
   for (const bp of bps) {
     if (bp.line < fromLine) {
@@ -255,7 +327,7 @@ export function shiftBreakpoints(scriptId: string, fromLine: number, delta: numb
   const deduped = [...new Map(moved.map((bp) => [bp.line, bp])).values()].sort(
     (a, b) => a.line - b.line,
   );
-  return commit(scriptId, deduped);
+  return store.mutate(scriptId, deduped);
 }
 
 // ============================================================================

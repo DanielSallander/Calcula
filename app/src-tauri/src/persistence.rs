@@ -1275,31 +1275,98 @@ pub(crate) fn slicer_computed_props_from_saved(
         .collect()
 }
 
+/// Point every saved BI pivot at the connection that now serves its data
+/// source. `restore_pivot_definitions` restores each pivot's `connection_id` as
+/// `ConnectionId::ZERO` — the connection ids of the session that saved the file
+/// mean nothing in this one — so the stable `data_source_id` is the only thing
+/// that can re-bind them.
+///
+/// ONE function because the open path re-binds TWICE, from two disjoint id
+/// spaces that share this field: `restore_local_bi_connections` keys its map by
+/// the SAVED CONNECTION UUID of a locally-authored connection, and
+/// `restore_package_bi_connections` keys its map by the PACKAGE DATA SOURCE ID.
+/// Both are additive — a pivot is re-bound only when the map names its data
+/// source — so running it twice cannot unbind what the other pass bound.
+fn rebind_bi_pivots_to_connections(
+    pivot_state: &State<crate::pivot::types::PivotState>,
+    id_map: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
+) {
+    if id_map.is_empty() {
+        return;
+    }
+    // LOAD PATH: remapping connection ids on the just-loaded metadata.
+    let load_meta = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(&load_meta) {
+        for meta in bi_meta.values_mut() {
+            if let Some(conn_id) = meta.data_source_id.as_deref().and_then(|ds| id_map.get(ds)) {
+                meta.connection_id = *conn_id;
+            }
+        }
+    }
+}
+
 /// Restore slicers from SavedSlicer format into SlicerState.
-fn restore_slicers(
+///
+/// Restores the computed properties AND the reverse dependency index that
+/// drives their re-evaluation. `slicer::computed::install_restored_computed_properties`
+/// owns both halves precisely so a future edit cannot restore one without the
+/// other: before it existed, this function put `computed_properties` back and
+/// left `computed_prop_dependencies` / `computed_prop_dependents` empty, so a
+/// reopened workbook's slicer properties were restored, visible in the dialog,
+/// and permanently dead — `re_evaluate_slicer_computed_properties` reads the
+/// reverse index and nothing else. Its AppState sibling
+/// (`computed_properties::restore_computed_properties`) rebuilt its index on
+/// this same load path all along.
+///
+/// LOCK ORDER: grids (read) before the slicer stores, matching
+/// `add_slicer_computed_property` and `restore_computed_properties`.
+/// Takes the states by plain reference, not `State<T>`: a `tauri::State` cannot
+/// be built outside a running app, and the defect this function carried — the
+/// index that was never rebuilt — is only provable by a test that runs the real
+/// restore. Call sites pass `&slicer_state` / `&state` and deref-coerce.
+pub(crate) fn restore_slicers(
     saved_slicers: &[persistence::SavedSlicer],
-    slicer_state: &State<crate::slicer::SlicerState>,
+    slicer_state: &crate::slicer::SlicerState,
     workbook: &persistence::Workbook,
+    state: &AppState,
 ) {
     // LOAD PATH: rebuilding the slicer stores from the file just read.
     let load = crate::document_effect::DocumentEffect::deliberately_clean(
         crate::document_effect::CleanReason::LoadingFromDisk,
     );
+    // A poisoned grid lock must not cost the user their slicers: the properties
+    // still restore, only their index stays empty (there is nothing to resolve
+    // references against).
+    let grids_guard = state.grids.read().ok();
+    let grids: &[engine::Grid] = grids_guard.as_deref().map(|g| &g[..]).unwrap_or(&[]);
     let mut slicers = slicer_state.slicers.write(&load).unwrap();
     let mut computed_props = slicer_state.computed_properties.write(&load).unwrap();
+    let mut deps = slicer_state.computed_prop_dependencies.lock().unwrap();
+    let mut rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
 
     slicers.clear();
     computed_props.clear();
+    deps.clear();
+    rev_deps.clear();
 
     for saved in saved_slicers {
         let slicer = saved_to_slicer(saved, workbook);
         let slicer_id = slicer.id;
+        let sheet_index = slicer.sheet_index;
         slicers.insert(slicer.id, slicer);
 
-        // Restore computed properties
-        if !saved.computed_properties.is_empty() {
-            computed_props.insert(slicer_id, slicer_computed_props_from_saved(saved));
-        }
+        // Restore computed properties AND their reverse index together.
+        crate::slicer::computed::install_restored_computed_properties(
+            slicer_id,
+            slicer_computed_props_from_saved(saved),
+            sheet_index,
+            grids,
+            &mut computed_props,
+            &mut deps,
+            &mut rev_deps,
+        );
     }
 }
 
@@ -2727,7 +2794,7 @@ pub fn open_file(
     }
 
     // Restore slicers from workbook
-    restore_slicers(&workbook.slicers, &slicer_state, &workbook);
+    restore_slicers(&workbook.slicers, &slicer_state, &workbook, &state);
 
     // Restore ribbon filters from workbook
     restore_ribbon_filters(&workbook.ribbon_filters, &ribbon_filter_state);
@@ -2750,23 +2817,7 @@ pub fn open_file(
             &workbook.bi_connections,
             &workbook.bi_connection_caches,
         );
-        if !id_map.is_empty() {
-            // LOAD PATH: remapping connection ids on the just-loaded metadata.
-            let load_meta = crate::document_effect::DocumentEffect::deliberately_clean(
-                crate::document_effect::CleanReason::LoadingFromDisk,
-            );
-            if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(&load_meta) {
-                for meta in bi_meta.values_mut() {
-                    if let Some(conn_id) = meta
-                        .data_source_id
-                        .as_deref()
-                        .and_then(|ds| id_map.get(ds))
-                    {
-                        meta.connection_id = *conn_id;
-                    }
-                }
-            }
-        }
+        rebind_bi_pivots_to_connections(&pivot_state, &id_map);
     }
 
     // Stage saved "view as" RLS roles so they re-attach when the BI connection
@@ -3061,6 +3112,33 @@ pub fn open_file(
     // Subscriptions, override layer, audit log and writeback drafts. Absent OR
     // unparseable both reset to empty — see the function for why.
     restore_distribution_user_files(&state, &mut workbook)?;
+
+    // Re-materialize the BI connections that a `.calp` pull created, and point
+    // this workbook's package BI pivots back at them.
+    //
+    // A package connection is NOT in the `.cala` (`capture_local_bi_connections`
+    // skips it — the model belongs to the publisher and travels in the package),
+    // and until this call nothing ever put one back: a saved subscriber workbook
+    // reopened with zero connections, `calp_refresh_data` could only UPDATE a
+    // connection that already existed, and the report had no path back to a live
+    // model at all. `restore_package_bi_connections` rebuilds each one from the
+    // subscription ledger plus the local package cache, through the same
+    // signature + pin + artifact-checksum gates a pull runs, under
+    // `PinPolicy::RequirePinned` — see its doc comment for what happens when the
+    // package is missing, when verification fails, and when offline.
+    //
+    // MUST FOLLOW `restore_distribution_user_files` (it reads the subscription
+    // ledger that call restores) and `load_pending_roles` (so a restored package
+    // connection picks up its saved "view as" role, as the pull path does).
+    {
+        let ds_to_conn = crate::calp_commands::restore_package_bi_connections(
+            &state,
+            &bi_state,
+            &ribbon_filter_state,
+            &slicer_state,
+        );
+        rebind_bi_pivots_to_connections(&pivot_state, &ds_to_conn);
+    }
 
     // Restore the scheduled-job registry. Deliberately placed AFTER the audit
     // log restore above: the drops this records must land in the log the user
@@ -3704,6 +3782,11 @@ pub(crate) fn reset_document_scoped_stores(
     // Reported verbatim to the user by `calp_get_writeback_rebuild_skips`, so a
     // leftover entry blames the open document for another one's bad manifest.
     state.writeback_rebuild_skips.lock().map_err(|e| e.to_string())?.clear();
+    // ...and the same for why a subscribed package's BI connections could not be
+    // re-materialized (`calp_get_package_connection_skips`). Same reasoning: the
+    // previous document's unverifiable package must not be reported against this
+    // one. `open_file` refills it from the workbook being opened.
+    state.package_connection_restore_skips.lock().map_err(|e| e.to_string())?.clear();
 
     // ---- The GATHER pre-fetch map ------------------------------------------
     // Keyed by writeback region id, and `build_gather_data` serves whatever is

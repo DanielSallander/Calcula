@@ -1789,8 +1789,17 @@ fn sanitize_distributed_slicers(
 ///
 /// Returns (id, name) for each slicer ACTUALLY inserted, so callers record
 /// provenance-ledger entries only for what landed.
+///
+/// Computed properties go in through the SAME installer `.cala` load uses
+/// (`slicer::computed::install_restored_computed_properties`), which restores
+/// the properties and the reverse dependency index they are re-evaluated
+/// through as one act. In practice the sanitizer above leaves nothing to
+/// install; routing through the shared installer anyway means this path cannot
+/// become the second copy of the "restored, listed in the dialog, and dead"
+/// defect if that ever changes.
 fn materialize_pulled_slicers(
     effect: &crate::document_effect::DocumentEffect,
+    state: &AppState,
     slicer_state: &crate::slicer::SlicerState,
     pulled: &[persistence::SavedSlicer],
     resolve: impl Fn(SheetId) -> Option<usize>,
@@ -1798,10 +1807,20 @@ fn materialize_pulled_slicers(
     if pulled.is_empty() {
         return Ok(Vec::new());
     }
+    // LOCK ORDER: grids before the slicer stores (see `restore_slicers`).
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let mut slicers = slicer_state.slicers.write(&effect).map_err(|e| e.to_string())?;
     let mut computed_props = slicer_state
         .computed_properties
         .write(effect)
+        .map_err(|e| e.to_string())?;
+    let mut deps = slicer_state
+        .computed_prop_dependencies
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut rev_deps = slicer_state
+        .computed_prop_dependents
+        .lock()
         .map_err(|e| e.to_string())?;
     let mut applied: Vec<(String, String)> = Vec::new();
     for saved in pulled {
@@ -1812,13 +1831,17 @@ fn materialize_pulled_slicers(
             continue; // subscriber already has this slicer (id collision)
         }
         let slicer = crate::persistence::saved_slicer_to_slicer_at(saved, sheet_index);
+        let slicer_id = slicer.id;
         applied.push((slicer.id.to_string(), slicer.name.clone()));
-        if !saved.computed_properties.is_empty() {
-            computed_props.insert(
-                slicer.id,
-                crate::persistence::slicer_computed_props_from_saved(saved),
-            );
-        }
+        crate::slicer::computed::install_restored_computed_properties(
+            slicer_id,
+            crate::persistence::slicer_computed_props_from_saved(saved),
+            sheet_index,
+            &grids,
+            &mut computed_props,
+            &mut deps,
+            &mut rev_deps,
+        );
         slicers.insert(slicer.id, slicer);
     }
     Ok(applied)
@@ -2694,6 +2717,7 @@ pub fn calp_pull(
     // computed-property formulas never materialize.
     let applied_slicers = materialize_pulled_slicers(
         &effect,
+        &state,
         &slicer_state,
         &sanitize_distributed_slicers(&result.slicers),
         |sid| pkg_to_index.get(&sid).copied(),
@@ -3677,6 +3701,20 @@ fn apply_override_value_to_grid(
             write_override_value(&mut grid, position.0, position.1, value);
         }
     }
+
+    // SPILL CLAIMS ON THE WRITTEN SHEET (§2y). An override lands a VALUE on a
+    // cell chosen by id, which can be the ORIGIN of a dynamic array — and the
+    // three commands that call this recalculate through the whole-sheet
+    // `recalculate_sheet_values`, which is not spill-aware, so nothing else
+    // would ever notice the formula had gone. The claim is dropped; the cells
+    // are left, because the override layer is authoritative about content (see
+    // `release_spills_orphaned_by_grid`).
+    if let Ok(grids) = state.grids.read() {
+        if let Some(grid) = grids.get(sheet_index) {
+            crate::commands::data::release_spills_orphaned_by_grid(state, sheet_index, grid);
+        }
+    }
+
     true
 }
 
@@ -4841,7 +4879,8 @@ pub fn calp_refresh_apply(
             // Same sanitization as first pull: distributed computed-property
             // formulas never materialize.
             let applied = materialize_pulled_slicers(
-        &effect,
+                &effect,
+                &state,
                 &slicer_state,
                 &sanitize_distributed_slicers(&payload.pull_result.slicers),
                 |sid| cfdv_pkg_to_index.get(&sid).copied(),
@@ -5996,8 +6035,14 @@ pub struct WritebackRebuildSkip {
     pub detail: String,
 }
 
-/// Classify a manifest-load failure into a [`WritebackRebuildSkip::reason`].
-fn writeback_skip_reason(err: &calp::error::CalpError) -> &'static str {
+/// Classify a manifest-load failure into a skip `reason` string.
+///
+/// Shared by both on-open registry walks — [`WritebackRebuildSkip`] and
+/// [`PackageConnectionRestoreSkip`] — because the question ("why could this
+/// subscription's signed manifest not be loaded?") and the answer vocabulary
+/// are the same one. One classifier means the Subscriptions pane cannot report
+/// the same registry failure two different ways.
+fn calp_skip_reason(err: &calp::error::CalpError) -> &'static str {
     use calp::error::CalpError as E;
     match err {
         E::Io(_) | E::Registry(_) | E::PackageNotFound(_) | E::VersionNotFound { .. } => {
@@ -6153,13 +6198,13 @@ fn rebuild_writeback_index_inner(
                     "CALP",
                     "writeback rebuild: {} skipped ({}): {}",
                     sub.package_name,
-                    writeback_skip_reason(&e),
+                    calp_skip_reason(&e),
                     e
                 );
                 skips.push(WritebackRebuildSkip {
                     package_name: sub.package_name.clone(),
                     registry_url: registry_path.to_string(),
-                    reason: writeback_skip_reason(&e).to_string(),
+                    reason: calp_skip_reason(&e).to_string(),
                     detail: e.to_string(),
                 });
                 continue;
@@ -6209,13 +6254,13 @@ fn rebuild_writeback_index_inner(
                     "writeback rebuild: {}@{} skipped ({}): {}",
                     sub.package_name,
                     sub.resolved_version,
-                    writeback_skip_reason(&e),
+                    calp_skip_reason(&e),
                     e
                 );
                 skips.push(WritebackRebuildSkip {
                     package_name: sub.package_name.clone(),
                     registry_url: registry_path.to_string(),
-                    reason: writeback_skip_reason(&e).to_string(),
+                    reason: calp_skip_reason(&e).to_string(),
                     detail: e.to_string(),
                 });
             }
@@ -10966,7 +11011,7 @@ mod writeback_rebuild_tests {
     fn skip_reasons_classify_the_failures_the_pane_has_to_tell_apart() {
         use calp::error::CalpError as E;
         assert_eq!(
-            writeback_skip_reason(&E::PublisherNotPinned {
+            calp_skip_reason(&E::PublisherNotPinned {
                 package: "p".into(),
                 version: "1.0.0".into(),
                 scope: "s".into(),
@@ -10975,7 +11020,7 @@ mod writeback_rebuild_tests {
             "notPinned"
         );
         assert_eq!(
-            writeback_skip_reason(&E::PublisherKeyChanged {
+            calp_skip_reason(&E::PublisherKeyChanged {
                 package: "p".into(),
                 version: "1.0.0".into(),
                 pinned: "a".into(),
@@ -10984,18 +11029,18 @@ mod writeback_rebuild_tests {
             "publisherChanged"
         );
         assert_eq!(
-            writeback_skip_reason(&E::PackageNotFound("p".into())),
+            calp_skip_reason(&E::PackageNotFound("p".into())),
             "unreachable"
         );
         assert_eq!(
-            writeback_skip_reason(&E::MissingChecksums {
+            calp_skip_reason(&E::MissingChecksums {
                 package: "p".into(),
                 version: "1.0.0".into(),
             }),
             "badManifest"
         );
         assert_eq!(
-            writeback_skip_reason(&E::AppTooOld {
+            calp_skip_reason(&E::AppTooOld {
                 package: "p".into(),
                 version: "1.0.0".into(),
                 required: "2.0.0".into(),
@@ -12385,6 +12430,231 @@ fn refresh_embedded_data_sources(
     newly_created
 }
 
+/// Why one subscription's PACKAGE BI connections were NOT re-materialized when
+/// the workbook was opened.
+///
+/// Same purpose as [`WritebackRebuildSkip`]: without it, "this package has no
+/// data sources" and "this package's model could not be verified on this
+/// machine" are the same observable state — no connection — and a subscriber
+/// staring at a pivot that says it has no model cannot tell which.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageConnectionRestoreSkip {
+    pub package_name: String,
+    pub registry_url: String,
+    /// One of: `unreachable`, `notPinned`, `publisherChanged`, `badManifest`,
+    /// `appTooOld`, `unsupportedTransport`, `unknown`. The first five come from
+    /// [`calp_skip_reason`], shared with the writeback rebuild.
+    pub reason: String,
+    /// The underlying error text, for the pane's tooltip / details line.
+    pub detail: String,
+}
+
+/// Re-materialize the BI connections a `.calp` pull created, when a subscribed
+/// workbook is OPENED. Returns package-data-source-id -> live ConnectionId so
+/// the caller can re-point saved BI pivots at them.
+///
+/// ## THE HOLE THIS CLOSES
+///
+/// `capture_local_bi_connections` deliberately skips package connections when
+/// saving a `.cala`: a package's model belongs to the publisher and travels in
+/// the `.calp`, and embedding a copy in every subscriber's workbook would mean
+/// a subscriber's file could serve a model no publisher ever signed. That was
+/// right, but nothing put those connections BACK. Measured on a saved
+/// subscriber workbook: reopen -> `bi_get_connections` = 0 (the subscription
+/// ledger itself restores fine); `calp_refresh_data` -> `sourcesRefreshed: 0`
+/// and still 0 afterwards, because refresh only ever UPDATES a connection that
+/// already exists. `calp_pull` and `refresh_embedded_data_sources` (reachable
+/// only when a NEWER version exists) were the sole creators, so there was no
+/// path from a reopened subscribed workbook back to a live model at all.
+///
+/// ## THE DESIGN
+///
+/// Re-materialize from the SUBSCRIPTION LEDGER (which package, which registry,
+/// which resolved version) plus the LOCAL PACKAGE CACHE (the registry the pull
+/// read), through `calp::pull::load_verified_data_sources` — which runs the
+/// same three gates `pull` runs, in the same order, under
+/// `PinPolicy::RequirePinned`. See its doc comment for the full chain.
+///
+/// The earlier decision that a PULL is the only thing that creates a package
+/// connection was deliberate and is not weakened here: this cannot create a
+/// connection for a package that was never pulled and pinned on this machine
+/// (`RequirePinned` makes first contact a hard error), it cannot mint a pin, and
+/// it cannot advance a version — it re-materializes exactly the version the
+/// ledger says the subscriber already accepted.
+///
+/// ## WHAT HAPPENS WHEN IT CANNOT
+///
+/// * **Package missing / registry gone / version deleted / offline** — the
+///   manifest read fails, the subscription is SKIPPED, no connection is made.
+///   The workbook opens with its cells (the last pull's data is in the `.cala`)
+///   and its pivots report no connection, exactly as before this function
+///   existed. Nothing stale is presented as live.
+/// * **Signature no longer verifies / publisher key changed / an artifact was
+///   tampered with** — `load_verified_data_sources` errors and the subscription
+///   is SKIPPED. There is deliberately no fallback to the unverified bytes: a
+///   subscriber that cannot prove which model it has gets no model.
+/// * **HTTP registry** — skipped WITHOUT any network I/O. Two reasons, both
+///   decisive: `local_artifact_path` returns `None` for a non-local transport,
+///   so a package connection has never materialized from an HTTP registry even
+///   on the pull path (nothing is lost here that a pull would have given); and
+///   verifying artifacts over HTTP means downloading every artifact behind a
+///   30-second-timeout blocking read, on the open, before a cell is drawn —
+///   the precise hang `rebuild_writeback_index_deferring_http` was written to
+///   avoid.
+/// * **Dev / channel subscriptions** — skipped silently, as in every other
+///   registry walk: a dev subscription's source is a local `.cala`, not a
+///   signed registry package, so there is no manifest to verify.
+///
+/// Every non-silent skip is recorded in `state.package_connection_restore_skips`
+/// and surfaced by `calp_get_package_connection_skips`.
+///
+/// ADDITIVE, like `restore_local_bi_connections`: a data source that already has
+/// a live connection is left alone, so this can never double-materialize.
+pub(crate) fn restore_package_bi_connections(
+    state: &AppState,
+    bi_state: &BiState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
+    // CLONED, not held: the walk below is registry I/O and manifest hashing.
+    let subscriptions = match state.subscriptions.read() {
+        Ok(s) => s.subscriptions.clone(),
+        Err(_) => return std::collections::HashMap::new(),
+    };
+
+    let mut ds_to_conn: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        std::collections::HashMap::new();
+    let mut skips: Vec<PackageConnectionRestoreSkip> = Vec::new();
+
+    for sub in &subscriptions {
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+        // RAW location — see `subscription_registry_path`.
+        let registry_path = subscription_registry_path(sub);
+        if crate::calp_registry::is_http_location(registry_path) {
+            skips.push(PackageConnectionRestoreSkip {
+                package_name: sub.package_name.clone(),
+                registry_url: registry_path.to_string(),
+                reason: "unsupportedTransport".to_string(),
+                detail: "an HTTP registry exposes no local model artifact, so a package \
+                         connection cannot be materialized from it (this is true of the pull \
+                         path too)"
+                    .to_string(),
+            });
+            continue;
+        }
+        let (registry, scope) = match crate::calp_registry::open_registry_scoped(registry_path) {
+            Ok(r) => r,
+            Err(e) => {
+                crate::log_warn!(
+                    "CALP",
+                    "package connections: {} skipped ({}): {}",
+                    sub.package_name,
+                    calp_skip_reason(&e),
+                    e
+                );
+                skips.push(PackageConnectionRestoreSkip {
+                    package_name: sub.package_name.clone(),
+                    registry_url: registry_path.to_string(),
+                    reason: calp_skip_reason(&e).to_string(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        let data_sources = match calp::pull::load_verified_data_sources(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &scope,
+            &calcula_profile_dir(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::log_warn!(
+                    "CALP",
+                    "package connections: {}@{} skipped ({}): {}",
+                    sub.package_name,
+                    sub.resolved_version,
+                    calp_skip_reason(&e),
+                    e
+                );
+                skips.push(PackageConnectionRestoreSkip {
+                    package_name: sub.package_name.clone(),
+                    registry_url: registry_path.to_string(),
+                    reason: calp_skip_reason(&e).to_string(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        // Don't double-materialize: a data source that already owns a live
+        // connection (another subscription in this workbook embeds the same
+        // one, or this function ran twice) keeps it.
+        let already: std::collections::HashSet<String> = match bi_state.connections.lock() {
+            Ok(conns) => conns
+                .values()
+                .filter_map(|c| c.package_data_source_id.clone())
+                .collect(),
+            Err(_) => continue,
+        };
+        let wanted: Vec<calp::pull::PulledDataSource> = data_sources
+            .into_iter()
+            .filter(|ds| !already.contains(&ds.definition.id))
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+
+        for (ds_id, conn_id) in load_embedded_data_sources(
+            &wanted,
+            bi_state,
+            ribbon_filter_state,
+            slicer_state,
+        ) {
+            ds_to_conn.insert(ds_id, conn_id);
+        }
+    }
+
+    if let Ok(mut s) = state.package_connection_restore_skips.lock() {
+        *s = skips;
+    }
+
+    if !ds_to_conn.is_empty() {
+        crate::log_info!(
+            "CALP",
+            "restored {} package BI connection(s) on open",
+            ds_to_conn.len()
+        );
+        // The engines were created after the open-path writeback rebuild, so
+        // re-queue the writeback -> BI dataset feed, exactly as `calp_pull` does
+        // after `load_embedded_data_sources`.
+        crate::bi::writeback_source::invalidate_writeback_bi();
+    }
+
+    ds_to_conn
+}
+
+/// Every subscription whose PACKAGE BI connections could not be restored when
+/// this workbook was opened, and why. Empty means every subscribed package's
+/// model is live (or the package declares no data source).
+#[tauri::command]
+pub fn calp_get_package_connection_skips(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<Vec<PackageConnectionRestoreSkip>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    state
+        .package_connection_restore_skips
+        .lock()
+        .map(|s| s.clone())
+        .map_err(|e| e.to_string())
+}
+
 /// Restore pivot definitions from a pulled .calp package: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
 fn restore_pulled_pivots(
@@ -12862,15 +13132,41 @@ pub async fn calp_refresh_data(
             }
 
             // RAW location — see `subscription_registry_path`.
-            let (registry, _scope) =
+            let (registry, scope) =
                 match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
 
-            let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+            // TRUST-BEARING READ. `ds.server` / `ds.database` from this manifest
+            // decide WHERE this command opens a database connection and sends
+            // the subscriber's credentials (a saved connection string, or their
+            // Windows identity via SSPI). An unverified read meant anyone able
+            // to write the registry directory — a shared folder, a synced drive
+            // — could repoint a subscribed package's data source at a host they
+            // control and harvest the credentials on the next Refresh, with no
+            // signature to break and nothing on screen to notice. Same gate the
+            // writeback rebuild uses: verified against the publisher key this
+            // machine pinned, or the subscription is skipped.
+            let ver_manifest = match calp::integrity::load_pinned_manifest_via(
+                registry.as_ref(),
+                &sub.package_name,
+                &sub.resolved_version,
+                &scope,
+                &calcula_profile_dir(),
+            ) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    crate::log_warn!(
+                        "CALP",
+                        "data refresh: {}@{} skipped ({}): {}",
+                        sub.package_name,
+                        sub.resolved_version,
+                        calp_skip_reason(&e),
+                        e
+                    );
+                    continue;
+                }
             };
 
             for ds in &ver_manifest.data_sources {
@@ -13054,13 +13350,24 @@ pub fn calp_save_data_source_config(
     for sub in &mut subs.subscriptions {
         // Find any subscription that references this data source.
         // RAW location — see `subscription_registry_path`.
-        let (registry, _scope) =
+        let (registry, scope) =
             match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
 
-        let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+        // TRUST-BEARING READ, for the same reason `calp_refresh_data`'s is: the
+        // data-source list this walks decides which package owns a data source
+        // id, and its `server` / `database` are what the connection dialog shows
+        // and what a refresh then connects to. Only a manifest signed by the
+        // publisher key this machine pinned may answer.
+        let ver_manifest = match calp::integrity::load_pinned_manifest_via(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &scope,
+            &calcula_profile_dir(),
+        ) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -13103,13 +13410,24 @@ pub fn calp_get_data_sources(
         }
 
         // RAW location — see `subscription_registry_path`.
-        let (registry, _scope) =
+        let (registry, scope) =
             match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
 
-        let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+        // TRUST-BEARING READ, for the same reason `calp_refresh_data`'s is: the
+        // data-source list this walks decides which package owns a data source
+        // id, and its `server` / `database` are what the connection dialog shows
+        // and what a refresh then connects to. Only a manifest signed by the
+        // publisher key this machine pinned may answer.
+        let ver_manifest = match calp::integrity::load_pinned_manifest_via(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &scope,
+            &calcula_profile_dir(),
+        ) {
             Ok(m) => m,
             Err(_) => continue,
         };
