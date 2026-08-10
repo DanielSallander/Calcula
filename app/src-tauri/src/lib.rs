@@ -4734,7 +4734,6 @@ pub fn run() {
             undo_commands::get_undo_state,
             undo_commands::undo,
             undo_commands::redo,
-            undo_commands::clear_undo_history,
             // Testing oracle commands
             state_digest::get_workbook_state_digest,
             // Logging commands

@@ -28,18 +28,29 @@
  * parser. A test that cannot see the entry when it is really there proves
  * nothing when it reports it absent.
  *
+ * AND THE SECOND HALF (4a, 2026-08-10): DOCUMENT-SCOPED STATE THAT IS NOT SAVED.
+ * §2w's census asks "is every store the SAVE PATH READS reset when the document
+ * is replaced?". The undo stack is not a save source, so it was invisible to
+ * that question by construction — and `new_file` cleared it in a block of its
+ * own labelled "session state that is NOT a save source" which `open_file` never
+ * ran. Open A, edit a cell, open B, press Ctrl+Z once, and B's cell is
+ * overwritten with A's value and saved that way. The last two tests here are
+ * that defect and its neighbour (the dynamic-array spill maps, which do not
+ * merely inject a value — they DELETE cells of the newly opened workbook).
+ *
  * WHY A JOURNEY. Every test calls File ▸ New, writes real `.cala` files and
  * reopens workbooks. The functional specs share one accumulating workbook.
  *
  * GRID REAL ESTATE. Columns CG..CM (84..90), rows 1..20 — outside every column
  * other specs claim. Every test starts from File ▸ New anyway.
  *
- * LOCALE. sv-SE. No spreadsheet formula is typed here, so no separator question
- * arises.
+ * LOCALE. sv-SE. The only formula typed here is `=SEQUENCE(4)` — one argument,
+ * so no list separator arises.
  */
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import * as zlib from "zlib";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
 import { parseCellRef } from "../helpers/grid";
@@ -57,6 +68,13 @@ const CYCLE_FILES = [1, 2, 3].map((n) =>
 const REGISTRY_DIR = path.join(os.tmpdir(), "calcula-e2e-leak-registry");
 const FILE_PKG_SUB = path.join(os.tmpdir(), "calcula-e2e-leak-subscriber.cala");
 const PACKAGE_NAME = "leak-probe-report";
+/** Defect 4a: the undo stack outliving its document. Three workbooks. */
+const FILE_UNDO_A = path.join(os.tmpdir(), "calcula-e2e-leak-undo-a.cala");
+const FILE_UNDO_B = path.join(os.tmpdir(), "calcula-e2e-leak-undo-b.cala");
+const FILE_UNDO_C = path.join(os.tmpdir(), "calcula-e2e-leak-undo-c.cala");
+/** 4a's neighbour: the spill maps. */
+const FILE_SPILL_A = path.join(os.tmpdir(), "calcula-e2e-leak-spill-a.cala");
+const FILE_SPILL_B = path.join(os.tmpdir(), "calcula-e2e-leak-spill-b.cala");
 
 async function invoke<T = unknown>(page: Page, cmd: string, args: unknown = {}): Promise<T> {
   return page.evaluate(
@@ -192,6 +210,88 @@ function entriesUnder(file: string, folder: string): string[] {
   return calaEntries(file).filter((e) => e.startsWith(folder));
 }
 
+/**
+ * The DECOMPRESSED text of every entry in a `.cala`, concatenated.
+ *
+ * `calaEntries` answers "is this OBJECT in the archive"; the undo defect needs
+ * the other question — "which VALUE is in the archive" — because the leak is a
+ * cell that looks entirely ordinary and holds another document's content. There
+ * is no object to count; there is only the wrong string in the right place.
+ *
+ * Same discipline as `calaEntries`: it THROWS rather than returning "" on any
+ * parse failure, because every assertion built on it is a `not.toContain`, and
+ * an empty string satisfies all of them.
+ */
+function calaText(file: string): string {
+  if (!fs.existsSync(file)) {
+    throw new Error(`the archive is missing at ${file} — nothing was saved`);
+  }
+  const buf = fs.readFileSync(file);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i >= buf.length - 66_000; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    throw new Error(`${file} has no ZIP end-of-central-directory record`);
+  }
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  const parts: string[] = [];
+  for (let n = 0; n < count; n++) {
+    if (buf.readUInt32LE(off) !== 0x02014b50) {
+      throw new Error(`${file}: central directory entry ${n} has a bad signature`);
+    }
+    const method = buf.readUInt16LE(off + 10);
+    const compressedSize = buf.readUInt32LE(off + 20);
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const localOffset = buf.readUInt32LE(off + 42);
+    if (buf.readUInt32LE(localOffset) !== 0x04034b50) {
+      throw new Error(`${file}: entry ${n} has no local header at its recorded offset`);
+    }
+    const localNameLen = buf.readUInt16LE(localOffset + 26);
+    const localExtraLen = buf.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+    const raw = buf.subarray(dataStart, dataStart + compressedSize);
+    if (method === 0) {
+      parts.push(raw.toString("utf8"));
+    } else if (method === 8) {
+      parts.push(zlib.inflateRawSync(raw).toString("utf8"));
+    } else {
+      throw new Error(`${file}: entry ${n} uses unsupported compression method ${method}`);
+    }
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  if (parts.length === 0) {
+    throw new Error(`${file} contains no entries at all — the parse is broken`);
+  }
+  return parts.join("\n");
+}
+
+/** The backend's undo/redo state, exactly as the ribbon's Undo button reads it. */
+async function undoState(page: Page): Promise<{
+  canUndo: boolean;
+  undoDepth: number;
+  undoDescription: string | null;
+}> {
+  return invoke(page, "get_undo_state");
+}
+
+/** One cell's displayed text, read the way the grid reads it. */
+async function cellDisplay(page: Page, ref: string): Promise<string> {
+  const { row, col } = parseCellRef(ref);
+  const cells = await invoke<Array<{ row: number; col: number; display: string }>>(
+    page,
+    "get_cells_in_rows",
+    { startRow: row, endRow: row },
+  );
+  return cells.find((c) => c.row === row && c.col === col)?.display ?? "";
+}
+
 // ---------------------------------------------------------------------------
 // The fixture: a CSV-backed model, a grid pivot and a ribbon filter over them.
 // Setup, never the thing under test.
@@ -289,7 +389,19 @@ async function buildWorkbookA(page: Page, target: string): Promise<void> {
 
 test.describe("a new document carries nothing of the previous one", () => {
   test.beforeAll(() => {
-    for (const f of [FILE_A, FILE_B, FILE_C, FILE_D, FILE_PKG_SUB, ...CYCLE_FILES]) {
+    for (const f of [
+      FILE_A,
+      FILE_B,
+      FILE_C,
+      FILE_D,
+      FILE_PKG_SUB,
+      FILE_UNDO_A,
+      FILE_UNDO_B,
+      FILE_UNDO_C,
+      FILE_SPILL_A,
+      FILE_SPILL_B,
+      ...CYCLE_FILES,
+    ]) {
       if (fs.existsSync(f)) fs.unlinkSync(f);
     }
     // A registry left behind by an earlier run already holds this package name
@@ -577,5 +689,151 @@ test.describe("a new document carries nothing of the previous one", () => {
       entriesUnder(FILE_D, "bi_connections/"),
       "a document created after a package pull carries the package's model",
     ).toHaveLength(0);
+  });
+
+  // =========================================================================
+  // DEFECT 4a — the undo stack outliving its document, and its neighbour
+  // =========================================================================
+
+  test("Open then ONE Ctrl+Z: the opened workbook keeps its own value", async ({
+    appPage: page,
+  }) => {
+    test.setTimeout(240_000);
+
+    // THE ORACLE THAT FOUND IT, unchanged. Two workbooks whose CL1 differ by a
+    // single word, one edit, one undo, one save — and then the bytes.
+    await newFile(page);
+    await setCell(page, "CL1", "A-ORIGINAL");
+    await saveAs(page, FILE_UNDO_A);
+
+    await newFile(page);
+    await setCell(page, "CL1", "B-ORIGINAL");
+    await saveAs(page, FILE_UNDO_B);
+
+    // Workbook A, with one undoable edit in it — ON THE SAME CELL. That is what
+    // makes the entry dangerous rather than merely stale: its before-image is
+    // "A-ORIGINAL" AT CL1, so applying it in another document overwrites CL1
+    // there. An entry pointing at a cell the new document happens to leave empty
+    // would still be a leak, and would still be wrong, but it would not show up
+    // in the bytes — and a test that cannot see the corruption is not a test of
+    // it. (Measured: with the reset removed and the probe editing a DIFFERENT
+    // cell, this spec passed on a demonstrably broken build.)
+    await openAt(page, FILE_UNDO_A);
+    await setCell(page, "CL1", "A-EDITED");
+
+    // VACUITY GUARD. Everything below asserts an ABSENCE of history, so the
+    // reader must first be shown history when there really is some.
+    const inA = await undoState(page);
+    expect(
+      inA.canUndo,
+      "the edit in A produced no undo entry, so the assertions below would pass " +
+        "on a stack that was never populated",
+    ).toBe(true);
+    expect(inA.undoDepth, "A's stack must hold the edit just made").toBeGreaterThan(0);
+
+    // Now open B. The document on screen has never been edited.
+    await openAt(page, FILE_UNDO_B);
+    expect(
+      await cellDisplay(page, "CL1"),
+      "precondition: B really is the document on screen",
+    ).toBe("B-ORIGINAL");
+
+    const inB = await undoState(page);
+    expect(
+      inB.canUndo,
+      `the freshly-opened workbook offers an undo it has not earned ` +
+        `(depth ${inB.undoDepth}, "${inB.undoDescription ?? ""}"). The stack ` +
+        `belongs to the workbook that is no longer open, and its entries name ` +
+        `bare (sheet, row, col) coordinates — so applying one here overwrites ` +
+        `a cell of THIS document with a value from THAT one`,
+    ).toBe(false);
+    expect(inB.undoDepth, "a freshly-opened workbook has no undo history").toBe(0);
+
+    // THE GESTURE. One Ctrl+Z, which a user presses without thinking.
+    await invoke(page, "undo");
+    await page.waitForTimeout(400);
+
+    expect(
+      await cellDisplay(page, "CL1"),
+      "one Ctrl+Z after File ▸ Open replaced the open workbook's cell with the " +
+        "PREVIOUS workbook's value",
+    ).toBe("B-ORIGINAL");
+
+    // ...and the bytes, which is where the damage becomes permanent.
+    await saveAs(page, FILE_UNDO_C);
+    const saved = calaText(FILE_UNDO_C);
+    expect(
+      saved,
+      "the saved workbook does not contain its own cell value at all",
+    ).toContain("B-ORIGINAL");
+    expect(
+      saved,
+      "THE 4a CORRUPTION, on disk: a workbook saved after one Ctrl+Z physically " +
+        "contains a value from a DIFFERENT document, written into a cell the " +
+        "user never touched",
+    ).not.toContain("A-ORIGINAL");
+  });
+
+  test("Open then edit: the previous workbook's spill does not delete cells here", async ({
+    appPage: page,
+  }) => {
+    test.setTimeout(240_000);
+
+    // Workbook A: one dynamic-array formula spilling CL1:CL4.
+    await newFile(page);
+    await setCell(page, "CL1", "=SEQUENCE(4)");
+    await page.waitForTimeout(500);
+    expect(
+      await cellDisplay(page, "CL3"),
+      "VACUITY GUARD: A's SEQUENCE must really spill, or nothing below is being " +
+        "tested — a spill that never happened leaks no map",
+    ).not.toBe("");
+    await saveAs(page, FILE_SPILL_A);
+
+    // Workbook B: ordinary literals at exactly the coordinates A's spill covered.
+    await newFile(page);
+    for (const [ref, value] of [
+      ["CL1", "B-ONE"],
+      ["CL2", "B-TWO"],
+      ["CL3", "B-THREE"],
+      ["CL4", "B-FOUR"],
+    ] as Array<[string, string]>) {
+      await setCell(page, ref, value);
+    }
+    await saveAs(page, FILE_SPILL_B);
+
+    // The sequence: open A (its spill is registered), then open B.
+    await openAt(page, FILE_SPILL_A);
+    await openAt(page, FILE_SPILL_B);
+
+    // (1) THE REFUSAL. `check_spill_protection` reads the stale `spill_hosts`
+    //     and rejects the edit, naming a formula in a workbook that is closed.
+    await setCell(page, "CL2", "B-TWO EDITED");
+    expect(
+      await cellDisplay(page, "CL2"),
+      "editing a cell of the newly-opened workbook was refused because the " +
+        "PREVIOUS workbook had a spill at that coordinate — those cells stay " +
+        "uneditable for the rest of the session",
+    ).toBe("B-TWO EDITED");
+
+    // (2) THE DELETION, which is the part that loses data. Clearing the stale
+    //     spill ORIGIN takes the branch that removes every coordinate the
+    //     previous document's spill covered — from THIS document's grid.
+    await setCell(page, "CL1", "");
+    await page.waitForTimeout(400);
+
+    for (const [ref, expected] of [
+      ["CL2", "B-TWO EDITED"],
+      ["CL3", "B-THREE"],
+      ["CL4", "B-FOUR"],
+    ] as Array<[string, string]>) {
+      expect(
+        await cellDisplay(page, ref),
+        `clearing ${"CL1"} deleted ${ref} — a cell of the open workbook that the ` +
+          `user never touched, because the PREVIOUS workbook's spill map still ` +
+          `claimed that coordinate. There is no undo entry for it: the undo ` +
+          `transaction records only the cell actually edited`,
+      ).toBe(expected);
+    }
   });
 });

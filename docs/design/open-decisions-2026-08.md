@@ -2397,6 +2397,225 @@ two specs. The script is now in the repo at `app/e2e/answer-native-dialog.ps1`, 
 Playwright reports as a collection error for the whole project), and a missing driver now THROWS
 instead of yielding an empty answer that reads exactly like "no dialog appeared".
 
+---
+
+### 2x. The UNDO STACK outlived its document — one Ctrl+Z after File ▸ Open destroyed a cell of the workbook on screen and wrote another document's value into it (2026-08-10) — **FIXED, and the class is now a census of its own**
+
+**§2w's neighbour, and the mirror image of §2w's own lesson.** §2w-FIXED collapsed the reset into one
+`persistence::reset_document_scoped_stores` and bought the invariant *"a store
+`assemble_workbook_for_save` reads is reset when the document is replaced"*, checked by a census with
+an empty `EXEMPT`. It was right about what it claimed. What it could not claim — **by construction** —
+is anything about a store nothing serialises. `new_file` kept its own inline block, honestly labelled
+*"Session state that is NOT a save source"*, and `open_file` had no equivalent. Everything in that
+block therefore survived a File ▸ Open into a document that had never seen it.
+
+**Measured on the bytes, cold.**
+
+```
+A.cala -> ["A-ORIGINAL"]      B.cala -> ["B-ORIGINAL"]
+open A, edit DB1 -> undo state {canUndo:true, "Edit cell (0, 105)", depth 2}
+open B          -> undo state UNCHANGED
+undo()          -> updatedCells: [{row:0,col:105,display:"A-ORIGINAL"}]
+save B as C     -> C.cala contains ["A-ORIGINAL"]   (B-ORIGINAL is GONE)
+```
+
+An `UndoTransaction` records `(sheet, row, col)` and the BEFORE value and names no document at all.
+So the first Ctrl+Z in the freshly-opened workbook applies the closed workbook's before-image at the
+open workbook's coordinates. The user spends an undo they never earned, loses a cell they never
+edited, and the next save makes it permanent. **This is not injection like §2w and not a lost write
+like §3av — it is a value from one document written over a value in another, and it looks exactly
+like an ordinary edit afterwards.**
+
+#### THE CLASSIFICATION, item by item — because half of that block is NOT the document's
+
+The block was moved, not copied, and every line was classified first. The instruction to classify was
+the right one: `new_file`'s block was a mix, and `FileState` in particular must NOT move.
+
+| item | scope | why |
+|---|---|---|
+| `AppState.undo_stack` | **DOCUMENT** | the defect. Coordinates + before-image, no document identity |
+| `dependents` / `dependencies` / `column_*` / `row_*` / `cross_sheet_*` / `name_*` (10 maps) | **DOCUMENT** | the dependency graph over THIS document's cells; rebuilt by `rebuild_all_dependencies`. The name edges matter separately (D2: a formula stores the NAME) |
+| `AppState.table_names` | **DOCUMENT** | reverse index of `tables`; a stale entry resolves `Table1` to a table this document does not have |
+| `AppState.workbook_protection` | **DOCUMENT** (and a save source) | carries the structure-protection PASSWORD HASH. Save-source status was hidden from the census — see the blind spot below |
+| `AppState.spill_ranges` / `spill_hosts` | **DOCUMENT** | §2's finding; it deletes cells. Detail below |
+| `AppState.next_cf_rule_id` | **DOCUMENT** | per-document id counter |
+| `writeback_index` / `writeback_declarations` / `model_writeback_declarations` | **DOCUMENT** | this document's subscription regions; a stale set makes the next refresh diff report another workbook's columns as removed |
+| `FileState.current_path` / `session_password` / `is_encrypted` / `mark_saved` | **CALLER'S, stays put** | not stores. They are the answer to "WHICH document is open", and the two paths must legitimately disagree: `open_file` sets the path it read and the passphrase that decrypted it, `new_file` sets neither. This is the one asymmetry the delegation check deliberately permits |
+
+**And the ones the enumeration turned up that were in NEITHER path's reset** — the point of
+enumerating rather than moving:
+
+| item | scope | what it costs |
+|---|---|---|
+| `ScriptState.notebook_runtime` | **DOCUMENT** | **worse than the undo stack.** `checkpoints[i].grids` and `baseline` are whole `Vec<Grid>` snapshots, and `notebook_rewind` assigns one straight over `AppState.grids`. A checkpoint that outlives its document is a one-click replacement of the open workbook with a closed one |
+| `ScriptState.notebook_executor` | **DOCUMENT** (session inside it) | the persistent QuickJS session holds the globals the PREVIOUS document's notebook cells defined. Dropped via a new sync `reset_detached()` — the mpsc channel preserves order, so the session is gone before the next cell runs, and it does not spawn the thread if none exists |
+| `AppState.animation_snapshots` | **DOCUMENT** | the prior `Cell` values a running playback restores on stop. Stopping after the swap writes the old document's cells into the new one — with NO undo entry, because transient writes never make one |
+| `AppState.id_registry` | **DOCUMENT** | `(sheet_id, position) -> CellId`. `open_file` re-seeds it from the restored override layer but nothing ever emptied it; it grew for the life of the process |
+| `AppState.gather_cache` | **DOCUMENT** | `build_gather_data` serves this on every recalculation even past its TTL (deliberately — no registry I/O on the edit path), so a stale map feeds another document's collected submissions into this one's GATHER formulas |
+| `AppState.pending_recalc` | **DOCUMENT** (and a save source) | `attach_pending_recalc_for_save` writes it into the workbook. `open_file` restored it; `new_file` never cleared it, so a blank document inherited — and saved — the previous workbook's "these cells were never calculated" claim |
+| `AppState.writeback_rebuild_skips` | **DOCUMENT** | shown to the user verbatim by `calp_get_writeback_rebuild_skips`; a leftover blames the open workbook for another one's unreachable registry |
+
+**The SESSION/MACHINE-scoped list, each with a written reason, is now `SESSION_SCOPED` in the census.**
+`ScriptState.permission_grants` is the one §2w already named and the one that matters most: it holds
+the session-scoped execute approval, and clearing it would silently re-arm scripts the user turned
+off — a security decision reversed in the unsafe direction with no prompt. The rest: `security_level`
+and `mcp_access_level` (machine settings), `notebook_exec_lock` (a `Mutex<()>`, a concurrency
+primitive with nothing in it), `BiState.engine_registry` (not cleared but RELEASED, per
+`reset_bi_connections`), `locale`, `reference_style`, `iteration_enabled` + `max_iterations` +
+`max_change`, `calculation_mode`, `precision_as_displayed`, `calculate_before_save`,
+`auto_recover_enabled` + `auto_recover_interval_ms` (application preferences — **none of them
+serialised**, which is the same fact from the other side: if one ever becomes a save source the
+save-path census will demand a reset and the exemption has to go), `subscriber_identity` (the person
+at the machine, from the profile directory) and `calc_cancel` (the Ctrl+Break flag; it cannot carry a
+stale cancel because `eval_budget::PassToken::claim` resets it at the start of every owning pass).
+
+#### `clear_undo_history` — DELETED, not wired up
+
+A `#[tauri::command]` with no product caller: no menu item, no command, nothing in `app/src` or
+`app/extensions`. Its own doc comment named the route it was missing — *"e.g., when opening a new
+file"* — and that route is real, but it is now `reset_document_scoped_stores`, which both
+document-replacing paths run. **Re-exposing the same clear as a command would put the undo stack's
+lifetime back into somebody's hands to remember, which is the shape that caused this defect.** There
+is no user-facing reason either: Excel exposes no such action, and the stack's lifetime IS the
+document's — the user asks for it by closing the document. Its one caller was E2E walker setup, where
+it was already redundant (`resetToNewWorkbook` invokes `new_file` immediately before, and nothing
+between that and the call pushes a transaction). Command, registration and call site are gone.
+
+#### THE SPILL NEIGHBOUR — reproduced, and it is WORSE than the undo stack
+
+§2w's list named `spill_ranges` / `spill_hosts` without a reproduction. Built one. Both maps are keyed
+by bare `(sheet_index, row, col)`, and there are two distinct live consequences:
+
+1. **A REFUSAL that never ends.** `check_spill_protection` probes `spill_hosts` and rejects the edit
+   with *"The value contained in this cell is spilled from the formula in A1. To delete this value,
+   you will need to modify that formula."* — naming a formula in a workbook that is no longer open.
+   Those cells of the newly-opened document stay uneditable for the rest of the session, and the
+   remedy the message gives is impossible to follow.
+2. **A DELETION.** Clearing (or recalculating a dependent of) the stale ORIGIN takes the
+   `spill_ranges.remove(...)` branch in `commands/data.rs`, which runs `grid.cells.remove(&(sr, sc))`
+   over every coordinate the PREVIOUS document's spill covered. That deletes cells of the open
+   document, and the undo transaction records only the cell the user actually touched — **so the
+   deleted cells cannot be undone.**
+
+So the neighbour is not a lesser instance: the undo stack overwrites one cell with a recoverable
+value, the spill map silently deletes a block with no undo entry at all. Both are pinned live
+(`document-store-leak.spec.ts`) and at the store level.
+
+#### THE CENSUS — non-save-source state now has one, and the save-source census had a blind spot
+
+**(a) The FIELD census.** `every_state_field_is_reset_or_exempt` enumerates every `pub` field of every
+State the reset is handed — **123 fields across 8 States, parsed from the source tree** — and requires
+each to be reset by the shared function or to sit in `SESSION_SCOPED` with a written reason. There is
+no third answer. This is the check that would have failed for the undo stack on the day it was
+written, and the save-path census could not have, however well written.
+
+Guarded the same way `DOCUMENT_REPLACING_PATHS` is: `the_field_census_covers_every_state_the_reset_is_given`
+compares `STATE_FIELD_SOURCES` against the reset's own signature in both directions, so a ninth State
+cannot be added to the reset without a ninth family of fields being enumerated.
+
+**(b) The DELEGATION invariant** — the cheapest one, and the one this fix buys outright. Both paths
+run the same function, so anything either resets outside it is a bug.
+`new_file_delegates_every_store_reset` requires `new_file` to touch **no store at all**;
+`open_file_touches_no_store_the_reset_does_not_cover` allows `open_file` its fifty restores but
+requires every store it reaches to be one the reset already blanked (one exemption, written:
+`AppState.locale`, READ to format the returned cells).
+
+**(c) A REAL BLIND SPOT in §2w's census, found while building (a) and fixed.** `scan_store_accesses`
+read one line at a time, and rustfmt wraps a method chain the moment it does not fit — so
+`state\n.workbook_protection\n.read()` and `state\n.pending_recalc\n...` were **invisible**. Both are
+save sources. The census had reported an empty `EXEMPT` and a clean bill the whole time, and behind
+the blind spot sat one live leak (`pending_recalc`, saved into blank documents) and one latent
+(`workbook_protection`, reset only by `new_file`'s inline block). `join_method_chains` now folds
+whitespace on both sides of every `.` before scanning; the save-path census's source count went 66 →
+70. **This is the fourth hardening lesson, alongside the three §2w recorded** (see through a
+delegating helper; a commented-out call is not a call; free functions only, or `fn drop` resolves as
+`drop(guard)`).
+
+#### DEMONSTRATED FIRING — four sabotages of the real tree, plus two on a running build
+
+| sabotage | what failed | message |
+|---|---|---|
+| the `undo_stack` reset commented out | `every_state_field_is_reset_or_exempt` **and** `the_undo_stack_does_not_survive_the_document_it_belongs_to` | `AppState.undo_stack` |
+| a new unclassified `pub sabotage_probe_store` field added to `AppState` | `every_state_field_is_reset_or_exempt` | `AppState.sabotage_probe_store` |
+| a private `state.spill_hosts...clear()` put back into `new_file` | `new_file_delegates_every_store_reset` | "`new_file` reaches these stores itself: `AppState.spill_hosts`" |
+| a WRAPPED `state\n.locale\n.lock()` read added to `assemble_workbook_for_save` | the save-path census | `AppState.locale` — i.e. the blind spot is really closed |
+| **on a running build:** undo + spill resets removed, backend rebuilt | `document-store-leak.spec.ts` tests 6 and 7 | *"the freshly-opened workbook offers an undo it has not earned (depth 3, ...)"* — the freshly-opened workbook reporting a stack it never built; and the spill test failed at its FIRST edit, *"Cannot edit cell (2, 90): it contains a spilled array value from cell (1, 90)"*, which is the refusal half firing before the deletion half was even reached |
+| **on the same build, store-level guard relaxed** to reach the byte oracle | the byte assertion | *"the saved workbook does not contain its own cell value at all"* — `B-ORIGINAL` is not in `C.cala` at all, because the Ctrl+Z put `A-ORIGINAL` there |
+
+**The last row corrected the test, and that is worth recording.** The first version of the acceptance
+test edited a DIFFERENT cell in workbook A than the one the two workbooks disagree about — and it
+**passed on the demonstrably broken build**, because the leaked undo entry pointed at a cell B left
+empty. The leak was real, the corruption was real, and the oracle could not see it. The probe now
+edits the same cell the register's original reproduction did — which is, on inspection, exactly what
+that reproduction was careful about and the test was not. **An acceptance test that has not been made
+to fail is a hypothesis, and this register's record on hypotheses is unchanged.**
+
+#### Where the behaviour is pinned
+
+`document_store_reset_tests.rs` went from 12 `#[test]` items to 22: one per store above, each with
+its populated-first precondition, so none can pass on an empty store. The counterweight
+(`the_reset_leaves_application_state_alone`) gained ten assertions and now includes
+`permission_grants`, `mcp_access_level`, `calculation_mode`, `precision_as_displayed`,
+`calculate_before_save`, both AutoRecover settings, both iteration limits and `subscriber_identity` —
+so a reset that got enthusiastic and cleared the user's security decisions fails here rather than
+shipping.
+
+
+### 2y. Deleting the ORIGIN of a spilled array leaves the spill map behind — the spilled cells become permanently uneditable AND undeletable for the session, and save as orphan literals (2026-08-10) — **OPEN, with a live reproduction**
+
+Found while giving §2x's spill half a real-UI gesture, by asking a question §2x did not: the store-level
+spec cleared the stale origin with `update_cell(row, col, "")`, so the register's whole account of the
+spill map's *removal* rests on that one command. **The Delete key is not that command.** It runs
+`clear_range`, which CHECKS `check_spill_protection` and never touches `spill_ranges` at all. So the
+first real-UI version of the deletion probe pressed Delete, saw the neighbours survive, and would have
+reported a clean run on a build that leaks. Following that thread found a defect that has nothing to do
+with File ▸ Open — it happens inside one document, on the first press.
+
+**Measured live, on the fixed build, cold** (`get_spill_ranges` and `get_cells_in_rows` verbatim):
+
+```
+A1 = "=SEQUENCE(4)"        A1..A4 -> 1 2 3 4     spill_ranges [{origin 0,0 -> 3,0}]
+clear_range A1:A1  (the Delete key)              -> ok, 1 cell cleared
+A1..A4 -> (empty) 2 3 4                          spill_ranges [{origin 0,0 -> 3,0}]   <-- UNCHANGED
+update_cell A2 "typed"  -> REFUSED: "Cannot edit cell (2, 1): it contains a spilled array
+                            value from cell (1, 1). Edit or delete the formula in the source
+                            cell instead."
+clear_range A1:A4       -> REFUSED: "We can't delete this value ... spilled from the formula
+                            in A1. To delete this value, you will need to modify that formula."
+```
+
+**Both remedies the product offers are impossible to follow.** The source cell it names is EMPTY —
+there is no formula left to edit or delete — and selecting the whole block and pressing Delete, which
+is what a user tries next, is refused by the same guard. A2:A4 keep showing `2 3 4`, values that no
+formula in the document produces, and they cannot be changed or removed for the rest of the session.
+
+**It reaches the bytes, and it half-heals on reload.** Saving writes A2:A4 as ordinary literals
+(measured: the archive holds them). Re-opening rebuilds the spill map from the restored formulas, so
+`spill_ranges` comes back EMPTY and the cells are editable again — the dead-end is session-scoped, but
+the orphan values are permanent in the file and the user has no way to know they became literals.
+
+**Why it is not §2x.** Nothing here crosses a document boundary; the reset is irrelevant. It is
+`clear_range` being a second writer to a store whose only maintainer is `update_cell`:
+
+| command | clears the cell | removes the origin's `spill_ranges` entry | drops the `spill_hosts` claims |
+|---|---|---|---|
+| `update_cell` with `""` (data.rs ~1011) | yes | yes | yes |
+| `update_cell` with a new formula (data.rs ~1212) | n/a | yes | yes |
+| `clear_range` / `clear_range_with_options` / `clear_range_on_sheets` | yes | **no** | **no** |
+
+**The fix is not one line, which is why it is filed rather than bolted onto §2x.** Two halves:
+(a) `clear_range` must remove the spill range owned by any ORIGIN inside the cleared rectangle and
+clear that range's cells — through its own `cells_to_clear` loop, so each removed cell gets an
+`undo_stack.record_cell_change` (strictly better than `update_cell`'s branch, which removes them with
+no undo entry at all — the deletion half of §2x); and (b) `check_spill_protection` must stop refusing a
+host whose ORIGIN is inside the same rectangle, or "select the spill and press Delete" stays refused
+after (a) fixes everything else. (b) changes a guard with three call sites and needs its own tests.
+
+**Not fixed in this pass, deliberately.** It is a different defect in a different command from the one
+this pass was sent to prove, the Delete key is one of the hottest paths in the suite, and half of it —
+removing cells without recording them for undo — is precisely the shape this register keeps filing
+against. It wants its own pass with its own teeth.
+
 
 ## 3. Test-infrastructure decisions
 
@@ -4444,6 +4663,82 @@ vendoring pass did not look at. It cannot run on another machine, or after this 
 is cleaned.
 
 
+### 3ax. §2x proved LIVE through the REAL UI — `undo-across-open.spec.ts`, the bytes under sabotage, and the three things writing it corrected (2026-08-10)
+
+`document-store-leak.spec.ts` pins §2x at the STORE level: it drives `open_file`, `update_cell` and
+`undo` as commands. That is the right test for the store, and it cannot see the thing the user meets.
+The real File ▸ Open runs `fileOpen()`, which calls **`window.location.reload()`** after a successful
+open — the frontend is rebuilt from scratch between the edit and the undo, and the whole question of
+§2x is what the BACKEND still holds across that boundary. Five tests in
+`app/e2e/journeys/undo-across-open.spec.ts` drive it end to end: the File menu, the **native file
+picker** (driven from outside the WebView, the `image-ingress` technique — Tauri's IPC surface is
+non-writable, so it cannot be stubbed), typing into the grid through the real inline editor, Ctrl+Z /
+Ctrl+Y on the grid container, the **ribbon's own Undo and Redo buttons**, and File ▸ Save. The oracle
+is the `.cala` on disk, parsed in the spec, THROWING on any parse failure.
+
+| # | claim, as the user meets it | how it is proved | teeth |
+|---|---|---|---|
+| 1 | File ▸ Open, one Ctrl+Z, File ▸ Save — the archive holds the OPEN workbook's value | real menu + picker + typed edit + Ctrl+Z + Save; `calaText` on the saved bytes | the two fixtures are proved to DISAGREE in their bytes first, and the edit is proved to have made an undo entry; the ribbon button is then pressed as a second route and the archive re-read |
+| 2 | undo still works INSIDE one document | typed edit, then the ribbon's Undo button; the restored value is read back out of the saved archive | the edit must be present and `undoDepth == 1` before the undo |
+| 3 | the same question for REDO across File ▸ Open | a redo entry is built in ALPHA (edit + undo), then Open, then Ctrl+Y and the ribbon Redo | ALPHA's `canRedo` asserted true first, or the absence is vacuous |
+| 4 | redo still works INSIDE one document | typed edit, undo, then the ribbon's Redo button; the redone value read from the archive | the undo must have taken first |
+| 5 | the previous workbook's spill neither blocks nor deletes here | Open ALPHA (spilling `=SEQUENCE(4)`), Open BRAVO, type over a covered cell, then Delete AND overwrite the stale origin; surviving cells read from the archive | ALPHA's spill must really have spilled (`DB3` non-empty) before anything is asserted |
+
+**THE SABOTAGE, on a running build.** `undo_stack` and the two spill `clear()`s commented out of
+`reset_document_scoped_stores`, backend rebuilt, app relaunched cold. Tests 1, 2, 3 and 5 failed;
+test 4 (redo inside one document) passed, which is the control. The messages, verbatim:
+
+* *"the freshly-opened workbook offers an undo it has not earned (depth 3, "Edit cell (0, 105)")"*
+* *"one Ctrl+Z after File > Open replaced the open workbook's cell with the PREVIOUS workbook's value.
+  Expected "BRAVO-ORIGINAL" / Received "ALPHA-ORIGINAL""*
+* *"the freshly-opened workbook offers a REDO it has not earned (depth 1)"* and Ctrl+Y produced
+  `ZULU-EDITED-IN-ALPHA` — the other document's EDIT, in this document's cell
+* *"Cannot edit cell (2, 106): it contains a spilled array value from cell (1, 106)"* — the refusal
+  half, naming a formula in a workbook that is no longer open
+
+**And the bytes, which is the part worth keeping.** With the sabotage in place, one Ctrl+Z after
+File ▸ Open followed by File ▸ Save left `bravo.cala` on disk in this state, read with an independent
+parser afterwards:
+
+```
+entries=6 bytes=3475
+ALPHA-ORIGINAL:       PRESENT
+BRAVO-ORIGINAL:       ABSENT
+ZULU-EDITED-IN-ALPHA: ABSENT
+```
+
+The workbook the user had open no longer contains its own cell value **at all**; what is there instead
+is a value from a document they closed. Source restored afterwards and verified **byte-identical by
+SHA-256** (`10007ab1e9c05854392de879ac53c2dbabd3a38e37fffd5a232eeefd39ae1364`), then rebuilt cold: 5/5.
+
+**THREE THINGS WRITING IT CORRECTED, all of them the register's own prose being wrong about the product.**
+
+1. **The Undo affordance is never disabled — anywhere.** The first version asserted that the ribbon's
+   Undo button is disabled on a freshly-opened document. It is not, and it never has been: the Home
+   tab renders `undo`/`redo` as plain `<Button>`s with no binding to `get_undo_state`, and the Edit
+   menu item has no enablement either. Nothing in `app/src` or `app/extensions` reads `canUndo` for a
+   UI state at all. The assertion was caught because its counterpart ("enabled after a real edit")
+   passed trivially — which is what a test asserting a property nothing implements looks like. The
+   spec now presses the button and asserts what the press DOES, and the fact is written down where it
+   was measured. **This is a real (small) product gap, not a defect of this fix: Excel greys Undo out
+   with an empty stack, and here the user is invited to press it.**
+2. **The Delete key does not reach the spill-removal branch.** `clear_range`, not `update_cell`. That
+   correction is what turned up §2y, which is a live defect in one document with no File ▸ Open in it.
+   Test 5 now performs both gestures.
+3. **Fixture ORDER decides whether the spill test can run at all.** Building BRAVO *after* ALPHA fails
+   during setup on a leaking build — the scaffolding's own `update_cell` is refused by the stale
+   `spill_hosts` — which kills the test before the assertions and hides the deletion half. Fixtures
+   are built before the leak is created, so the refusal fires where it is being asserted.
+
+**One deliberate structural choice: the intermediate assertions are `expect.soft`, the archive ones are
+hard.** A hard store-level assertion aborts a leaking build before the gesture runs, and the byte
+oracle — the only place the damage is permanent — is never reached. The register records that this had
+to be relaxed by hand last time to see the corruption; now it does not. Soft still fails the test.
+
+**The spec is self-contained.** It writes its own dialog helper into `os.tmpdir()` at setup rather than
+reaching into a session scratchpad — the defect §3ak found in `dirty-flag-close.spec.ts` and §3aw found
+still living in `macro-link-model.spec.ts`.
+
 ## 4. OWNER DECISIONS — not work, product calls
 
 **These are for the owner. Nothing in this section is a defect awaiting a fix; each is a choice
@@ -5340,6 +5635,12 @@ written decision, and this is one.
 from the sections rather than amended, for the reason the first rewrite gave: a to-do list that
 outlives its items stops being read.
 
+**The silently-wrong-answer tier is NOT empty. §2x closed on 2026-08-10 and was then proved live —
+and proving it live turned up §2y, a defect in one document with no File ▸ Open in it. The way the tier
+refilled twice between 2026-08-09 and now is recorded as the SEVENTH and EIGHTH CORRECTIONS below —
+read those before trusting any sentence in this section, because every version of the emptiness claim
+so far has been falsified within a day.**
+
 **The silently-wrong-answer tier is empty, and this time the claim is checked rather than asserted.**
 The last rewrite made that claim and was wrong within a day (§2m's F9 half). What is different now is
 that the five guarantees the claim rests on were each made to FAIL before being trusted — the recalc
@@ -5451,6 +5752,57 @@ its own fix, and it was right about its own fix while being wrong about its own 
 it demanded is now a check with an empty exemption list, so the count is no longer anybody's to get
 wrong.
 
+**A SEVENTH CORRECTION, 2026-08-10 — and it falsifies the SIXTH's closing sentence.** The paragraph
+above ends *"the count is no longer anybody's to get wrong"*. It was wrong within a day, and in the
+one way this register has never recorded before: **not by miscounting the class, but by measuring the
+wrong class.** §2w's census asks whether every store the SAVE PATH READS is reset. The undo stack is
+not a save source. It is nevertheless the document's, `new_file` cleared it in a block labelled
+*"session state that is NOT a save source"*, `open_file` did not, and **one Ctrl+Z after File ▸ Open
+overwrote a cell of the workbook on screen with a value from a workbook that was no longer open** —
+then saved it there. §2x, measured on the bytes.
+
+Read against the six before it, the shape is finally explicit. Every correction so far has been about
+COMPLETENESS: the list was three and the class was six, the sweep found lost writes and missed
+injected ones. This one is about SCOPE — a guarantee that is completely enforced over the wrong set.
+**A census cannot fail for what it does not enumerate, and "every save source" is not "every thing
+that belongs to the document".** The fix is not a bigger list: `every_state_field_is_reset_or_exempt`
+now enumerates every field of every State (123 across 8), so the set being measured is the set that
+exists rather than the set that is serialised.
+
+Two side-findings are worth more than their size. **§2w's own census had a live blind spot**: it read
+one line at a time, and a rustfmt-wrapped method chain is invisible to that — so `workbook_protection`
+and `pending_recalc`, both save sources, were never enumerated, and the empty `EXEMPT` was an empty
+`EXEMPT` over 66 of 70 sources. And the acceptance test for §2x **passed on a demonstrably broken
+build** on its first attempt, because its probe edited a cell the leaked undo entry did not name. Both
+were found by insisting on the demonstration rather than the assertion, which is the only method this
+program has that keeps working.
+
+**AN EIGHTH CORRECTION, later on 2026-08-10 — the tier is NOT empty, and §2x itself held up.** Two
+separable results, and they point opposite ways.
+
+**§2x was proved LIVE and the static work was confirmed, not contradicted** (§3ax). Five tests drive
+the real File menu, the real native picker, real typing, Ctrl+Z / Ctrl+Y and the ribbon's own Undo and
+Redo buttons, across the `window.location.reload()` that File ▸ Open performs — the boundary no
+command-level test can see — and read the answer out of the `.cala` on disk. Given teeth by sabotaging
+a running build: with the resets removed, one Ctrl+Z after File ▸ Open followed by File ▸ Save left the
+saved workbook holding `ALPHA-ORIGINAL` and **not holding `BRAVO-ORIGINAL` at all**. Restored and
+verified byte-identical by SHA-256, rebuilt cold, 5/5.
+
+**And writing it found a live defect, §2y, which has nothing to do with File ▸ Open.** The store-level
+spec cleared the stale spill origin with `update_cell(.., "")`. The Delete key is a different command
+— `clear_range` — and it never removes a spill range at all. Following that: delete the origin of a
+`=SEQUENCE(4)` inside ONE document and its three spilled cells become uneditable AND undeletable for
+the rest of the session, showing values no formula produces, with both remedies the error messages
+offer impossible to follow (the source cell they name is empty; deleting the whole block is refused by
+the same guard). They save as orphan literals. Reproduction and the two-part fix are in §2y.
+
+**So the claim to carry forward is the method, not the count.** Each of the last four passes has been
+told to check emptiness by asking a question the previous pass did not, and each has found something
+real — §2w by asking what `new_file` does not reset, §2x by asking what the census cannot enumerate,
+§2y by asking which COMMAND the gesture under test actually runs. The tier is empty exactly as often
+as somebody stops asking. This time the question that paid was: *the store-level test drove one
+command — is that the command the user's gesture calls?* It was not.
+
 **The one thing that WAS owed is now paid (§3au).** Both **D8** and **§2v** have been proved on a
 running app — `structural-recalc.spec.ts`, 10 tests through the real row/column-header context menu,
 green, and given teeth by sabotaging a running build twice (D8 off: 8 of 10 fail with the exact stale
@@ -5462,7 +5814,26 @@ is stored and shown as `SHEET1!`, normalised at cell entry and nothing to do wit
 
 What remains, in order.
 
-0. ~~**§2w — `new_file` does not reset three stores that `assemble_workbook_for_save` writes.**~~
+0. **§2y — deleting the ORIGIN of a spilled array leaves the spill map behind.** OPEN, with a live
+   reproduction. `clear_range` (what the Delete key runs) checks `check_spill_protection` and never
+   removes a spill range; only `update_cell` does. Delete the origin of a `=SEQUENCE(4)` and its three
+   spilled cells are uneditable AND undeletable for the session, showing values no formula produces,
+   with both offered remedies impossible to follow; they save as orphan literals. The fix is two parts
+   (remove the owned range through `clear_range`'s own undo-recording loop; stop refusing a host whose
+   ORIGIN is inside the same rectangle) and it wants its own pass. Found by asking which COMMAND the
+   user's gesture actually runs — §3ax.
+
+0. ~~**§2x — the undo stack (and eighteen other stores) outlived its document across File ▸ Open.**~~
+   **CLOSED 2026-08-10.** `new_file`'s inline "session state that is NOT a save source" block is gone
+   into `reset_document_scoped_stores`, classified item by item first — `FileState` deliberately did
+   NOT move, because "which document is open" is the one thing the two paths must disagree about.
+   Enumerating turned up **seven more stores neither path reset**, including `ScriptState.notebook_runtime`
+   (whole `Vec<Grid>` snapshots that `notebook_rewind` writes straight over the open workbook) and two
+   save sources the old census was blind to. The class is now checkable at both ends: a FIELD census
+   over every field of every State, plus the delegation invariant that `new_file` resets nothing of
+   its own. `clear_undo_history` was DELETED, not wired up. §2x.
+
+0b. ~~**§2w — `new_file` does not reset three stores that `assemble_workbook_for_save` writes.**~~
    **CLOSED 2026-08-09 (§2w-FIXED).** It was not fixed by clearing three more stores, as the entry
    insisted: the reset is COLLAPSED into one `reset_document_scoped_stores` that both `new_file` and
    `open_file` run, and the invariant is now a census over the save path's sources with an empty

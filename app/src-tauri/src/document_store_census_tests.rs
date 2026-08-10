@@ -1,12 +1,34 @@
 //! FILENAME: app/src-tauri/src/document_store_census_tests.rs
-//! PURPOSE: The DOCUMENT-SCOPED STORE CENSUS — every store `assemble_workbook_for_save`
-//!          reads must be reset when the document is replaced.
+//! PURPOSE: The DOCUMENT-SCOPED STORE CENSUS — every store the save path reads,
+//!          AND every field of every State, must be reset when the document is
+//!          replaced or carry a written reason why it is not the document's.
 //! CONTEXT: The acceptance test for a whole defect class. See the module docs below.
 
-//! # The invariant
+//! # The invariants — there are two, and the second one is why the first was
+//! # not enough
 //!
-//! > **A store `assemble_workbook_for_save` reads is reset by the
-//! > document-replacing paths.**
+//! > 1. **A store `assemble_workbook_for_save` reads is reset by the
+//! >    document-replacing paths.**
+//! > 2. **Every field of every State those paths reset is either reset by the
+//! >    shared function, or written down as session- or machine-scoped.**
+//!
+//! Invariant 1 shipped first and could never have caught defect 4a. The UNDO
+//! STACK is not a save source, so the save path's sources — however completely
+//! enumerated — do not contain it. It nevertheless belongs to the document:
+//! an `UndoTransaction` records (sheet, row, col) and a before-value and names
+//! no document at all. `new_file` cleared it inline, in a block honestly
+//! labelled *"session state that is NOT a save source"*; `open_file` had no
+//! equivalent. So: open A, edit a cell, open B, press Ctrl+Z once — and B's cell
+//! is overwritten with A's value, and saved that way. Measured on the bytes.
+//!
+//! That is the shape invariant 2 answers. It asks the question the save path
+//! cannot ask ("is this field the DOCUMENT's?") of a set nothing can hide in
+//! (every field of every State), and it forces the answer to be written down.
+//! `SESSION_SCOPED` is the list of things that really are not the document's,
+//! and it is small, argued and dangerous to get wrong in either direction:
+//! `ScriptState.permission_grants` must NOT be reset (it would re-arm scripts
+//! the user turned off), and `AppState.undo_stack` must be, and "session state"
+//! reads like a reason for both.
 //!
 //! # Why this file exists rather than three more `clear()` calls
 //!
@@ -33,7 +55,7 @@
 //! that comparison is a test. Hence this census: it ENUMERATES the crate, so it
 //! fails for the store nobody thought of.
 //!
-//! # The two hardening lessons inherited from the recalculation census
+//! # The hardening lessons — two inherited, one bought here, one paid for twice
 //!
 //! 1. **It must see through a delegating helper.** Both sides delegate: the save
 //!    path reads `BiState` only inside `capture_local_bi_connections`, and the
@@ -43,10 +65,31 @@
 //! 2. **A commented-out call must not satisfy it.** Every call site here is
 //!    wrapped in a comment explaining it, so a careless deletion leaves the name
 //!    behind as text. Both sides therefore read comment-stripped code.
+//! 3. **A free function is not an `impl` method.** `parse_fn_header` takes
+//!    indentation 0 only, because at `indent <= 4` a `Drop` impl's `fn drop`
+//!    resolves as the `drop(guard)` every lock release calls and walks the call
+//!    graph out of the save path entirely.
+//! 4. **A method chain broken across lines is still a read.** Added when 4a was
+//!    fixed, and it was not theoretical: `collect_protection_for_save` and
+//!    `attach_pending_recalc_for_save` are both written as wrapped chains, so
+//!    the census had never seen either — two save sources, one of them a live
+//!    leak, behind a scanner that read one line at a time. See
+//!    `join_method_chains`.
 //!
-//! Both lessons are asserted, on synthetic sources, by
-//! `the_census_detector_actually_fires` below — so they run on every build
-//! instead of once in somebody's head.
+//! All four are asserted, on synthetic sources, by
+//! `the_census_detector_actually_fires` and `the_field_census_detector_actually_fires`
+//! below — so they run on every build instead of once in somebody's head.
+//!
+//! # The delegation invariant
+//!
+//! The collapse buys one more property, and it is the cheapest of the lot to
+//! check: **both document-replacing paths run the same function, so anything
+//! either of them resets outside it is a bug.** `new_file` must therefore touch
+//! no store at all (`new_file_delegates_every_store_reset`) and `open_file` must
+//! touch no store the reset does not also cover
+//! (`open_file_touches_no_store_the_reset_does_not_cover`). Defect 4a is
+//! precisely a violation of the first: ~50 lines of resets `new_file` kept to
+//! itself, none of which `open_file` ever ran.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -121,6 +164,182 @@ const DOCUMENT_REPLACING_PATHS: &[&str] = &["new_file", "open_file"];
 /// carry a reason somebody wrote; `every_exemption_carries_a_written_reason`
 /// refuses an empty one.
 const EXEMPT: &[(&str, &str)] = &[];
+
+// ---------------------------------------------------------------------------
+// The FIELD census — the other half, and the one the save-path census could
+// never have covered
+// ---------------------------------------------------------------------------
+
+/// Where each State is declared: `(store name, file, struct name)`.
+///
+/// This is the set of States `reset_document_scoped_stores` is handed, which is
+/// the set a document-replacing path can put back to blank. It is checked
+/// against the reset's own signature by
+/// `the_field_census_covers_every_state_the_reset_is_given`, so a ninth State
+/// cannot be added to the reset without appearing here.
+const STATE_FIELD_SOURCES: &[(&str, &str, &str)] = &[
+    ("AppState", "lib.rs", "AppState"),
+    ("UserFilesState", "persistence.rs", "UserFilesState"),
+    ("SlicerState", "slicer/types.rs", "SlicerState"),
+    ("RibbonFilterState", "ribbon_filter/types.rs", "RibbonFilterState"),
+    ("PaneControlState", "pane_control/types.rs", "PaneControlState"),
+    ("ScriptState", "scripting/types.rs", "ScriptState"),
+    ("PivotState", "pivot/types.rs", "PivotState"),
+    ("BiState", "bi/types.rs", "BiState"),
+];
+
+/// Fields the reset clears through a call that is not `read`/`write`/`lock`.
+///
+/// The escape hatch for a store whose teardown is a METHOD rather than a guard,
+/// and it is deliberately the narrowest one available: the entry names the exact
+/// call text, and the field census credits it only if that text appears in the
+/// comment-stripped reset closure. A comment cannot satisfy it and a rename
+/// cannot silently keep it satisfied.
+const RESET_BY_METHOD_CALL: &[(&str, &str)] = &[
+    (
+        "BiState.engine_registry",
+        "bi_state.engine_registry.release(",
+    ),
+    (
+        "ScriptState.notebook_executor",
+        "script_state.notebook_executor.reset_detached(",
+    ),
+];
+
+/// Fields that are NOT the document's, with the reason each one is not.
+///
+/// THE OTHER HALF OF THE CENSUS, and the half that would have caught defect 4a.
+/// `EXEMPT` above answers "the save path reads this and the reset does not clear
+/// it — why?". This list answers the question the save path cannot even ask:
+/// **a field nothing serialises can still belong to the document**, and the undo
+/// stack is the proof. It was invisible to the save-source census by
+/// construction, and the fix for it is worthless if the next such field goes in
+/// unnoticed. So every field of every State is either reset by the shared
+/// function or listed here with a written reason.
+///
+/// The line is "is this the DOCUMENT's?", never "is this stateful?". A wrong
+/// entry here is a silent re-arm — `ScriptState.permission_grants` is the
+/// standing example: clearing it would re-ask nothing and quietly restore
+/// execute consent the user had withdrawn. Behaviour-side counterweights for
+/// these live in `document_store_reset_tests.rs`
+/// (`the_reset_leaves_application_state_alone`).
+const SESSION_SCOPED: &[(&str, &str)] = &[
+    // -- Application preferences: the user's, not the workbook's --------------
+    // None of these is persisted, which is the same fact from the other side:
+    // if one ever becomes a save source, the save-path census demands a reset
+    // and its exemption here has to go.
+    (
+        "AppState.calculation_mode",
+        "Automatic vs Manual is an application preference in Calcula (nothing serialises it), and it is a choice the user makes ABOUT their session. Resetting it would silently put a user who had switched to Manual — usually because automatic recalculation was too slow — back on Automatic at every File > Open",
+    ),
+    (
+        "AppState.iteration_enabled",
+        "iterative calculation is an application preference; already named as deliberately untouched when the reset was collapsed",
+    ),
+    (
+        "AppState.max_iterations",
+        "the iteration limit travels with iteration_enabled and is the same preference",
+    ),
+    (
+        "AppState.max_change",
+        "the convergence threshold travels with iteration_enabled and is the same preference",
+    ),
+    (
+        "AppState.locale",
+        "decimal/list separators and date format are the machine's regional settings; a document does not carry them, and resetting would reformat the user's numbers on File > New",
+    ),
+    (
+        "AppState.reference_style",
+        "A1 vs R1C1 is how the USER wants references written to them, not a property of the workbook being read; nothing serialises it, and swapping the formula bar's notation because a file was opened would be the app editing the user's preferences",
+    ),
+    (
+        "AppState.precision_as_displayed",
+        "an application-level calculation toggle here (nothing serialises it). It is destructive when on, so flipping it as a side effect of opening a file is the one behaviour worse than leaving it",
+    ),
+    (
+        "AppState.calculate_before_save",
+        "an application preference about what saving does, not a property of the thing being saved",
+    ),
+    (
+        "AppState.auto_recover_enabled",
+        "AutoRecover is a machine-level safety net; turning it back on (or off) because the user opened a file would be a setting that changes itself",
+    ),
+    (
+        "AppState.auto_recover_interval_ms",
+        "the AutoRecover period travels with auto_recover_enabled and is the same setting",
+    ),
+    // -- Machine identity and transient control flags -------------------------
+    (
+        "AppState.subscriber_identity",
+        "the WHO of writeback submissions: loaded from (or created in) the Calcula profile directory by `get_subscriber_identity` and cached here. It identifies the person at the machine, not the open document, and re-reading it per document would only re-do the same disk read",
+    ),
+    (
+        "AppState.calc_cancel",
+        "the Ctrl+Break flag, an `Arc<AtomicBool>` deliberately outside any Mutex so `cancel_calculation` cannot block on a lock the recalculation holds. It cannot carry a stale cancel across documents: `eval_budget::PassToken::claim` resets it at the start of every governed pass that owns one",
+    ),
+    // -- Script security: session and machine scope, NOT document scope -------
+    (
+        "ScriptState.permission_grants",
+        "the SESSION-scoped execute approval. Consent is granted per script for as long as the app is running, and clearing it on File > Open would silently re-arm scripts the user had turned off — the reset would be undoing a security decision, in the dangerous direction, with no prompt",
+    ),
+    (
+        "ScriptState.security_level",
+        "Script Security (disabled/prompt/enabled) is a machine setting; a document must never be able to change it, least of all by being opened",
+    ),
+    (
+        "ScriptState.mcp_access_level",
+        "the AI tool-surface ceiling (read/mutate/script) is a machine setting for the same reason as security_level",
+    ),
+    (
+        "ScriptState.notebook_exec_lock",
+        "a `tokio::sync::Mutex<()>` that serialises notebook execution. It is a concurrency primitive holding no value at all — there is nothing in it to be scoped to anything",
+    ),
+];
+
+/// The `pub` field names of `struct <name>` in `file`, in declaration order.
+///
+/// Parsed rather than listed, because a hand-written field list is the thing
+/// this census exists to replace: it must fail for the field nobody thought of,
+/// and a field added to `AppState` tomorrow is exactly that field.
+fn struct_fields(sources: &[(String, String)], file: &str, struct_name: &str) -> Vec<String> {
+    let text = sources
+        .iter()
+        .find(|(f, _)| f == file)
+        .map(|(_, t)| t.as_str())
+        .unwrap_or_else(|| panic!("the census cannot read `{}` — has it moved?", file));
+    let header = format!("pub struct {} {{", struct_name);
+    let start = text.lines().position(|l| l.trim() == header).unwrap_or_else(|| {
+        panic!(
+            "`{}` no longer declares `{}` — the field census is pointed at the wrong file",
+            file, struct_name
+        )
+    });
+    let mut out = Vec::new();
+    for line in text.lines().skip(start + 1) {
+        if line == "}" {
+            return out;
+        }
+        // Fields sit at exactly one level of indentation; anything deeper is
+        // inside a type argument or a nested literal.
+        let Some(rest) = line.strip_prefix("    pub ") else {
+            continue;
+        };
+        if rest.starts_with(' ') {
+            continue;
+        }
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && rest[name.len()..].starts_with(':') {
+            out.push(name);
+        }
+    }
+    panic!(
+        "`struct {}` in `{}` has no closing brace at column 0 — the field walk is broken",
+        struct_name, file
+    );
+}
 
 /// One `fn` item: its name, the file it came from, and its body lines.
 #[derive(Clone)]
@@ -354,9 +573,50 @@ fn store_accesses(defs: &[FnDef]) -> BTreeMap<String, BTreeSet<String>> {
     out
 }
 
+/// Method chains folded onto one line: `state\n    .workbook_protection\n    .read()`
+/// becomes `state.workbook_protection.read()`.
+///
+/// THE THIRD BLIND SPOT, and it was live. `scan_store_accesses` reads one line
+/// at a time, and rustfmt breaks a chain across lines the moment the receiver
+/// and the field do not fit together — which is exactly how
+/// `collect_protection_for_save` and `attach_pending_recalc_for_save` are
+/// written. Both are save sources. The census read NEITHER and reported an
+/// empty `EXEMPT` with a clean bill, and behind the blind spot sat two real
+/// leaks: `AppState.pending_recalc` (a blank document inheriting, and SAVING,
+/// the previous workbook's "these cells were never calculated" marker) and
+/// `AppState.workbook_protection` (reset only by `new_file`'s inline block).
+///
+/// Whitespace is dropped on BOTH sides of every `.`, so the shape the scanner
+/// matches is independent of how the formatter chose to wrap.
+fn join_method_chains(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut pending_ws = String::new();
+    for ch in code.chars() {
+        if ch.is_whitespace() {
+            pending_ws.push(ch);
+            continue;
+        }
+        if ch == '.' {
+            pending_ws.clear();
+            out.push('.');
+            continue;
+        }
+        if out.ends_with('.') {
+            pending_ws.clear();
+        }
+        out.push_str(&pending_ws);
+        pending_ws.clear();
+        out.push(ch);
+    }
+    out.push_str(&pending_ws);
+    out
+}
+
 /// The `Store.field` keys mentioned in one comment-stripped body.
 fn scan_store_accesses(code: &str) -> Vec<(String, String)> {
     const ACCESSORS: [&str; 3] = ["read", "write", "lock"];
+    let joined = join_method_chains(code);
+    let code = joined.as_str();
     let mut out: Vec<(String, String)> = Vec::new();
     for line in code.lines() {
         let chars: Vec<char> = line.chars().collect();
@@ -741,6 +1001,316 @@ fn no_command_with_document_wide_reach_is_unclassified() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 1b. THE FIELD CENSUS — every field of every State, saved or not
+// ---------------------------------------------------------------------------
+
+/// The stores the reset is credited with, by `Store.field` key.
+///
+/// Shared by the three tests below so they cannot disagree about what "reset"
+/// means. `RESET_BY_METHOD_CALL` is folded in here and nowhere else.
+fn reset_coverage(fns: &[FnDef]) -> BTreeSet<String> {
+    let closure = call_closure(fns, RESET_FUNCTIONS);
+    let mut covered: BTreeSet<String> = store_accesses(&closure).keys().cloned().collect();
+    let closure_code: String = closure
+        .iter()
+        .map(|f| join_method_chains(&f.code()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (field, call) in RESET_BY_METHOD_CALL {
+        if closure_code.contains(call) {
+            covered.insert((*field).to_string());
+        }
+    }
+    covered
+}
+
+/// EVERY FIELD OF EVERY STATE IS RESET OR EXEMPT — the half of the census the
+/// save path could not see, and the half defect 4a lived in.
+///
+/// `every_store_the_save_path_reads_is_reset_when_the_document_is_replaced`
+/// asks its question of the stores that reach the archive. The undo stack does
+/// not reach the archive. It is still the document's — an `UndoTransaction`
+/// names (sheet, row, col) and a before-value and nothing else — so a stack that
+/// outlives its document applies workbook A's before-image to workbook B's
+/// coordinates on the first Ctrl+Z, and the next save writes that in. The save
+/// census could not have failed for it, no matter how well it was written.
+///
+/// So this one enumerates the FIELDS, which is a set nothing can hide in: a
+/// field is reset by the shared function, or it is `SESSION_SCOPED` with a
+/// written reason. There is no third answer and no "not applicable".
+#[test]
+fn every_state_field_is_reset_or_exempt() {
+    let sources = read_crate_sources();
+    let fns = index_functions(&sources);
+    let covered = reset_coverage(&fns);
+
+    let mut all_fields: Vec<String> = Vec::new();
+    let mut unclassified: Vec<String> = Vec::new();
+    for (store, file, struct_name) in STATE_FIELD_SOURCES {
+        let fields = struct_fields(&sources, file, struct_name);
+        assert!(
+            !fields.is_empty(),
+            "no fields parsed out of `struct {}` in `{}` — the field walk is \
+             broken, and a broken walk passes this test vacuously",
+            struct_name,
+            file
+        );
+        for field in fields {
+            let key = format!("{}.{}", store, field);
+            all_fields.push(key.clone());
+            if covered.contains(&key) {
+                continue;
+            }
+            if SESSION_SCOPED.iter().any(|(name, _)| *name == key) {
+                continue;
+            }
+            unclassified.push(key);
+        }
+    }
+
+    assert!(
+        unclassified.is_empty(),
+        "these fields belong to a State the document-replacing paths reset, and \
+         nobody has said whether they belong to the DOCUMENT:\n  {}\n\nThis is \
+         the class defect 4a was in. The undo stack was one of these: not a save \
+         source, so the save-path census could never fail for it, and it \
+         survived File > Open — one Ctrl+Z then overwrote a cell of the workbook \
+         on screen with a value from a workbook that was no longer open, and \
+         saved it there. Either reset the field in \
+         `persistence::reset_document_scoped_stores`, or add it to \
+         SESSION_SCOPED with the reason it is the user's or the machine's rather \
+         than the document's.",
+        unclassified.join("\n  ")
+    );
+
+    // Neither list may outlive its fields: a stale entry reads as a considered
+    // decision about a field that no longer exists.
+    let stale: Vec<&str> = SESSION_SCOPED
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !all_fields.iter().any(|f| f == name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "SESSION_SCOPED names fields that no longer exist:\n  {}",
+        stale.join("\n  ")
+    );
+    let stale_calls: Vec<&str> = RESET_BY_METHOD_CALL
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !all_fields.iter().any(|f| f == name))
+        .collect();
+    assert!(
+        stale_calls.is_empty(),
+        "RESET_BY_METHOD_CALL names fields that no longer exist:\n  {}",
+        stale_calls.join("\n  ")
+    );
+
+    // Every method-call credit must really be in the reset. Without this the
+    // list is a way to declare a field reset by writing its name down.
+    for (field, call) in RESET_BY_METHOD_CALL {
+        assert!(
+            covered.contains(*field),
+            "RESET_BY_METHOD_CALL credits `{}` to the call `{}`, which does not \
+             appear in the reset. Either the call was lost or it was renamed; \
+             leaving the entry excuses the field either way",
+            field,
+            call
+        );
+    }
+
+    // NON-VACUITY. The walk must be finding the fields it was built for — the
+    // 4a defect itself, its two neighbours, and the two that the enumeration
+    // turned up on its own.
+    for known in [
+        "AppState.undo_stack",
+        "AppState.spill_ranges",
+        "AppState.spill_hosts",
+        "ScriptState.notebook_runtime",
+        "AppState.animation_snapshots",
+    ] {
+        assert!(
+            all_fields.iter().any(|f| f == known),
+            "the field census did not even enumerate `{}`",
+            known
+        );
+        assert!(
+            covered.contains(known),
+            "`{}` is document-scoped and the reset no longer clears it",
+            known
+        );
+    }
+    assert!(
+        all_fields.len() > 100,
+        "only {} fields enumerated across {} States — the struct walk is broken, \
+         not the crate",
+        all_fields.len(),
+        STATE_FIELD_SOURCES.len()
+    );
+}
+
+/// The field census must cover every State the reset is HANDED.
+///
+/// `STATE_FIELD_SOURCES` is hand-written, and this is what stops it being the
+/// by-name list this register keeps recording the failure of: a ninth State
+/// added to `reset_document_scoped_stores` is a ninth family of fields nobody
+/// is enumerating, and it fails here on the day the parameter is added.
+#[test]
+fn the_field_census_covers_every_state_the_reset_is_given() {
+    let sources = read_crate_sources();
+    let fns = index_functions(&sources);
+    let reset: Vec<&FnDef> = fns
+        .iter()
+        .filter(|f| f.name == "reset_document_scoped_stores")
+        .collect();
+    assert_eq!(reset.len(), 1, "expected exactly one `reset_document_scoped_stores`");
+    let signature = reset[0].signature();
+
+    for (store, _, struct_name) in STATE_FIELD_SOURCES {
+        assert!(
+            signature.contains(struct_name),
+            "the field census enumerates `{}`, but the reset is not given one — \
+             a State it never sees is a State it cannot reset",
+            store
+        );
+    }
+
+    // ...and the reverse: a parameter whose fields nobody enumerates.
+    for param in signature.lines() {
+        let Some((_, ty)) = param.split_once(':') else {
+            continue;
+        };
+        let Some(state_name) = ty
+            .rsplit("::")
+            .next()
+            .map(|s| s.trim().trim_start_matches('&').trim_end_matches(',').trim_end_matches('>'))
+        else {
+            continue;
+        };
+        if !state_name.ends_with("State") || state_name == "FileState" {
+            continue;
+        }
+        assert!(
+            STATE_FIELD_SOURCES.iter().any(|(s, _, _)| *s == state_name),
+            "`reset_document_scoped_stores` is handed a `{}` whose fields the \
+             field census does not enumerate. Add it to STATE_FIELD_SOURCES \
+             with the file that declares it, or the next unreset field on it \
+             will be found the way the undo stack was",
+            state_name
+        );
+    }
+}
+
+/// `new_file` RESETS NOTHING OF ITS OWN — the invariant the collapse buys.
+///
+/// After the fix, both document-replacing paths run the same function, so
+/// anything either path resets OUTSIDE that function is by definition something
+/// the other path does not get. `new_file` is the strict case and can be
+/// asserted exactly: it must touch no store at all. Everything it does to a
+/// document is `reset_document_scoped_stores`; everything else it does is
+/// `FileState` (which document is now open), and `FileState` is not a store.
+///
+/// This is the check that would have caught 4a on the day it was written.
+/// `new_file` had ~50 lines of resets after the shared call — the undo stack
+/// among them — and `open_file` had none of them.
+#[test]
+fn new_file_delegates_every_store_reset() {
+    let sources = read_crate_sources();
+    let fns = index_functions(&sources);
+    let defs: Vec<&FnDef> = fns.iter().filter(|f| f.name == "new_file").collect();
+    assert_eq!(defs.len(), 1, "expected exactly one `new_file`");
+
+    let touched: BTreeSet<String> = scan_store_accesses(&defs[0].code())
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert!(
+        touched.is_empty(),
+        "`new_file` reaches these stores itself:\n  {}\n\nEvery one of them is a \
+         reset `open_file` does NOT get, because `open_file` runs \
+         `reset_document_scoped_stores` and nothing else. That asymmetry IS \
+         defect 4a: the undo stack sat in this list, so opening a workbook left \
+         the previous one's stack live and the first Ctrl+Z wrote a foreign \
+         value into the open document. Move the reset into \
+         `reset_document_scoped_stores`, which both paths run.",
+        touched.into_iter().collect::<Vec<_>>().join("\n  ")
+    );
+}
+
+/// `open_file` touches no store the shared reset does not also cover.
+///
+/// The looser half of the same invariant, and it has to be looser: `open_file`
+/// legitimately RESTORES some fifty stores from the file it just read, so
+/// "touches nothing" is not available. What is available — and is the property
+/// that matters — is that every store it reaches is one the reset already put
+/// back to blank, so no store depends on `open_file`'s restore being careful.
+/// "Most restores clear before refilling" was the shape of the original defect;
+/// a store `open_file` knows about and the reset does not is the next one.
+#[test]
+fn open_file_touches_no_store_the_reset_does_not_cover() {
+    /// Stores `open_file` reaches that the reset deliberately leaves alone.
+    const OPEN_FILE_MAY_TOUCH: &[(&str, &str)] = &[(
+        "AppState.locale",
+        "READ, not written: the command formats the opened cells for its return value and needs the user's decimal and thousands separators to do it. The locale is an application preference (see SESSION_SCOPED), so the reset must not clear it and this read must not be mistaken for one",
+    )];
+
+    let sources = read_crate_sources();
+    let fns = index_functions(&sources);
+    let covered = reset_coverage(&fns);
+
+    let defs: Vec<&FnDef> = fns.iter().filter(|f| f.name == "open_file").collect();
+    assert_eq!(defs.len(), 1, "expected exactly one `open_file`");
+    let touched: BTreeSet<String> = scan_store_accesses(&defs[0].code())
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+
+    assert!(
+        touched.len() > 30,
+        "`open_file` was found to touch only {} stores; it restores dozens, so \
+         the scan is broken rather than the command",
+        touched.len()
+    );
+
+    let uncovered: Vec<&String> = touched
+        .iter()
+        .filter(|k| !covered.contains(*k))
+        .filter(|k| !OPEN_FILE_MAY_TOUCH.iter().any(|(n, _)| *n == k.as_str()))
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "`open_file` reaches these stores, and the shared reset does not:\n  \
+         {}\n\nA store only the open path knows about is a store whose blank \
+         value depends on this one command remembering to write it — which is \
+         the arrangement that let `new_file` and `open_file` disagree about the \
+         undo stack. Reset it in `reset_document_scoped_stores`.",
+        uncovered
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    let stale: Vec<&str> = OPEN_FILE_MAY_TOUCH
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| !touched.contains(*n))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "OPEN_FILE_MAY_TOUCH names stores `open_file` no longer reaches:\n  {}",
+        stale.join("\n  ")
+    );
+    for (name, reason) in OPEN_FILE_MAY_TOUCH {
+        assert!(
+            reason.len() > 40,
+            "the exemption for `{}` is not a reason anybody wrote",
+            name
+        );
+    }
+}
+
 /// Every exemption carries a reason somebody wrote.
 ///
 /// An empty string is how an entry gets parked "temporarily" and then stays
@@ -767,6 +1337,48 @@ fn every_exemption_carries_a_written_reason() {
              decision, and a decision nobody wrote down is indistinguishable \
              from an oversight",
             trimmed
+        );
+    }
+
+    // SESSION_SCOPED is the exemption list that actually has entries, so it is
+    // the one where a one-word reason would do real damage — "session state" as
+    // a reason for the undo stack would have read perfectly and been wrong. The
+    // bar is a SENTENCE, checked on the constant itself rather than on the
+    // source text, so no reformatting can slip past it.
+    for (field, reason) in SESSION_SCOPED {
+        assert!(
+            reason.len() > 60,
+            "the SESSION_SCOPED entry for `{}` is not a reason anybody wrote:\n  \
+             {:?}\n\nSay WHOSE it is (the user's? the machine's?) and what \
+             resetting it would break. `{}` is exempted from a check that exists \
+             because a field everybody assumed was session state turned out to \
+             be the document's.",
+            field,
+            reason,
+            field
+        );
+    }
+
+    // A field cannot be both exempt and reset-by-method: that is two answers to
+    // a question this census allows exactly one answer to.
+    for (field, _) in RESET_BY_METHOD_CALL {
+        assert!(
+            !SESSION_SCOPED.iter().any(|(n, _)| n == field),
+            "`{}` is listed as both session-scoped and reset by a method call",
+            field
+        );
+    }
+
+    // A method-call credit must name its own field, or the list becomes a way
+    // to satisfy one field with another field's teardown.
+    for (field, call) in RESET_BY_METHOD_CALL {
+        let short = field.split('.').nth(1).expect("keys are Store.field");
+        assert!(
+            call.contains(short),
+            "RESET_BY_METHOD_CALL credits `{}` to `{}`, which does not even \
+             mention the field",
+            field,
+            call
         );
     }
 }
@@ -914,6 +1526,239 @@ pub fn assemble_workbook_for_save(state: &State<AppState>) -> Workbook {
     assert!(
         analyse(SAVE_NON_STORE_RECEIVER, RESET_EMPTY).is_empty(),
         "a non-store receiver was enumerated as a document store"
+    );
+
+    // 9. LESSON THREE — A CHAIN BROKEN ACROSS LINES IS STILL A READ. This is not
+    //    hypothetical and it is not cosmetic: `collect_protection_for_save` and
+    //    `attach_pending_recalc_for_save` are both written exactly like this,
+    //    and the census read neither for as long as it existed. It reported an
+    //    empty EXEMPT the whole time.
+    const SAVE_MULTILINE_CHAIN: &str = "\
+pub fn assemble_workbook_for_save(state: &State<AppState>) -> Workbook {
+    workbook.workbook_protection = state
+        .workbook_protection
+        .read()
+        .ok()
+        .map(|p| p.clone());
+}
+";
+    assert_eq!(
+        analyse(SAVE_MULTILINE_CHAIN, RESET_EMPTY),
+        vec!["AppState.workbook_protection".to_string()],
+        "a save-path read written as a WRAPPED method chain was not enumerated. \
+         rustfmt wraps every chain that does not fit, so a line-at-a-time \
+         scanner sees a censored version of the crate"
+    );
+
+    // 10. ...and the same on the RESET side, or the census would demand a second
+    //     inline clear of a store the reset already handles in wrapped form.
+    const RESET_MULTILINE_CHAIN: &str = "\
+pub fn reset_document_scoped_stores(state: &AppState) {
+    *state
+        .workbook_protection
+        .write(effect)
+        .map_err(|e| e.to_string())? = WorkbookProtection::default();
+}
+";
+    assert!(
+        analyse(SAVE_MULTILINE_CHAIN, RESET_MULTILINE_CHAIN).is_empty(),
+        "a reset written as a wrapped method chain was not credited"
+    );
+
+    // 11. Joining chains must not invent an access out of two unrelated
+    //     statements. Nothing here is `state.<field>.<accessor>(`.
+    const SAVE_ADJACENT_STATEMENTS: &str = "\
+pub fn assemble_workbook_for_save(state: &State<AppState>) -> Workbook {
+    let n = state;
+    workbook.undo_stack.len();
+}
+";
+    assert!(
+        analyse(SAVE_ADJACENT_STATEMENTS, RESET_EMPTY).is_empty(),
+        "the chain join fabricated a store access across two statements"
+    );
+}
+
+/// THE FIELD CENSUS FIRES — the same demonstration, for the half that is new.
+///
+/// The manual version is "delete a reset, add an unreset field, watch it name
+/// the right one", which is exactly what was done to the real tree when this
+/// landed (both sabotages are recorded in the register). This is that, on
+/// synthetic sources, so it runs on every build instead of once.
+#[test]
+fn the_field_census_detector_actually_fires() {
+    // A tiny State, and a reset that covers one of its two fields.
+    const STATE_SRC: &str = "\
+pub struct AppState {
+    pub document_thing: Mutex<u32>,
+    pub undo_stack: Mutex<UndoStack>,
+}
+";
+    const RESET_ONE: &str = "\
+pub fn reset_document_scoped_stores(state: &AppState) {
+    state.document_thing.lock().unwrap().clear();
+}
+";
+    fn classify(state_src: &str, reset_src: &str, exempt: &[&str]) -> Vec<String> {
+        let sources = vec![
+            ("probe_app_state.rs".to_string(), state_src.to_string()),
+            ("reset.rs".to_string(), reset_src.to_string()),
+        ];
+        let fns = index_functions(&sources);
+        let covered: BTreeSet<String> =
+            store_accesses(&call_closure(&fns, &["reset_document_scoped_stores"]))
+                .keys()
+                .cloned()
+                .collect();
+        struct_fields(&sources, "probe_app_state.rs", "AppState")
+            .into_iter()
+            .map(|f| format!("AppState.{}", f))
+            .filter(|k| !covered.contains(k))
+            .filter(|k| !exempt.contains(&k.as_str()))
+            .collect()
+    }
+
+    // 1. THE 4a SHAPE. A field the reset does not touch is NAMED — and note
+    //    that nothing here is a save source, so the save-path census would
+    //    have reported nothing at all.
+    assert_eq!(
+        classify(STATE_SRC, RESET_ONE, &[]),
+        vec!["AppState.undo_stack".to_string()],
+        "the field census did not name a State field the reset leaves alone. \
+         That is defect 4a exactly: the undo stack was not a save source, so \
+         the only census that existed could not fail for it"
+    );
+
+    // 2. ...and stops naming it once the reset covers it.
+    const RESET_BOTH: &str = "\
+pub fn reset_document_scoped_stores(state: &AppState) {
+    state.document_thing.lock().unwrap().clear();
+    *state.undo_stack.lock().unwrap() = UndoStack::new();
+}
+";
+    assert!(
+        classify(STATE_SRC, RESET_BOTH, &[]).is_empty(),
+        "the field census flagged a field the reset demonstrably clears"
+    );
+
+    // 3. ...or once somebody has written down why it is not the document's.
+    assert!(
+        classify(STATE_SRC, RESET_ONE, &["AppState.undo_stack"]).is_empty(),
+        "an exempted field was still reported"
+    );
+
+    // 4. A NEW FIELD IS THE POINT. Adding one to the struct and nothing else
+    //    fails immediately — the field census's whole reason for existing is
+    //    that a hand-written list cannot fail for the field nobody thought of.
+    const STATE_SRC_GROWN: &str = "\
+pub struct AppState {
+    pub document_thing: Mutex<u32>,
+    pub undo_stack: Mutex<UndoStack>,
+    pub freshly_added: Mutex<Vec<u8>>,
+}
+";
+    assert_eq!(
+        classify(STATE_SRC_GROWN, RESET_BOTH, &[]),
+        vec!["AppState.freshly_added".to_string()],
+        "a field added to a State with no decision about it was not reported"
+    );
+
+    // 5. A COMMENTED-OUT reset does not count here either.
+    const RESET_COMMENTED: &str = "\
+pub fn reset_document_scoped_stores(state: &AppState) {
+    state.document_thing.lock().unwrap().clear();
+    // *state.undo_stack.lock().unwrap() = UndoStack::new();
+}
+";
+    assert_eq!(
+        classify(STATE_SRC, RESET_COMMENTED, &[]),
+        vec!["AppState.undo_stack".to_string()],
+        "a commented-out reset satisfied the field census"
+    );
+
+    // 6. The field parse takes `pub` fields at ONE level of indentation and
+    //    nothing else — not the `impl` below it, not a nested type argument.
+    const STATE_WITH_IMPL: &str = "\
+pub struct AppState {
+    pub document_thing: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self { document_thing: Mutex::new(HashMap::new()) }
+    }
+}
+";
+    let sources = vec![("probe_app_state.rs".to_string(), STATE_WITH_IMPL.to_string())];
+    assert_eq!(
+        struct_fields(&sources, "probe_app_state.rs", "AppState"),
+        vec!["document_thing".to_string()],
+        "the field walk read past the struct's closing brace"
+    );
+}
+
+/// `new_file` and `open_file` are read for what they RESET, and the detector
+/// fires for a reset either of them keeps to itself.
+#[test]
+fn the_delegation_detector_actually_fires() {
+    fn touched(src: &str, name: &str) -> Vec<String> {
+        let sources = vec![("persistence.rs".to_string(), src.to_string())];
+        let fns = index_functions(&sources);
+        let def = fns
+            .iter()
+            .find(|f| f.name == name)
+            .expect("the probe source must declare the function");
+        let mut keys: Vec<String> = scan_store_accesses(&def.code())
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    // THE 4a SOURCE, in miniature: the shared call, then a private reset.
+    const NEW_FILE_WITH_PRIVATE_RESET: &str = "\
+pub fn new_file(state: State<AppState>) -> Result<(), String> {
+    reset_document_scoped_stores(state.inner())?;
+    *state.undo_stack.lock().map_err(|e| e.to_string())? = UndoStack::new();
+    *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
+    Ok(())
+}
+";
+    assert_eq!(
+        touched(NEW_FILE_WITH_PRIVATE_RESET, "new_file"),
+        vec!["AppState.undo_stack".to_string()],
+        "a reset `new_file` performs itself — the exact shape of defect 4a — \
+         was not reported. `file_state` is correctly ignored: it is not a store, \
+         it is the answer to which document is open"
+    );
+
+    // The fixed shape reports nothing.
+    const NEW_FILE_DELEGATING: &str = "\
+pub fn new_file(state: State<AppState>) -> Result<(), String> {
+    reset_document_scoped_stores(state.inner())?;
+    *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
+    Ok(())
+}
+";
+    assert!(
+        touched(NEW_FILE_DELEGATING, "new_file").is_empty(),
+        "a `new_file` that delegates every store reset was still reported"
+    );
+
+    // ...and a COMMENTED-OUT private reset must not be reported, or the fix
+    // would have to delete the explanation along with the code.
+    const NEW_FILE_COMMENTED: &str = "\
+pub fn new_file(state: State<AppState>) -> Result<(), String> {
+    reset_document_scoped_stores(state.inner())?;
+    // *state.undo_stack.lock().unwrap() = UndoStack::new();
+    Ok(())
+}
+";
+    assert!(
+        touched(NEW_FILE_COMMENTED, "new_file").is_empty(),
+        "a commented-out reset was read as a private reset"
     );
 }
 

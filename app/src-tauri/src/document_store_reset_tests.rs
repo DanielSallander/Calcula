@@ -74,6 +74,15 @@ impl Stores {
     }
 }
 
+/// A cell holding one text value — the "workbook A" side of every before-image
+/// in this file. `Cell::new()` takes no arguments and starts empty, so the value
+/// is assigned rather than passed.
+fn probe_cell(text: &str) -> engine::Cell {
+    let mut cell = engine::Cell::new();
+    cell.value = engine::CellValue::Text(text.to_string());
+    cell
+}
+
 /// Seeding a store directly, and the reset itself: neither is an edit TO a
 /// document, which is why both callers pass a deliberately-clean effect.
 fn seed() -> DocumentEffect {
@@ -554,6 +563,514 @@ fn the_distribution_stores_do_not_survive_the_document() {
     );
 }
 
+// ===========================================================================
+// DEFECT 4a — document-scoped state that is NOT a save source
+//
+// Everything below was invisible to the save-path census by construction: none
+// of it is serialised, so enumerating what `assemble_workbook_for_save` reads
+// could never have named any of it. `new_file` cleared it inline and
+// `open_file` did not clear it at all, so every one of these stores survived a
+// File ▸ Open into a document that had never seen it.
+// ===========================================================================
+
+/// THE 4a DEFECT ITSELF: the undo stack does not outlive its document.
+///
+/// A `Transaction` records (sheet, row, col) and the BEFORE value, and names no
+/// document. Left across a File ▸ Open, the first Ctrl+Z applies workbook A's
+/// before-image at workbook B's coordinates — measured, cold, on the bytes:
+/// open A (A1 = "A-ORIGINAL"), edit a cell, open B (same cell = "B-ORIGINAL"),
+/// press Ctrl+Z once, save B, and the saved `.cala` contains "A-ORIGINAL".
+/// The user spends one undo they never earned and loses a cell they never
+/// touched, in a document that had no history to spend.
+///
+/// The byte-level half of this is `document-store-leak.spec.ts`; this is the
+/// store-level half, and it is the one that fails the moment the reset is
+/// removed rather than the moment somebody runs the app.
+#[test]
+fn the_undo_stack_does_not_survive_the_document_it_belongs_to() {
+    let s = Stores::new();
+    {
+        let mut stack = s.state.undo_stack.lock().unwrap();
+        stack.record_cell_change(
+            0,
+            0,
+            105,
+            Some(probe_cell("A-ORIGINAL")),
+        );
+        assert!(
+            stack.can_undo() && stack.undo_depth() == 1,
+            "precondition: workbook A's edit really is on the stack"
+        );
+    }
+
+    s.reset();
+
+    let stack = s.state.undo_stack.lock().unwrap();
+    assert!(
+        !stack.can_undo(),
+        "the previous document's undo stack survived. One Ctrl+Z in the newly \
+         opened workbook now applies THAT document's before-image at these \
+         coordinates — a silent overwrite of a cell the user never edited, \
+         which the next save writes to disk"
+    );
+    assert_eq!(stack.undo_depth(), 0, "undo depth must be zero");
+    assert_eq!(stack.redo_depth(), 0, "redo depth must be zero");
+    assert!(
+        !stack.has_open_transaction(),
+        "an open transaction from the previous document would swallow the new \
+         document's first edit into a batch that describes neither"
+    );
+}
+
+/// The spill maps do not outlive their document — and this one DESTROYS cells.
+///
+/// `spill_ranges` (origin -> spilled coordinates) and `spill_hosts` (spilled
+/// coordinate -> origin) are keyed by bare `(sheet_index, row, col)`. Both
+/// consequences of leaving them across a File ▸ Open are live:
+///
+/// * `check_spill_protection` reads `spill_hosts` and REFUSES the edit — "The
+///   value contained in this cell is spilled from the formula in A1" — naming a
+///   formula in a workbook that is no longer open. Those cells stay uneditable
+///   for the rest of the session.
+/// * clearing the stale ORIGIN takes the `spill_ranges` branch that runs
+///   `grid.cells.remove(...)` over every coordinate the PREVIOUS document's
+///   spill covered. That deletes cells of the open document, and the undo
+///   entry records only the cell the user actually touched.
+#[test]
+fn the_spill_maps_do_not_survive_the_document_they_belong_to() {
+    let s = Stores::new();
+    // Workbook A: `=SEQUENCE(4)` in A1, spilling A1:A4.
+    s.state
+        .spill_ranges
+        .lock()
+        .unwrap()
+        .insert((0, 0, 0), vec![(1, 0), (2, 0), (3, 0)]);
+    {
+        let mut hosts = s.state.spill_hosts.lock().unwrap();
+        hosts.insert((0, 1, 0), (0, 0));
+        hosts.insert((0, 2, 0), (0, 0));
+        hosts.insert((0, 3, 0), (0, 0));
+    }
+    assert_eq!(
+        s.state.spill_ranges.lock().unwrap().len(),
+        1,
+        "precondition: workbook A's spill really is tracked"
+    );
+    assert_eq!(
+        s.state.spill_hosts.lock().unwrap().len(),
+        3,
+        "precondition: the spilled cells really are claimed"
+    );
+
+    s.reset();
+
+    assert!(
+        s.state.spill_ranges.lock().unwrap().is_empty(),
+        "the previous document's spill RANGE survived. Clearing A1 in the newly \
+         opened workbook now walks these coordinates and deletes the cells it \
+         finds there — data the user never touched, with no undo entry for it"
+    );
+    assert!(
+        s.state.spill_hosts.lock().unwrap().is_empty(),
+        "the previous document's spill HOSTS survived. Every one of those \
+         coordinates is now an uneditable cell in the open workbook, refused \
+         with a message naming a formula in a document that is closed"
+    );
+}
+
+/// The dependency graph does not outlive its document.
+///
+/// Rebuilt from the grid by `rebuild_all_dependencies`, in every direction it is
+/// indexed — including the DEFINED-NAME edges, without which a name the previous
+/// workbook defined keeps its dependents pointed at coordinates that mean
+/// nothing here (D2: a formula stores the NAME, not the reference).
+#[test]
+fn the_dependency_graph_does_not_survive_the_document() {
+    let s = Stores::new();
+    s.state
+        .dependents
+        .lock()
+        .unwrap()
+        .entry((0, 0))
+        .or_default()
+        .insert((5, 5));
+    s.state
+        .dependencies
+        .lock()
+        .unwrap()
+        .entry((5, 5))
+        .or_default()
+        .insert((0, 0));
+    s.state
+        .column_dependents
+        .lock()
+        .unwrap()
+        .entry(3)
+        .or_default()
+        .insert((7, 7));
+    s.state
+        .row_dependents
+        .lock()
+        .unwrap()
+        .entry(3)
+        .or_default()
+        .insert((7, 7));
+    s.state
+        .column_dependencies
+        .lock()
+        .unwrap()
+        .entry((7, 7))
+        .or_default()
+        .insert(3);
+    s.state
+        .row_dependencies
+        .lock()
+        .unwrap()
+        .entry((7, 7))
+        .or_default()
+        .insert(3);
+    s.state
+        .name_dependents
+        .lock()
+        .unwrap()
+        .entry("BUDGETTOTAL".to_string())
+        .or_default()
+        .insert((9, 9));
+    s.state
+        .name_dependencies
+        .lock()
+        .unwrap()
+        .entry((9, 9))
+        .or_default()
+        .insert("BUDGETTOTAL".to_string());
+    s.state
+        .cross_sheet_dependents
+        .lock()
+        .unwrap()
+        .entry(("Sheet2".to_string(), 1, 1))
+        .or_default()
+        .insert((0, 2, 2));
+    s.state
+        .cross_sheet_dependencies
+        .lock()
+        .unwrap()
+        .entry((0, 2, 2))
+        .or_default()
+        .insert(("Sheet2".to_string(), 1, 1));
+
+    assert!(
+        !s.state.dependents.lock().unwrap().is_empty()
+            && !s.state.name_dependents.lock().unwrap().is_empty()
+            && !s.state.cross_sheet_dependents.lock().unwrap().is_empty(),
+        "precondition: the previous document's graph really is populated"
+    );
+
+    s.reset();
+
+    assert!(s.state.dependents.lock().unwrap().is_empty(), "cell dependents survived");
+    assert!(s.state.dependencies.lock().unwrap().is_empty(), "cell dependencies survived");
+    assert!(s.state.column_dependents.lock().unwrap().is_empty(), "column dependents survived");
+    assert!(s.state.row_dependents.lock().unwrap().is_empty(), "row dependents survived");
+    assert!(s.state.column_dependencies.lock().unwrap().is_empty(), "column dependencies survived");
+    assert!(s.state.row_dependencies.lock().unwrap().is_empty(), "row dependencies survived");
+    assert!(
+        s.state.name_dependents.lock().unwrap().is_empty(),
+        "the previous document's DEFINED-NAME edges survived, so re-pointing a \
+         name in the new document would recalculate cells that do not exist"
+    );
+    assert!(s.state.name_dependencies.lock().unwrap().is_empty(), "name dependencies survived");
+    assert!(s.state.cross_sheet_dependents.lock().unwrap().is_empty(), "cross-sheet dependents survived");
+    assert!(
+        s.state.cross_sheet_dependencies.lock().unwrap().is_empty(),
+        "cross-sheet dependencies survived"
+    );
+}
+
+/// Workbook structure protection — and its PASSWORD HASH — does not outlive its
+/// document.
+///
+/// A save source that the census could not see: `collect_protection_for_save`
+/// reads it through a method chain wrapped across lines, which the census's
+/// line-at-a-time scan skipped (see `join_method_chains`). `new_file` reset it
+/// inline, so the leak was latent rather than live — but "latent" was one
+/// refactor away from a blank document carrying another workbook's password.
+#[test]
+fn workbook_structure_protection_does_not_survive_the_document() {
+    let s = Stores::new();
+    {
+        let mut prot = s.state.workbook_protection.write(&seed()).unwrap();
+        prot.protected = true;
+        prot.password_hash = Some("LEAK-PROBE-HASH".to_string());
+    }
+    assert!(
+        s.state.workbook_protection.read().unwrap().protected,
+        "precondition: workbook A really is structure-protected"
+    );
+
+    s.reset();
+
+    let prot = s.state.workbook_protection.read().unwrap();
+    assert!(
+        !prot.protected,
+        "the previous workbook's structure protection survived, so the new \
+         document refuses sheet add/delete/rename for a password its author \
+         never set"
+    );
+    assert!(
+        prot.password_hash.is_none(),
+        "the previous workbook's PASSWORD HASH survived, and protection is \
+         persisted — the next save writes another document's secret into this \
+         one"
+    );
+}
+
+/// The subscription writeback bookkeeping does not outlive its document.
+#[test]
+fn the_writeback_bookkeeping_does_not_survive_the_document() {
+    let s = Stores::new();
+    let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+    let declaration: calp::WritebackRegionDeclaration = serde_json::from_value(serde_json::json!({
+        "id": "leak-probe-region",
+        "selector": {
+            "sheetId": sheet_id,
+            "rowStart": 0, "rowEnd": 4, "colStart": 0, "colEnd": 2,
+        },
+    }))
+    .expect("the probe declaration must deserialize");
+    *s.state.writeback_index.lock().unwrap() =
+        calp::WritebackIndex::from_declarations(std::slice::from_ref(&declaration))
+            .expect("the probe index must build");
+    s.state.writeback_declarations.lock().unwrap().push(declaration);
+    s.state
+        .model_writeback_declarations
+        .lock()
+        .unwrap()
+        .push(
+            serde_json::from_value(serde_json::json!({
+                "id": "leak-probe-column",
+                "dataSourceId": "ds-1",
+                "table": "Sales",
+                "column": "Forecast",
+                "keyColumns": ["Id"],
+            }))
+            .expect("the probe model column must deserialize"),
+        );
+    s.state
+        .writeback_rebuild_skips
+        .lock()
+        .unwrap()
+        .push(crate::calp_commands::WritebackRebuildSkip {
+            package_name: "leak-probe".to_string(),
+            registry_url: "C:/probe".to_string(),
+            reason: "unreachable".to_string(),
+            detail: "the registry path does not exist".to_string(),
+        });
+
+    assert!(
+        s.state.writeback_index.lock().unwrap().contains(sheet_id, 0, 0),
+        "precondition: workbook A's writeback region really is indexed"
+    );
+
+    s.reset();
+
+    assert!(
+        !s.state.writeback_index.lock().unwrap().contains(sheet_id, 0, 0),
+        "the previous document's writeback INDEX survived, so cells of the \
+         newly opened workbook are treated as publisher-designated writeback \
+         cells belonging to a package it never subscribed to"
+    );
+    assert!(
+        s.state.writeback_declarations.lock().unwrap().is_empty(),
+        "the previous document's writeback declarations survived"
+    );
+    assert!(
+        s.state.model_writeback_declarations.lock().unwrap().is_empty(),
+        "the previous document's MODEL writeback columns survived, so the next \
+         refresh diff reports that workbook's columns as removed from this one"
+    );
+    assert!(
+        s.state.writeback_rebuild_skips.lock().unwrap().is_empty(),
+        "the previous document's rebuild skips survived, and they are shown to \
+         the user verbatim — blaming the open workbook for another one's \
+         unreachable registry"
+    );
+}
+
+/// The GATHER pre-fetch map does not outlive its document.
+///
+/// `build_gather_data` runs on every recalculation and serves whatever is in
+/// here even past its TTL, precisely so that it never does registry I/O on the
+/// edit path. That makes a stale map worse than a slow one: the previous
+/// document's collected submissions are fed straight into this document's
+/// GATHER formulas, and the result looks like a computed answer.
+#[test]
+fn the_gather_cache_does_not_survive_the_document() {
+    let s = Stores::new();
+    let mut regions = std::collections::HashMap::new();
+    regions.insert(
+        "leak-probe-region".to_string(),
+        engine::GatherRegionData::default(),
+    );
+    *s.state.gather_cache.lock().unwrap() = Some((std::time::Instant::now(), regions));
+    assert!(
+        s.state.gather_cache.lock().unwrap().is_some(),
+        "precondition: workbook A's gathered data really is cached"
+    );
+
+    s.reset();
+
+    assert!(
+        s.state.gather_cache.lock().unwrap().is_none(),
+        "the previous document's GATHER data survived, so this document's \
+         GATHER formulas answer with another workbook's collected submissions"
+    );
+}
+
+/// The cell-identity registry does not outlive its document.
+///
+/// `open_file` re-seeds it from the restored override layer AFTER the reset, so
+/// the identities the new document needs are rebuilt. Nothing ever emptied it,
+/// so it accumulated every cell identity of every workbook opened in the
+/// session.
+#[test]
+fn the_cell_identity_registry_does_not_survive_the_document() {
+    let s = Stores::new();
+    let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+    {
+        let mut registry = s.state.id_registry.lock().unwrap();
+        registry.register_sheet_with_id("Sheet1", sheet_id);
+        registry.cell_id_at(sheet_id, (3, 4));
+        assert!(
+            registry.lookup_cell_id(sheet_id, (3, 4)).is_some(),
+            "precondition: workbook A's cell really has an identity"
+        );
+    }
+
+    s.reset();
+
+    assert!(
+        s.state
+            .id_registry
+            .lock()
+            .unwrap()
+            .lookup_cell_id(sheet_id, (3, 4))
+            .is_none(),
+        "the previous document's cell identities survived; the registry grows \
+         for the life of the process and hands the new document ids minted for \
+         a workbook it has never seen"
+    );
+}
+
+/// The cancelled-recalculation marker does not outlive its document.
+///
+/// Another save source the wrapped-chain blind spot hid
+/// (`attach_pending_recalc_for_save`). `open_file` restores it from the file;
+/// `new_file` used to leave the previous document's "these cells were never
+/// calculated" claim standing over a blank grid — and SAVE it there.
+#[test]
+fn the_pending_recalc_marker_does_not_survive_the_document() {
+    use crate::eval_budget::{PendingCell, PendingRecalc};
+
+    let s = Stores::new();
+    *s.state.pending_recalc.lock().unwrap() = Some(PendingRecalc {
+        sheet_index: 0,
+        cells: vec![PendingCell { row: 12, col: 3 }],
+    });
+    assert!(
+        s.state.pending_recalc.lock().unwrap().is_some(),
+        "precondition: workbook A really has a cancelled pass on record"
+    );
+
+    s.reset();
+
+    assert!(
+        s.state.pending_recalc.lock().unwrap().is_none(),
+        "the previous document's cancelled-recalculation marker survived: the \
+         new document reports cells as never-calculated on coordinates it has \
+         never evaluated, and writes that claim into the next save"
+    );
+}
+
+/// Animation/simulation transient snapshots do not outlive their document.
+///
+/// Each entry is the PRIOR `Cell` values a running playback must restore on
+/// stop. Those cells belong to the document being replaced, so a playback
+/// stopped after the swap writes them into the new one — the undo defect with a
+/// different verb, and with no undo entry at all, because the whole point of the
+/// transient-write pattern is that it never touches the undo stack.
+#[test]
+fn animation_snapshots_do_not_survive_the_document() {
+    let s = Stores::new();
+    s.state.animation_snapshots.lock().unwrap().insert(
+        "leak-probe-token".to_string(),
+        vec![((0, 0), Some(probe_cell("A-ORIGINAL")))],
+    );
+    assert_eq!(
+        s.state.animation_snapshots.lock().unwrap().len(),
+        1,
+        "precondition: workbook A's playback snapshot really is held"
+    );
+
+    s.reset();
+
+    assert!(
+        s.state.animation_snapshots.lock().unwrap().is_empty(),
+        "the previous document's animation snapshots survived: stopping that \
+         playback restores its cells into the workbook now on screen, without \
+         an undo entry, because transient writes never make one"
+    );
+}
+
+/// The notebook runtime does not outlive its document — and it carries WHOLE
+/// GRIDS.
+///
+/// `NotebookRuntime.checkpoints[i].grids` and `.baseline` are `Vec<Grid>`
+/// snapshots of the document that ran the cells, and `notebook_rewind` assigns
+/// one of them straight over `AppState.grids`. A checkpoint that outlives its
+/// document is therefore a one-click replacement of the open workbook with a
+/// closed one — the same shape as the undo entry, at whole-workbook scale.
+#[test]
+fn the_notebook_runtime_does_not_survive_the_document() {
+    use crate::scripting::types::GridCheckpoint;
+
+    let s = Stores::new();
+    {
+        let mut runtime = s.scripts.notebook_runtime.lock().unwrap();
+        let mut snapshot = engine::grid::Grid::new();
+        snapshot.set_cell(0, 0, probe_cell("A-ORIGINAL"));
+        runtime.checkpoints.push(GridCheckpoint {
+            cell_id: "cell-1".to_string(),
+            grids: vec![snapshot.clone()],
+        });
+        runtime.baseline = Some(vec![snapshot]);
+        runtime.execution_counter = 7;
+    }
+    assert_eq!(
+        s.scripts.notebook_runtime.lock().unwrap().checkpoints.len(),
+        1,
+        "precondition: workbook A's notebook checkpoint really is held"
+    );
+
+    s.reset();
+
+    let runtime = s.scripts.notebook_runtime.lock().unwrap();
+    assert!(
+        runtime.checkpoints.is_empty(),
+        "the previous document's notebook CHECKPOINTS survived — each one is a \
+         full `Vec<Grid>`, and a rewind writes it straight over the open \
+         workbook's grids"
+    );
+    assert!(
+        runtime.baseline.is_none(),
+        "the previous document's notebook BASELINE survived: a full-rewind now \
+         restores a closed workbook over the open one"
+    );
+    assert_eq!(
+        runtime.execution_counter, 0,
+        "the execution counter belongs to the notebook run that is over"
+    );
+}
+
 /// Protected regions belong to the document that registered them.
 ///
 /// Not a save source, so outside the census's invariant — but `open_file` never
@@ -591,14 +1108,39 @@ fn protected_regions_do_not_survive_the_document_that_registered_them() {
 
 /// The reset does not empty the app's own state along with the document's.
 ///
-/// The counterweight to every test above: a reset that cleared everything would
-/// pass all of them and leave the user with no Cell Styles gallery, no locale
-/// and no script security setting. The line is "is this the DOCUMENT's?", not
-/// "is this stateful?".
+/// THE COUNTERWEIGHT to every test above, and the reason it matters is not
+/// symmetry: a reset that cleared everything would pass all of them. It would
+/// also leave the user with no Cell Styles gallery, a reset locale — and, worst
+/// of all, script execution re-armed. The line is "is this the DOCUMENT's?",
+/// never "is this stateful?", and the undo stack and `permission_grants` are the
+/// two ends of it: both look exactly like session state, and only one of them is.
+///
+/// Every field asserted here is an entry in the census's `SESSION_SCOPED` list,
+/// which is where the WRITTEN reason for each lives. This is the behaviour half:
+/// the list says what the decision was, this proves the code made it.
 #[test]
 fn the_reset_leaves_application_state_alone() {
     let s = Stores::new();
     *s.scripts.security_level.lock().unwrap() = "disabled".to_string();
+    *s.scripts.mcp_access_level.lock().unwrap() = "read".to_string();
+    s.scripts.permission_grants.lock().unwrap().insert(
+        "script-the-user-approved".to_string(),
+        vec!["net.fetch".to_string()],
+    );
+    *s.state.calculation_mode.lock().unwrap() = "manual".to_string();
+    *s.state.precision_as_displayed.lock().unwrap() = true;
+    *s.state.calculate_before_save.lock().unwrap() = false;
+    *s.state.auto_recover_enabled.lock().unwrap() = false;
+    *s.state.auto_recover_interval_ms.lock().unwrap() = 60_000;
+    *s.state.max_iterations.lock().unwrap() = 250;
+    *s.state.max_change.lock().unwrap() = 0.5;
+    *s.state.subscriber_identity.lock().unwrap() = Some(
+        serde_json::from_value(serde_json::json!({
+            "id": "identity-probe",
+            "displayName": "The Person At This Machine",
+        }))
+        .expect("the probe identity must deserialize"),
+    );
     let locale_before = format!("{:?}", *s.state.locale.lock().unwrap());
     let reference_style_before = s.state.reference_style.lock().unwrap().clone();
     let iteration_before = *s.state.iteration_enabled.lock().unwrap();
@@ -611,6 +1153,70 @@ fn the_reset_leaves_application_state_alone() {
         "Script Security is a machine setting, not a property of the open \
          document — resetting it on File > New would silently re-enable script \
          execution the user had turned off"
+    );
+    assert_eq!(
+        *s.scripts.mcp_access_level.lock().unwrap(),
+        "read",
+        "the AI tool-surface ceiling is a machine setting for the same reason \
+         as Script Security: a document must not be able to widen it by being \
+         opened"
+    );
+    assert_eq!(
+        s.scripts
+            .permission_grants
+            .lock()
+            .unwrap()
+            .get("script-the-user-approved")
+            .map(|g| g.as_slice()),
+        Some(["net.fetch".to_string()].as_slice()),
+        "THE DANGEROUS ONE. `permission_grants` holds the SESSION-scoped execute \
+         approval. Clearing it looks like tidying up and is actually a security \
+         decision reversed in the unsafe direction, with no prompt: the user's \
+         withdrawal of consent would be silently undone by opening a file"
+    );
+    assert_eq!(
+        *s.state.calculation_mode.lock().unwrap(),
+        "manual",
+        "Automatic vs Manual is the user's choice about their session; nothing \
+         serialises it, and putting a user who switched to Manual back on \
+         Automatic at every File > Open would undo the choice they made because \
+         recalculation was too slow"
+    );
+    assert!(
+        *s.state.precision_as_displayed.lock().unwrap(),
+        "precision-as-displayed is destructive when on, so flipping it as a \
+         side effect of opening a file is the one behaviour worse than leaving \
+         it alone"
+    );
+    assert!(
+        !*s.state.calculate_before_save.lock().unwrap(),
+        "recalculate-before-save is a preference about what saving does, not a \
+         property of the thing being saved"
+    );
+    assert!(
+        !*s.state.auto_recover_enabled.lock().unwrap(),
+        "AutoRecover is a machine-level safety net; a setting that turns itself \
+         back on because a file was opened is not a setting"
+    );
+    assert_eq!(
+        *s.state.auto_recover_interval_ms.lock().unwrap(),
+        60_000,
+        "the AutoRecover period travels with the AutoRecover switch"
+    );
+    assert_eq!(
+        *s.state.max_iterations.lock().unwrap(),
+        250,
+        "the iteration limit is part of the iterative-calculation preference"
+    );
+    assert_eq!(
+        *s.state.max_change.lock().unwrap(),
+        0.5,
+        "the convergence threshold is part of the same preference"
+    );
+    assert!(
+        s.state.subscriber_identity.lock().unwrap().is_some(),
+        "the subscriber identity is the person at this machine, loaded from the \
+         Calcula profile directory — not something the open document supplies"
     );
     assert_eq!(
         format!("{:?}", *s.state.locale.lock().unwrap()),

@@ -81,12 +81,13 @@ export async function deepResetForWalk(page: Page): Promise<void> {
   await page.waitForTimeout(300);
 
   // Fresh workbook + UI reset (new_file, grid:refresh, Escape, Ctrl+Home).
+  //
+  // This is ALSO what gives walks a clean undo stack, and it is the only thing
+  // that does. There used to be a `clear_undo_history` invoke here; the command
+  // is gone (it had no product caller and no product route — see
+  // `undo_commands.rs`), and it was already redundant, because `new_file` runs
+  // `reset_document_scoped_stores`, which empties the stack. Nothing between
+  // that call and here pushes a transaction: Escape and Ctrl+Home navigate.
   await resetToNewWorkbook(page);
-
-  // Walks measure undo-stack depth deltas — start from a clean stack.
-  await page.evaluate(async () => {
-    const tauri = (window as any).__TAURI__;
-    await tauri.core.invoke("clear_undo_history").catch(() => {});
-  });
   await page.waitForTimeout(200);
 }

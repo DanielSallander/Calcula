@@ -206,6 +206,39 @@ impl NotebookExecutor {
             self.clear_sender();
         }
     }
+
+    /// Drop the persistent session WITHOUT awaiting — the document-replacing
+    /// reset's form of [`reset`](Self::reset).
+    ///
+    /// Two deliberate differences from `reset`:
+    ///
+    /// 1. **It does not await the reply.** `persistence::reset_document_scoped_stores`
+    ///    is synchronous because `open_file` is, and the ordering the caller
+    ///    actually needs is guaranteed without a reply: the executor takes jobs
+    ///    off one `mpsc` channel in send order, so every later `RunCell` is
+    ///    handled after this `Reset` and can never see the old session.
+    /// 2. **It does not SPAWN the thread.** `sender()` starts the executor on
+    ///    demand, and starting a JS interpreter thread on every File ▸ New to
+    ///    tell it to forget a session it never had is pure cost. No channel
+    ///    means no session, which is already the desired state.
+    ///
+    /// The session holds the globals the previous document's notebook cells
+    /// defined; those notebooks are dropped by the same reset, so leaving their
+    /// variables visible to the next document's cells is a leak across
+    /// documents in exactly the sense this reset exists to close.
+    pub fn reset_detached(&self) {
+        let guard = self
+            .tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(tx) = guard.as_ref() else {
+            return;
+        };
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        // A send failure means the thread is already gone, and a gone thread has
+        // no session — the state this asks for. The next `sender()` respawns.
+        let _ = tx.send(Job::Reset { reply: reply_tx });
+    }
 }
 
 impl Default for NotebookExecutor {

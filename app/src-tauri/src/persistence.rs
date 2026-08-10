@@ -3363,6 +3363,18 @@ pub(crate) fn reset_default_geometry(
 /// not the document's and survives, which is why those stores are not save
 /// sources either.
 ///
+/// IT IS NOT ONLY THE SAVE SOURCES. The census above measures the stores the
+/// save path READS; the second half of this function resets document-scoped
+/// state that is never written to disk at all, and that half is where the worse
+/// defect lived. `new_file` kept its own inline "session state that is NOT a
+/// save source" block — the undo stack, the dependency graph, the spill maps,
+/// the writeback index — and `open_file` had no equivalent, so the UNDO STACK
+/// OUTLIVED ITS DOCUMENT: open A, edit a cell, open B, press Ctrl+Z once, and
+/// B's cell was overwritten with A's value and saved that way. Being invisible
+/// to the save-source census by construction is exactly why it survived it,
+/// which is why `every_state_field_is_reset_or_exempt` now enumerates every
+/// field of every State instead.
+///
 /// The caller supplies the `DocumentEffect`. Both callers pass a
 /// `deliberately_clean(LoadingFromDisk)` one: replacing the document is not an
 /// edit to it, and both end by marking the document saved.
@@ -3603,6 +3615,141 @@ pub(crate) fn reset_document_scoped_stores(
     // (`reregister_report_region`, `update_pivot_region`).
     state.protected_regions.lock().map_err(|e| e.to_string())?.clear();
 
+    // =======================================================================
+    // DOCUMENT-SCOPED STATE THAT IS NOT A SAVE SOURCE
+    // =======================================================================
+    //
+    // Everything below is rebuilt from the grid (or recorded live) rather than
+    // persisted, so the save-source census cannot see it BY CONSTRUCTION. It is
+    // still the document's, and it still describes the document being thrown
+    // away. `new_file` used to hold this list inline and `open_file` had no
+    // equivalent, which is the whole of defect 4a: one Ctrl+Z after File > Open
+    // wrote the PREVIOUS workbook's value into the one on screen, and the next
+    // save put it on disk.
+    //
+    // A field here is covered by `every_state_field_is_reset_or_exempt`, which
+    // enumerates every field of every State handed to this function. Adding a
+    // field to `AppState` and not to this block fails that test until somebody
+    // writes down why the field is session- or machine-scoped.
+
+    // ---- The undo stack ----------------------------------------------------
+    // THE 4a DEFECT. An `UndoTransaction` holds (sheet_index, row, col) plus the
+    // BEFORE value; nothing in it names the document it came from. Left across a
+    // File > Open, the first Ctrl+Z applies workbook A's before-image to
+    // workbook B's coordinates — a silent, undoable-looking overwrite of a cell
+    // the user never edited, in a document that had no undo history to spend.
+    *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
+
+    // ---- The dependency graph, in every direction it is indexed ------------
+    // Cell -> cell, the two stripe (whole row / whole column) forms, the
+    // cross-sheet form, and the DEFINED-NAME edges (D2: a formula stores the
+    // name, so `RATE` must lose its dependents with the workbook that defined
+    // it). All are rebuilt by `rebuild_all_dependencies` from the restored grid.
+    state.dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.cross_sheet_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.column_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.row_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.column_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.name_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.name_dependencies.lock().map_err(|e| e.to_string())?.clear();
+
+    // ---- Table NAMES -------------------------------------------------------
+    // The reverse index of `tables` (cleared above), never serialized on its
+    // own: a stale entry makes `Table1` resolve to a table the document does
+    // not have.
+    state.table_names.write(effect).map_err(|e| e.to_string())?.clear();
+
+    // ---- Workbook structure protection -------------------------------------
+    // This one IS a save source, and the census could not see it: the read in
+    // `collect_protection_for_save` is a multi-line `state\n.workbook_protection\n
+    // .read()` chain, which the census's line-at-a-time scan missed until it
+    // learned to join method chains. Without the reset a File > New after
+    // opening a structure-protected workbook inherits the old PASSWORD HASH and
+    // writes it into the fresh document.
+    *state.workbook_protection.write(effect).map_err(|e| e.to_string())? =
+        crate::protection::WorkbookProtection::default();
+
+    // ---- Dynamic-array spill tracking --------------------------------------
+    // The same shape as the undo stack, and it DESTROYS CELLS rather than
+    // merely refusing them. Both maps are keyed by bare (sheet_index, row, col)
+    // with no document identity. Left across a File > Open:
+    //   * `check_spill_protection` reads `spill_hosts` and refuses to edit a
+    //     cell of the newly-opened workbook — "The value contained in this cell
+    //     is spilled from the formula in A1" — naming a formula in a document
+    //     that is no longer open, for the rest of the session; and
+    //   * clearing (or recalculating a dependent of) the stale ORIGIN takes the
+    //     `spill_ranges` branch that does `grid.cells.remove(...)` over every
+    //     coordinate the previous document's spill covered, deleting the new
+    //     document's cells with no undo entry for them.
+    state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
+    state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
+
+    // ---- Conditional-format rule id counter --------------------------------
+    // Ids are per-document, so a fresh document restarts at 1.
+    *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;
+
+    // ---- Subscription writeback bookkeeping --------------------------------
+    // The positional index, the region declarations, and the model-writeback
+    // COLUMN mirror, all rebuilt from the (already-reset) subscription manifest.
+    // A stale set survives into the next document and makes the next refresh
+    // diff report the PREVIOUS workbook's columns as removed.
+    *state.writeback_index.lock().map_err(|e| e.to_string())? =
+        calp::WritebackIndex::default();
+    state.writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
+    state.model_writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
+    // ...and why the last rebuild could not install a subscription's regions.
+    // Reported verbatim to the user by `calp_get_writeback_rebuild_skips`, so a
+    // leftover entry blames the open document for another one's bad manifest.
+    state.writeback_rebuild_skips.lock().map_err(|e| e.to_string())?.clear();
+
+    // ---- The GATHER pre-fetch map ------------------------------------------
+    // Keyed by writeback region id, and `build_gather_data` serves whatever is
+    // here on every recalculation even past its TTL — so a stale map feeds the
+    // PREVIOUS document's collected values into this document's GATHER
+    // formulas. `None` is the honest "nothing known yet"; the background
+    // rebuild refills it. Neither path invalidated it before.
+    *state.gather_cache.lock().map_err(|e| e.to_string())? = None;
+
+    // ---- The cell-identity registry ----------------------------------------
+    // (sheet_id, position) -> CellId for the open document. `open_file`
+    // re-seeds it from the restored override layer after this returns; nothing
+    // ever emptied it, so it accumulated every cell identity of every workbook
+    // opened in the session.
+    *state.id_registry.lock().map_err(|e| e.to_string())? = identity::IdRegistry::new();
+
+    // ---- The cancelled-recalculation marker --------------------------------
+    // A save source too (`attach_pending_recalc_for_save` writes it into the
+    // workbook), hidden from the census by the same multi-line chain as
+    // `workbook_protection`. `open_file` restores it from the file below;
+    // `new_file` used to leave the previous document's "these cells were never
+    // calculated" claim standing over a blank grid, and save it there.
+    *state.pending_recalc.lock().map_err(|e| e.to_string())? = None;
+
+    // ---- Animation / simulation transient snapshots ------------------------
+    // token -> the PRIOR `Cell` values a running playback must restore. Those
+    // cells belong to the document being replaced; a playback stopped after the
+    // swap would write them into the new one, which is the undo defect with a
+    // different verb. Reset by neither path before.
+    state.animation_snapshots.lock().map_err(|e| e.to_string())?.clear();
+
+    // ---- Notebook runtime bookkeeping --------------------------------------
+    // `NotebookRuntime` holds `checkpoints[i].grids` and `baseline`: whole
+    // `Vec<Grid>` snapshots of the document that ran the cells. `notebook_rewind`
+    // assigns one of them straight over `AppState.grids`, so a checkpoint that
+    // outlives its document is a one-click replacement of the open workbook with
+    // a closed one. The notebooks themselves were already dropped above
+    // (`workbook_notebooks`); this is the machinery that pointed at them.
+    *script_state.notebook_runtime.lock().map_err(|e| e.to_string())? =
+        crate::scripting::types::NotebookRuntime::new();
+    // ...and the JS session those cells built their globals in. Detached rather
+    // than awaited: `reset_document_scoped_stores` is sync because `open_file`
+    // is, and the executor's mpsc channel preserves order, so the session is
+    // guaranteed dropped before the next cell runs. See `reset_detached`.
+    script_state.notebook_executor.reset_detached();
+
     Ok(())
 }
 
@@ -3644,58 +3791,19 @@ pub fn new_file(
         &reset_effect,
     )?;
 
-    // ---- Session state that is NOT a save source ---------------------------
-    // Everything below is rebuilt from the grid rather than persisted, so it is
-    // outside the census's invariant — but it still describes the document that
-    // has just been thrown away, and leaving it would point the blank workbook's
-    // machinery at cells that no longer exist.
-
-    // Table NAMES (the reverse index of `tables`, never serialized on its own).
-    state.table_names.write(&reset_effect).map_err(|e| e.to_string())?.clear();
-
-    // Dependency graph, in every direction it is indexed.
-    state.dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.dependencies.lock().map_err(|e| e.to_string())?.clear();
-    state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.cross_sheet_dependencies.lock().map_err(|e| e.to_string())?.clear();
-    state.column_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.row_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.column_dependencies.lock().map_err(|e| e.to_string())?.clear();
-    state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
-    // ...including the DEFINED-NAME edges, or a blank document would keep
-    // pointing the old workbook's names at cell coordinates that no longer mean
-    // anything (D2).
-    state.name_dependents.lock().map_err(|e| e.to_string())?.clear();
-    state.name_dependencies.lock().map_err(|e| e.to_string())?.clear();
-
-    // Reset undo stack
-    *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
-
-    // Workbook structure protection must reset too — without this a File>New
-    // after opening a structure-protected workbook inherits the old password
-    // (and, now that protection persists, would even SAVE the old hash into
-    // the fresh document).
-    *state.workbook_protection.write(&reset_effect).map_err(|e| e.to_string())? =
-        crate::protection::WorkbookProtection::default();
-
-    // Clear spill tracking
-    state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
-    state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
-
-    // Reset conditional format ID counter
-    *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;
-
-    // Reset writeback index/declarations (otherwise the previous workbook's
-    // regions stay active in the new workbook)
-    *state.writeback_index.lock().map_err(|e| e.to_string())? =
-        calp::WritebackIndex::default();
-    state.writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
-    // The MODEL writeback mirror must be cleared with its grid sibling: new_file
-    // does not call rebuild_writeback_index, so a stale set would survive into
-    // the blank workbook and make the next refresh diff report the PREVIOUS
-    // workbook's columns as removed.
-    state.model_writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
-
+    // NOTHING ELSE BELONGS HERE. `new_file` used to follow the reset with its
+    // own inline "session state that is NOT a save source" block — the undo
+    // stack, the dependency graph, the spill maps, the writeback index — and
+    // `open_file` had no equivalent, so every one of those stores survived a
+    // File > Open into a document that had never seen them. That block now
+    // lives in `reset_document_scoped_stores` with the rest, and
+    // `new_file_delegates_every_store_reset` fails if a store is ever cleared
+    // here again: a reset only this path runs is a reset the open path does not.
+    //
+    // The lines below are not stores. They are this command's answer to "WHICH
+    // document is now open", and they are the one thing the two paths must
+    // legitimately disagree about — `open_file` sets the path it just read and
+    // the passphrase that decrypted it, `new_file` sets none of either.
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
     crate::document_effect::mark_saved(&file_state);
     // A new (blank) document is never encrypted; drop any session passphrase.

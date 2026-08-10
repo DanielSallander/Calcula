@@ -2035,12 +2035,26 @@ pub fn redo(
     result
 }
 
-/// Clear undo/redo history (e.g., when opening a new file).
-#[tauri::command]
-pub fn clear_undo_history(state: State<AppState>) {
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    undo_stack.clear();
-}
+// `clear_undo_history` USED TO BE HERE, and it was deleted rather than wired up
+// (2026-08-10, defect 4a).
+//
+// It was a `#[tauri::command]` with no product caller anywhere — no menu item,
+// no command, no frontend invoke — whose own doc comment named the route it was
+// missing: "e.g., when opening a new file". That route is real, and it is now
+// `persistence::reset_document_scoped_stores`, which BOTH document-replacing
+// paths run. Re-exposing the same clear as a command would put the undo stack's
+// lifetime back into somebody's hands to remember, which is precisely the shape
+// that let the stack outlive its document in the first place.
+//
+// There is no user-facing reason for the command either: Excel exposes no
+// "clear undo history" action, and the stack's lifetime IS the document's — the
+// user asks for it by closing the document, not by asking for it. Its only
+// caller was E2E walker setup (`app/e2e/walker/reset.ts`), where it was already
+// redundant: that helper calls `new_file` immediately before, which resets the
+// stack through the shared function.
+//
+// Every command also costs main-thread stack in `generate_handler!` (32MB
+// reserve, ~660 commands), so an unused one is not free.
 
 // ============================================================================
 // PIVOT TABLE UNDO/REDO HANDLERS
