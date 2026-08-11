@@ -748,6 +748,19 @@ Also in this cycle:
 - **`DATEDIFF` sub-day intervals rejected at parse.** `DATEDIFF(a, b, HOUR | MINUTE | SECOND)` previously parsed but **silently returned days** (the renderer had no sub-day arm). The interval allow-list is now `DAY` / `MONTH` / `YEAR` / `QUARTER` only, matching the documented contract; an unsupported interval is a parse error. (`DATEADD` / `DATE_TRUNC` still accept sub-day intervals — they render correctly.)
 - **Scalar filter on a filter-only dimension now restricts the fact.** A `QueryRequest.filters` condition whose column is owned only by a dimension that is neither grouped nor measured (e.g. slice `region = "East"` while grouping by product) was **silently dropped**; it now pulls that table into the fetch set and rides the two-phase propagation, restricting the fact — matching how `in_filters` already behaved.
 
+## String literals accept `""` as an escaped quote (no API change, no `MODEL_FORMAT_VERSION` change)
+
+The expression tokenizer scanned a string literal to the **first** closing `"`, with no escape of any kind — so the measure/CONTEXT language **could not express a double quote at all**. Correspondingly `expression_to_formula` rendered `Expression::LiteralString(v)` as `format!("\"{v}\"")` with no escaping, emitting text its own tokenizer could not read back.
+
+This matters to the host because **CONTEXT expression TEXT is the authoring form**: Calcula's Model Editor round-trips through `to_text()` / `parse_context` and stores the text. An expression carrying a `"` that entered by a non-parser route — model JSON, a `biModel*` command taking an expression tree, or a connector-derived calculated column — therefore formatted to text that failed to re-parse, so the round-trip refused or corrupted it.
+
+- **Tokenizer:** `""` inside a string literal now yields one literal `"` and stays inside the literal. An unterminated literal is still `EngineError::ParseError` (a trailing `""` at end of input leaves the literal open, and is reported as such — it is not silently truncated).
+- **Formatter:** `LiteralString` now doubles every embedded `"`.
+
+**Spelling chosen for DAX/Power BI parity** — DAX uses `""` doubling, not backslash escapes.
+
+**Host impact:** none for existing models (no stored text could legally contain a quote before). New: a model expression may now contain a quote, and `to_text()` output for such an expression is `"a""b"` rather than the previously unparseable `"a"b"`.
+
 ## Performance (transparent — no API change)
 
 - **Sargable integer filters.** A scalar filter or `OR`-slicer condition on a column the model declares as an **integer** type now renders to the source as an uncast, unquoted comparison (`col = 5`), so a source index on that column is usable — previously every filter was text-cast (`col::text = $1`), forcing a sequential scan. This closes the asymmetry with the IN-list path, which was already sargable by the same model-type rule. (Date/decimal sargability remains future work; those still text-cast.) **Contract:** a model's declared column type must match the source's physical type. The optimization keys off the *declared* type, so a column declared integer but physically `VARCHAR` at the source now renders `col = 5` — on PostgreSQL this is a loud error (operator type mismatch); on SQL Server it compares numerically rather than as text, which can differ for non-canonical strings (`'05'`). This only affects models that misdeclare their own column types; a faithful model is unaffected. (Same caveat already applied to the IN-list slicer path.)

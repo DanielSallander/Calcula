@@ -59,6 +59,18 @@ export default defineConfig({
       name: "functional",
       testDir: "./e2e/tests",
       testMatch: "**/*.spec.ts",
+      // The monkey walk is NOT a functional test and must not run inside this
+      // suite. Everything in ./e2e/tests shares one app instance and one
+      // accumulating workbook, which is why `journey` exists as a separate
+      // project: a spec that disturbs the whole document shifts unrelated
+      // goldens. `state-consistency` is the largest such disturber in the tree
+      // — it deep-resets the workbook (deleting every table, chart, pivot and
+      // slicer earlier specs created), then applies up to 75 RANDOM mutating
+      // actions, and roughly twenty specs run after it alphabetically. It has
+      // had its own `invariant` project the whole time; it was simply also
+      // being picked up here. It is also budgeted for an in-spec ddmin shrink
+      // on failure, which is minutes, not the 30s this project assumes.
+      testIgnore: "**/state-consistency.spec.ts",
     },
     {
       name: "visual",

@@ -3690,7 +3690,7 @@ mod tests {
         ]);
 
         let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (2, 2));
-        let mut region_field = PivotField::new(0, "Region".to_string());
+        let region_field = PivotField::new(0, "Region".to_string());
         let mut product_field = PivotField::new(1, "Product".to_string());
         product_field.show_all_items = true; // Show items with no data
 

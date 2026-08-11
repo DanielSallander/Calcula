@@ -320,6 +320,7 @@ pub fn update_chart(
 /// Returns the deleted chart's sheet index.
 pub(crate) fn delete_chart_core(
     state: &AppState,
+    pane_control_state: &crate::pane_control::PaneControlState,
     effect: &crate::document_effect::DocumentEffect,
     chart_id: &str,
 ) -> Result<usize, String> {
@@ -339,7 +340,31 @@ pub(crate) fn delete_chart_core(
         let mut charts = state.charts.write(effect).map_err(|e| e.to_string())?;
         charts.retain(|c| c.id != id);
     }
+    // SECOND DELETE PATH, SAME CASCADE (section 3bt). This is not the Tauri
+    // command -- an AI tool reaches charts here -- and every lifecycle rule the
+    // UI path applies has to apply on this one too, or the object graph depends
+    // on WHO deleted the chart. Recorded in ONE transaction so the AI's delete
+    // is one Ctrl+Z, exactly like the user's.
+    let pruned_controls =
+        crate::object_deps::cascade_deleted_charts(pane_control_state, &[id]);
+    let opened_transaction = {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let opened = !undo_stack.has_open_transaction();
+        if opened {
+            undo_stack.begin_transaction("Delete chart (AI)".to_string());
+        }
+        opened
+    };
+    crate::object_deps::record_pane_control_prune_undo(
+        state,
+        &pruned_controls,
+        "Restore chart binding",
+    );
     crate::undo_commands::record_chart_undo(state, id, Some(previous.clone()), "Delete chart (AI)");
+    if opened_transaction {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo_stack.commit_transaction();
+    }
     // C10 lifecycle hygiene, exactly like chart_commands::delete_chart.
     crate::scripting::object_script_commands::prune_scripts_for_instance(state, effect, &id.to_string());
 
@@ -353,7 +378,9 @@ pub fn delete_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String
     // Built after `require_tier`; `delete_chart_core` still resolves "no such chart"
     // and the protection gate under a read guard before touching anything.
     let effect = mcp_effect(handle);
-    let sheet = delete_chart_core(&state, &effect, chart_id)?;
+    let pane_control_state = handle.state::<crate::pane_control::PaneControlState>();
+    let sheet = delete_chart_core(&state, &pane_control_state, &effect, chart_id)?;
+    drop(pane_control_state);
     drop(state);
 
     let _ = handle.emit("charts:refresh", ());
@@ -631,6 +658,10 @@ pub fn update_table(
         let result = crate::tables::rename_table(
             handle.state::<crate::persistence::FileState>(),
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
+            handle.state::<crate::pivot::PivotState>(),
+            handle.state::<crate::pane_control::PaneControlState>(),
+            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
             id,
             name.to_string(),
         );
@@ -649,6 +680,10 @@ pub fn update_table(
         let result = crate::tables::resize_table(
             handle.state::<crate::persistence::FileState>(),
             handle.state::<AppState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
+            handle.state::<crate::pivot::PivotState>(),
+            handle.state::<crate::pane_control::PaneControlState>(),
+            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
             crate::tables::ResizeTableParams {
                 table_id: id,
                 start_row,
@@ -701,6 +736,12 @@ pub fn delete_table(handle: &AppHandle, table_id: &str) -> Result<String, String
     let result = crate::tables::delete_table(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
+        handle.state::<crate::persistence::UserFilesState>(),
+        handle.state::<crate::pivot::PivotState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
+        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        handle.state::<crate::slicer::SlicerState>(),
+        handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
         id,
     );
     if !result.success {
@@ -1052,6 +1093,8 @@ pub fn delete_pivot(handle: &AppHandle, pivot_id: &str) -> Result<String, String
         handle.state::<crate::persistence::UserFilesState>(),
         handle.state::<crate::pane_control::PaneControlState>(),
         handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        handle.state::<crate::slicer::SlicerState>(),
+        handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
         id,
     )?;
 
@@ -1193,6 +1236,8 @@ pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> 
         handle.state::<crate::persistence::UserFilesState>(),
         handle.state::<crate::pane_control::PaneControlState>(),
         handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        handle.state::<crate::slicer::SlicerState>(),
+        handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
         index,
     )?;
 
@@ -1230,6 +1275,9 @@ pub fn move_sheet(handle: &AppHandle, from_index: usize, to_index: usize) -> Res
     crate::sheets::move_sheet(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
+        handle.state::<crate::slicer::SlicerState>(),
+        handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
+        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
         from_index,
         to_index,
     )?;
@@ -1461,9 +1509,10 @@ mod tests {
         }
 
         let fs = crate::persistence::FileState::default();
+        let pane_state = crate::pane_control::PaneControlState::new();
         let effect = crate::document_effect::DocumentEffect::mutates(&fs);
         let sheet =
-            delete_chart_core(&state, &effect, &drop_id).expect("delete should succeed");
+            delete_chart_core(&state, &pane_state, &effect, &drop_id).expect("delete should succeed");
         assert!(
             fs.is_dirty(),
             "an AI-driven chart delete must dirty the document: the MCP path never runs              the frontend, so nothing else would"
@@ -1481,7 +1530,7 @@ mod tests {
 
         // Deleting it twice is an error, not a silent success.
         drop(undo);
-        assert!(delete_chart_core(&state, &effect, &drop_id).is_err());
+        assert!(delete_chart_core(&state, &pane_state, &effect, &drop_id).is_err());
     }
 
     #[test]
@@ -1504,9 +1553,10 @@ mod tests {
         }
 
         let fs = crate::persistence::FileState::default();
+        let pane_state = crate::pane_control::PaneControlState::new();
         let effect = crate::document_effect::DocumentEffect::mutates(&fs);
         assert!(update_chart_core(&state, &effect, &id, None, Some("nope"), None, &ChartPlacement::default()).is_err());
-        assert!(delete_chart_core(&state, &effect, &id).is_err());
+        assert!(delete_chart_core(&state, &pane_state, &effect, &id).is_err());
         // Nothing changed, nothing recorded.
         assert_eq!(state.charts.read().unwrap().len(), 1);
         assert!(!state.undo_stack.lock().unwrap().can_undo());

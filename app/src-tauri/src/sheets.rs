@@ -420,6 +420,50 @@ pub(crate) fn remap_sheet_keyed_stores_for_test(
     remap_sheet_keyed_stores(state, effect, remap)
 }
 
+/// Pre-flight the whole-workbook formula repair over the grids AS THE REPAIR
+/// WILL SEE THEM, and refuse before anything is mutated.
+///
+/// TWO SUBTLETIES, both of which a naive `check_formulas_repairable(&grids, ..)`
+/// gets wrong:
+///
+/// 1. `state.grid` is the AUTHORITATIVE copy of the active sheet and
+///    `grids[active]` can lag behind it (BUG-0016) — both sheet commands sync
+///    them just before repairing. Checking `grids` alone would miss a formula
+///    the user typed since the last sheet switch, which is exactly the formula
+///    most likely to be unusual.
+/// 2. A sheet being DELETED is skipped: its formulas are about to cease to
+///    exist, so refusing the delete on account of one of them would be a
+///    refusal the user cannot act on.
+fn check_workbook_repairable(
+    grids: &[engine::Grid],
+    active_grid: &engine::Grid,
+    active_sheet: usize,
+    deleted_sheet: Option<usize>,
+    repair: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), crate::FormulaRepairRefusal> {
+    let mut skip: Vec<usize> = Vec::new();
+    if let Some(d) = deleted_sheet {
+        skip.push(d);
+    }
+    if active_sheet < grids.len() {
+        skip.push(active_sheet);
+    }
+    crate::check_formulas_repairable(grids, &skip, repair)?;
+    if active_sheet < grids.len() && deleted_sheet != Some(active_sheet) {
+        // The active sheet, from the copy that is actually authoritative. Its
+        // refusal comes back carrying index 0 (it was checked as a one-sheet
+        // slice), so re-stamp it with the real sheet index or the message names
+        // the wrong sheet.
+        crate::check_formulas_repairable(std::slice::from_ref(active_grid), &[], repair).map_err(
+            |mut refusal| {
+                refusal.sheet_index = active_sheet;
+                refusal
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn repair_named_ranges(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -623,9 +667,9 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     );
     let (result, switched) = {
     let sheet_names = state.sheet_names.read().unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
-    let mut current_grid = state.grid.write(&effect).unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
@@ -715,14 +759,21 @@ pub fn add_sheet(
     name: Option<String>,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "add a sheet")?;
+    // Excel's rule, checked BEFORE the document is marked modified: a refused
+    // name must not dirty the workbook. The uniqueness half needs the sheet
+    // list and is checked under the lock below.
+    let name = match name {
+        Some(requested) => Some(crate::sheet_names::validate_sheet_name(&requested)?),
+        None => None,
+    };
     // Past the workbook-structure protection gate. Adding a sheet appends to every
     // per-sheet persisted vector.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let result = {
     let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
-    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -731,20 +782,28 @@ pub fn add_sheet(
     let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
     let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
 
-    let new_name = name.unwrap_or_else(|| {
-        let mut counter = sheet_names.len() + 1;
-        loop {
-            let candidate = format!("Sheet{}", counter);
-            if !sheet_names.contains(&candidate) {
-                return candidate;
+    // A name the CALLER gave goes through Excel's rule; the default this
+    // generates cannot violate it. The duplicate check is case-INSENSITIVE
+    // (`crate::sheet_names`) -- sheet lookup is case-insensitive everywhere
+    // else, so `sheet1` beside `Sheet1` was two sheets the rest of the crate
+    // believed were one.
+    let new_name = match name {
+        Some(requested) => requested,
+        None => {
+            let mut counter = sheet_names.len() + 1;
+            loop {
+                let candidate = format!("Sheet{}", counter);
+                if crate::sheet_names::ensure_sheet_name_is_free(&candidate, &sheet_names, None)
+                    .is_ok()
+                {
+                    break candidate;
+                }
+                counter += 1;
             }
-            counter += 1;
         }
-    });
+    };
 
-    if sheet_names.contains(&new_name) {
-        return Err(format!("Sheet '{}' already exists", new_name));
-    }
+    crate::sheet_names::ensure_sheet_name_is_free(&new_name, &sheet_names, None)?;
 
     let old_index = *active_sheet;
 
@@ -843,16 +902,63 @@ pub fn delete_sheet(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     index: usize,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "delete a sheet")?;
+
+    // PRE-FLIGHT, under READ locks, before the document is marked dirty and
+    // before a single store is touched.
+    //
+    // The repair itself runs far below, after this command has already removed
+    // the sheet from a dozen index-aligned stores; by then there is nothing to
+    // refuse INTO. So the question "does every formula in this workbook survive
+    // the delete" is asked here, while the workbook is still whole, and a
+    // formula whose repaired text cannot be read back stops the delete instead
+    // of being quietly emptied (register §3bc — Excel refuses the operation
+    // rather than corrupting the file). The cost is parsing the repaired text
+    // twice on a command that already walks every formula on every sheet.
+    {
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let current_grid = state.grid.read().map_err(|e| e.to_string())?;
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        if index < sheet_names.len() && sheet_names.len() > 1 {
+            let deleted_name = sheet_names[index].clone();
+            let names_after: Vec<String> = sheet_names
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != index)
+                .map(|(_, n)| n.clone())
+                .collect();
+            let repair = |formula: &str| {
+                crate::repair_3d_refs_on_delete(formula, &deleted_name, &names_after)
+            };
+            if let Err(refusal) =
+                check_workbook_repairable(&grids, &current_grid, active, Some(index), &repair)
+            {
+                crate::log_error!("SHEET", "delete_sheet refused: {}", refusal);
+                return Err(refusal.message(
+                    &format!("delete sheet '{}'", deleted_name),
+                    &sheet_names,
+                ));
+            }
+        }
+    }
+
     // Deleting a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // Tables and pivots removed BECAUSE their sheet went, collected inside the
+    // guarded block and cascaded after every lock is released (§3bn): objects on
+    // OTHER sheets can be bound to them.
+    let mut removed_sources: Vec<crate::object_deps::DeletedSource> = Vec::new();
     let result = {
     let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
-    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -888,10 +994,14 @@ pub fn delete_sheet(
     all_column_widths[old_active] = std::mem::take(&mut *column_widths);
     all_row_heights[old_active] = std::mem::take(&mut *row_heights);
 
-    // Remove tables on the deleted sheet and update name registry
+    // Remove tables on the deleted sheet and update name registry.
+    // The ids are KEPT (§3bn): slicers on OTHER sheets can be bound to a table
+    // that lived here, and a table removed as a side effect of a sheet delete
+    // orphans them exactly as `delete_table` did.
     if let Some(sheet_tables) = tables.remove(&index) {
         for table in sheet_tables.values() {
             table_names.remove(&table.name.to_uppercase());
+            removed_sources.push(crate::object_deps::DeletedSource::table(table.id));
         }
     }
 
@@ -932,6 +1042,7 @@ pub fn delete_sheet(
 
         for pivot_id in &pivots_to_delete {
             pivot_tables.remove(pivot_id);
+            removed_sources.push(crate::object_deps::DeletedSource::pivot(*pivot_id));
         }
         drop(pivot_tables);
 
@@ -1001,6 +1112,42 @@ pub fn delete_sheet(
         }
     });
 
+    // §3bn — THE FLOATING OBJECT STORES, which `remap_sheet_keyed_stores` does
+    // NOT cover because they are not keyed by sheet: slicers, timeline slicers,
+    // charts and sparklines each carry a `sheet_index` FIELD, and none of them
+    // was ever touched by a sheet operation. Two defects at once: an object on
+    // the deleted sheet survived invisibly, and every object ABOVE it kept an
+    // index that now names a DIFFERENT sheet — so a chart authored on Sheet3
+    // started painting on Sheet2 and a click there edited it. Ribbon filters in
+    // bySheet mode resolve their targets from `connectedSheets`, so those
+    // indices move with everything else.
+    let sheet_cascade = crate::object_deps::cascade_sheet_removed(
+        &state,
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        &effect,
+        &|i| {
+            if i == index {
+                None
+            } else if i > index {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        },
+    );
+    if !sheet_cascade.is_empty() {
+        crate::log_info!(
+            "SHEET",
+            "delete_sheet '{}' removed {} slicer(s), {} timeline(s), {} chart(s) on it",
+            deleted_name,
+            sheet_cascade.deleted_slicers.len(),
+            sheet_cascade.deleted_timelines.len(),
+            sheet_cascade.deleted_charts.len()
+        );
+    }
+
     // Re-key tables for sheets above the deleted index (shift down by 1)
     let keys_to_shift: Vec<usize> = tables.keys().filter(|&&k| k > index).cloned().collect();
     for old_key in keys_to_shift {
@@ -1033,9 +1180,21 @@ pub fn delete_sheet(
     // Repair 3D reference bookends AND plain cross-sheet references in all
     // formulas. A reference to the deleted sheet becomes #REF!.
     let names_after = sheet_names.clone();
-    crate::repair_all_formulas(&mut grids, &|formula| {
+    // UNREACHABLE BY CONSTRUCTION: the pre-flight at the top of this command ran
+    // the identical closure over the identical formulas and nothing between
+    // there and here rewrites a cell. If it ever does fire, the repair wrote
+    // NOTHING (it is all-or-nothing), so no formula has been corrupted — the
+    // workbook is left with the sheet removed and a refusal the log names.
+    if let Err(refusal) = crate::repair_all_formulas(&mut grids, &|formula| {
         crate::repair_3d_refs_on_delete(formula, &deleted_name, &names_after)
-    });
+    }) {
+        crate::log_error!(
+            "SHEET",
+            "delete_sheet repair failed AFTER its pre-flight passed: {}",
+            refusal
+        );
+        return Err(refusal.message(&format!("delete sheet '{}'", deleted_name), &sheet_names));
+    }
     // Defined names hold their target as formula TEXT and go through the same
     // repair; one whose sheet just vanished becomes `=#REF!`.
     repair_named_ranges(&state, &effect, &|refers_to| {
@@ -1146,6 +1305,30 @@ pub fn delete_sheet(
     }
     }; // drop all locks before rebuilding dependency maps
 
+    // §3bn — the SECOND half of the sheet cascade, and the one the sheet-index
+    // walk above cannot do: a slicer on Sheet1 bound to a table that lived on
+    // the sheet just deleted is still on a live sheet, so it survives the index
+    // remap — pointing at an id that resolves to nothing. Deleting a table by
+    // deleting its SHEET must leave the same world behind as deleting the table.
+    // Runs here because every guard the block held is released.
+    let source_cascade = crate::object_deps::cascade_deleted_sources(
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        &effect,
+        &removed_sources,
+    );
+    if !source_cascade.is_empty() {
+        crate::log_info!(
+            "SHEET",
+            "delete_sheet cascaded through its objects: {}",
+            source_cascade.describe()
+        );
+    }
+    // No undo is recorded, deliberately: Excel does not let a sheet delete be
+    // undone and neither does this command, so a cascade that recorded restores
+    // would put slicers back onto a sheet that cannot come back.
+
     // The active sheet (or its index) changed — rebuild the single-sheet
     // dependency maps (see set_active_sheet / BUG-0016).
     crate::undo_commands::rebuild_all_dependencies(&state);
@@ -1212,14 +1395,33 @@ pub fn rename_sheet(
         return Err(format!("Sheet index {} out of range", index));
     }
 
-    let trimmed_name = new_name.trim().to_string();
-    if trimmed_name.is_empty() {
-        return Err("Sheet name cannot be empty".to_string());
-    }
+    // EXCEL'S RULE, at the one place a user names a sheet (register F6, product
+    // half): 1-31 characters, none of `: \ / ? * [ ]`, no leading or trailing
+    // apostrophe, not the reserved `History`, and not a name another sheet
+    // already has IGNORING CASE. `John's`, `Q1-2026` and `2026` remain legal --
+    // Excel allows them and the renderer quotes them correctly.
+    let trimmed_name = crate::sheet_names::validate_sheet_name(&new_name)?;
+    crate::sheet_names::ensure_sheet_name_is_free(&trimmed_name, &sheet_names, Some(index))?;
 
-    for (i, name) in sheet_names.iter().enumerate() {
-        if i != index && name == &trimmed_name {
-            return Err(format!("Sheet '{}' already exists", trimmed_name));
+    // THE FOURTH GATE, and the reason the three above hold `lock_pending`
+    // guards: renaming a sheet re-renders every formula in the workbook, and a
+    // repaired formula that cannot be read back used to become a cell with a
+    // stale value and an empty formula bar (register §3bc). Excel refuses the
+    // rename rather than corrupting the workbook, so this refuses too — here,
+    // while the document is still undecided and nothing has been written.
+    {
+        let old_name = sheet_names[index].clone();
+        let repair = |formula: &str| {
+            Some(crate::repair_3d_refs_on_rename(formula, &old_name, &trimmed_name))
+        };
+        if let Err(refusal) =
+            check_workbook_repairable(&grids, &current_grid, active_sheet, None, &repair)
+        {
+            crate::log_error!("SHEET", "rename_sheet refused: {}", refusal);
+            return Err(refusal.message(
+                &format!("rename sheet '{}' to '{}'", old_name, trimmed_name),
+                &sheet_names,
+            ));
         }
     }
 
@@ -1239,9 +1441,24 @@ pub fn rename_sheet(
     // Repair cross-sheet and 3D reference bookends in all formulas
     let old = old_name.clone();
     let new_n = trimmed_name.clone();
-    crate::repair_all_formulas(&mut grids, &|formula| {
+    // UNREACHABLE BY CONSTRUCTION (the gate above ran this exact closure over
+    // these exact formulas), and handled anyway: the repair is all-or-nothing,
+    // so no formula has been rewritten. Put the sheet's name back and refuse —
+    // a rename that cannot carry the formulas with it must not happen at all.
+    if let Err(refusal) = crate::repair_all_formulas(&mut grids, &|formula| {
         Some(crate::repair_3d_refs_on_rename(formula, &old, &new_n))
-    });
+    }) {
+        crate::log_error!(
+            "SHEET",
+            "rename_sheet repair failed AFTER its gate passed: {}",
+            refusal
+        );
+        sheet_names[index] = old_name.clone();
+        return Err(refusal.message(
+            &format!("rename sheet '{}' to '{}'", old_name, trimmed_name),
+            &sheet_names,
+        ));
+    }
 
     // Sync back the active grid
     if active_sheet < grids.len() {
@@ -1489,6 +1706,9 @@ pub fn get_sheet_zoom(state: State<AppState>) -> f64 {
 pub fn move_sheet(
     state: State<AppState>,
     file_state: State<FileState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     from_index: usize,
     to_index: usize,
 ) -> Result<SheetsResult, String> {
@@ -1496,9 +1716,9 @@ pub fn move_sheet(
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
-    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -1670,6 +1890,21 @@ pub fn move_sheet(
         // tracking) — historically missed here, which left their entries
         // pointing at whatever sheet inherited the old index after a move.
         remap_sheet_keyed_stores(&state, &effect, |i| Some(remap(i)));
+
+        // The floating object stores carry a sheet_index FIELD rather than a
+        // sheet KEY, so nothing above reaches them (§3bn). A move renumbers
+        // sheets under them exactly as a delete does: without this, moving a
+        // sheet left every slicer, timeline, chart and sparkline pointing at
+        // whichever sheet inherited its old index. The remap is total here --
+        // a move deletes nothing -- so this is a pure re-anchor.
+        crate::object_deps::cascade_sheet_removed(
+            &state,
+            &slicer_state,
+            &timeline_state,
+            &ribbon_filter_state,
+            &effect,
+            &|i| Some(remap(i)),
+        );
     }
 
     Ok(SheetsResult {
@@ -1683,16 +1918,38 @@ pub fn move_sheet(
 pub fn copy_sheet(
     state: State<AppState>,
     file_state: State<FileState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     source_index: usize,
     new_name: Option<String>,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "copy a sheet")?;
+
+    // NAME GATES FIRST, under a read lock, so a refused name cannot leave the
+    // document marked modified (`DocumentEffect::mutates` on ordering). The
+    // checks are repeated under the write lock below, which is the
+    // authoritative pair; this one exists to refuse cleanly.
+    let requested_name = match new_name {
+        Some(requested) => Some(crate::sheet_names::validate_sheet_name(&requested)?),
+        None => None,
+    };
+    {
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        if source_index >= sheet_names.len() {
+            return Err(format!("Source sheet index {} out of range", source_index));
+        }
+        if let Some(name) = &requested_name {
+            crate::sheet_names::ensure_sheet_name_is_free(name, &sheet_names, None)?;
+        }
+    }
+
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
-    let mut current_grid = state.grid.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
     let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
@@ -1721,22 +1978,15 @@ pub fn copy_sheet(
         all_row_heights[old_active] = std::mem::take(&mut *row_heights);
     }
 
-    // Generate copy name
-    let copy_name = new_name.unwrap_or_else(|| {
-        let base = &sheet_names[source_index];
-        let mut counter = 2;
-        loop {
-            let candidate = format!("{} ({})", base, counter);
-            if !sheet_names.contains(&candidate) {
-                return candidate;
-            }
-            counter += 1;
-        }
-    });
+    // Generate copy name. A name the caller SUPPLIED goes through Excel's rule;
+    // a generated one is built to satisfy it -- `format!("{} (2)", base)` on a
+    // 31-character base produced a 35-character name, which the rule refuses.
+    let copy_name = match requested_name {
+        Some(requested) => requested,
+        None => crate::sheet_names::unique_sheet_name(&sheet_names[source_index], &sheet_names),
+    };
 
-    if sheet_names.contains(&copy_name) {
-        return Err(format!("Sheet '{}' already exists", copy_name));
-    }
+    crate::sheet_names::ensure_sheet_name_is_free(&copy_name, &sheet_names, None)?;
 
     // Clone source data
     let cloned_grid = grids[source_index].clone();
@@ -1854,6 +2104,20 @@ pub fn copy_sheet(
         remap_sheet_keyed_stores(&state, &effect, |i| {
             Some(if i >= insert_at { i + 1 } else { i })
         });
+
+        // Same shift for the floating object stores (slicers, timelines,
+        // charts, sparklines, bySheet filter targets), which are keyed by a
+        // sheet_index FIELD and were missed here for the same reason (§3bn).
+        // The COPY itself gets none of them -- mirroring reports -- so this
+        // only re-anchors the originals the insertion pushed up.
+        crate::object_deps::cascade_sheet_removed(
+            &state,
+            &slicer_state,
+            &timeline_state,
+            &ribbon_filter_state,
+            &effect,
+            &|i| Some(if i >= insert_at { i + 1 } else { i }),
+        );
     }
 
     Ok(SheetsResult {

@@ -147,7 +147,23 @@ pub fn create_pane_control(
     Ok(control)
 }
 
+/// The object-script `instanceId` convention for a pane control (design D6,
+/// mirrored from `CustomControlHost.paneControlInstanceId` on the frontend).
+///
+/// It lives here as well as there because the CLEANUP has to be backend-side:
+/// a frontend-only prune is skipped whenever the control is deleted by a script,
+/// by an MCP tool, or by any path that does not go through the Controls pane's
+/// event handler — and a script that outlives its control keeps running headless
+/// and re-mounts on reload.
+pub const PANE_CONTROL_INSTANCE_PREFIX: &str = "pane-";
+
 /// Delete a pane control.
+///
+/// §3bn: its object script goes with it. This was previously done ONLY by the
+/// ControlsPane extension's CONTROL_DELETED handler, so every other route to
+/// this command left the script persisted and bound to a control that no longer
+/// existed. The prune is idempotent, so the frontend handler staying in place
+/// (it also unmounts the live worker, which the backend cannot do) is harmless.
 #[tauri::command]
 pub fn delete_pane_control(
     state: State<AppState>,
@@ -179,7 +195,14 @@ pub fn delete_pane_control(
     }
 
     // Pane controls are persisted workbook entities — mark the file dirty.
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // C10 / §3bn: the control's object script is bound by instanceId "pane-<id>"
+    // and must not outlive it.
+    crate::scripting::object_script_commands::prune_scripts_for_instance(
+        &state,
+        &effect,
+        &format!("{}{}", PANE_CONTROL_INSTANCE_PREFIX, control_id),
+    );
 
     Ok(())
 }

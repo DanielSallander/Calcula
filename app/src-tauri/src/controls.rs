@@ -678,6 +678,8 @@ pub fn resolve_control_properties(
                                 table_names: &table_names_map,
                                 current_sheet_index: sheet_index,
                                 current_row: row,
+                                current_col: col,
+                                sheet_names: &sheet_names,
                             };
                             let r = resolve_table_refs_in_ast(&resolved, &ctx);
                             drop(table_names_map);

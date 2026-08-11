@@ -95,8 +95,11 @@ describe("vRangeRef (bulk range read args)", () => {
   it("rejects a bad sheet ref, accepts an index or a name (Wave 1)", () => {
     expect(vRangeRef([0, 0, 1, 1, -2])).not.toBe(true);
     expect(vRangeRef([0, 0, 1, 1, 1.5])).not.toBe(true);
+    // A sheet REF is looser than a sheet RENAME on purpose: loading a workbook
+    // ACCEPTS AND CARRIES a name entry would refuse, so a script has to be able
+    // to address one. Shape only here (empty / over-long / wrong type).
     expect(vRangeRef([0, 0, 1, 1, ""])).not.toBe(true);
-    expect(vRangeRef([0, 0, 1, 1, "Bad[Name]"])).not.toBe(true);
+    expect(vRangeRef([0, 0, 1, 1, "Bad[Name]"])).toBe(true);
     expect(vRangeRef([0, 0, 1, 1, true])).not.toBe(true);
     // A sheet NAME is now a valid ref — resolution happens host-side.
     expect(vRangeRef([0, 0, 1, 1, "Sheet1"])).toBe(true);
@@ -131,7 +134,11 @@ describe("vRangeWrite (bulk range write args)", () => {
     expect(vRangeWrite([-1, 0, [["a"]]])).not.toBe(true);
     expect(vRangeWrite([0, 0.5, [["a"]]])).not.toBe(true);
     expect(vRangeWrite([0, 0, [["a"]], -1])).not.toBe(true);
-    expect(vRangeWrite([0, 0, [["a"]], "has:colon"])).not.toBe(true);
+    // A sheet REF is looser than a sheet RENAME on purpose: loading a workbook
+    // ACCEPTS AND CARRIES a name entry would refuse, so a script has to be able
+    // to address one. Shape only here (empty / over-long / wrong type).
+    expect(vRangeWrite([0, 0, [["a"]], "has:colon"])).toBe(true);
+    expect(vRangeWrite([0, 0, [["a"]], ""])).not.toBe(true);
     expect(vRangeWrite([0, 0, [["a"]], false])).not.toBe(true);
   });
 
@@ -253,7 +260,11 @@ describe("vRowColOp (insert/delete rows + columns)", () => {
     expect(vRowColOp([-1, 1])).not.toBe(true);
     expect(vRowColOp([0.5, 1])).not.toBe(true);
     expect(vRowColOp([0, 1, -1])).not.toBe(true);
-    expect(vRowColOp([0, 1, "Bad/Name"])).not.toBe(true);
+    // A sheet REF is looser than a sheet RENAME on purpose: loading a workbook
+    // ACCEPTS AND CARRIES a name entry would refuse, so a script has to be able
+    // to address one. Shape only here (empty / over-long / wrong type).
+    expect(vRowColOp([0, 1, "Bad/Name"])).toBe(true);
+    expect(vRowColOp([0, 1, ""])).not.toBe(true);
     // A sheet NAME is a valid ref (resolved host-side; refused there if the
     // named sheet is not the active one).
     expect(vRowColOp([0, 1, "Sheet1"])).toBe(true);

@@ -89,15 +89,54 @@ export function handleSelectionChange(
       // Clear column header overrides
       clearTableHeaderOverride();
 
-      // Unregister the contextual panel
-      if (designTabRegistered) {
-        unregisterPanel(TABLE_DESIGN_TAB_ID);
-        designTabRegistered = false;
-      }
-
       // Notify the panel sections that the table is deselected
       window.dispatchEvent(new Event("table:deselected"));
     }
+
+    // OUTSIDE the currentTableId guard, deliberately. The tab can be turned on
+    // by `ensureDesignTabRegistered` (TABLE_CREATED) without any selection ever
+    // having been inside a table, and that route never sets `currentTableId` --
+    // so while the unregister lived inside the guard, nothing could ever turn
+    // the tab off again. Excel's rule is a function of the CURRENT state, not
+    // of how the tab was switched on: the active cell is not in a table, so the
+    // contextual tab is not shown.
+    if (designTabRegistered) {
+      unregisterPanel(TABLE_DESIGN_TAB_ID);
+      designTabRegistered = false;
+    }
+  }
+}
+
+/**
+ * Re-derive the contextual tab after the TABLE LIST changed.
+ *
+ * `handleSelectionChange` only ever runs when the CURSOR moves, and it
+ * short-circuits when the cell is the same one it checked last. Deleting the
+ * table under a stationary cursor changes neither, so the tab -- and every
+ * button on it, each addressing an object that no longer exists -- outlived the
+ * object it belonged to. With `ensureDesignTabRegistered` able to switch the
+ * tab on with no selection at all, the end state was a Table Design tab on a
+ * workbook with zero tables.
+ *
+ * FOUND BY THE SOAK WALK, seed 20260810, invariant `contextual-ribbon-tabs`,
+ * minimized to one action ("the violation was already true when the walk
+ * started").
+ */
+export function syncDesignTabToTables(): void {
+  const last = lastCheckedSelection;
+  // Throw the cached answer away: what changed is the table under the cell, not
+  // the cell. Without this the re-check below returns immediately.
+  lastCheckedSelection = null;
+  if (last) {
+    handleSelectionChange({ endRow: last.row, endCol: last.col });
+  }
+  if (designTabRegistered && getAllTables().length === 0) {
+    unregisterPanel(TABLE_DESIGN_TAB_ID);
+    designTabRegistered = false;
+    currentTableId = null;
+    removeTaskPaneContextKey("table");
+    clearTableHeaderOverride();
+    window.dispatchEvent(new Event("table:deselected"));
   }
 }
 

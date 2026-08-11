@@ -1,6 +1,11 @@
 //! FILENAME: app/e2e/walker/actionCatalog.ts
-// PURPOSE: Action catalog v2 for the random walker. Differences from the v1
-//          catalog (app/e2e/invariants/actions.ts):
+// PURPOSE: THE action catalog for the random walker — the soak walk and the
+//          invariant walk both generate and replay from this one list.
+//
+//          There used to be a second, smaller catalog at
+//          app/e2e/invariants/actions.ts (27 actions to this one's 59, a
+//          strict subset by id). It is DELETED; the two properties that made
+//          this one the survivor are:
 //            1. DETERMINISTIC: all randomness flows through an injected rng
 //               and a sequence number — no Math.random()/Date.now(). The
 //               chosen parameters are JSON-serializable and recorded in the
@@ -341,7 +346,22 @@ const tableDelete: ActionDef<Record<string, never>> = {
     await page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       const tables = await tauri.core.invoke("get_all_tables", {});
-      if (tables && tables.length > 0) {
+      if (!tables || tables.length === 0) return;
+      // THE PRODUCT'S OWN DELETE, not a raw `delete_table` invoke.
+      //
+      // Deleting a table CASCADES on the backend -- the slicers bound to it go
+      // with it (§3bt) -- and the raw command tells the frontend nothing. The
+      // Slicer store then keeps a slicer whose backend object is gone, paints
+      // it, and answers "Slicer <id> not found" the moment anything clicks it:
+      // a `no-console-errors` failure that no user gesture can produce.
+      // `deleteTableAsync` is what the Table Design tab's Delete button calls,
+      // and it makes the announcement the caches need.
+      const store = (await (window as any).__calcImport(
+        new URL("/extensions/Table/lib/tableStore.ts", document.baseURI).href,
+      )) as { deleteTableAsync?: (id: string) => Promise<boolean> };
+      if (store?.deleteTableAsync) {
+        await store.deleteTableAsync(tables[0].id);
+      } else {
         await tauri.core.invoke("delete_table", { tableId: tables[0].id });
       }
     });
@@ -1303,10 +1323,29 @@ const scriptShapeMount: ActionDef<{ slotIndex: number; fill: string }> = {
         // mountScript THROWS on refusal/failure. The walker is a fuzzer, not a
         // mount test: a Script Security decision must not abort the run, but it
         // must be visible in the log rather than mistaken for a clean mount.
+        //
+        // TIMED, and the time is in the message. The host's mount deadline is
+        // ten seconds, so "refused instantly" and "sat on the deadline" are
+        // completely different findings that used to produce the same line —
+        // which is exactly what made S13 undiagnosable. Note also that the
+        // product has ALREADY logged `console.error("[ObjectScriptManager]
+        // Failed to mount script ...")` by the time this catch runs, so a
+        // failed mount fails the walk's `no-console-errors` invariant whatever
+        // this handler does; this line is what tells the reader why.
+        const startedAt = performance.now();
         try {
           await mgr.mountScript(id);
+          const ms = Math.round(performance.now() - startedAt);
+          if (ms > 2000) {
+            console.warn(`[walker] script mount "${id}" took ${ms}ms (deadline 10000ms)`);
+          }
         } catch (e) {
-          console.warn("[walker] script mount refused/failed:", e);
+          const ms = Math.round(performance.now() - startedAt);
+          console.warn(
+            `[walker] script mount "${id}" refused/failed after ${ms}ms ` +
+              `(deadline 10000ms):`,
+            e,
+          );
         }
       },
       { slotIndex: p.slotIndex, fill: p.fill },

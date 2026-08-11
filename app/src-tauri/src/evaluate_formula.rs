@@ -7,10 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use engine::{
-    BinaryOperator, BuiltinFunction, Evaluator, Expression,
-    UnaryOperator, Value,
-};
+use engine::{BuiltinFunction, Evaluator, Expression, Value};
 use engine::coord::{col_to_index, index_to_col};
 use parser::parse as parse_formula;
 use tauri::State;
@@ -348,204 +345,29 @@ pub(crate) fn get_node<'a>(ast: &'a Expression, path: &[usize]) -> &'a Expressio
 
 /// Convert the AST to display with proper underline tracking.
 /// Returns (display_string, underline_start, underline_end).
+///
+/// THIS IS A DELEGATION, and it is the point. The ~190-line walker that used to
+/// live here was a SECOND AST->text serialiser, with the two defects a second
+/// serialiser was already deleted from `lib.rs` for having:
+///
+///   * no parenthesis guard -- it concatenated left/op/right, so the Evaluate
+///     Formula dialog displayed `=(A1+B1)*C1` as `A1+B1*C1`. On a surface whose
+///     entire purpose is "trust this rendering of your formula", it showed a
+///     formula the user never wrote, and the underline offsets were computed off
+///     that same wrong string;
+///   * a hand-maintained 224-arm name table ending in `other => format!("{:?}")`
+///     against an enum that had grown to 472 variants, so 248 functions were
+///     displayed under their Rust variant name (`VLookup(`, `StdevS(`).
+///
+/// The offsets now come from the renderer that produces the text, so the
+/// highlight cannot disagree with what is on screen.
+///
+/// A `target_path` that names no node yields `(0, 0)` -- callers use an
+/// impossible path (`&[999]`) precisely to ask for "no underline".
 pub(crate) fn build_display(ast: &Expression, target_path: &[usize]) -> (String, usize, usize) {
-    let mut result = String::new();
-    let mut underline = (0_usize, 0_usize);
-    build_display_recursive(ast, target_path, &[], &mut result, &mut underline);
-    (result, underline.0, underline.1)
-}
-
-pub(crate) fn build_display_recursive(
-    expr: &Expression,
-    target_path: &[usize],
-    current_path: &[usize],
-    output: &mut String,
-    underline: &mut (usize, usize),
-) {
-    let is_target = current_path == target_path;
-    let start_pos = output.len();
-
-    match expr {
-        Expression::Literal(val) => {
-            output.push_str(&value_to_display(val));
-        }
-
-        Expression::CellRef { sheet, col, row, .. } => {
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') {
-                    output.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    output.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            output.push_str(col);
-            output.push_str(&row.to_string());
-        }
-
-        Expression::Range { sheet, start, end, .. } => {
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') {
-                    output.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    output.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_display_recursive(start, target_path, &child_path, output, underline);
-            output.push(':');
-            child_path.pop();
-            child_path.push(1);
-            build_display_recursive(end, target_path, &child_path, output, underline);
-        }
-
-        Expression::ColumnRef { sheet, start_col, end_col, .. } => {
-            if let Some(sheet_name) = sheet {
-                output.push_str(&format!("{}!", sheet_name));
-            }
-            output.push_str(start_col);
-            output.push(':');
-            output.push_str(end_col);
-        }
-
-        Expression::RowRef { sheet, start_row, end_row, .. } => {
-            if let Some(sheet_name) = sheet {
-                output.push_str(&format!("{}!", sheet_name));
-            }
-            output.push_str(&start_row.to_string());
-            output.push(':');
-            output.push_str(&end_row.to_string());
-        }
-
-        Expression::BinaryOp { left, op, right } => {
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_display_recursive(left, target_path, &child_path, output, underline);
-
-            let op_str = match op {
-                BinaryOperator::Add => "+",
-                BinaryOperator::Subtract => "-",
-                BinaryOperator::Multiply => "*",
-                BinaryOperator::Divide => "/",
-                BinaryOperator::Power => "^",
-                BinaryOperator::Concat => "&",
-                BinaryOperator::Equal => "=",
-                BinaryOperator::NotEqual => "<>",
-                BinaryOperator::LessThan => "<",
-                BinaryOperator::GreaterThan => ">",
-                BinaryOperator::LessEqual => "<=",
-                BinaryOperator::GreaterEqual => ">=",
-            };
-            output.push_str(op_str);
-
-            child_path.pop();
-            child_path.push(1);
-            build_display_recursive(right, target_path, &child_path, output, underline);
-        }
-
-        Expression::UnaryOp { op, operand } => {
-            let op_str = match op {
-                UnaryOperator::Negate => "-",
-            };
-            output.push_str(op_str);
-
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_display_recursive(operand, target_path, &child_path, output, underline);
-        }
-
-        Expression::FunctionCall { func, args, .. } => {
-            output.push_str(&builtin_fn_name(func));
-            output.push('(');
-            for (i, arg) in args.iter().enumerate() {
-                if i > 0 {
-                    output.push_str(", ");
-                }
-                let mut child_path = current_path.to_vec();
-                child_path.push(i);
-                build_display_recursive(arg, target_path, &child_path, output, underline);
-            }
-            output.push(')');
-        }
-
-        Expression::TableRef { table_name, specifier, .. } => {
-            output.push_str(table_name);
-            output.push('[');
-            output.push_str(&table_specifier_to_display(specifier));
-            output.push(']');
-        }
-
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            // Format sheet range prefix
-            if start_sheet.contains(' ') || end_sheet.contains(' ') {
-                output.push_str(&format!("'{}:{}'!", start_sheet, end_sheet));
-            } else {
-                output.push_str(&format!("{}:{}!", start_sheet, end_sheet));
-            }
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_display_recursive(reference, target_path, &child_path, output, underline);
-        }
-
-        Expression::IndexAccess { target, index } => {
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_display_recursive(target, target_path, &child_path, output, underline);
-            output.push('[');
-            let mut idx_path = current_path.to_vec();
-            idx_path.push(1);
-            build_display_recursive(index, target_path, &idx_path, output, underline);
-            output.push(']');
-        }
-
-        Expression::ListLiteral { elements } => {
-            output.push('{');
-            for (i, elem) in elements.iter().enumerate() {
-                if i > 0 {
-                    output.push_str(", ");
-                }
-                let mut child_path = current_path.to_vec();
-                child_path.push(i);
-                build_display_recursive(elem, target_path, &child_path, output, underline);
-            }
-            output.push('}');
-        }
-
-        Expression::DictLiteral { entries } => {
-            output.push('{');
-            for (i, (key, value)) in entries.iter().enumerate() {
-                if i > 0 {
-                    output.push_str(", ");
-                }
-                let mut key_path = current_path.to_vec();
-                key_path.push(i * 2);
-                build_display_recursive(key, target_path, &key_path, output, underline);
-                output.push_str(": ");
-                let mut val_path = current_path.to_vec();
-                val_path.push(i * 2 + 1);
-                build_display_recursive(value, target_path, &val_path, output, underline);
-            }
-            output.push('}');
-        }
-
-        Expression::NamedRef { name, .. } => {
-            output.push_str(name);
-        }
-
-        Expression::SpillRef { cell, .. } => {
-            build_display_recursive(cell, target_path, current_path, output, underline);
-            output.push('#');
-        }
-
-        Expression::ImplicitIntersection { operand } => {
-            output.push('@');
-            build_display_recursive(operand, target_path, current_path, output, underline);
-        }
-    }
-
-    if is_target {
-        *underline = (start_pos, output.len());
-    }
+    let (text, spans) = engine::ast_render::render_with_spans(ast, false);
+    let (start, end) = spans.get(target_path).copied().unwrap_or((0, 0));
+    (text, start, end)
 }
 
 pub(crate) fn value_to_display(val: &Value) -> String {
@@ -563,258 +385,29 @@ pub(crate) fn value_to_display(val: &Value) -> String {
     }
 }
 
+/// Render a table specifier for the Evaluate-Formula display.
+///
+/// Delegates to the canonical renderer. The hand-written copy that used to
+/// live here emitted `#Data,Col` and `Col1:Col2` -- forms Excel does not use
+/// and the parser cannot read back.
 pub(crate) fn table_specifier_to_display(spec: &engine::TableSpecifier) -> String {
-    match spec {
-        engine::TableSpecifier::Column(col) => col.clone(),
-        engine::TableSpecifier::ThisRow(col) => format!("@{}", col),
-        engine::TableSpecifier::ColumnRange(start, end) => format!("{}:{}", start, end),
-        engine::TableSpecifier::ThisRowRange(start, end) => format!("@{}:@{}", start, end),
-        engine::TableSpecifier::AllRows => "#All".to_string(),
-        engine::TableSpecifier::DataRows => "#Data".to_string(),
-        engine::TableSpecifier::Headers => "#Headers".to_string(),
-        engine::TableSpecifier::Totals => "#Totals".to_string(),
-        engine::TableSpecifier::SpecialColumn(special, col) => {
-            format!("{},{}", table_specifier_to_display(special), col)
-        }
-    }
+    engine::ast_render::render_table_specifier(spec)
 }
 
+/// The display name of a builtin function.
+///
+/// ONE NAME TABLE. This used to be a hand-maintained 224-arm `match` ending in
+/// `other => format!("{:?}", other)`, and the enum had grown to 472 variants --
+/// so 248 functions were shown to the user under their RUST VARIANT NAME:
+/// `VLookup(`, `StdevS(` (for STDEV.S), `NormDist(` (NORM.DIST), `TDist2T(`,
+/// `Bin2Dec(`, every `Cube*` and every `Gather*`. That is the exact defect a
+/// second serialiser was deleted from lib.rs for having; this copy survived
+/// because the guard test scanned one file by function NAME.
+///
+/// `to_canonical_name` is total over the enum (the compiler enforces it), so
+/// there is nothing left to drift.
 pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
-    match func {
-        BuiltinFunction::Sum => "SUM".to_string(),
-        BuiltinFunction::Average => "AVERAGE".to_string(),
-        BuiltinFunction::Min => "MIN".to_string(),
-        BuiltinFunction::Max => "MAX".to_string(),
-        BuiltinFunction::Count => "COUNT".to_string(),
-        BuiltinFunction::CountA => "COUNTA".to_string(),
-        BuiltinFunction::If => "IF".to_string(),
-        BuiltinFunction::And => "AND".to_string(),
-        BuiltinFunction::Or => "OR".to_string(),
-        BuiltinFunction::Not => "NOT".to_string(),
-        BuiltinFunction::True => "TRUE".to_string(),
-        BuiltinFunction::False => "FALSE".to_string(),
-        BuiltinFunction::Abs => "ABS".to_string(),
-        BuiltinFunction::Round => "ROUND".to_string(),
-        BuiltinFunction::Floor => "FLOOR".to_string(),
-        BuiltinFunction::Ceiling => "CEILING".to_string(),
-        BuiltinFunction::Sqrt => "SQRT".to_string(),
-        BuiltinFunction::Power => "POWER".to_string(),
-        BuiltinFunction::Mod => "MOD".to_string(),
-        BuiltinFunction::Int => "INT".to_string(),
-        BuiltinFunction::Sign => "SIGN".to_string(),
-        BuiltinFunction::Len => "LEN".to_string(),
-        BuiltinFunction::Upper => "UPPER".to_string(),
-        BuiltinFunction::Lower => "LOWER".to_string(),
-        BuiltinFunction::Trim => "TRIM".to_string(),
-        BuiltinFunction::Concatenate => "CONCATENATE".to_string(),
-        BuiltinFunction::Left => "LEFT".to_string(),
-        BuiltinFunction::Right => "RIGHT".to_string(),
-        BuiltinFunction::Mid => "MID".to_string(),
-        BuiltinFunction::Rept => "REPT".to_string(),
-        BuiltinFunction::Text => "TEXT".to_string(),
-        BuiltinFunction::IsNumber => "ISNUMBER".to_string(),
-        BuiltinFunction::IsText => "ISTEXT".to_string(),
-        BuiltinFunction::IsBlank => "ISBLANK".to_string(),
-        BuiltinFunction::IsError => "ISERROR".to_string(),
-        BuiltinFunction::XLookup => "XLOOKUP".to_string(),
-        BuiltinFunction::XLookups => "XLOOKUPS".to_string(),
-
-        BuiltinFunction::GetRowHeight => "GET.ROW.HEIGHT".to_string(),
-        BuiltinFunction::GetColumnWidth => "GET.COLUMN.WIDTH".to_string(),
-        BuiltinFunction::GetCellFillColor => "GET.CELL.FILLCOLOR".to_string(),
-        BuiltinFunction::Row => "ROW".to_string(),
-        BuiltinFunction::Column => "COLUMN".to_string(),
-        // New functions - use format!("{:?}") for debug name, then uppercase
-        BuiltinFunction::SumIf => "SUMIF".to_string(),
-        BuiltinFunction::SumIfs => "SUMIFS".to_string(),
-        BuiltinFunction::CountIf => "COUNTIF".to_string(),
-        BuiltinFunction::CountIfs => "COUNTIFS".to_string(),
-        BuiltinFunction::AverageIf => "AVERAGEIF".to_string(),
-        BuiltinFunction::AverageIfs => "AVERAGEIFS".to_string(),
-        BuiltinFunction::CountBlank => "COUNTBLANK".to_string(),
-        BuiltinFunction::MinIfs => "MINIFS".to_string(),
-        BuiltinFunction::MaxIfs => "MAXIFS".to_string(),
-        BuiltinFunction::IfError => "IFERROR".to_string(),
-        BuiltinFunction::IfNa => "IFNA".to_string(),
-        BuiltinFunction::Ifs => "IFS".to_string(),
-        BuiltinFunction::Switch => "SWITCH".to_string(),
-        BuiltinFunction::Xor => "XOR".to_string(),
-        BuiltinFunction::SumProduct => "SUMPRODUCT".to_string(),
-        BuiltinFunction::SumX2MY2 => "SUMX2MY2".to_string(),
-        BuiltinFunction::SumX2PY2 => "SUMX2PY2".to_string(),
-        BuiltinFunction::SumXMY2 => "SUMXMY2".to_string(),
-        BuiltinFunction::Product => "PRODUCT".to_string(),
-        BuiltinFunction::Rand => "RAND".to_string(),
-        BuiltinFunction::RandBetween => "RANDBETWEEN".to_string(),
-        BuiltinFunction::Pi => "PI".to_string(),
-        BuiltinFunction::Log => "LOG".to_string(),
-        BuiltinFunction::Log10 => "LOG10".to_string(),
-        BuiltinFunction::Ln => "LN".to_string(),
-        BuiltinFunction::Exp => "EXP".to_string(),
-        BuiltinFunction::Sin => "SIN".to_string(),
-        BuiltinFunction::Cos => "COS".to_string(),
-        BuiltinFunction::Tan => "TAN".to_string(),
-        BuiltinFunction::Asin => "ASIN".to_string(),
-        BuiltinFunction::Acos => "ACOS".to_string(),
-        BuiltinFunction::Atan => "ATAN".to_string(),
-        BuiltinFunction::Atan2 => "ATAN2".to_string(),
-        BuiltinFunction::RoundUp => "ROUNDUP".to_string(),
-        BuiltinFunction::RoundDown => "ROUNDDOWN".to_string(),
-        BuiltinFunction::Trunc => "TRUNC".to_string(),
-        BuiltinFunction::Even => "EVEN".to_string(),
-        BuiltinFunction::Odd => "ODD".to_string(),
-        BuiltinFunction::Gcd => "GCD".to_string(),
-        BuiltinFunction::Lcm => "LCM".to_string(),
-        BuiltinFunction::Combin => "COMBIN".to_string(),
-        BuiltinFunction::Fact => "FACT".to_string(),
-        BuiltinFunction::Degrees => "DEGREES".to_string(),
-        BuiltinFunction::Radians => "RADIANS".to_string(),
-        BuiltinFunction::Find => "FIND".to_string(),
-        BuiltinFunction::Search => "SEARCH".to_string(),
-        BuiltinFunction::Substitute => "SUBSTITUTE".to_string(),
-        BuiltinFunction::Replace => "REPLACE".to_string(),
-        BuiltinFunction::ValueFn => "VALUE".to_string(),
-        BuiltinFunction::Exact => "EXACT".to_string(),
-        BuiltinFunction::Proper => "PROPER".to_string(),
-        BuiltinFunction::Char => "CHAR".to_string(),
-        BuiltinFunction::Code => "CODE".to_string(),
-        BuiltinFunction::Clean => "CLEAN".to_string(),
-        BuiltinFunction::NumberValue => "NUMBERVALUE".to_string(),
-        BuiltinFunction::TFn => "T".to_string(),
-        BuiltinFunction::Today => "TODAY".to_string(),
-        BuiltinFunction::Now => "NOW".to_string(),
-        BuiltinFunction::Date => "DATE".to_string(),
-        BuiltinFunction::Year => "YEAR".to_string(),
-        BuiltinFunction::Month => "MONTH".to_string(),
-        BuiltinFunction::Day => "DAY".to_string(),
-        BuiltinFunction::Hour => "HOUR".to_string(),
-        BuiltinFunction::Minute => "MINUTE".to_string(),
-        BuiltinFunction::Second => "SECOND".to_string(),
-        BuiltinFunction::DateValue => "DATEVALUE".to_string(),
-        BuiltinFunction::TimeValue => "TIMEVALUE".to_string(),
-        BuiltinFunction::EDate => "EDATE".to_string(),
-        BuiltinFunction::EOMonth => "EOMONTH".to_string(),
-        BuiltinFunction::NetworkDays => "NETWORKDAYS".to_string(),
-        BuiltinFunction::WorkDay => "WORKDAY".to_string(),
-        BuiltinFunction::DateDif => "DATEDIF".to_string(),
-        BuiltinFunction::Weekday => "WEEKDAY".to_string(),
-        BuiltinFunction::WeekNum => "WEEKNUM".to_string(),
-        BuiltinFunction::IsNa => "ISNA".to_string(),
-        BuiltinFunction::IsErr => "ISERR".to_string(),
-        BuiltinFunction::IsLogical => "ISLOGICAL".to_string(),
-        BuiltinFunction::IsOdd => "ISODD".to_string(),
-        BuiltinFunction::IsEven => "ISEVEN".to_string(),
-        BuiltinFunction::TypeFn => "TYPE".to_string(),
-        BuiltinFunction::NFn => "N".to_string(),
-        BuiltinFunction::Na => "NA".to_string(),
-        BuiltinFunction::IsFormula => "ISFORMULA".to_string(),
-        BuiltinFunction::Index => "INDEX".to_string(),
-        BuiltinFunction::Match => "MATCH".to_string(),
-        BuiltinFunction::Choose => "CHOOSE".to_string(),
-        BuiltinFunction::Indirect => "INDIRECT".to_string(),
-        BuiltinFunction::Offset => "OFFSET".to_string(),
-        BuiltinFunction::Address => "ADDRESS".to_string(),
-        BuiltinFunction::Rows => "ROWS".to_string(),
-        BuiltinFunction::Columns => "COLUMNS".to_string(),
-        BuiltinFunction::Transpose => "TRANSPOSE".to_string(),
-        BuiltinFunction::Median => "MEDIAN".to_string(),
-        BuiltinFunction::Stdev => "STDEV".to_string(),
-        BuiltinFunction::StdevP => "STDEV.P".to_string(),
-        BuiltinFunction::Var => "VAR".to_string(),
-        BuiltinFunction::VarP => "VAR.P".to_string(),
-        BuiltinFunction::Large => "LARGE".to_string(),
-        BuiltinFunction::Small => "SMALL".to_string(),
-        BuiltinFunction::Rank => "RANK".to_string(),
-        BuiltinFunction::Percentile => "PERCENTILE".to_string(),
-        BuiltinFunction::Quartile => "QUARTILE".to_string(),
-        BuiltinFunction::Mode => "MODE".to_string(),
-        BuiltinFunction::Frequency => "FREQUENCY".to_string(),
-        BuiltinFunction::Pmt => "PMT".to_string(),
-        BuiltinFunction::Pv => "PV".to_string(),
-        BuiltinFunction::Fv => "FV".to_string(),
-        BuiltinFunction::Npv => "NPV".to_string(),
-        BuiltinFunction::Irr => "IRR".to_string(),
-        BuiltinFunction::Rate => "RATE".to_string(),
-        BuiltinFunction::Nper => "NPER".to_string(),
-        BuiltinFunction::Sln => "SLN".to_string(),
-        BuiltinFunction::Db => "DB".to_string(),
-        BuiltinFunction::Ddb => "DDB".to_string(),
-        BuiltinFunction::Let => "LET".to_string(),
-        BuiltinFunction::TextJoin => "TEXTJOIN".to_string(),
-        BuiltinFunction::Filter => "FILTER".to_string(),
-        BuiltinFunction::Sort => "SORT".to_string(),
-        BuiltinFunction::SortBy => "SORTBY".to_string(),
-        BuiltinFunction::Unique => "UNIQUE".to_string(),
-        BuiltinFunction::Sequence => "SEQUENCE".to_string(),
-        BuiltinFunction::RandArray => "RANDARRAY".to_string(),
-        BuiltinFunction::GroupBy => "GROUPBY".to_string(),
-        BuiltinFunction::PivotBy => "PIVOTBY".to_string(),
-        BuiltinFunction::Collect => "COLLECT".to_string(),
-        BuiltinFunction::DictFn => "DICT".to_string(),
-        BuiltinFunction::Keys => "KEYS".to_string(),
-        BuiltinFunction::Values => "VALUES".to_string(),
-        BuiltinFunction::Contains => "CONTAINS".to_string(),
-        BuiltinFunction::IsList => "ISLIST".to_string(),
-        BuiltinFunction::IsDict => "ISDICT".to_string(),
-        BuiltinFunction::Flatten => "FLATTEN".to_string(),
-        BuiltinFunction::Take => "TAKE".to_string(),
-        BuiltinFunction::Drop => "DROP".to_string(),
-        BuiltinFunction::Append => "APPEND".to_string(),
-        BuiltinFunction::Merge => "MERGE".to_string(),
-        BuiltinFunction::HStack => "HSTACK".to_string(),
-        BuiltinFunction::FileRead => "FILEREAD".to_string(),
-        BuiltinFunction::FileLines => "FILELINES".to_string(),
-        BuiltinFunction::FileExists => "FILEEXISTS".to_string(),
-        BuiltinFunction::Lambda => "LAMBDA".to_string(),
-        BuiltinFunction::Map => "MAP".to_string(),
-        BuiltinFunction::Reduce => "REDUCE".to_string(),
-        BuiltinFunction::Scan => "SCAN".to_string(),
-        BuiltinFunction::MakeArray => "MAKEARRAY".to_string(),
-        BuiltinFunction::ByRow => "BYROW".to_string(),
-        BuiltinFunction::ByCol => "BYCOL".to_string(),
-        BuiltinFunction::Subtotal => "SUBTOTAL".to_string(),
-        // Hyperbolic & reciprocal trig
-        BuiltinFunction::Sinh => "SINH".to_string(),
-        BuiltinFunction::Cosh => "COSH".to_string(),
-        BuiltinFunction::Tanh => "TANH".to_string(),
-        BuiltinFunction::Cot => "COT".to_string(),
-        BuiltinFunction::Coth => "COTH".to_string(),
-        BuiltinFunction::Csc => "CSC".to_string(),
-        BuiltinFunction::Csch => "CSCH".to_string(),
-        BuiltinFunction::Sec => "SEC".to_string(),
-        BuiltinFunction::Sech => "SECH".to_string(),
-        BuiltinFunction::Acot => "ACOT".to_string(),
-        // Rounding variants
-        BuiltinFunction::CeilingMath => "CEILING.MATH".to_string(),
-        BuiltinFunction::CeilingPrecise => "CEILING.PRECISE".to_string(),
-        BuiltinFunction::FloorMath => "FLOOR.MATH".to_string(),
-        BuiltinFunction::FloorPrecise => "FLOOR.PRECISE".to_string(),
-        BuiltinFunction::IsoCeiling => "ISO.CEILING".to_string(),
-        // Additional math (Group 3)
-        BuiltinFunction::Multinomial => "MULTINOMIAL".to_string(),
-        BuiltinFunction::Combina => "COMBINA".to_string(),
-        BuiltinFunction::FactDouble => "FACTDOUBLE".to_string(),
-        BuiltinFunction::SqrtPi => "SQRTPI".to_string(),
-        // Aggregate
-        BuiltinFunction::Aggregate => "AGGREGATE".to_string(),
-        // Web
-        BuiltinFunction::EncodeUrl => "ENCODEURL".to_string(),
-        // Database functions
-        BuiltinFunction::DAverage => "DAVERAGE".to_string(),
-        BuiltinFunction::DCount => "DCOUNT".to_string(),
-        BuiltinFunction::DCountA => "DCOUNTA".to_string(),
-        BuiltinFunction::DGet => "DGET".to_string(),
-        BuiltinFunction::DMax => "DMAX".to_string(),
-        BuiltinFunction::DMin => "DMIN".to_string(),
-        BuiltinFunction::DProduct => "DPRODUCT".to_string(),
-        BuiltinFunction::DStdev => "DSTDEV".to_string(),
-        BuiltinFunction::DStdevP => "DSTDEVP".to_string(),
-        BuiltinFunction::DSum => "DSUM".to_string(),
-        BuiltinFunction::DVar => "DVAR".to_string(),
-        BuiltinFunction::DVarP => "DVARP".to_string(),
-        BuiltinFunction::Custom(name) => name.clone(),
-        other => format!("{:?}", other),
-    }
+    func.to_canonical_name().to_string()
 }
 
 // ============================================================================
@@ -1066,8 +659,10 @@ pub fn eval_formula_init(
                 let ctx = crate::TableRefContext {
                     tables: &tables_map,
                     table_names: &table_names_map,
+                    sheet_names: &sheet_names,
                     current_sheet_index: active_sheet,
                     current_row: row,
+                    current_col: col,
                 };
                 let r = crate::resolve_table_refs_in_ast(&resolved, &ctx);
                 drop(table_names_map);
@@ -1204,8 +799,10 @@ pub fn eval_formula_step_in(
                 let ctx = crate::TableRefContext {
                     tables: &tables_map,
                     table_names: &table_names_map,
+                    sheet_names: &sheet_names,
                     current_sheet_index: target_sheet,
                     current_row: row_0,
+                    current_col: col_0,
                 };
                 let r = crate::resolve_table_refs_in_ast(&parser_ast, &ctx);
                 drop(table_names_map);
@@ -1313,8 +910,10 @@ pub fn eval_formula_restart(
                 let ctx = crate::TableRefContext {
                     tables: &tables_map,
                     table_names: &table_names_map,
+                    sheet_names: &sheet_names,
                     current_sheet_index: sheet_index,
                     current_row: row,
+                    current_col: col,
                 };
                 let r = crate::resolve_table_refs_in_ast(&parser_ast, &ctx);
                 drop(table_names_map);

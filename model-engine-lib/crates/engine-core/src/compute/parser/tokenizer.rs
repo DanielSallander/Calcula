@@ -191,19 +191,35 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
                 i += 1;
             }
             '"' => {
-                // String literal.
+                // String literal. `""` inside the literal is an escaped quote,
+                // exactly as in DAX -- Excel/Power BI parity settles the
+                // spelling. Without this the language could not express a
+                // double quote AT ALL: the scan stopped at the first `"`, so
+                // `"a""b"` tokenized as `"a"` followed by garbage, and the
+                // formatter (which now doubles on the way out) emitted text its
+                // own tokenizer could not read back.
                 i += 1;
-                let start = i;
-                while i < len && chars[i] != '"' {
+                let mut s = String::new();
+                let mut terminated = false;
+                while i < len {
+                    if chars[i] == '"' {
+                        if i + 1 < len && chars[i + 1] == '"' {
+                            s.push('"');
+                            i += 2;
+                            continue;
+                        }
+                        terminated = true;
+                        break;
+                    }
+                    s.push(chars[i]);
                     i += 1;
                 }
-                if i >= len {
+                if !terminated {
                     return Err(EngineError::ParseError {
                         position: tok_start,
                         message: "unterminated string literal".into(),
                     });
                 }
-                let s: String = chars[start..i].iter().collect();
                 tokens.push((Token::StringLit(s), tok_start));
                 i += 1; // skip closing quote
             }
@@ -301,5 +317,46 @@ mod tests {
             .collect();
         assert_eq!(nums, vec![1.5, 0.25]);
         assert!(idents("1.5 + .25 + Sales[x]").contains(&"Sales".to_string()));
+    }
+
+    /// A double quote inside a string literal must survive the round-trip.
+    ///
+    /// Before this, the scan stopped at the FIRST `"`, so the language could not
+    /// express a quote at all -- and the formatter emitted `"a"b"` for a string
+    /// containing one, i.e. text its own tokenizer could not read back. Since
+    /// CONTEXT expression TEXT is the authoring form the host stores and
+    /// re-parses, that made such an expression corrupt or unopenable.
+    /// `""` doubling is DAX's escape, so Power BI parity settles the spelling.
+    #[test]
+    fn a_doubled_quote_is_an_escaped_quote_inside_a_string_literal() {
+        let toks = tokenize(r#""a""b""#).expect("doubled quote must tokenize");
+        let lits: Vec<String> = toks
+            .iter()
+            .filter_map(|(t, _)| match t {
+                Token::StringLit(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lits, vec![r#"a"b"#.to_string()]);
+
+        // Empty string, and a quote at each end.
+        assert_eq!(
+            tokenize(r#""""#).unwrap().iter().filter_map(|(t, _)| match t {
+                Token::StringLit(s) => Some(s.clone()),
+                _ => None,
+            }).collect::<Vec<_>>(),
+            vec![String::new()]
+        );
+        assert_eq!(
+            tokenize(r#""""x""""#).unwrap().iter().filter_map(|(t, _)| match t {
+                Token::StringLit(s) => Some(s.clone()),
+                _ => None,
+            }).collect::<Vec<_>>(),
+            vec![r#""x""#.to_string()]
+        );
+
+        // An unterminated literal is still an error, not a silent truncation.
+        assert!(tokenize(r#""a"#).is_err());
+        assert!(tokenize(r#""a"""#).is_err(), "trailing escape leaves it open");
     }
 }

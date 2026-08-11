@@ -32,8 +32,15 @@ export const UDF_ERROR_KEY = "__calculaError";
 /**
  * The cell-error literals the engine can represent. Anything else a UDF names
  * degrades to #VALUE! — matching `parse_cell_error` in scripting/udf.rs, which
- * is the authority on the wire. (Excel's #NUM!/#NULL! have no engine variant,
- * so they are deliberately absent rather than silently aliased.)
+ * is the authority on the wire.
+ *
+ * #NULL! and #NUM! ARE in the list now. They used to be absent with the note
+ * "no engine variant, so deliberately absent rather than silently aliased";
+ * `CellError` gained both when the .xlsx reader was fixed (it had been mangling
+ * every imported error through `format!("{:?}")`, which is what made "nothing
+ * can hold one" look true). `from_literal` — and therefore `parse_cell_error` —
+ * accepts them today, so leaving them out here would mean the FRONTEND collapsed
+ * to #VALUE! a literal the backend was ready to keep.
  *
  * `#LIMIT!` means the formula exceeded its CALCULATION BUDGET — it did more
  * work than one cell is allowed to, or it never terminates (an unbounded
@@ -43,6 +50,11 @@ export const UDF_ERROR_KEY = "__calculaError";
  * to simplify the formula. Listing it here is what stops
  * `normalizeCellErrorLiteral` from collapsing it back into #VALUE! and undoing
  * that distinction on the way through the frontend.
+ *
+ * `#SPILL!` is here for the same reason and is the sharpest case of it: a
+ * dynamic array that cannot write its result is not an argument problem at all
+ * — the remedy is in ANOTHER CELL ("clear what is in the way"), and collapsing
+ * it to #VALUE! sends the user to inspect a formula that is entirely correct.
  */
 export const CELL_ERROR_LITERALS = [
   "#DIV/0!",
@@ -50,10 +62,13 @@ export const CELL_ERROR_LITERALS = [
   "#NAME?",
   "#VALUE!",
   "#N/A",
+  "#NULL!",
+  "#NUM!",
   "#CIRCULAR!",
   "#CONFLICT!",
   "#BLOCKED!",
   "#LIMIT!",
+  "#SPILL!",
 ] as const;
 
 export type CellErrorLiteral = (typeof CELL_ERROR_LITERALS)[number];

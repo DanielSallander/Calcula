@@ -1700,3 +1700,69 @@ fn test_get_controlvalue_catalog_entry_and_aliases() {
         assert!(meta.is_alias, "{} must be a hidden alias entry", alias);
     }
 }
+
+// ========================================
+// SCIENTIFIC NOTATION (register 3bj)
+// ========================================
+//
+// `=1E3` is 1000 in Excel. The lexer had no exponent rule, so it produced
+// Number(1) followed by Identifier("E3") -- two tokens with no operator, the
+// parse failed, and the app stored the user's text AS TEXT: a cell reading
+// "=1E3" with no error anywhere. `E` also begins a column name, so the rule
+// commits only when an optional sign is followed by at least one digit; the
+// three refusal cases below are the counterweight that keeps it from eating one.
+
+#[test]
+fn a_scientific_literal_lexes_as_one_number() {
+    for (src, expected) in [
+        ("1E3", 1000.0),
+        ("1e3", 1000.0),
+        ("2.5E2", 250.0),
+        ("1E+3", 1000.0),
+        ("1E-3", 0.001),
+        (".5e1", 5.0),
+    ] {
+        let mut lexer = Lexer::new(src);
+        assert_eq!(lexer.next_token(), Token::Number(expected), "lexing {src}");
+        assert_eq!(lexer.next_token(), Token::EOF, "{src} must be ONE token");
+    }
+}
+
+#[test]
+fn an_e_that_is_not_an_exponent_is_left_alone() {
+    // Each of these must lex exactly as it did before the exponent rule: the
+    // number, then whatever the `E` starts. Consuming the `E` here would turn a
+    // column name into part of a literal.
+    for src in ["1E", "1E+", "1EUR"] {
+        let mut lexer = Lexer::new(src);
+        assert_eq!(lexer.next_token(), Token::Number(1.0), "lexing {src}");
+        match lexer.next_token() {
+            Token::Identifier(_) | Token::Plus => {}
+            other => panic!("{src}: expected the E to survive as its own token, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_scientific_literal_parses_and_keeps_its_precedence() {
+    // The whole point: these used to be parse errors, which the app turned into
+    // a text cell.
+    match parse("2.5E2+1") {
+        Ok(Expression::BinaryOp { left, op, right }) => {
+            assert_eq!(op, BinaryOperator::Add);
+            assert!(matches!(*left, Expression::Literal(Value::Number(n)) if n == 250.0));
+            assert!(matches!(*right, Expression::Literal(Value::Number(n)) if n == 1.0));
+        }
+        other => panic!("2.5E2+1 did not parse as 250 + 1: {other:?}"),
+    }
+    assert!(parse("SUM(1E2,2)").is_ok(), "a scientific literal must be usable as an argument");
+    assert!(parse("1E3").is_ok());
+}
+
+#[test]
+fn a_column_named_e_still_parses_as_a_reference() {
+    // The counterweight to the exponent rule at the PARSER level: E3 and E10 are
+    // ordinary cell references and must not have been absorbed into a literal.
+    assert!(parse("E3").is_ok(), "E3 is a cell reference");
+    assert!(parse("SUM(E3:E10)").is_ok(), "a range over column E must still parse");
+}

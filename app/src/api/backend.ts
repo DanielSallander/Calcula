@@ -5294,6 +5294,43 @@ export async function calpSetModelSubmissionState(
   });
 }
 
+/**
+ * One object that would be affected by deleting another (§3bn).
+ *
+ * `policy` is what the delete WILL do to it, using the same rules the backend
+ * cascade applies, so a warning and the behaviour cannot drift:
+ * `"cascade"` (deleted with the owner), `"prune"` (survives, minus the dead
+ * reference) or `"warnAndKeep"` (survives with a reference that no longer
+ * resolves — the case the user must be told about before they commit).
+ */
+export interface ObjectDependent {
+  kind: string;
+  id: string;
+  name: string;
+  policy: string;
+  via: string;
+}
+
+/**
+ * What currently points at `objectId`, so a confirm can NAME it.
+ *
+ * The generalisation of `list_controls_referencing_macro`: the backend owns
+ * every store, so "what depends on this?" is answered where the data is instead
+ * of being reassembled from a dozen per-feature frontend caches.
+ *
+ * `objectKind` is one of "table", "pivot", "slicer", "ribbonFilter", "chart",
+ * "sheet" (whose `objectId` is the sheet INDEX as a string) or "biConnection".
+ */
+export async function listObjectDependents(
+  objectKind: string,
+  objectId: string,
+): Promise<ObjectDependent[]> {
+  return invoke<ObjectDependent[]>("list_object_dependents", {
+    objectKind,
+    objectId,
+  });
+}
+
 /** Delete a connection by ID. */
 export async function biDeleteConnection(
   connectionId: string,

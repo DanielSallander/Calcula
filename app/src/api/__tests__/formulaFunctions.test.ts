@@ -41,9 +41,11 @@ describe("cell-error sentinel", () => {
   it("normalizes case and whitespace, and degrades unknown codes to #VALUE!", () => {
     expect(normalizeCellErrorLiteral(" #n/a ")).toBe("#N/A");
     expect(normalizeCellErrorLiteral("#div/0!")).toBe("#DIV/0!");
-    // Excel has #NUM!/#NULL!; the engine has no variant, so they must land on
-    // #VALUE! rather than silently disappearing.
-    expect(normalizeCellErrorLiteral("#NUM!")).toBe("#VALUE!");
+    // #NUM!/#NULL! now have engine variants of their own (they arrive from
+    // .xlsx), so they must SURVIVE rather than collapse — the assertion here
+    // used to be the opposite and pinned the old absence.
+    expect(normalizeCellErrorLiteral("#NUM!")).toBe("#NUM!");
+    expect(normalizeCellErrorLiteral("#null!")).toBe("#NULL!");
     expect(normalizeCellErrorLiteral("not an error")).toBe("#VALUE!");
     expect(normalizeCellErrorLiteral(42)).toBe("#VALUE!");
   });
@@ -61,9 +63,78 @@ describe("cell-error sentinel", () => {
     expect(normalizeCellErrorLiteral("#LIMIT")).toBe("#VALUE!");
   });
 
+  // The blocked-dynamic-array error. Same argument as #LIMIT!, and the
+  // sharpest case of it: a blocked array's remedy is in ANOTHER CELL ("clear
+  // what is in the way"), so collapsing it to #VALUE! sends the user to inspect
+  // a formula whose arguments are all correct.
+  it("keeps #SPILL! distinct instead of collapsing it into #VALUE!", () => {
+    expect(normalizeCellErrorLiteral("#SPILL!")).toBe("#SPILL!");
+    expect(normalizeCellErrorLiteral(" #spill! ")).toBe("#SPILL!");
+    expect(CELL_ERROR_LITERALS).toContain("#SPILL!");
+    expect(normalizeCellErrorLiteral("#SPILL")).toBe("#VALUE!");
+  });
+
   it("every advertised literal round-trips through normalize", () => {
     for (const lit of CELL_ERROR_LITERALS) {
       expect(normalizeCellErrorLiteral(lit)).toBe(lit);
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // The DRIFT GUARD for the API list, read out of cell.rs at test time.
+  // --------------------------------------------------------------------------
+  //
+  // `isErrorValue` (gridRenderer/styles/cellFormatting.ts) already has a guard
+  // of this shape in core/lib/__tests__/type-guards-exhaustive.test.ts, and it
+  // covers a DIFFERENT list — the renderer's. Nothing covered THIS one, so the
+  // two `CELL_ERROR_LITERALS` constants could drift apart silently: the grid
+  // would paint a new variant red while `normalizeCellErrorLiteral` collapsed
+  // the same variant to #VALUE! on the UDF path.
+  //
+  // That collapse is lossy and SILENT — it is exactly what the comments on
+  // #LIMIT! and #SPILL! in formulaFunctions.ts describe, and both of those were
+  // caught by hand after the fact. Two literals had already been added to the
+  // engine (#NUM!, #NULL!) while this list said they had "no engine variant".
+  // Reading the engine's own table is what makes the coverage checkable.
+  it("advertises EVERY CellError literal the engine can produce", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const cellRs = fs.readFileSync(
+      path.join(__dirname, "../../../../core/engine/src/cell.rs"),
+      "utf8",
+    );
+    // The canonical table: `CellError::X => "#LITERAL"` inside as_literal().
+    const start = cellRs.indexOf("pub fn as_literal");
+    expect(start, "as_literal not found in core/engine/src/cell.rs").toBeGreaterThan(-1);
+    const body = cellRs.slice(start, cellRs.indexOf("\n    }", start));
+    const literals = [
+      ...new Set([...body.matchAll(/CellError::\w+\s*=>\s*"([^"]+)"/g)].map((m) => m[1])),
+    ];
+    expect(
+      literals.length,
+      "parsed no literals out of CellError::as_literal -- the Rust shape changed",
+    ).toBeGreaterThan(5);
+
+    for (const literal of literals) {
+      expect(
+        CELL_ERROR_LITERALS as readonly string[],
+        `CELL_ERROR_LITERALS (api/formulaFunctions.ts) is missing "${literal}", which ` +
+          `core/engine/src/cell.rs (CellError::as_literal) can put in a cell. ` +
+          `normalizeCellErrorLiteral would collapse it to #VALUE! -- a UDF could not ` +
+          `return it, and a value carrying it would lose its identity crossing the API.`,
+      ).toContain(literal);
+      // And it must survive normalize, not merely be listed.
+      expect(normalizeCellErrorLiteral(literal)).toBe(literal);
+    }
+
+    // The reverse direction: a literal advertised here that the engine cannot
+    // produce is a promise nothing can keep.
+    for (const advertised of CELL_ERROR_LITERALS) {
+      expect(
+        literals,
+        `CELL_ERROR_LITERALS advertises "${advertised}", which core/engine/src/cell.rs ` +
+          `can no longer produce -- remove it or restore the CellError variant.`,
+      ).toContain(advertised);
     }
   });
 

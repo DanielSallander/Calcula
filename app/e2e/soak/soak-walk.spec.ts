@@ -3,13 +3,12 @@
 //          invariants per action and the semantic oracle battery at
 //          checkpoints. On failure the spec SELF-MINIMIZES the trace via
 //          delta debugging before failing, and writes a complete failure
-//          bundle for the triage/fix loop:
+//          bundle for the triage/fix loop.
 //
-//            app/e2e/results/soak/failures/<runId>-<violationId>/
-//              trace.json            original failing trace
-//              minimized.trace.json  ddmin-reduced repro
-//              failure.json          violation + digest diff + metadata
-//              report.md             human-readable report
+// The bundle format, the minimization and the "what did the replays do
+// INSTEAD" accounting all live in `walker/failureBundle.ts`, which the
+// `invariant` walk uses too — there is ONE implementation of a failure
+// report in this tree, not one per harness.
 //
 // Environment variables (set by tests/soak/soak-runner.mjs):
 //   SOAK_SEED         seed for the generator (default: Date.now())
@@ -32,8 +31,7 @@ import {
   createTraceSource,
   deepResetForWalk,
   formatWalkReport,
-  minimizeTrace,
-  saveTrace,
+  writeFailureBundle,
 } from "../walker";
 import type { ActionTrace, WalkResult } from "../walker";
 
@@ -88,63 +86,28 @@ test.describe("Soak walk", () => {
     }
 
     // ---- Failure: write the bundle and self-minimize ----
-    const violationId = result.violation?.invariantId ?? "unknown";
-    const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${violationId}`;
-    const failureDir = path.join(RESULTS_DIR, "failures", runId);
-    fs.mkdirSync(failureDir, { recursive: true });
+    const bundle = await writeFailureBundle({
+      result,
+      page: appPage,
+      resultsDir: RESULTS_DIR,
+      harness: "soak",
+      seed: SEED,
+      replayCommand:
+        `E2E_MANUAL=1 SOAK_SEED=${SEED} SOAK_ACTIONS=${MAX_ACTIONS} ` +
+        `SOAK_ORACLE_EVERY=${ORACLE_EVERY} SOAK_RAPID_FIRE=${RAPID_FIRE} ` +
+        `npx playwright test --project=soak --grep "random walk"`,
+      replay: NO_SHRINK ? null : makeReplayFn(appPage, grid, RESULTS_DIR),
+      extra: {
+        maxActions: MAX_ACTIONS,
+        rapidFireProbability: RAPID_FIRE,
+        oracleEveryNActions: ORACLE_EVERY,
+        budgetMs: BUDGET_MS ?? null,
+      },
+    });
 
-    saveTrace(result.trace, path.join(failureDir, "trace.json"));
-    fs.writeFileSync(
-      path.join(failureDir, "failure.json"),
-      JSON.stringify(
-        {
-          seed: SEED,
-          violationId,
-          violation: result.violation,
-          allViolations: result.allViolations,
-          failedAtStep: result.failedAtStep,
-          totalActions: result.totalActions,
-          checkpoints: result.checkpoints,
-          replayConfirmed: false,
-          minimized: false,
-        },
-        null,
-        2
-      ),
-      "utf8"
-    );
-    fs.writeFileSync(path.join(failureDir, "report.md"), report, "utf8");
-
-    const crashed =
-      violationId === "page-crashed" || violationId === "oracle-infrastructure";
-
-    if (!NO_SHRINK && !crashed) {
-      console.log(`\n  Minimizing failing trace (${result.trace.actions.length} actions)...`);
-      const replay = makeReplayFn(appPage, grid, RESULTS_DIR);
-      const shrink = await minimizeTrace(replay, result.trace, violationId, {
-        maxReplays: 30,
-        timeBudgetMs: 15 * 60 * 1000,
-      });
-
-      saveTrace(shrink.minimized, path.join(failureDir, "minimized.trace.json"));
-      const failureJsonPath = path.join(failureDir, "failure.json");
-      const failureJson = JSON.parse(fs.readFileSync(failureJsonPath, "utf8"));
-      failureJson.minimized = true;
-      failureJson.minimizedActionCount = shrink.minimized.actions.length;
-      failureJson.replayConfirmed = shrink.stillFails;
-      failureJson.shrinkReplays = shrink.replays;
-      fs.writeFileSync(failureJsonPath, JSON.stringify(failureJson, null, 2), "utf8");
-
-      console.log(
-        `  Minimized: ${result.trace.actions.length} -> ` +
-          `${shrink.minimized.actions.length} actions ` +
-          `(${shrink.replays} replays, confirmed=${shrink.stillFails})`
-      );
-    }
-
-    test.info().annotations.push({ type: "soak-failure", description: report });
-    test.info().annotations.push({ type: "soak-failure-dir", description: failureDir });
-    expect(result.passed, report).toBe(true);
+    test.info().annotations.push({ type: "soak-failure", description: bundle.report });
+    test.info().annotations.push({ type: "soak-failure-dir", description: bundle.dir });
+    expect(result.passed, bundle.report).toBe(true);
   });
 });
 

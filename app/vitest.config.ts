@@ -24,9 +24,20 @@ export default defineConfig({
   },
   test: {
     // Match .test/.spec in both .ts and .tsx so component/spec unit tests are
-    // actually gated. E2E Playwright specs live under app/e2e (outside src/ and
-    // extensions/), so they are not picked up here.
-    include: ["src/**/*.{test,spec}.{ts,tsx}", "extensions/**/*.{test,spec}.{ts,tsx}"],
+    // actually gated.
+    //
+    // THE E2E HARNESS IS INCLUDED TOO, and only as *.test.ts. Playwright owns
+    // *.spec.ts / *.scenario.ts under app/e2e and every project matches on
+    // those, so a *.test.ts file there is unambiguously a NODE unit test of the
+    // harness itself. It is included because the harness had no unit tier at
+    // all, which is how the trace minimiser shipped with a bug that made it
+    // discard its own answer: nothing could exercise it without launching the
+    // whole app.
+    include: [
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "extensions/**/*.{test,spec}.{ts,tsx}",
+      "e2e/**/*.test.ts",
+    ],
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     // The api/lib barrel pulls in every extension; a cold dynamic import of it

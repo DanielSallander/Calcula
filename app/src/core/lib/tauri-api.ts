@@ -1474,6 +1474,18 @@ export async function deleteSheet(index: number): Promise<SheetsResult> {
     sheetIndex: index,
     sheetName: removed?.name ?? "",
   });
+  // §3bn. Deleting a sheet is the widest object deletion in the workbook: the
+  // tables and pivots ON it go, the slicers, timelines, charts and sparklines
+  // anchored to it go with them, and every one of those objects on a sheet
+  // ABOVE it is renumbered. Each of those stores is cached by its own
+  // extension, so an announcement is the only thing that makes the caches
+  // agree with the backend -- otherwise a slicer keeps painting on the sheet
+  // that inherited its index. Core names DOMAINS, never features; the Shell
+  // translator owns the mapping.
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "pivot", "ribbonFilter", "objects"],
+    source: "commit",
+  });
   recordGridEvent({ kind: "deleteSheet", index });
   return result;
 }
@@ -1488,7 +1500,15 @@ export async function renameSheet(index: number, newName: string): Promise<Sheet
 }
 
 export async function moveSheet(fromIndex: number, toIndex: number): Promise<SheetsResult> {
-  return invoke<SheetsResult>("move_sheet", { fromIndex, toIndex });
+  const result = await invoke<SheetsResult>("move_sheet", { fromIndex, toIndex });
+  // A move renumbers sheets under every index-anchored object exactly as a
+  // delete does (§3bn) -- the backend re-anchors them, and the caches have to
+  // re-read or they keep the pre-move index.
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "pivot", "ribbonFilter", "objects"],
+    source: "commit",
+  });
+  return result;
 }
 
 export async function copySheet(sourceIndex: number, newName?: string): Promise<SheetsResult> {
@@ -1498,6 +1518,12 @@ export async function copySheet(sourceIndex: number, newName?: string): Promise<
     newName: newName ?? null,
   });
   announceSheetAdded(before, result, "copy");
+  // The insertion shifted every sheet at or above it up by one, and the backend
+  // re-anchored the index-keyed object stores with it (§3bn).
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "pivot", "ribbonFilter", "objects"],
+    source: "commit",
+  });
   return result;
 }
 
@@ -1629,6 +1655,22 @@ export interface UndoState {
    * someone else's group early.
    */
   transactionOpen: boolean;
+  /**
+   * The history ids on the undo stack, oldest first.
+   *
+   * `undoDepth` is a SIZE, not a position, and the two must not be confused.
+   * History is capped at `historyLimit`; past the cap every push silently
+   * drops the oldest entry and the depth stops growing, so
+   * `depthNow - depthThen` under-counts the distance back to a remembered
+   * point. To return to one, remember the id on TOP at that moment and later
+   * count the entries above it; if the id is absent, that state is
+   * unreachable and no step count restores it.
+   */
+  undoSeqs: number[];
+  /** How many transactions the cap has dropped over this document's life. */
+  evictedTotal: number;
+  /** The history cap (Excel keeps 100 too). */
+  historyLimit: number;
 }
 
 export interface UndoResult {

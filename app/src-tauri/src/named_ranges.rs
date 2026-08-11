@@ -973,11 +973,14 @@ pub fn apply_names_to_formulas(
     end_col: Option<u32>,
 ) -> Result<ApplyNamesResult, String> {
     let named_ranges = state.named_ranges.read().unwrap();
-    // Every gate above has passed; from here this command commits. Constructed
-    // HERE and not at the top so a refusal cannot leave a spuriously dirty
-    // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
+    // LOCKED BUT UNDECIDED. This command has three ways to write nothing --
+    // no applicable names, no formula that mentions one, and (since the §3bc
+    // fix below) a replacement that cannot be read back -- and the dirty
+    // decision has to sit AFTER all three, or asking Excel's Apply Names about
+    // a workbook it has nothing to do to marks the document modified. Same
+    // instrument `rename_sheet` uses: read through the pending guard, then
+    // `authorize` once the command has decided to commit.
+    let grid = state.grid.lock_pending().unwrap();
     let styles = state.style_registry.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -1013,7 +1016,7 @@ pub fn apply_names_to_formulas(
     let scan_end_col = end_col.unwrap_or(grid.max_col);
 
     // Collect cells that need modification first (to avoid borrow issues)
-    let mut modifications: Vec<(u32, u32, String)> = Vec::new();
+    let mut modifications: Vec<(u32, u32, String, String)> = Vec::new();
 
     for (&(row, col), cell) in grid.cells.iter() {
         if row < scan_start_row || row > scan_end_row
@@ -1022,36 +1025,84 @@ pub fn apply_names_to_formulas(
             continue;
         }
 
-        if let Some(formula) = cell.formula_string() {
+        // RAW, not the display form -- the rule `repair_all_formulas` already
+        // follows. `formula_string()` COLLAPSES the internal
+        // `__INVOKE__("MyFn", <lambda>, args)` marker a named LAMBDA call
+        // carries down to `MyFn(args)`; re-parsing that gives `Custom("MYFN")`
+        // with no lambda attached, so applying a name inside such a call
+        // destroyed the call. The raw form round-trips.
+        if let Some(formula) = cell.formula_string_raw() {
             let mut new_formula = formula.clone();
 
             for (name, patterns) in &replacements {
                 new_formula = replace_ref_in_formula(&new_formula, patterns, name);
             }
 
-            if new_formula != *formula {
-                modifications.push((row, col, new_formula));
+            if new_formula != formula {
+                modifications.push((row, col, formula, new_formula));
+            }
+        }
+    }
+    // `grid.cells` is a hash map: sort so the cells the frontend paints -- and
+    // the cell a refusal names -- do not depend on hash order.
+    modifications.sort_by_key(|(row, col, _, _)| (*row, *col));
+
+    // PARSE EVERY REPLACEMENT BEFORE WRITING ANY OF THEM (register §3bc).
+    //
+    // This used to be `parser::parse(new_formula).ok().map(Box::new)` at the
+    // write site: a replacement that failed to parse set `ast = None`, which is
+    // a cell holding a stale value with an EMPTY formula bar and no error
+    // anywhere -- the user's formula deleted by a command that says it only
+    // renames references. Excel refuses Apply Names rather than damaging a
+    // formula, so this refuses too, and refuses the WHOLE command: a partially
+    // applied rewrite is not a state the user asked for and not one they can
+    // undo, since this command writes no undo entry.
+    let mut parsed: Vec<(u32, u32, Box<parser::Expression>)> =
+        Vec::with_capacity(modifications.len());
+    for (row, col, original, new_formula) in &modifications {
+        match parser::parse(new_formula) {
+            Ok(ast) => parsed.push((*row, *col, Box::new(ast))),
+            Err(e) => {
+                let address = calcula_format::cell_ref::to_a1(*row, *col);
+                crate::log_error!(
+                    "NAMES",
+                    "apply_names refused at {}: `{}` -> `{}` ({})",
+                    address,
+                    original,
+                    new_formula,
+                    e
+                );
+                return Err(format!(
+                    "Cannot apply names: the formula in {} would be rewritten to `={}`,                      which cannot be read back ({}). No formula was changed.",
+                    address, new_formula, e
+                ));
             }
         }
     }
 
-    // Apply modifications -- rewrites formula ASTs across the scanned range.
-    // Conditional: only mint the token if there is actually something to rewrite.
-    let _effect = if modifications.is_empty() {
-        None
-    } else {
-        Some(crate::document_effect::DocumentEffect::mutates(&file_state))
-    };
+    // Nothing to write: answer without touching the document. Minting the
+    // effect here would mark a workbook modified for a command that changed no
+    // cell in it.
+    if parsed.is_empty() {
+        return Ok(ApplyNamesResult {
+            formulas_modified: 0,
+            cells: Vec::new(),
+        });
+    }
+
+    // Every gate has passed; from here this command commits.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
     let mut updated_cells: Vec<CellData> = Vec::new();
 
-    for (row, col, new_formula) in &modifications {
-        if let Some(cell) = grid.cells.get_mut(&(*row, *col)) {
-            cell.ast = parser::parse(new_formula).ok().map(Box::new);
+    for (row, col, ast) in parsed {
+        if let Some(cell) = grid.cells.get_mut(&(row, col)) {
+            cell.ast = Some(ast);
         }
     }
 
     // Build CellData results for the frontend
-    for (row, col, _) in &modifications {
+    for (row, col, _, _) in &modifications {
         if let Some(cell_data) =
             get_cell_internal_with_merge(&grid, &styles, &merged_regions, *row, *col, &locale)
         {

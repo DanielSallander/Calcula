@@ -32,8 +32,8 @@ fn with_sheet_grid<T>(
 ) -> Result<T, String> {
     let active_sheet = *state.active_sheet.read().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
-    let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid: &engine::Grid = if target_sheet == active_sheet {
         &active_grid
     } else if target_sheet < grids.len() {

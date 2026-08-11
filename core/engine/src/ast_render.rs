@@ -11,6 +11,8 @@
 //! - Sheet names with spaces or apostrophes are quoted
 
 use parser::ast::{BinaryOperator, BuiltinFunction, Expression, TableSpecifier, Value};
+use std::collections::HashMap;
+use std::fmt::Write;
 
 // ---------------------------------------------------------------------------
 // OPERATOR PRECEDENCE
@@ -69,19 +71,73 @@ fn precedence(expr: &Expression) -> u8 {
     }
 }
 
-/// Render `child` as an operand, parenthesising it when the surrounding
+/// Append `child` as an operand, parenthesising it when the surrounding
 /// position demands at least `min_prec` and the child binds looser than that.
-fn render_child(child: &Expression, min_prec: u8, collapse: bool) -> String {
-    let text = render_expr(child, collapse);
-    if precedence(child) < min_prec {
-        format!("({})", text)
-    } else {
-        text
+fn render_child_into(child: &Expression, min_prec: u8, ctx: &mut RenderCtx<'_>, out: &mut String) {
+    let guarded = precedence(child) < min_prec;
+    if guarded {
+        out.push('(');
+    }
+    render_into(child, ctx, out);
+    if guarded {
+        out.push(')');
+    }
+}
+
+/// Byte spans of each sub-expression within the rendered text, keyed by the
+/// child-index path from the root (`[]` is the whole formula, `[0]` the left
+/// operand of a root binary op, and so on).
+pub type SpanMap = HashMap<Vec<usize>, (usize, usize)>;
+
+/// Rendering state threaded through [`render_into`].
+///
+/// `spans` is what makes this ONE renderer rather than three. The Evaluate
+/// Formula dialog and the Formula Visualizer need to underline the
+/// sub-expression they are about to evaluate, and each of them used to carry
+/// its OWN AST->text walker to get the offsets -- walkers that had no
+/// parenthesis guard (so `=(A1+B1)*C1` was SHOWN as `A1+B1*C1`) and their own
+/// 224-arm function-name table ending in a `{:?}` catch-all, so 248 of the
+/// enum's 472 functions were shown under their Rust variant name: `VLookup(`,
+/// `StdevS(` for STDEV.S, `NormDist(` for NORM.DIST. Both walkers are deleted;
+/// the offsets now come from the renderer that produces the text, so a
+/// highlight cannot point at something the text does not say.
+struct RenderCtx<'a> {
+    collapse: bool,
+    path: Vec<usize>,
+    spans: Option<&'a mut SpanMap>,
+}
+
+impl RenderCtx<'_> {
+    #[inline]
+    fn tracking(&self) -> bool {
+        self.spans.is_some()
+    }
+    /// Descend into child `idx`. A no-op when nobody asked for spans, so the
+    /// hot path (persistence renders every formula in the workbook) pays
+    /// nothing for the bookkeeping.
+    #[inline]
+    fn enter(&mut self, idx: usize) {
+        if self.tracking() {
+            self.path.push(idx);
+        }
+    }
+    #[inline]
+    fn leave(&mut self) {
+        if self.tracking() {
+            self.path.pop();
+        }
+    }
+    #[inline]
+    fn record(&mut self, start: usize, end: usize) {
+        let path = self.path.clone();
+        if let Some(spans) = self.spans.as_deref_mut() {
+            spans.insert(path, (start, end));
+        }
     }
 }
 
 /// Render a formula AST to its canonical string representation.
-/// Does NOT include a leading '=' — the caller adds it if needed for display.
+/// Does NOT include a leading '=' -- the caller adds it if needed for display.
 ///
 /// The internal `__INVOKE__("Name", lambda, args...)` marker that name
 /// resolution injects for user-defined (named `LAMBDA`) function calls is
@@ -100,45 +156,78 @@ pub fn render_formula_raw(expr: &Expression) -> String {
     render_expr(expr, false)
 }
 
+/// The canonical text PLUS the byte span of every sub-expression.
+///
+/// The text is byte-identical to [`render_formula`] / [`render_formula_raw`] for
+/// the same `collapse` flag -- it is produced by the same code -- which is the
+/// property `spans_agree_with_the_canonical_text` pins.
+pub fn render_with_spans(expr: &Expression, collapse: bool) -> (String, SpanMap) {
+    let mut out = String::new();
+    let mut spans = SpanMap::new();
+    {
+        let mut ctx = RenderCtx {
+            collapse,
+            path: Vec::new(),
+            spans: Some(&mut spans),
+        };
+        render_into(expr, &mut ctx, &mut out);
+    }
+    (out, spans)
+}
+
 fn render_expr(expr: &Expression, collapse: bool) -> String {
+    let mut out = String::new();
+    let mut ctx = RenderCtx {
+        collapse,
+        path: Vec::new(),
+        spans: None,
+    };
+    render_into(expr, &mut ctx, &mut out);
+    out
+}
+
+/// THE renderer. Every AST->text surface in the product bottoms out here.
+fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
+    let start = out.len();
+
     match expr {
-        Expression::Literal(val) => render_value(val),
+        Expression::Literal(val) => out.push_str(&render_value(val)),
 
         Expression::CellRef { sheet, col, row, col_absolute, row_absolute, .. } => {
-            let mut s = render_sheet_prefix(sheet);
-            if *col_absolute { s.push('$'); }
-            s.push_str(col);
-            if *row_absolute { s.push('$'); }
-            s.push_str(&row.to_string());
-            s
+            out.push_str(&render_sheet_prefix(sheet));
+            if *col_absolute { out.push('$'); }
+            out.push_str(col);
+            if *row_absolute { out.push('$'); }
+            out.push_str(&row.to_string());
         }
 
-        Expression::Range { sheet, start, end, .. } => {
-            let mut s = render_sheet_prefix(sheet);
-            s.push_str(&render_expr_no_sheet(start, collapse));
-            s.push(':');
-            s.push_str(&render_expr_no_sheet(end, collapse));
-            s
+        Expression::Range { sheet, start: s, end: e, .. } => {
+            out.push_str(&render_sheet_prefix(sheet));
+            ctx.enter(0);
+            render_no_sheet_into(s, ctx, out);
+            ctx.leave();
+            out.push(':');
+            ctx.enter(1);
+            render_no_sheet_into(e, ctx, out);
+            ctx.leave();
         }
 
         Expression::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute, .. } => {
-            let mut s = render_sheet_prefix(sheet);
-            if *start_absolute { s.push('$'); }
-            s.push_str(start_col);
-            s.push(':');
-            if *end_absolute { s.push('$'); }
-            s.push_str(end_col);
-            s
+            out.push_str(&render_sheet_prefix(sheet));
+            if *start_absolute { out.push('$'); }
+            out.push_str(start_col);
+            out.push(':');
+            if *end_absolute { out.push('$'); }
+            out.push_str(end_col);
         }
 
         Expression::RowRef { sheet, start_row, end_row, start_absolute, end_absolute, .. } => {
-            let mut s = render_sheet_prefix(sheet);
-            if *start_absolute { s.push('$'); }
-            s.push_str(&start_row.to_string());
-            s.push(':');
-            if *end_absolute { s.push('$'); }
-            s.push_str(&end_row.to_string());
-            s
+            out.push_str(&render_sheet_prefix(sheet));
+            if *start_absolute { out.push('$'); }
+            out.push_str(&start_row.to_string());
+            out.push(':');
+            if *end_absolute { out.push('$'); }
+            out.push_str(&end_row.to_string());
         }
 
         Expression::BinaryOp { left, op, right } => {
@@ -152,124 +241,188 @@ fn render_expr(expr: &Expression, collapse: bool) -> String {
             } else {
                 (p, p + 1)
             };
-            format!(
-                "{}{}{}",
-                render_child(left, left_min, collapse),
-                op,
-                render_child(right, right_min, collapse)
-            )
+            ctx.enter(0);
+            render_child_into(left, left_min, ctx, out);
+            ctx.leave();
+            let _ = write!(out, "{}", op);
+            ctx.enter(1);
+            render_child_into(right, right_min, ctx, out);
+            ctx.leave();
         }
 
         Expression::UnaryOp { op, operand } => {
             // `parse_unary`'s operand is itself `parse_unary`, so a nested unary
             // or a `^` needs no parentheses; anything looser does.
-            format!("{}{}", op, render_child(operand, PREC_UNARY, collapse))
+            let _ = write!(out, "{}", op);
+            ctx.enter(0);
+            render_child_into(operand, PREC_UNARY, ctx, out);
+            ctx.leave();
         }
 
         Expression::FunctionCall { func, args, .. } => {
             // Collapse the named-function invocation marker back to `Name(args)`
             // for display. The raw path (collapse == false) falls through and
             // renders the literal `__INVOKE__("Name", lambda, args)` form.
-            if collapse {
-                if let Some(collapsed) = try_render_named_invoke(func, args) {
-                    return collapsed;
+            let collapsed = ctx.collapse && render_named_invoke_into(func, args, ctx, out);
+            if !collapsed {
+                out.push_str(func.to_canonical_name());
+                out.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { out.push(','); }
+                    ctx.enter(i);
+                    render_into(a, ctx, out);
+                    ctx.leave();
                 }
+                out.push(')');
             }
-            let name = func.to_canonical_name();
-            let arg_strs: Vec<String> = args.iter().map(|a| render_expr(a, collapse)).collect();
-            format!("{}({})", name, arg_strs.join(","))
         }
 
-        Expression::NamedRef { name, .. } => name.clone(),
+        Expression::NamedRef { name, .. } => out.push_str(name),
 
         Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            let prefix = if needs_quoting(start_sheet) || needs_quoting(end_sheet) {
+            if needs_quoting(start_sheet) || needs_quoting(end_sheet) {
                 // ONE pair of apostrophes wraps the whole `A:B` bookend pair, so
                 // each half is escaped but not separately quoted.
-                format!(
+                let _ = write!(
+                    out,
                     "'{}:{}'!",
                     start_sheet.replace('\'', "''"),
                     end_sheet.replace('\'', "''")
-                )
+                );
             } else {
-                format!("{}:{}!", start_sheet, end_sheet)
-            };
-            format!("{}{}", prefix, render_expr(reference, collapse))
+                let _ = write!(out, "{}:{}!", start_sheet, end_sheet);
+            }
+            ctx.enter(0);
+            render_into(reference, ctx, out);
+            ctx.leave();
         }
 
         Expression::TableRef { table_name, specifier, .. } => {
-            let spec_str = render_table_specifier(specifier);
-            if table_name.is_empty() {
-                spec_str
-            } else {
-                format!("{}{}", table_name, spec_str)
-            }
+            out.push_str(table_name);
+            out.push_str(&render_table_specifier(specifier));
         }
 
         Expression::IndexAccess { target, index } => {
             // The subscript chain is parsed off a primary; the index sits inside
             // brackets and so needs no guarding.
-            format!(
-                "{}[{}]",
-                render_child(target, PREC_ATOM, collapse),
-                render_expr(index, collapse)
-            )
+            ctx.enter(0);
+            render_child_into(target, PREC_ATOM, ctx, out);
+            ctx.leave();
+            out.push('[');
+            ctx.enter(1);
+            render_into(index, ctx, out);
+            ctx.leave();
+            out.push(']');
         }
 
         Expression::ListLiteral { elements } => {
-            let inner: Vec<String> = elements.iter().map(|e| render_expr(e, collapse)).collect();
-            format!("{{{}}}", inner.join(", "))
+            out.push('{');
+            for (i, e) in elements.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                ctx.enter(i);
+                render_into(e, ctx, out);
+                ctx.leave();
+            }
+            out.push('}');
         }
 
         Expression::DictLiteral { entries } => {
-            let inner: Vec<String> = entries.iter()
-                .map(|(k, v)| format!("{}: {}", render_expr(k, collapse), render_expr(v, collapse)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
+            out.push('{');
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                ctx.enter(i * 2);
+                render_into(k, ctx, out);
+                ctx.leave();
+                out.push_str(": ");
+                ctx.enter(i * 2 + 1);
+                render_into(v, ctx, out);
+                ctx.leave();
+            }
+            out.push('}');
         }
 
+        // SpillRef and ImplicitIntersection give their operand the SAME path as
+        // themselves: the evaluation walker treats each as a single indivisible
+        // step, so there is no child step to highlight. Recording the parent
+        // AFTER the child (below) is what makes the wider span win.
         Expression::SpillRef { cell, .. } => {
-            format!("{}#", render_child(cell, PREC_ATOM, collapse))
+            render_child_into(cell, PREC_ATOM, ctx, out);
+            out.push('#');
         }
 
         Expression::ImplicitIntersection { operand } => {
             // `@` takes a `parse_primary`, so its operand must be atom-level.
-            format!("@{}", render_child(operand, PREC_ATOM, collapse))
+            out.push('@');
+            render_child_into(operand, PREC_ATOM, ctx, out);
         }
     }
+
+    let end = out.len();
+    ctx.record(start, end);
 }
 
 /// If `func`/`args` are the named-function invocation marker
-/// `__INVOKE__("Name", lambda, arg1, ...)`, render it back to `Name(arg1, ...)`.
-/// Returns `None` for the inline-lambda shape `__INVOKE__(lambda, args)` (no
-/// leading name literal) and for any non-invoke call, so the caller renders
+/// `__INVOKE__("Name", lambda, arg1, ...)`, append `Name(arg1, ...)` and return
+/// true. Returns false for the inline-lambda shape `__INVOKE__(lambda, args)`
+/// (no leading name literal) and for any non-invoke call, so the caller renders
 /// those normally.
-fn try_render_named_invoke(func: &BuiltinFunction, args: &[Expression]) -> Option<String> {
-    let BuiltinFunction::Custom(name) = func else { return None; };
+fn render_named_invoke_into(
+    func: &BuiltinFunction,
+    args: &[Expression],
+    ctx: &mut RenderCtx<'_>,
+    out: &mut String,
+) -> bool {
+    let BuiltinFunction::Custom(name) = func else { return false; };
     if name != "__INVOKE__" || args.len() < 2 {
-        return None;
+        return false;
     }
     // Named form only: args[0] is the display-name string literal, args[1] is
     // the resolved LAMBDA, args[2..] are the call arguments.
-    let Expression::Literal(Value::String(fn_name)) = &args[0] else { return None; };
-    let arg_strs: Vec<String> = args[2..].iter().map(|a| render_expr(a, true)).collect();
-    Some(format!("{}({})", fn_name, arg_strs.join(",")))
+    let Expression::Literal(Value::String(fn_name)) = &args[0] else { return false; };
+    out.push_str(fn_name);
+    out.push('(');
+    for (j, a) in args[2..].iter().enumerate() {
+        if j > 0 { out.push(','); }
+        // The path stays the TRUE AST index so a span keys to the same node the
+        // evaluation walker names, even though the display hides args 0 and 1.
+        ctx.enter(j + 2);
+        render_into(a, ctx, out);
+        ctx.leave();
+    }
+    out.push(')');
+    true
 }
 
-/// Render a CellRef without its sheet prefix (for Range start/end endpoints).
-fn render_expr_no_sheet(expr: &Expression, collapse: bool) -> String {
+/// Append a CellRef without its sheet prefix (for Range start/end endpoints).
+fn render_no_sheet_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
     match expr {
         Expression::CellRef { col, row, col_absolute, row_absolute, .. } => {
-            let mut s = String::new();
-            if *col_absolute { s.push('$'); }
-            s.push_str(col);
-            if *row_absolute { s.push('$'); }
-            s.push_str(&row.to_string());
-            s
+            let start = out.len();
+            if *col_absolute { out.push('$'); }
+            out.push_str(col);
+            if *row_absolute { out.push('$'); }
+            out.push_str(&row.to_string());
+            let end = out.len();
+            ctx.record(start, end);
         }
-        _ => render_expr(expr, collapse),
+        _ => render_into(expr, ctx, out),
     }
 }
+
+/// Longest PLAIN decimal rendering a numeric literal may have before the
+/// renderer switches to scientific notation.
+///
+/// Rust's `Display` for `f64` never uses an exponent, so `format!("{}", 1e300)`
+/// is a **301-character** string of digits — and this renderer's output is not
+/// only what the formula bar shows, it is what `.cala` STORES and re-parses.
+/// `=1E300*A1` therefore round-tripped as a 301-digit literal, and `=1E-300`
+/// as a 302-character one, in the file and on screen.
+///
+/// 20 is chosen so that nothing human-scale moves: the widest ordinary value —
+/// an exact integer just under the `1e15` fast path, or a 17-digit
+/// `1e16`-scale number — stays plain, and only genuinely absurd expansions
+/// switch. Excel likewise spells extreme magnitudes with an exponent.
+const MAX_PLAIN_LITERAL_LEN: usize = 20;
 
 fn render_value(val: &Value) -> String {
     match val {
@@ -277,7 +430,16 @@ fn render_value(val: &Value) -> String {
             if *n == (*n as i64) as f64 && n.abs() < 1e15 {
                 format!("{}", *n as i64)
             } else {
-                format!("{}", n)
+                // `{:E}` produces `1E300` / `1.5E-7`, which this crate's lexer
+                // reads back as one number token (its exponent rule accepts a
+                // bare, `+` or `-` exponent), so the round trip that
+                // persistence depends on is preserved.
+                let plain = format!("{}", n);
+                if plain.len() > MAX_PLAIN_LITERAL_LEN {
+                    format!("{:E}", n)
+                } else {
+                    plain
+                }
             }
         }
         // A `"` inside the text is written `""` -- the escape the lexer reads
@@ -335,18 +497,41 @@ fn needs_quoting(name: &str) -> bool {
 }
 
 /// Render a TableSpecifier to its bracket notation.
+///
+/// Every arm must emit text the PARSER READS BACK AS THE SAME SPECIFIER. Three
+/// of them did not, and because `SavedCell::from_cell` stores this text and
+/// `to_cell` feeds it to `Cell::new_formula` — which stores an unparseable
+/// formula as a TEXT VALUE (`cell.rs`) — the failure was silent corruption of
+/// the saved file, not an error anyone saw:
+///
+///   * `SpecialColumn` emitted `Sales[#Data],Revenue`, which re-parses as TWO
+///     arguments (`Sales[#Data]` and a NamedRef `Revenue`). `=SUM(...)` over it
+///     silently changed from one column to the whole table body plus an
+///     undefined name — a different NUMBER, with no warning.
+///   * `ColumnRange` emitted `Sales[a]:[b]` and `ThisRowRange` emitted
+///     `Sales[@a]:[@b]`; neither parses at all (there is no generic postfix `:`
+///     after a table ref), so reopening the file replaced the formula with its
+///     own mangled text.
+///
+/// The forms below are Excel's (ECMA-376 structured references): the column
+/// part of a multi-part specifier is ALWAYS itself bracketed, and the whole
+/// thing sits inside one outer bracket pair. `parse_nested_bracket_specifier`
+/// is the matching reader; `render_then_parse_is_a_fixed_point` pins the pair.
 pub fn render_table_specifier(spec: &TableSpecifier) -> String {
     match spec {
         TableSpecifier::Column(name) => format!("[{}]", name),
         TableSpecifier::ThisRow(name) => format!("[@{}]", name),
-        TableSpecifier::ColumnRange(start, end) => format!("[{}]:[{}]", start, end),
-        TableSpecifier::ThisRowRange(start, end) => format!("[@{}]:[@{}]", start, end),
+        TableSpecifier::ColumnRange(start, end) => format!("[[{}]:[{}]]", start, end),
+        TableSpecifier::ThisRowRange(start, end) => format!("[[@{}]:[@{}]]", start, end),
         TableSpecifier::AllRows => "[#All]".to_string(),
         TableSpecifier::DataRows => "[#Data]".to_string(),
         TableSpecifier::Headers => "[#Headers]".to_string(),
         TableSpecifier::Totals => "[#Totals]".to_string(),
         TableSpecifier::SpecialColumn(special, col) => {
-            format!("{},{}", render_table_specifier(special), col)
+            // `render_table_specifier(special)` already carries its own outer
+            // brackets (`[#Data]`), which is exactly the inner half Excel wants;
+            // the column gets its own, and one more pair wraps the comma.
+            format!("[{},[{}]]", render_table_specifier(special), col)
         }
     }
 }
@@ -708,6 +893,176 @@ mod tests {
                     assert_eq!(got.to_uppercase(), name.to_uppercase())
                 }
                 other => panic!("`{}` -> {:?}", name, other),
+            }
+        }
+    }
+
+    /// EVERY `TableSpecifier` variant must render to text the parser reads back
+    /// as the SAME specifier.
+    ///
+    /// Three of the nine did not, and the consequence was silent corruption of
+    /// the saved file rather than an error: `SavedCell::from_cell` stores this
+    /// text and `to_cell` feeds it to `Cell::new_formula`, which stores an
+    /// UNPARSEABLE formula as a plain text value.
+    ///
+    ///   * `SpecialColumn` rendered `Sales[#Data],Revenue`, which re-parses
+    ///     inside a call as TWO arguments -- `=SUM(Sales[[#Data],[Revenue]])`
+    ///     came back as the sum of the whole table body plus an undefined name.
+    ///     A different number, no warning.
+    ///   * `ColumnRange` rendered `Sales[a]:[b]` and `ThisRowRange` rendered
+    ///     `Sales[@a]:[@b]`; neither parses (there is no postfix `:` after a
+    ///     table ref), so the formula was replaced by its own mangled text.
+    ///
+    /// Enumerating the variants is what makes this a census rather than the
+    /// single-variant sample that was here before (`Sales[Revenue]` -- the one
+    /// that worked).
+    #[test]
+    fn every_table_specifier_variant_survives_render_and_re_parse() {
+        let variants = vec![
+            TableSpecifier::Column("REV".to_string()),
+            TableSpecifier::ThisRow("REV".to_string()),
+            TableSpecifier::ColumnRange("A".to_string(), "B".to_string()),
+            TableSpecifier::ThisRowRange("A".to_string(), "B".to_string()),
+            TableSpecifier::AllRows,
+            TableSpecifier::DataRows,
+            TableSpecifier::Headers,
+            TableSpecifier::Totals,
+            TableSpecifier::SpecialColumn(Box::new(TableSpecifier::DataRows), "REV".to_string()),
+        ];
+
+        for spec in variants {
+            let expr = Expression::TableRef {
+                table_name: "T".to_string(),
+                specifier: spec.clone(),
+                ref_site_id: Default::default(),
+            };
+            let text = render_formula_raw(&expr);
+
+            let reparsed = parser::parse(&text).unwrap_or_else(|e| {
+                panic!(
+                    "{:?} rendered {:?}, which the parser cannot read: {}",
+                    spec, text, e
+                )
+            });
+
+            match &reparsed {
+                Expression::TableRef { table_name, specifier, .. } => {
+                    assert_eq!(table_name, "T", "table name changed for {:?}", spec);
+                    assert_eq!(
+                        specifier, &spec,
+                        "{:?} rendered {:?} and came back as a DIFFERENT specifier",
+                        spec, text
+                    );
+                }
+                other => panic!(
+                    "{:?} rendered {:?}, which re-parses as {:?} -- not a table ref \
+                     at all (the comma form became two arguments)",
+                    spec, text, other
+                ),
+            }
+
+            // And the render must be a fixed point: render(parse(render(x))) == render(x).
+            assert_eq!(
+                render_formula_raw(&reparsed),
+                text,
+                "rendering is not a fixed point for {:?}",
+                spec
+            );
+        }
+    }
+
+    /// Excel's own spellings must parse, and round-trip to themselves.
+    #[test]
+    fn excel_structured_reference_spellings_round_trip() {
+        for source in [
+            "SUM(SALES[[#Data],[REVENUE]])",
+            "SUM(SALES[[REVENUE]:[COST]])",
+            "SUM(SALES[[@REVENUE]:[@COST]])",
+            "SUM(SALES[REVENUE])",
+            "SUM(SALES[@REVENUE])",
+            "SUM(SALES[#All])",
+            "SUM(SALES[#Headers])",
+            "SUM(SALES[#Totals])",
+        ] {
+            let ast = parser::parse(source)
+                .unwrap_or_else(|e| panic!("Excel spelling {} does not parse: {}", source, e));
+            let rendered = render_formula_raw(&ast);
+            assert_eq!(rendered, source, "{} did not round-trip", source);
+        }
+    }
+
+    /// AN EXTREME NUMERIC LITERAL MUST NOT EXPAND TO 301 DIGITS.
+    ///
+    /// Rust's `Display` for `f64` has no exponent form, so `format!("{}", 1e300)`
+    /// is a full 301-character decimal expansion. This renderer's output is not
+    /// a debug string: it is what the formula bar shows AND what `.cala` writes
+    /// and re-parses, so `=1E300*A1` was stored, displayed and reloaded as a
+    /// 301-digit literal. Excel spells it `1E+300`.
+    ///
+    /// The round trip is the load-bearing half: the rendered text has to lex
+    /// back to the SAME f64, or persistence changes the number.
+    #[test]
+    fn extreme_numeric_literals_render_in_scientific_notation() {
+        for (source, expect_scientific) in [
+            ("=1E300", true),
+            ("=1E-300", true),
+            ("=1.7976931348623157E308", true),
+            // ... and the counterweight: nothing human-scale moves.
+            ("=1000", false),
+            ("=1E3", false),
+            ("=0.001", false),
+            ("=1E-9", false),
+            ("=2.5", false),
+            ("=123456789012345", false),
+        ] {
+            let ast = parser::parse(source).expect("parses");
+            let rendered = render_formula_raw(&ast);
+            assert!(
+                rendered.len() <= 32,
+                "{} rendered as {} characters: {}",
+                source,
+                rendered.len(),
+                &rendered[..rendered.len().min(60)]
+            );
+            assert_eq!(
+                rendered.contains('E'),
+                expect_scientific,
+                "{} rendered as {:?}",
+                source,
+                rendered
+            );
+
+            // THE ROUND TRIP. Persistence stores this text and re-parses it, so
+            // a rendering that does not lex back to the same number silently
+            // changes the workbook.
+            let reparsed = parser::parse(&format!("={}", rendered))
+                .unwrap_or_else(|e| panic!("{:?} does not re-parse: {}", rendered, e));
+            assert_eq!(
+                render_formula_raw(&reparsed),
+                rendered,
+                "{} is not a fixed point of the renderer",
+                rendered
+            );
+        }
+    }
+
+    /// The exact bit pattern has to survive, not just the magnitude.
+    #[test]
+    fn scientific_rendering_preserves_the_exact_f64() {
+        for n in [1e300_f64, 1e-300, 1.7976931348623157e308, 5e-324, 1.2345678901234567e250] {
+            let ast = Expression::Literal(Value::Number(n));
+            let rendered = render_formula_raw(&ast);
+            let reparsed = parser::parse(&format!("={}", rendered)).expect("re-parses");
+            match reparsed {
+                Expression::Literal(Value::Number(back)) => assert_eq!(
+                    back.to_bits(),
+                    n.to_bits(),
+                    "{:e} rendered as {:?} and came back as {:e}",
+                    n,
+                    rendered,
+                    back
+                ),
+                other => panic!("{:e} rendered as {:?}, which re-parsed as {:?}", n, rendered, other),
             }
         }
     }

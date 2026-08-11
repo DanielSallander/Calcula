@@ -370,11 +370,11 @@ pub fn recalc_control_dependents(
 ///    GET.CONTROLVALUE formula is recalculated via `recalculate_sheet_values`,
 ///    together with every sheet that (transitively) depends on one of them
 ///    through cross-sheet references, in sheet-level dependency order
-///    (`ordered_sheet_closure`). LIMITATIONS (v1): no spill maintenance off
-///    the active sheet — array results collapse to the origin cell (matches
-///    .calp refresh); sheets on a sheet-level dependency cycle recalc once in
-///    appended (imperfect) order; no `CellData` is reported for these sheets
-///    (the frontend refetches on sheet switch).
+///    (`ordered_sheet_closure`). Dynamic arrays ARE re-laid off the active
+///    sheet since §3bm — `recalculate_sheet_values` ends in the one spill
+///    decision. LIMITATIONS (v1): sheets on a sheet-level dependency cycle
+///    recalc once in appended (imperfect) order; no `CellData` is reported for
+///    these sheets (the frontend refetches on sheet switch).
 /// 2. **Active-sheet pass.** Seeds = matching GET.CONTROLVALUE cells PLUS
 ///    every active-sheet cell that references a sheet recalculated in pass 1
 ///    (reverse cross-sheet propagation; deliberately over-broad — any
@@ -504,9 +504,9 @@ pub(crate) fn recalc_control_dependents_core(
 
     // Pass 1: other sheets, whole-sheet recalc in sheet-level dependency
     // order (a sheet recalculates after the sheets it depends on).
-    // LIMITATION (v1): no spill maintenance off the active sheet —
-    // recalculate_sheet_values collapses array results to the origin cell
-    // (matches .calp refresh) — and no CellData reporting for these sheets.
+    // `recalculate_sheet_values` re-lays dynamic arrays on the sheet it
+    // evaluates (§3bm); what these sheets still do not get is CellData
+    // reporting, so the frontend re-fetches them on switch.
     let other_recalc =
         ordered_sheet_closure(&control_sheets, &sheet_edges, prepass_active_sheet);
     for &idx in &other_recalc {
@@ -695,6 +695,7 @@ pub(crate) fn recalc_control_dependents_core(
                 .collect()
         };
         crate::commands::data::cascade_cross_sheet_dependents(
+            state,
             &mut grid,
             &mut grids,
             &sheet_names,
@@ -709,6 +710,8 @@ pub(crate) fn recalc_control_dependents_core(
                 named_ranges: &cascade_named_ranges,
                 tables: &cascade_tables,
                 table_names: &cascade_table_names,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
             },
             &initial_changed,
             &affected,

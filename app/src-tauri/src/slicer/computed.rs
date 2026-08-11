@@ -760,20 +760,19 @@ pub fn remove_slicer_computed_property(
         }
     }
 
-    // Clean up dependencies
+    // Clean up dependencies.
+    //
+    // THE SHARED LOOP, not a local copy. This block used to inline the forward
+    // and reverse map bookkeeping by hand; it agreed with
+    // `computed_properties::clear_prop_dependencies` only because nobody had
+    // changed either one yet. The object-dependency census now asks the
+    // question per delete COMMAND rather than per object kind, and that is what
+    // exposed it: the `computedProperty` row names `clear_prop_dependencies`,
+    // `remove_computed_property` called it, and this path did not.
     {
         let mut deps = slicer_state.computed_prop_dependencies.lock().unwrap();
         let mut rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
-        if let Some(old_cells) = deps.remove(&prop_id) {
-            for cell in &old_cells {
-                if let Some(prop_set) = rev_deps.get_mut(cell) {
-                    prop_set.remove(&prop_id);
-                    if prop_set.is_empty() {
-                        rev_deps.remove(cell);
-                    }
-                }
-            }
-        }
+        crate::computed_properties::clear_prop_dependencies(prop_id, &mut deps, &mut rev_deps);
     }
 
     log_debug!(

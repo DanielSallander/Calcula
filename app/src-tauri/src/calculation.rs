@@ -3,7 +3,7 @@
 
 use serde::{Serialize, Deserialize};
 use tauri::State;
-use crate::{AppState, evaluate_formula_with_pivot, format_cell_value};
+use crate::{AppState, format_cell_value};
 use crate::api_types::CellData;
 use crate::eval_budget::{self, EvalSurface, PendingCell, PendingRecalc, ProgressEmitter};
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_warn, log_info};
@@ -150,38 +150,25 @@ fn evaluate_single_formula(
     user_files: &std::collections::HashMap<String, Vec<u8>>,
     pivot_data_fn: &dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>,
     gather_fn: &dyn Fn(&str) -> engine::GatherRegionData,
-    tables_map: &crate::tables::TableStorage,
-    table_names_map: &crate::tables::TableNameRegistry,
-    named_ranges_map: &std::collections::HashMap<String, crate::named_ranges::NamedRange>,
+    name_tables: crate::name_resolution::NameTables<'_>,
     row_heights: &std::collections::HashMap<u32, f64>,
     column_widths: &std::collections::HashMap<u32, f64>,
     cube: Option<&std::sync::Arc<engine::CubePrefetch>>,
     control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
-) -> engine::CellValue {
+) -> engine::EvalResult {
     match parser::parse(formula) {
         Ok(parsed) => {
-            // Resolve named references
-            let resolved = if crate::ast_has_named_refs(&parsed) {
-                let mut visited = std::collections::HashSet::new();
-                crate::resolve_names_in_ast(&parsed, named_ranges_map, active_sheet, &mut visited)
-            } else {
-                parsed
-            };
-
-            // Resolve structured table references
-            let resolved = if crate::ast_has_table_refs(&resolved) {
-                let ctx = crate::TableRefContext {
-                    tables: tables_map,
-                    table_names: table_names_map,
-                    current_sheet_index: active_sheet,
-                    current_row: row,
-                };
-                crate::resolve_table_refs_in_ast(&resolved, &ctx)
-            } else {
-                resolved
-            };
-
-            let engine_ast = crate::convert_expr(&resolved);
+            // EVERY indirection a stored formula keeps, expanded through the ONE
+            // resolver: defined names (D2), structured references (§2aj) and
+            // spill references (§3bf). This function used to hand-roll the
+            // first two and know nothing of the third, so `=SUM(A1#)` reached
+            // the evaluator with an unresolved `SpillRef` and answered `#NAME?`
+            // the first time F9 was pressed — the recalculation pass having its
+            // own private copy of a resolution rule is exactly the shape §3bm
+            // was.
+            let engine_ast =
+                crate::name_resolution::eval_ast(&parsed, &name_tables.at(active_sheet, row, col))
+                    .into_owned();
             let eval_ctx = engine::EvalContext {
                 cube_prefetch: cube.cloned(),
                 current_row: Some(row),
@@ -191,7 +178,14 @@ fn evaluate_single_formula(
                 hidden_rows: None,
                 control_values: control_values.cloned(),
             };
-            evaluate_formula_with_pivot(
+            // RAW, not collapsed. `evaluate_formula_with_pivot` ends in
+            // `EvalResult::to_cell_value()`, which reduces an array to its
+            // first element — and that collapse, applied on the recalculation
+            // path, is exactly §3bm: a blocked array's `#SPILL!` became a
+            // plausible number on every save, and a shrunk array kept its stale
+            // tail. The caller hands this to `apply_spill_decision`, which is
+            // the one place allowed to decide what an array does to the grid.
+            crate::evaluate_formula_raw_with_files_and_pivot(
                 grids,
                 sheet_names,
                 active_sheet,
@@ -201,9 +195,10 @@ fn evaluate_single_formula(
                 user_files,
                 Some(pivot_data_fn),
                 Some(gather_fn),
+                None,
             )
         }
-        Err(_) => engine::CellValue::Error(engine::CellError::Value),
+        Err(_) => engine::EvalResult::Error(engine::CellError::Value),
     }
 }
 
@@ -424,16 +419,18 @@ pub(crate) fn begin_circular_pass() -> CircularPassGuard {
 fn cross_sheet_circular_cells(
     grids: &[engine::Grid],
     sheet_names: &[String],
+    name_tables: crate::name_resolution::NameTables<'_>,
 ) -> std::rc::Rc<std::collections::HashSet<(usize, u32, u32)>> {
     let cached = CIRCULAR_PASS.with(|c| c.borrow().clone());
     match cached {
         Some(Some(set)) => set,
         Some(None) => {
-            let set = std::rc::Rc::new(workbook_circular_cells(grids, sheet_names));
+            let set =
+                std::rc::Rc::new(workbook_circular_cells(grids, sheet_names, name_tables));
             CIRCULAR_PASS.with(|c| *c.borrow_mut() = Some(Some(set.clone())));
             set
         }
-        None => std::rc::Rc::new(workbook_circular_cells(grids, sheet_names)),
+        None => std::rc::Rc::new(workbook_circular_cells(grids, sheet_names, name_tables)),
     }
 }
 
@@ -456,9 +453,16 @@ fn cross_sheet_circular_cells(
 /// `run_calculation_pass` (Shift+F9). A WORKBOOK pass does not call it — its
 /// own plan is the same graph, so the residue of its Kahn IS this set, and
 /// computing it twice would be the second traversal this file works to avoid.
+///
+/// `name_tables` is not decoration: a STORED formula keeps its defined names
+/// (D2) and its structured references (§2aj), and neither carries the cell
+/// coordinates this walk needs. Extracting straight from `cell.ast` would make
+/// `=SUM(Sales[Amount])` look like a formula that reads nothing, so a cycle
+/// running through a name or a table would be invisible.
 pub(crate) fn workbook_circular_cells(
     grids: &[engine::Grid],
     sheet_names: &[String],
+    name_tables: crate::name_resolution::NameTables<'_>,
 ) -> std::collections::HashSet<(usize, u32, u32)> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -493,7 +497,7 @@ pub(crate) fn workbook_circular_cells(
             let node: Node = (sheet_idx, row, col);
             formula_cells.push(node);
 
-            let refs = crate::extract_all_references(ast, grid);
+            let refs = crate::stored_ast_references(ast, grid, name_tables, sheet_idx, row, col);
             for &(r, c) in &refs.cells {
                 same_sheet_edges.push(((sheet_idx, r, c), node));
             }
@@ -813,7 +817,16 @@ impl CalcPlan {
 /// same circular grouping. The soak and regression oracles compare recalc
 /// results across runs; an order that depends on hash iteration makes an
 /// independent-cell tie look like a change.
-fn build_workbook_plan(grids: &[engine::Grid], sheet_names: &[String]) -> CalcPlan {
+///
+/// `name_tables` for the reason `workbook_circular_cells` gives: the stored AST
+/// keeps its defined names (D2) and its structured references (§2aj), and
+/// ordering a workbook from edges that cannot see through either would let F9's
+/// answer depend on hash-iteration order.
+fn build_workbook_plan(
+    grids: &[engine::Grid],
+    sheet_names: &[String],
+    name_tables: crate::name_resolution::NameTables<'_>,
+) -> CalcPlan {
     use std::cmp::Reverse;
     use std::collections::{BinaryHeap, HashMap, VecDeque};
 
@@ -838,7 +851,7 @@ fn build_workbook_plan(grids: &[engine::Grid], sheet_names: &[String]) -> CalcPl
             let Some(ast) = &cell.ast else {
                 continue;
             };
-            let refs = crate::extract_all_references(ast, grid);
+            let refs = crate::stored_ast_references(ast, grid, name_tables, sheet_idx, row, col);
             for &(r, c) in &refs.cells {
                 raw_edges.push(((sheet_idx, r, c), node));
             }
@@ -1139,7 +1152,17 @@ pub(crate) fn run_calculation_pass(
         // No cross-sheet MERGE step and no off-sheet MARK step are needed here:
         // a cycle's members are all in the plan, so they take the ordinary
         // circular-group branch on whichever sheet they live on.
-        CalcScope::Workbook => build_workbook_plan(&grids, &sheet_names),
+        CalcScope::Workbook => build_workbook_plan(
+            &grids,
+            &sheet_names,
+            crate::name_resolution::NameTables {
+                named_ranges: &named_ranges_map,
+                tables: &tables_map,
+                table_names: &table_names_map,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
+            },
+        ),
         // Shift+F9. The active sheet alone, ordered by the AppState dependency
         // map (which describes exactly that sheet), with the workbook-level
         // cycle answer merged in — a cycle is a workbook-level fact even when
@@ -1158,7 +1181,17 @@ pub(crate) fn run_calculation_pass(
             // §2c follow-on: `state.dependencies` has no sheet dimension, so a
             // sheet-scoped pass cannot see a cycle that crosses a boundary
             // either. Merge the workbook-level answer in.
-            let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names);
+            let cross_circular = cross_sheet_circular_cells(
+                &grids,
+                &sheet_names,
+                crate::name_resolution::NameTables {
+                    named_ranges: &named_ranges_map,
+                    tables: &tables_map,
+                    table_names: &table_names_map,
+                    sheet_names: &sheet_names,
+                    spill_ranges: &state.spill_ranges,
+                },
+            );
             merge_cross_sheet_circular(
                 active_sheet,
                 &cross_circular,
@@ -1176,6 +1209,21 @@ pub(crate) fn run_calculation_pass(
                 iteration_enabled,
             );
             for (sheet, row, col) in marked {
+                // A member of a cross-sheet cycle produces no array, so the
+                // range it used to own is released here too — the same
+                // obligation the active sheet's own circular branch discharges,
+                // reached from the caller because `mark_off_sheet_circular_cells`
+                // holds neither the mirror nor the state.
+                crate::commands::data::release_origin_spill(
+                    state,
+                    &mut grid,
+                    &mut grids,
+                    active_sheet,
+                    sheet,
+                    row,
+                    col,
+                    &mut updated_cells,
+                );
                 let effective_style_index = grids[sheet].effective_style_index(row, col);
                 let style = styles.get(effective_style_index);
                 let formula = grids[sheet]
@@ -1319,7 +1367,13 @@ pub(crate) fn run_calculation_pass(
             *row, *col, formula,
             &grids, &sheet_names, sheet,
             &styles, &user_files, &pivot_data_fn, &gather_fn,
-            &tables_map, &table_names_map, &named_ranges_map,
+            crate::name_resolution::NameTables {
+                named_ranges: &named_ranges_map,
+                tables: &tables_map,
+                table_names: &table_names_map,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
+            },
             rh, cw,
             cube_arc.as_ref(),
             Some(&control_values),
@@ -1338,9 +1392,31 @@ pub(crate) fn run_calculation_pass(
             break;
         }
 
-        if let Some(cell) = grids[sheet].get_cell(*row, *col) {
-            let mut updated = cell.clone();
-            updated.value = result;
+        let existing = grids[sheet].get_cell(*row, *col).cloned();
+        if let Some(cell) = existing {
+            // §3bm. THE ONE SPILL DECISION — the same one an edit makes, on the
+            // sheet this planned cell actually lives on. Without it the pass
+            // wrote `to_cell_value()`, which collapses an array to its first
+            // element: a blocked array lost its `#SPILL!` to a plausible number
+            // (on EVERY save, because `calculate_before_save` defaults to true)
+            // and a resized array kept the old rectangle in `spill_ranges` while
+            // the grid showed the old tail. It also releases what the origin no
+            // longer owns, which is what makes a SHRINKING array right here.
+            let value = crate::commands::data::apply_spill_decision(
+                state,
+                &mut grid,
+                &mut grids,
+                active_sheet,
+                sheet,
+                *row,
+                *col,
+                &result,
+                &styles,
+                &locale,
+                &mut updated_cells,
+            );
+            let mut updated = cell;
+            updated.value = value;
             grids[sheet].set_cell(*row, *col, updated.clone());
             if sheet == active_sheet {
                 grid.set_cell(*row, *col, updated.clone());
@@ -1393,8 +1469,24 @@ pub(crate) fn run_calculation_pass(
                 if sheet >= grids.len() {
                     continue;
                 }
-                if let Some(cell) = grids[sheet].get_cell(*row, *col) {
-                    let mut updated = cell.clone();
+                // A member of a cycle produces no array, so whatever it used to
+                // spill is released here — the same obligation
+                // `apply_spill_decision`'s scalar branch discharges, reached
+                // directly because this branch writes a value it did not
+                // evaluate.
+                crate::commands::data::release_origin_spill(
+                    state,
+                    &mut grid,
+                    &mut grids,
+                    active_sheet,
+                    sheet,
+                    *row,
+                    *col,
+                    &mut updated_cells,
+                );
+                let existing = grids[sheet].get_cell(*row, *col).cloned();
+                if let Some(cell) = existing {
+                    let mut updated = cell;
                     updated.value = engine::CellValue::Error(engine::CellError::Circular);
                     grids[sheet].set_cell(*row, *col, updated.clone());
                     if sheet == active_sheet {
@@ -1466,16 +1558,32 @@ pub(crate) fn run_calculation_pass(
                         *row, *col, formula,
                         &grids, &sheet_names, sheet,
                         &styles, &user_files, &pivot_data_fn, &gather_fn,
-                        &tables_map, &table_names_map, &named_ranges_map,
+                        crate::name_resolution::NameTables {
+                            named_ranges: &named_ranges_map,
+                            tables: &tables_map,
+                            table_names: &table_names_map,
+                            sheet_names: &sheet_names,
+                            spill_ranges: &state.spill_ranges,
+                        },
                         rh, cw,
                         cube_arc.as_ref(),
                         Some(&control_values),
                     );
 
+                    // ITERATION COLLAPSES AN ARRAY, deliberately and as it
+                    // always has: convergence is measured on ONE number per
+                    // member (`max_change`), and a cell inside a cycle that
+                    // also spilled would have to re-lay its rectangle on every
+                    // iteration. Excel refuses a dynamic array in an iterative
+                    // cycle outright; collapsing to the first element is the
+                    // behaviour this build has, and it is not what §3bm is
+                    // about — the acyclic branch above is.
+                    let new_result = new_result.to_cell_value();
                     let new_numeric = cell_value_as_f64(&new_result);
 
-                    if let Some(cell) = grids[sheet].get_cell(*row, *col) {
-                        let mut updated = cell.clone();
+                    let existing = grids[sheet].get_cell(*row, *col).cloned();
+                    if let Some(cell) = existing {
+                        let mut updated = cell;
                         updated.value = new_result;
                         grids[sheet].set_cell(*row, *col, updated.clone());
                         if sheet == active_sheet {
@@ -1711,6 +1819,13 @@ pub(crate) fn recalculate_sheet_values(
     }
     let styles = state.style_registry.read().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
+    // Needed only to FORMAT the cells a spill writes or releases. This function
+    // returns nothing — its callers re-fetch the viewport afterwards — so the
+    // `CellData` records go into a sink that is dropped. They are still built,
+    // because `apply_spill_decision` is ONE function and giving it a second,
+    // record-free mode would be a second spill decision by another name.
+    let locale = state.locale.lock().unwrap();
+    let mut spill_repaints: Vec<CellData> = Vec::new();
 
     let iteration_enabled = *state.iteration_enabled.lock().unwrap();
     let max_iterations = *state.max_iterations.lock().unwrap();
@@ -1759,10 +1874,24 @@ pub(crate) fn recalculate_sheet_values(
 
     // Local same-sheet dependency map for evaluation ordering.
     let mut local_deps = crate::DependencyMap::default();
+    let plan_name_tables = crate::name_resolution::NameTables {
+        named_ranges: &named_ranges_map,
+        tables: &tables_map,
+        table_names: &table_names_map,
+        sheet_names: &sheet_names,
+        spill_ranges: &state.spill_ranges,
+    };
     for (row, col, _f) in &formula_cells {
         if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
             if let Some(ast) = &cell.ast {
-                let refs = crate::extract_all_references(ast, &grids[sheet_index]);
+                let refs = crate::stored_ast_references(
+                    ast,
+                    &grids[sheet_index],
+                    plan_name_tables,
+                    sheet_index,
+                    *row,
+                    *col,
+                );
                 if !refs.cells.is_empty() {
                     local_deps.insert((*row, *col), refs.cells);
                 }
@@ -1775,7 +1904,7 @@ pub(crate) fn recalculate_sheet_values(
     // §2c follow-on: `local_deps` describes THIS sheet only, so a cycle that
     // crosses a boundary is invisible to the partition above and used to
     // produce an order-dependent number. Merge the workbook-level answer in.
-    let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names);
+    let cross_circular = cross_sheet_circular_cells(&grids, &sheet_names, plan_name_tables);
     merge_cross_sheet_circular(
         sheet_index,
         &cross_circular,
@@ -1798,7 +1927,7 @@ pub(crate) fn recalculate_sheet_values(
             *row, *col, formula,
             &grids, &sheet_names, sheet_index,
             &styles, &user_files, &pivot_data_fn, &gather_fn,
-            &tables_map, &table_names_map, &named_ranges_map,
+            plan_name_tables,
             &row_heights, &column_widths,
             None,
             control_values.as_ref(),
@@ -1812,9 +1941,24 @@ pub(crate) fn recalculate_sheet_values(
             );
             break;
         }
-        if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
-            let mut updated = cell.clone();
-            updated.value = result;
+        let existing = grids[sheet_index].get_cell(*row, *col).cloned();
+        if let Some(cell) = existing {
+            // §3bm, background half. Same decision, same function, same rules.
+            let value = crate::commands::data::apply_spill_decision(
+                state,
+                &mut grid_mirror,
+                &mut grids,
+                active_sheet,
+                sheet_index,
+                *row,
+                *col,
+                &result,
+                &styles,
+                &locale,
+                &mut spill_repaints,
+            );
+            let mut updated = cell;
+            updated.value = value;
             grids[sheet_index].set_cell(*row, *col, updated.clone());
             if sheet_index == active_sheet {
                 grid_mirror.set_cell(*row, *col, updated);
@@ -1835,8 +1979,19 @@ pub(crate) fn recalculate_sheet_values(
         }
         if !iteration_enabled {
             for (row, col, _formula) in group {
-                if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
-                    let mut updated = cell.clone();
+                crate::commands::data::release_origin_spill(
+                    state,
+                    &mut grid_mirror,
+                    &mut grids,
+                    active_sheet,
+                    sheet_index,
+                    *row,
+                    *col,
+                    &mut spill_repaints,
+                );
+                let existing = grids[sheet_index].get_cell(*row, *col).cloned();
+                if let Some(cell) = existing {
+                    let mut updated = cell;
                     updated.value = engine::CellValue::Error(engine::CellError::Circular);
                     grids[sheet_index].set_cell(*row, *col, updated.clone());
                     if sheet_index == active_sheet {
@@ -1859,14 +2014,18 @@ pub(crate) fn recalculate_sheet_values(
                         *row, *col, formula,
                         &grids, &sheet_names, sheet_index,
                         &styles, &user_files, &pivot_data_fn, &gather_fn,
-                        &tables_map, &table_names_map, &named_ranges_map,
+                        plan_name_tables,
                         &row_heights, &column_widths,
                         None,
                         control_values.as_ref(),
                     );
+                    // Collapsed for the same reason the manual pass collapses an
+                    // iterated member: convergence is one number per member.
+                    let new_result = new_result.to_cell_value();
                     let new_numeric = cell_value_as_f64(&new_result);
-                    if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
-                        let mut updated = cell.clone();
+                    let existing = grids[sheet_index].get_cell(*row, *col).cloned();
+                    if let Some(cell) = existing {
+                        let mut updated = cell;
                         updated.value = new_result;
                         grids[sheet_index].set_cell(*row, *col, updated.clone());
                         if sheet_index == active_sheet {
@@ -2327,6 +2486,7 @@ pub(crate) fn recalc_visibility_dependents_core(
             let no_controls =
                 std::sync::Arc::new(crate::control_values::ControlValuesMap::new());
             crate::commands::data::cascade_cross_sheet_dependents(
+                state,
                 &mut grid,
                 &mut grids,
                 &sheet_names,
@@ -2341,6 +2501,8 @@ pub(crate) fn recalc_visibility_dependents_core(
                     named_ranges: &cascade_named_ranges,
                     tables: &cascade_tables,
                     table_names: &cascade_table_names,
+                    sheet_names: &sheet_names,
+                    spill_ranges: &state.spill_ranges,
                 },
                 &initial_changed,
                 &affected,

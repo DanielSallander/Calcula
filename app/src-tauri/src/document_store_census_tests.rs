@@ -1925,3 +1925,163 @@ fn the_function_walk_reads_free_functions_and_not_impl_methods() {
          a state type would classify as holding it"
     );
 }
+
+// ============================================================================
+// THE XLSX LOSS-REPORT CENSUS
+// ============================================================================
+//
+// `xlsx_save_loss_report` tells the user what a .xlsx save will destroy. It was
+// a hand-maintained list of 24 checks with NOTHING tying it to the thing it
+// describes, and it had drifted exactly the way every unpinned list does: eight
+// stores were dropped in silence, including `Workbook::controls` -- the
+// cell-anchored control store, where every embedded IMAGE lives. (The report
+// did have a "Pane controls" line, but that reads `PaneControlState.controls`,
+// a different store entirely, so a workbook full of pictures reported no loss.)
+//
+// This is the producer the list never had: the field names come out of
+// `persistence::Workbook` at TEST TIME, so a new field cannot be added without
+// deciding whether an .xlsx save loses it.
+
+#[cfg(test)]
+mod xlsx_loss_census {
+    /// The `pub` field names of `persistence::Workbook`, read from source.
+    fn workbook_fields() -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../core/persistence/src/lib.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
+
+        let anchor = "pub struct Workbook {";
+        let start = src
+            .find(anchor)
+            .unwrap_or_else(|| panic!("`{}` not found -- the struct was renamed", anchor))
+            + anchor.len();
+
+        let mut depth = 1usize;
+        let mut end = start;
+        for (i, ch) in src[start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > start, "unbalanced braces in Workbook");
+
+        let mut fields = Vec::new();
+        for line in src[start..end].lines() {
+            let line = line.trim();
+            // Skip attributes, comments and doc comments.
+            if line.starts_with('#') || line.starts_with("//") {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("pub ") else { continue };
+            let Some((name, _)) = rest.split_once(':') else { continue };
+            let name = name.trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()) {
+                fields.push(name.to_string());
+            }
+        }
+        assert!(
+            fields.len() > 20,
+            "parsed only {} fields out of Workbook -- the struct shape changed",
+            fields.len()
+        );
+        fields
+    }
+
+    #[test]
+    fn the_loss_report_covers_every_workbook_field() {
+        let covered: std::collections::HashMap<&str, &str> =
+            crate::persistence::XLSX_LOSS_COVERAGE.iter().copied().collect();
+
+        let mut missing = Vec::new();
+        for field in workbook_fields() {
+            if !covered.contains_key(field.as_str()) {
+                missing.push(field);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these `persistence::Workbook` fields have no entry in \
+             XLSX_LOSS_COVERAGE, so nobody has decided whether saving as .xlsx \
+             destroys them:\n  {}\n\nAdd each one as WRITTEN (the writer emits \
+             it), REPORTED (dropped, and `xlsx_save_loss_report` says so), or \
+             SILENT (dropped, WITH the reason it needs no line).",
+            missing.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_coverage_table_names_no_field_that_no_longer_exists() {
+        let fields: std::collections::HashSet<String> = workbook_fields().into_iter().collect();
+        let stale: Vec<&str> = crate::persistence::XLSX_LOSS_COVERAGE
+            .iter()
+            .map(|(f, _)| *f)
+            .filter(|f| !fields.contains(*f))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "XLSX_LOSS_COVERAGE names fields that are not on \
+             `persistence::Workbook` any more: {:?}. A stale entry is how a \
+             REAL field ends up looking covered.",
+            stale
+        );
+    }
+
+    #[test]
+    fn every_coverage_entry_states_a_verdict() {
+        for (field, reason) in crate::persistence::XLSX_LOSS_COVERAGE {
+            assert!(
+                reason.starts_with("WRITTEN")
+                    || reason.starts_with("REPORTED")
+                    || reason.starts_with("SILENT"),
+                "coverage entry for `{}` must start with WRITTEN, REPORTED or \
+                 SILENT so the verdict is readable at a glance; got {:?}",
+                field,
+                reason
+            );
+            // A SILENT verdict is the only one that can hide data loss, so it
+            // has to argue for itself rather than just assert.
+            if reason.starts_with("SILENT") {
+                assert!(
+                    reason.len() > 40,
+                    "the SILENT verdict for `{}` needs a written reason, not a \
+                     label: {:?}",
+                    field,
+                    reason
+                );
+            }
+        }
+    }
+
+    /// The census must be able to SEE an uncovered field.
+    #[test]
+    fn the_loss_census_detector_actually_fires() {
+        let covered: std::collections::HashSet<&str> = crate::persistence::XLSX_LOSS_COVERAGE
+            .iter()
+            .map(|(f, _)| *f)
+            .collect();
+        assert!(
+            !covered.contains("a_field_nobody_declared"),
+            "sanity: the coverage set must not contain an invented name"
+        );
+        // And the real parse must find the field that started all this.
+        let fields = workbook_fields();
+        assert!(
+            fields.iter().any(|f| f == "controls"),
+            "the field parser no longer sees `controls` -- the store whose \
+             omission destroyed every embedded image without a warning"
+        );
+        assert!(
+            fields.iter().any(|f| f == "media"),
+            "the field parser no longer sees `media`"
+        );
+    }
+}

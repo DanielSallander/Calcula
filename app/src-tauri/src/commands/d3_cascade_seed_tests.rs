@@ -585,7 +585,11 @@ fn every_table_cell_write_seeds_the_shared_cascade() {
     ] {
         let body = body_of(TABLES_RS, name);
         assert!(
-            body.contains("recalc_after_active_sheet_bulk_rewrite("),
+            body.contains("recalc_after_active_sheet_bulk_rewrite(")
+                // §2aj: `recalc_after_table_change` seeds exactly that helper,
+                // plus the table's own readers and the cell-edge rebuild a
+                // resize needs. Satisfying D3 through it is satisfying D3.
+                || body.contains("recalc_after_table_change("),
             "`{}` rewrites table cells without seeding the shared cascade — \
              every formula reading them keeps a stale value until an unrelated \
              later edit sweeps it up",

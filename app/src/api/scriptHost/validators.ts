@@ -197,9 +197,16 @@ function checkSheetRef(v: unknown, label: string): true | string {
       : `${label} must be a non-negative 0-based sheet index or a sheet name`;
   }
   if (typeof v === "string") {
-    // Same character rules as renameSheet: 1-255 chars, none of : \ / ? * [ ]
-    const named = checkSheetName(v);
-    return named === true ? true : `${label}: ${named}`;
+    // DELIBERATELY LOOSER THAN `checkSheetName`. This names a sheet that ALREADY
+    // EXISTS, and a workbook on disk may carry a name today's rule would refuse
+    // -- one written before the rule, or one an .xlsx/.calp publisher produced.
+    // Loading accepts and carries such a name (see the Rust `sheet_names`
+    // module), so a script must be able to ADDRESS it; only CREATING or
+    // RENAMING is held to the rule.
+    if (!isBoundedString(v, MAX_ADDRESSABLE_SHEET_NAME) || v.trim().length === 0) {
+      return `${label} must be a non-empty sheet name (max ${MAX_ADDRESSABLE_SHEET_NAME} chars) or a 0-based index`;
+    }
+    return true;
   }
   return `${label} must be a 0-based sheet index (number) or a sheet name (string)`;
 }
@@ -1588,9 +1595,20 @@ export const vAddHyperlink: Validator = ([row, col, link, options, sheetIndex]) 
 // Sheet CRUD (B2)
 // ============================================================================
 
-const MAX_SHEET_NAME = 255;
+// EXCEL'S RULE, and the SAME rule the backend enforces (Rust:
+// `app/src-tauri/src/sheet_names.rs`). It was 255 characters here and unlimited
+// there; both are now 31, which is what Excel's Rename Sheet accepts. A script
+// that creates or renames a sheet gets the refusal from this validator with a
+// message instead of a raw backend error string -- the backend still checks,
+// because a validator is a convenience and never the authority.
+const MAX_SHEET_NAME = 31;
+/** How long a name a script may USE to address an existing sheet - see checkSheetRef. */
+const MAX_ADDRESSABLE_SHEET_NAME = 255;
 /** Excel's forbidden sheet-name characters (plus a leading/trailing apostrophe). */
 const ILLEGAL_SHEET_NAME_CHARS = /[:\\/?*[\]]/;
+
+/** Excel reserves this for the change-history sheet of a shared workbook. */
+const RESERVED_SHEET_NAME = "history";
 
 function checkSheetName(name: unknown): true | string {
   if (!isBoundedString(name, MAX_SHEET_NAME) || name.trim().length === 0) {
@@ -1598,6 +1616,13 @@ function checkSheetName(name: unknown): true | string {
   }
   if (ILLEGAL_SHEET_NAME_CHARS.test(name)) {
     return "sheet name may not contain : \\ / ? * [ ]";
+  }
+  const trimmed = name.trim();
+  if (trimmed.startsWith("'") || trimmed.endsWith("'")) {
+    return "sheet name may not begin or end with an apostrophe";
+  }
+  if (trimmed.toLowerCase() === RESERVED_SHEET_NAME) {
+    return '"History" is reserved and may not be used as a sheet name';
   }
   return true;
 }

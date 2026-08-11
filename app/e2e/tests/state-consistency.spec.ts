@@ -1,23 +1,49 @@
 //! FILENAME: app/e2e/tests/state-consistency.spec.ts
 // PURPOSE: Invariant-based monkey testing for state consistency bugs.
 //          Runs randomized action sequences and checks UI invariants after
-//          each action. Any failure prints the seed for deterministic replay.
+//          each action. On failure it MINIMIZES the failing trace and writes
+//          a complete failure bundle.
+//
+// THIS SPEC USED TO HAVE ITS OWN RUNNER, ITS OWN ACTION CATALOG AND ITS OWN
+// GENERATOR — a strict subset of the walker's, 27 actions against 59, with no
+// trace, no minimiser and no bundle. That is why `state-consistency` was
+// classified as monkey flake three times: a failure report that lists action
+// IDs and nothing else cannot be replayed, cannot be reduced, and cannot be
+// distinguished from noise. The orphaned slicer it was hiding had to be
+// reduced BY HAND. The v1 runner (`invariants/runner.ts`), catalog
+// (`invariants/actions.ts`), generator (`invariants/actionGenerator.ts`) and
+// reporter (`invariants/reporter.ts`) are DELETED; this spec now drives the
+// same `WalkRunner` the soak walk drives, over the same catalog, and produces
+// the same failure bundle from the same `writeFailureBundle`.
+//
+// Environment:
+//   INVARIANT_SEED            replay a specific walk (default: Date.now()). The
+//                             second test uses SEED + 1 so replaying one does
+//                             not replay both.
+//   INVARIANT_SHRINK_REPLAYS  cap on shrink replays (default 30)
+//   INVARIANT_SHRINK_BUDGET_MS  wall-clock budget for the shrink (default 15m)
+//   INVARIANT_NO_SHRINK=1     write the bundle but skip minimization
 
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
-import {
-  ALL_INVARIANTS,
-  createActionGenerator,
-  InvariantRunner,
-  formatReport,
-} from "../invariants";
+import { ALL_INVARIANTS } from "../invariants";
 import { OracleBattery } from "../oracles";
-import { resetToNewWorkbook } from "../helpers/screenshots";
+import {
+  WalkRunner,
+  createGeneratorSource,
+  createTraceSource,
+  deepResetForWalk,
+  formatWalkReport,
+  writeFailureBundle,
+} from "../walker";
+import type { ActionTrace, WalkResult } from "../walker";
 
 // ============================================================================
 // Configuration
 // ============================================================================
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /** Number of actions per random exploration run */
 const ACTIONS_PER_RUN = 75;
@@ -29,52 +55,86 @@ const SETTLE_MS = 250;
  *  every N actions */
 const ORACLE_EVERY_N_ACTIONS = 25;
 
-/** Temp dir for the save/reload oracle's .cala files */
-const ORACLE_TMP_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../results/oracle-tmp"
+/** Bundles, live traces and the oracle's temp .cala files. */
+const RESULTS_DIR = path.resolve(HERE, "../results/invariant");
+
+/**
+ * The failure report says "use this seed to replay". It could not be used: the
+ * seed was `Date.now()` with no way to inject one, so every reported seed was
+ * unreplayable and every invariant failure had to be re-found by luck.
+ */
+const BASE_SEED = Number(process.env.INVARIANT_SEED ?? Date.now());
+
+/** Shrink budget. Raise both when a failure is worth an hour of reduction. */
+const SHRINK_MAX_REPLAYS = Number(process.env.INVARIANT_SHRINK_REPLAYS ?? 30);
+const SHRINK_BUDGET_MS = Number(
+  process.env.INVARIANT_SHRINK_BUDGET_MS ?? 15 * 60 * 1000
 );
+const NO_SHRINK = process.env.INVARIANT_NO_SHRINK === "1";
 
 // ============================================================================
 // Tests
 // ============================================================================
 
 test.describe("State consistency (invariant monkey testing)", () => {
-  // Give these tests a generous timeout — they run many sequential actions
-  test.setTimeout(120_000);
+  // Generous timeout: many sequential actions, oracle checkpoints, and — on
+  // failure — an in-spec ddmin shrink before the test is allowed to fail.
+  test.setTimeout(1_500_000);
 
   test("random action sequence maintains UI invariants", async ({
     appPage,
     grid,
   }) => {
-    await resetToNewWorkbook(appPage);
+    await deepResetForWalk(appPage);
     await appPage.waitForTimeout(500);
 
-    const seed = Date.now();
-    console.log(`\n  Invariant test seed: ${seed}`);
+    const seed = BASE_SEED;
+    console.log(`\n  Invariant walk seed: ${seed}`);
 
-    const runner = new InvariantRunner(appPage, grid, {
+    const runner = new WalkRunner(appPage, grid, {
+      source: createGeneratorSource({ seed }),
       invariants: ALL_INVARIANTS,
-      actionGenerator: createActionGenerator({ seed }),
+      oracleBattery: new OracleBattery({
+        tmpDir: path.join(RESULTS_DIR, "tmp"),
+      }),
+      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
       maxActions: ACTIONS_PER_RUN,
       settleTimeMs: SETTLE_MS,
-      oracleBattery: new OracleBattery({ tmpDir: ORACLE_TMP_DIR }),
-      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
+      resultsDir: path.join(RESULTS_DIR, "live"),
     });
 
     const result = await runner.run();
-    const report = formatReport(result);
-    console.log(`\n${report}`);
+    console.log(`\n${formatWalkReport(result)}`);
 
-    if (!result.passed) {
-      // Attach the full report as a test annotation for Playwright HTML report
-      test.info().annotations.push({
-        type: "invariant-failure",
-        description: report,
-      });
+    if (result.passed) {
+      expect(result.passed).toBe(true);
+      return;
     }
 
-    expect(result.passed, report).toBe(true);
+    const bundle = await writeFailureBundle({
+      result,
+      page: appPage,
+      resultsDir: RESULTS_DIR,
+      harness: "invariant",
+      seed,
+      replayCommand:
+        `E2E_MANUAL=1 INVARIANT_SEED=${seed} npx playwright test ` +
+        `--project=invariant --grep "random action sequence"`,
+      replay: NO_SHRINK ? null : makeReplayFn(appPage, grid, RESULTS_DIR),
+      shrinkMaxReplays: SHRINK_MAX_REPLAYS,
+      shrinkTimeBudgetMs: SHRINK_BUDGET_MS,
+      extra: { maxActions: ACTIONS_PER_RUN, settleTimeMs: SETTLE_MS },
+    });
+
+    test.info().annotations.push({
+      type: "invariant-failure",
+      description: bundle.report,
+    });
+    test.info().annotations.push({
+      type: "invariant-failure-dir",
+      description: bundle.dir,
+    });
+    expect(result.passed, bundle.report).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -85,53 +145,105 @@ test.describe("State consistency (invariant monkey testing)", () => {
     appPage,
     grid,
   }) => {
-    await resetToNewWorkbook(appPage);
+    await deepResetForWalk(appPage);
     await appPage.waitForTimeout(500);
 
-    const seed = Date.now() + 1;
-    console.log(`\n  Rapid-fire test seed: ${seed}`);
+    // `+ 1` keeps the two tests on different walks when a seed is given, so
+    // replaying one does not replay the other.
+    const seed = BASE_SEED + 1;
+    console.log(`\n  Rapid-fire walk seed: ${seed}`);
 
-    const runner = new InvariantRunner(appPage, grid, {
+    const runner = new WalkRunner(appPage, grid, {
+      source: createGeneratorSource({ seed, rapidFireProbability: 0.5 }),
       invariants: ALL_INVARIANTS,
-      actionGenerator: createActionGenerator({
-        seed,
-        rapidFireProbability: 0.5, // 50% chance of rapid-fire pairs
+      oracleBattery: new OracleBattery({
+        tmpDir: path.join(RESULTS_DIR, "tmp"),
       }),
+      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
       maxActions: 50,
       settleTimeMs: SETTLE_MS,
-      oracleBattery: new OracleBattery({ tmpDir: ORACLE_TMP_DIR }),
-      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
+      resultsDir: path.join(RESULTS_DIR, "live-rapid"),
     });
 
     const result = await runner.run();
-    const report = formatReport(result);
-    console.log(`\n${report}`);
+    console.log(`\n${formatWalkReport(result)}`);
 
-    expect(result.passed, report).toBe(true);
+    if (result.passed) {
+      expect(result.passed).toBe(true);
+      return;
+    }
+
+    const bundle = await writeFailureBundle({
+      result,
+      page: appPage,
+      resultsDir: RESULTS_DIR,
+      harness: "invariant-rapid-fire",
+      seed,
+      // The spec derives this walk's seed as INVARIANT_SEED + 1, so the command
+      // that replays it passes the BASE seed, not this one. Printing the seed
+      // that actually drove the generator and a command that would produce a
+      // different walk is how a bundle lies to the next reader.
+      replayCommand:
+        `E2E_MANUAL=1 INVARIANT_SEED=${seed - 1} npx playwright test ` +
+        `--project=invariant --grep "rapid create-delete"`,
+      replay: NO_SHRINK ? null : makeReplayFn(appPage, grid, RESULTS_DIR),
+      shrinkMaxReplays: SHRINK_MAX_REPLAYS,
+      shrinkTimeBudgetMs: SHRINK_BUDGET_MS,
+      extra: {
+        maxActions: 50,
+        settleTimeMs: SETTLE_MS,
+        rapidFireProbability: 0.5,
+        derivedSeed: `INVARIANT_SEED + 1 = ${seed}`,
+      },
+    });
+
+    test.info().annotations.push({
+      type: "invariant-failure",
+      description: bundle.report,
+    });
+    test.info().annotations.push({
+      type: "invariant-failure-dir",
+      description: bundle.dir,
+    });
+    expect(result.passed, bundle.report).toBe(true);
   });
-
-  // -------------------------------------------------------------------------
-  // Regression replay template — uncomment and set a failing seed to debug
-  // -------------------------------------------------------------------------
-
-  // test("replay regression seed XXXXXXXXX", async ({ appPage, grid }) => {
-  //   await resetToNewWorkbook(appPage);
-  //   await appPage.waitForTimeout(500);
-  //
-  //   const seed = XXXXXXXXX; // <-- paste failing seed here
-  //   console.log(`\n  Replay seed: ${seed}`);
-  //
-  //   const runner = new InvariantRunner(appPage, grid, {
-  //     invariants: ALL_INVARIANTS,
-  //     actionGenerator: createActionGenerator({ seed }),
-  //     maxActions: ACTIONS_PER_RUN,
-  //     settleTimeMs: SETTLE_MS,
-  //   });
-  //
-  //   const result = await runner.run();
-  //   const report = formatReport(result);
-  //   console.log(`\n${report}`);
-  //
-  //   expect(result.passed, report).toBe(true);
-  // });
 });
+
+// ============================================================================
+// Replay function for the shrinker
+// ============================================================================
+
+/**
+ * Replays a candidate trace from a deep-reset workbook and reports what
+ * happened. Identical in shape to the soak walk's: one runner, one catalog,
+ * one reset, one definition of "did this trace fail".
+ */
+function makeReplayFn(
+  appPage: Parameters<typeof deepResetForWalk>[0],
+  grid: ConstructorParameters<typeof WalkRunner>[1],
+  resultsDir: string
+) {
+  return async (trace: ActionTrace) => {
+    await deepResetForWalk(appPage);
+    await appPage.waitForTimeout(300);
+
+    const runner = new WalkRunner(appPage, grid, {
+      source: createTraceSource(trace),
+      invariants: ALL_INVARIANTS,
+      oracleBattery: new OracleBattery({
+        tmpDir: path.join(resultsDir, "tmp"),
+        saveReloadEvery: 1,
+      }),
+      oracleEveryNActions: 1_000_000, // single oracle checkpoint at trace end
+      maxActions: trace.actions.length,
+      settleTimeMs: 150,
+      verbose: false,
+    });
+
+    const result: WalkResult = await runner.run();
+    return {
+      failed: !result.passed,
+      violationId: result.violation?.invariantId,
+    };
+  };
+}

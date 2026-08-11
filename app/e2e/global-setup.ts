@@ -126,17 +126,43 @@ export default async function globalSetup() {
     env: {
       ...cleanEnv,
       ...rustEnv,
-      // Tell WebView2 to open a CDP port.
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
+      // Tell WebView2 to open a CDP port -- and to rasterize into a FIXED
+      // colour profile.
+      //
+      // `--force-color-profile=sRGB` is load-bearing for every screenshot
+      // golden in the tree. Without it a capture goes through the display's
+      // colour profile, so a golden encodes the MONITOR as well as the page.
+      // Measured 2026-08-11: the status bar is a hard-coded `#217346` in
+      // `StatusBar.tsx`; every committed golden holds `rgb(63,112,75)`; a
+      // capture taken the same day holds `rgb(33,115,70)`, which is `#217346`
+      // exactly. When that transform changed, 34 functional and all 18 visual
+      // tests failed at once with a uniform per-channel delta, hours after the
+      // same suites had been green on the same machine.
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT} --force-color-profile=sRGB`,
     },
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
 
-  // Stream output so the user can see build progress.
-  child.stdout?.on("data", (d: Buffer) => process.stdout.write(`[tauri] ${d}`));
-  child.stderr?.on("data", (d: Buffer) => process.stderr.write(`[tauri] ${d}`));
+  // Stream output so the user can see build progress — AND tee it to a file.
+  //
+  // Nothing was recording the app's own output, so every walker failure bundle
+  // this harness has ever written contained the browser console and nothing
+  // else: a failure whose cause was on the Rust side left no trace at all. The
+  // manual launcher (scratchpad/launch-vba-batch.ps1) writes the same file, and
+  // walker/failureBundle.ts copies its tail into the bundle.
+  const appLogPath = path.join(__dirname, "results", "app-dev.log");
+  fs.mkdirSync(path.dirname(appLogPath), { recursive: true });
+  const appLog = fs.createWriteStream(appLogPath, { flags: "w" });
+  child.stdout?.on("data", (d: Buffer) => {
+    process.stdout.write(`[tauri] ${d}`);
+    appLog.write(d);
+  });
+  child.stderr?.on("data", (d: Buffer) => {
+    process.stderr.write(`[tauri] ${d}`);
+    appLog.write(d);
+  });
 
   child.on("error", (err) => {
     console.error("[e2e] Failed to start Tauri:", err.message);

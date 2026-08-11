@@ -1832,6 +1832,66 @@ mod tests {
     }
 
     #[test]
+    fn a_published_dynamic_array_declares_a_minimum_app_version() {
+        // A DYNAMIC-ARRAY SPILL EXTENT fails `carries_wave_content`'s test in
+        // its sharpest form. An older app pulls the package "successfully",
+        // writes the spilled cells as ordinary literals, and drops the record
+        // of which origin owns them -- so the subscriber gets an array that
+        // looks right, is protected by nothing, and collapses to an error the
+        // first time anything re-evaluates its origin (register 2ab). Refusing
+        // the pull is the honest failure.
+        let plain_wb = make_test_workbook();
+        let mut req = PublishRequest {
+            model_writebacks: None,
+            workbook: &plain_wb,
+            package_name: "spill-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-08-10T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        assert!(
+            !publish::carries_wave_content(&req),
+            "precondition: this workbook carries no wave content yet"
+        );
+
+        let mut array_wb = make_test_workbook();
+        array_wb.sheets[0].cells.insert(
+            (0, 0),
+            persistence::SavedCell {
+                value: persistence::SavedCellValue::Number(1.0),
+                formula: Some("SEQUENCE(4)".to_string()),
+                style_index: 0,
+                rich_text: None,
+                spill: Some((3, 0)),
+            },
+        );
+        req.workbook = &array_wb;
+        assert!(
+            publish::carries_wave_content(&req),
+            "a spill extent on a published sheet must declare a minimum"
+        );
+
+        // ...and only when the sheet carrying it is actually PUBLISHED, which
+        // is what keeps a cell-only package pullable by older apps.
+        req.sheet_indices = vec![1];
+        assert!(
+            !publish::carries_wave_content(&req),
+            "an array on a sheet this package does not publish must not stamp"
+        );
+    }
+
+    #[test]
     fn pull_carries_ribbon_filters_with_data_source_id() {
         // Wave A: ribbon filters are workbook-scoped and BI-only; the stable
         // package data-source id must survive so the subscriber's pull can

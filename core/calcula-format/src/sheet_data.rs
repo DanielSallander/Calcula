@@ -48,6 +48,18 @@ pub struct CellEntry {
     /// Rich text runs for partial formatting within the cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rt: Option<Vec<RichTextRun>>,
+
+    /// SPILL EXTENT of a dynamic-array ORIGIN, as an A1 range INCLUDING this
+    /// cell ("A1:A4"). Absent on every other cell.
+    ///
+    /// This is Excel's `ref` attribute on `<f t="array" ref="A1:A4">`, in the
+    /// same shape and meaning: the rectangle the origin's array occupies. The
+    /// spilled cells themselves are written as ordinary value-only entries
+    /// (no `f`), exactly as xlsx writes them, so the pair `f` + `sp` on the
+    /// origin is the whole record of the array. See `SavedCell::spill` for why
+    /// the extent must be stored even though the values already are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sp: Option<String>,
 }
 
 fn is_null_value(v: &serde_json::Value) -> bool {
@@ -69,7 +81,7 @@ pub fn cells_to_sheet_data(cells: &HashMap<(u32, u32), SavedCell>) -> SheetData 
         }
 
         let key = cell_ref::to_a1(*row, *col);
-        let entry = saved_cell_to_entry(cell);
+        let entry = saved_cell_to_entry(*row, *col, cell);
         sorted_cells.insert(key, entry);
     }
 
@@ -85,7 +97,7 @@ pub fn sheet_data_to_cells(data: &SheetData) -> HashMap<(u32, u32), SavedCell> {
 
     for (key, entry) in &data.cells {
         if let Some((row, col)) = cell_ref::from_a1(key) {
-            let cell = entry_to_saved_cell(entry);
+            let cell = entry_to_saved_cell(row, col, entry);
             cells.insert((row, col), cell);
         }
     }
@@ -93,7 +105,7 @@ pub fn sheet_data_to_cells(data: &SheetData) -> HashMap<(u32, u32), SavedCell> {
     cells
 }
 
-fn saved_cell_to_entry(cell: &SavedCell) -> CellEntry {
+fn saved_cell_to_entry(row: u32, col: u32, cell: &SavedCell) -> CellEntry {
     let (v, t, e) = saved_value_to_json(&cell.value);
 
     CellEntry {
@@ -102,6 +114,17 @@ fn saved_cell_to_entry(cell: &SavedCell) -> CellEntry {
         f: cell.formula.clone(),
         e,
         rt: cell.rich_text.clone(),
+        // Written as a full range so the entry is self-describing next to its
+        // A1 key ("A1": { ..., "sp": "A1:A4" }), which is also Excel's shape.
+        // A degenerate extent (the origin alone) is never written: it carries
+        // no information and would make every ordinary formula cell heavier.
+        sp: cell.spill.and_then(|(end_row, end_col)| {
+            if end_row == row && end_col == col {
+                None
+            } else {
+                Some(cell_ref::range_to_a1(row, col, end_row, end_col))
+            }
+        }),
     }
 }
 
@@ -148,7 +171,7 @@ fn saved_value_to_json_value(value: &SavedCellValue) -> serde_json::Value {
     }
 }
 
-fn entry_to_saved_cell(entry: &CellEntry) -> SavedCell {
+fn entry_to_saved_cell(row: u32, col: u32, entry: &CellEntry) -> SavedCell {
     let value = json_to_saved_value(&entry.v, &entry.t, &entry.e);
 
     SavedCell {
@@ -156,6 +179,17 @@ fn entry_to_saved_cell(entry: &CellEntry) -> SavedCell {
         formula: entry.f.clone(),
         style_index: 0, // Will be set from styles.json
         rich_text: entry.rt.clone(),
+        // An extent that does not parse, is reversed, or does not START at
+        // this cell is DISCARDED rather than repaired: the host would use it
+        // to claim ownership of other cells, and a wrong claim deletes them on
+        // the next re-evaluation. Dropping it degrades to the pre-v7
+        // behaviour, which the load path already has a recovery for.
+        spill: entry
+            .sp
+            .as_deref()
+            .and_then(cell_ref::range_from_a1)
+            .filter(|&(start_row, start_col, _, _)| start_row == row && start_col == col)
+            .map(|(_, _, end_row, end_col)| (end_row, end_col)),
     }
 }
 
@@ -250,6 +284,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -259,6 +294,7 @@ mod tests {
                 formula: Some("=B1*2".to_string()),
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
 
@@ -287,6 +323,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
         // Cell with only style should be kept
@@ -297,6 +334,7 @@ mod tests {
                 formula: None,
                 style_index: 5,
                 rich_text: None,
+                spill: None,
             },
         );
 
@@ -315,6 +353,7 @@ mod tests {
                 formula: None,
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -324,6 +363,7 @@ mod tests {
                 formula: None,
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -333,6 +373,7 @@ mod tests {
                 formula: None,
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -345,6 +386,7 @@ mod tests {
                 formula: None,
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
 
@@ -377,6 +419,7 @@ mod tests {
                         ..RichTextRun::plain(String::new())
                     },
                 ]),
+                spill: None,
             },
         );
 
@@ -432,6 +475,7 @@ mod tests {
                         subscript: true,
                     },
                 ]),
+                spill: None,
             },
         );
 
@@ -460,6 +504,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
 
@@ -478,6 +523,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: Some(vec![RichTextRun::plain("test".to_string())]),
+                spill: None,
             },
         );
 

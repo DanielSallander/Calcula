@@ -314,13 +314,6 @@ mod tests {
     use super::*;
     use identity::generate_uuid_v7;
 
-    fn make_id() -> (SheetId, CellId) {
-        (
-            SheetId::from_bytes(generate_uuid_v7()),
-            CellId::from_bytes(generate_uuid_v7()),
-        )
-    }
-
     fn make_sheet() -> SheetId {
         SheetId::from_bytes(generate_uuid_v7())
     }

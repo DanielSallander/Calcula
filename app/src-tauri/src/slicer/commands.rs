@@ -84,22 +84,42 @@ pub fn create_slicer(
 }
 
 /// Delete a slicer.
+///
+/// §3bn: a slicer is not only a dependent, it is also something depended ON.
+/// Ribbon filters name canvas slicers in `crossFilterSlicerTargets`, and a
+/// deleted slicer used to stay in those lists forever — every item fetch went
+/// on re-evaluating cross-filter candidacy against an id that resolved to
+/// nothing. The prune is [`crate::object_deps::cascade_deleted_slicers`], and
+/// its restores go into the same transaction as the slicer's own.
 #[tauri::command]
 pub fn delete_slicer(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("SLICER", "delete_slicer id={}", slicer_id);
 
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-    let removed = slicers
-        .remove(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let removed = {
+        let mut slicers = slicer_state.slicers.write(&effect).unwrap();
+        slicers
+            .remove(&slicer_id)
+            .ok_or_else(|| format!("Slicer {} not found", slicer_id))?
+    };
 
-    // Record undo for slicer deletion (undo = recreate the slicer)
+    // Filters that cross-filtered this slicer, pruned before the transaction
+    // opens (it takes the filter lock; the undo lock is never held across one).
+    let pruned_filters = crate::object_deps::cascade_deleted_slicers(
+        &ribbon_filter_state,
+        &effect,
+        &[slicer_id],
+    );
+
+    // Record undo for slicer deletion (undo = recreate the slicer), with the
+    // pruned filters in the SAME transaction: one Ctrl+Z brings back the slicer
+    // AND the cross-filter links that named it.
     {
         #[derive(serde::Serialize)]
         struct SlicerSnapshot {
@@ -107,30 +127,25 @@ pub fn delete_slicer(
             previous: Slicer,
         }
         let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: removed }).unwrap_or_default();
+        {
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            undo_stack.begin_transaction("Delete slicer");
+        }
+        // Recorded first, so the reverse replay restores the SLICER first and
+        // the filters that point at it second.
+        crate::object_deps::record_filter_prune_undo(
+            &state,
+            &pruned_filters,
+            "Restore filter cross-links",
+        );
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Delete slicer");
         undo_stack.record_custom_restore("slicer_delete".to_string(), data, "Delete slicer");
         undo_stack.commit_transaction();
     }
 
-    // Clean up computed properties for this slicer
-    let mut computed_props = slicer_state.computed_properties.write(&effect).unwrap();
-    if let Some(props) = computed_props.remove(&slicer_id) {
-        let mut deps = slicer_state.computed_prop_dependencies.lock().unwrap();
-        let mut rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
-        for prop in &props {
-            if let Some(old_cells) = deps.remove(&prop.id) {
-                for cell in &old_cells {
-                    if let Some(prop_set) = rev_deps.get_mut(cell) {
-                        prop_set.remove(&prop.id);
-                        if prop_set.is_empty() {
-                            rev_deps.remove(cell);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Computed properties belong to the slicer outright — one helper, shared
+    // with the cascade, so "remove a slicer" means the same thing on both paths.
+    crate::object_deps::drop_slicer_computed_properties(&slicer_state, &effect, slicer_id);
 
     // `workbook.slicers` and the pruned object script are both persisted.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);

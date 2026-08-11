@@ -103,6 +103,38 @@ function encErrorKind(error: unknown): 'needs' | 'wrong' | 'corrupt' | null {
 // ============================================================================
 
 /**
+ * Lossy-save consent, keyed on the DESTINATION PATH.
+ *
+ * Returns true when the save may proceed.
+ *
+ * This lived inline in `saveFileAs` only, so it ran when the user picked a
+ * destination and never again. Open `report.xlsx`, add a pivot table and a
+ * conditional-format rule, press Ctrl+S: `saveFile` saw a `currentPath`, went
+ * straight to the backend, and the backend routes on extension with no consent
+ * of its own — so both features were destroyed silently, by the shortcut people
+ * use most. The comment two functions down calls that "the exact trust-killer
+ * the warning exists to prevent"; it was reachable the whole time.
+ *
+ * Keying on the path rather than on which button was pressed is what makes the
+ * two call sites impossible to get out of step again.
+ */
+async function confirmLossySave(path: string): Promise<boolean> {
+  if (!path.toLowerCase().endsWith('.xlsx')) return true;
+  const lost = await tracedInvoke<string[]>('xlsx_save_loss_report', {});
+  if (lost.length === 0) return true;
+  // AWAITED. The bare `window.confirm` this replaced returned a Promise under
+  // Tauri, so `if (!ok)` was `!Promise` — always false. Cancelling the
+  // lossy-save warning saved the .xlsx anyway and silently dropped every
+  // feature just listed.
+  return confirmAsync(
+    `Saving as .xlsx will NOT include these Calcula features:\n\n` +
+      lost.map((f) => `  • ${f}`).join('\n') +
+      `\n\nSave as .xlsx anyway? (Use .cala to keep everything.)`,
+    { title: 'Save as .xlsx?', kind: 'warning' },
+  );
+}
+
+/**
  * Save As. `password` is optional; when omitted the backend falls back to the
  * session passphrase so an encrypted document stays encrypted.
  */
@@ -117,23 +149,7 @@ export async function saveFileAs(password?: string): Promise<string | null> {
       // Lossy-save consent: .xlsx cannot carry every Calcula feature. Silent
       // destruction on save is the trust-killer — list what will be lost and
       // let the user confirm (or cancel and pick .cala).
-      if (path.toLowerCase().endsWith('.xlsx')) {
-        const lost = await tracedInvoke<string[]>('xlsx_save_loss_report', {});
-        if (lost.length > 0) {
-          // AWAITED. The bare `window.confirm` this replaced returned a
-          // Promise under Tauri, so `if (!ok)` was `!Promise` — always false.
-          // Cancelling the lossy-save warning saved the .xlsx anyway and
-          // silently dropped every feature just listed, which is the exact
-          // trust-killer the warning exists to prevent.
-          const ok = await confirmAsync(
-            `Saving as .xlsx will NOT include these Calcula features:\n\n` +
-              lost.map((f) => `  • ${f}`).join('\n') +
-              `\n\nSave as .xlsx anyway? (Use .cala to keep everything.)`,
-            { title: 'Save as .xlsx?', kind: 'warning' },
-          );
-          if (!ok) return null;
-        }
-      }
+      if (!(await confirmLossySave(path))) return null;
       // Cancellable Before-Save. Guards run BEFORE the BEFORE_SAVE broadcast so
       // a cancelled save never makes subscribers do save-prep work for a save
       // that will not happen. checkLifecycleGuards reports the cancellation to
@@ -167,6 +183,9 @@ export async function saveFile(password?: string): Promise<string | null> {
     const currentPath = await getCurrentFilePath();
 
     if (currentPath) {
+      // Same lossy-save consent as Save As. Ctrl+S onto an already-open .xlsx
+      // is the COMMON way to reach a lossy save, not the rare one.
+      if (!(await confirmLossySave(currentPath))) return null;
       // Cancellable Before-Save (see saveFileAs). Returning null means "not
       // saved", which every caller already handles as the user-cancelled case.
       if (await checkLifecycleGuards('save', { path: currentPath, kind: 'save' })) return null;

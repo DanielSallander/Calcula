@@ -139,12 +139,25 @@ test.describe("Ribbon tab navigation", () => {
     appPage,
     grid,
   }) => {
-    // PIN THE SELECTION. The window-framed capture below also contains the Name
-    // Box and the status bar, both of which render the CURRENT selection — so
-    // without this the golden carries whatever cell the previous ~450 tests
-    // left selected, which is the `clickCell` drift this suite has already
-    // documented. `navigateTo` is that defect's recorded remedy.
-    await grid.navigateTo("W1");
+    // PIN THE SELECTION **AND WHAT IS IN IT**. The window-framed capture below
+    // contains the Name Box, the FORMULA BAR and the status bar, all three of
+    // which render the current selection — so without this the golden carries
+    // whatever cell the previous ~450 tests left selected, which is the
+    // `clickCell` drift this suite has already documented.
+    //
+    // Pinning only the selection is not enough, and recording it proved that:
+    // the first attempt navigated to W1, and W1 is written to `"Bold"` by the
+    // LAST test in this very file. In a single ordered run that test has not
+    // run yet, so W1 is empty and the golden looked stable; re-record the file
+    // twice, or run this test alone after a full pass, and the formula bar
+    // reads "Bold" instead. A golden that depends on the file having been run
+    // exactly once is the residue trap §3ar refused to walk into, one level in.
+    //
+    // X9 is inside this spec's declared W-X / rows 1-10 block and is touched by
+    // nothing else, and it is given a KNOWN value rather than assumed empty —
+    // "nothing ever writes here" is an assumption, "this is what is here" is not.
+    await grid.setCellValueDirect("X9", "ribbon-pin");
+    await grid.navigateTo("X9");
 
     // Take baseline screenshot
     await softly(takeRibbonScreenshot(appPage, "ribbon-before-minimize"));

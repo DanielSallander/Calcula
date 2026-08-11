@@ -48,6 +48,34 @@ pub fn from_a1(reference: &str) -> Option<(u32, u32)> {
     Some((row - 1, col))
 }
 
+/// Convert a rectangle to an A1-style RANGE reference (e.g. `(0,0)`-`(3,0)` ->
+/// `"A1:A4"`). Used for the dynamic-array spill extent, which is Excel's `ref`
+/// attribute on `<f t="array">` and is written in the same shape so a
+/// `data.json` is readable next to a sheet XML.
+pub fn range_to_a1(start_row: u32, start_col: u32, end_row: u32, end_col: u32) -> String {
+    format!(
+        "{}:{}",
+        to_a1(start_row, start_col),
+        to_a1(end_row, end_col)
+    )
+}
+
+/// Parse an A1-style RANGE reference back to `(start_row, start_col, end_row,
+/// end_col)`. Returns `None` unless BOTH halves parse and the end is at or
+/// after the start on both axes — a reversed or malformed extent is discarded
+/// rather than normalised, because the only thing that writes one is a
+/// corrupted file and silently "fixing" it would claim cells the origin never
+/// covered.
+pub fn range_from_a1(reference: &str) -> Option<(u32, u32, u32, u32)> {
+    let (start, end) = reference.split_once(':')?;
+    let (start_row, start_col) = from_a1(start.trim())?;
+    let (end_row, end_col) = from_a1(end.trim())?;
+    if end_row < start_row || end_col < start_col {
+        return None;
+    }
+    Some((start_row, start_col, end_row, end_col))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +108,28 @@ mod tests {
         assert_eq!(from_a1(""), None);
         assert_eq!(from_a1("A0"), None);
         assert_eq!(from_a1("123"), None);
+    }
+
+    #[test]
+    fn test_range_roundtrip() {
+        assert_eq!(range_to_a1(0, 0, 3, 0), "A1:A4");
+        assert_eq!(range_to_a1(4, 131, 7, 133), "EB5:ED8");
+        assert_eq!(range_from_a1("A1:A4"), Some((0, 0, 3, 0)));
+        assert_eq!(range_from_a1("EB5:ED8"), Some((4, 131, 7, 133)));
+        // A single-cell extent is legal on the way in (a 1x1 array is never
+        // WRITTEN, but a hand-edited file may carry one and it is harmless).
+        assert_eq!(range_from_a1("B2:B2"), Some((1, 1, 1, 1)));
+    }
+
+    #[test]
+    fn test_range_rejects_malformed_and_reversed() {
+        assert_eq!(range_from_a1("A1"), None);
+        assert_eq!(range_from_a1(""), None);
+        assert_eq!(range_from_a1("A1:"), None);
+        assert_eq!(range_from_a1(":A1"), None);
+        assert_eq!(range_from_a1("A4:A1"), None, "reversed rows");
+        assert_eq!(range_from_a1("D1:A1"), None, "reversed columns");
+        assert_eq!(range_from_a1("A0:A4"), None);
     }
 
     #[test]

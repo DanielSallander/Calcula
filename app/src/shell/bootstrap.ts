@@ -537,6 +537,10 @@ export function bootstrapShell(): void {
     validations: [AppEvents.VALIDATIONS_CHANGED],
     annotations: [AppEvents.ANNOTATIONS_CHANGED],
     controls: [AppEvents.CONTROLS_CHANGED, "grid:refresh"],
+    // Undoing an add/delete/reorder of a conditional-formatting rule changes
+    // the rule LIST, not just the values it paints — the extension has to
+    // re-read it, which is what CONDITIONAL_FORMATS_CHANGED asks for.
+    conditionalFormats: [AppEvents.CONDITIONAL_FORMATS_CHANGED],
   };
   onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
     const fired = new Set<string>();

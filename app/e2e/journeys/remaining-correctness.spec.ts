@@ -310,13 +310,29 @@ const isShapeFill = ([r, g, b]: Pixel): boolean =>
   r >= 50 && r <= 90 && g >= 95 && g <= 135 && b >= 175 && b <= 215;
 
 /**
- * Dark ink. Row numbers and column letters are near-black glyphs; gridlines are
- * light grey and the active-cell chrome is accent BLUE (high b), so `b < 120`
- * excludes both. On an empty sheet with the selection parked away, "dark pixels
+ * Dark ink. Row numbers and column letters are grey glyphs; gridlines are light
+ * grey and the active-cell chrome is accent BLUE (high b), so the cut-off has to
+ * exclude both. On an empty sheet with the selection parked away, "dark pixels
  * in the top-left corner" means "the headings are being painted" and nothing
  * else.
+ *
+ * THE CUT-OFF WAS 120 AND IT WAS TUNED TO A CAPTURE PIPELINE THAT NO LONGER
+ * EXISTS. Screenshots used to go through the DISPLAY's colour profile; they are
+ * now pinned to sRGB (`--force-color-profile=sRGB`, see `global-setup.ts`),
+ * which is what makes a golden mean the same thing twice. Anti-aliased text
+ * lands slightly lighter through the pinned path, and the probe measured
+ * 0.0031 against a `> 0.005` gate — a test that read "the headings are not
+ * painted" while they were painted perfectly well.
+ *
+ * Re-tuned by MEASUREMENT, not by loosening until green. `theme.headerText` is
+ * `#666666` = (102,102,102), and the glyph edges around it run to about 160;
+ * everything else in the probe patch is far lighter — background 248-255,
+ * gridlines 208-226, the accent blue (26,95,180) has b=180. A cut-off of 170
+ * therefore counts glyph pixels and nothing else, and it measures 0.0083 with
+ * the headings ON against ~0 with them OFF: the same claim, with margin either
+ * side instead of on the edge.
  */
-const isDarkInk = ([r, g, b]: Pixel): boolean => r < 120 && g < 120 && b < 120;
+const isDarkInk = ([r, g, b]: Pixel): boolean => r < 170 && g < 170 && b < 170;
 
 /**
  * The anchor cell's top-left corner in CANVAS CSS pixels, from LIVE geometry —

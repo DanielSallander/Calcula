@@ -18,6 +18,7 @@ use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
+    SPILL_EXTENT_MIN_FORMAT_VERSION,
     USER_HIDDEN_MIN_FORMAT_VERSION,
     CALA_MAX_SUPPORTED_FORMAT_VERSION,
 };
@@ -179,6 +180,20 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }) {
         manifest.features.push("sheet_display_flags".to_string());
         stamp_feature_format_version(&mut manifest, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION);
+    }
+    // Dynamic-array spill extents. The strongest case in the chain: an older
+    // reader drops `sp`, re-saves the spilled VALUES as ordinary literals, and
+    // hands back a workbook whose arrays look right, are owned by nothing, and
+    // collapse on the next re-evaluation of the origin (see
+    // SPILL_EXTENT_MIN_FORMAT_VERSION). Stamped only when a cell actually
+    // carries one, so a workbook with no dynamic array stays v1-v6.
+    if workbook
+        .sheets
+        .iter()
+        .any(|s| s.cells.values().any(|c| c.spill.is_some()))
+    {
+        manifest.features.push("spill_extents".to_string());
+        stamp_feature_format_version(&mut manifest, SPILL_EXTENT_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -1119,6 +1134,10 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         sheet_protections,
         workbook_protection,
         pending_recalc,
+        // The version this file WAS written at, carried inbound so the host's
+        // load path can run a one-time recovery for anything a pre-feature
+        // writer could not record. Never read by the writer.
+        format_version: manifest.format_version,
     })
 }
 
@@ -1165,6 +1184,7 @@ mod tests {
                 formula: None,
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -1174,6 +1194,7 @@ mod tests {
                 formula: None,
                 style_index: 1,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -1183,6 +1204,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -1192,6 +1214,7 @@ mod tests {
                 formula: Some("=SUM(C2:C100)".to_string()),
                 style_index: 2,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -1201,6 +1224,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
 
@@ -1290,6 +1314,7 @@ mod tests {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            format_version: 0,
         }
     }
 

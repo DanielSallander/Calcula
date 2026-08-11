@@ -1287,6 +1287,32 @@ impl<'a> Parser<'a> {
             return Ok(special);
         }
 
+        // This-row range: [[@Col1]:[@Col2]] -- Excel's form for a this-row span.
+        // Without this arm the nested `@` fell into `parse_bracket_content`,
+        // which rejected it as "Empty column name", so `Sales[[@a]:[@b]]` -- the
+        // spelling Excel itself writes, and the one `render_table_specifier`
+        // now emits -- could not be read at all.
+        if self.current_token == Token::At {
+            self.advance();
+            let col1 = self.parse_bracket_content()?;
+            self.expect(Token::RBracket)?; // close [@Col1]
+
+            if self.current_token == Token::Colon {
+                self.advance();
+                self.expect(Token::LBracket)?;
+                // The trailing `@` is optional: Excel writes `[[@a]:[@b]]`, but
+                // `[[@a]:[b]]` means the same span.
+                if self.current_token == Token::At {
+                    self.advance();
+                }
+                let col2 = self.parse_bracket_content()?;
+                self.expect(Token::RBracket)?;
+                return Ok(TableSpecifier::ThisRowRange(col1, col2));
+            }
+
+            return Ok(TableSpecifier::ThisRow(col1));
+        }
+
         // Column range: [Col1]:[Col2]
         let col1 = self.parse_bracket_content()?;
         self.expect(Token::RBracket)?; // close [Col1]

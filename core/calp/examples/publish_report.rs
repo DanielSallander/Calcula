@@ -112,6 +112,7 @@ fn put_text(cells: &mut HashMap<(u32, u32), SavedCell>, row: u32, col: u32, val:
             formula: None,
             style_index: style,
             rich_text: None,
+            spill: None,
         },
     );
 }
@@ -124,6 +125,7 @@ fn put_number(cells: &mut HashMap<(u32, u32), SavedCell>, row: u32, col: u32, va
             formula: None,
             style_index: style,
             rich_text: None,
+            spill: None,
         },
     );
 }

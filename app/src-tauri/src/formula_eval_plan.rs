@@ -416,188 +416,22 @@ fn expr_to_short_label(expr: &Expression) -> String {
 
 /// Build the display string and record source spans for ALL nodes.
 /// Returns (display_string, map of path -> (start, end)).
+///
+/// THIS IS A DELEGATION. The walker that used to live here was the THIRD
+/// AST->text serialiser in the product (after the one deleted from `lib.rs` and
+/// the one in `evaluate_formula.rs`), and it carried the same two defects: no
+/// parenthesis guard, so the Formula Visualizer drew `=(A1+B1)*C1` as
+/// `A1+B1*C1` and then anchored every step marker to offsets in that wrong
+/// string; and the shared 224-arm name table with a `{:?}` catch-all.
+///
+/// `render_with_spans` uses the SAME child-index path scheme this walker did
+/// (`[0]`/`[1]` for binary operands, argument index for calls, `2i`/`2i+1` for
+/// dict entries), which is the scheme `find_next_eval_node` names steps by --
+/// so the span keys still line up with the evaluation plan.
 fn build_display_with_all_spans(
     ast: &Expression,
 ) -> (String, HashMap<Vec<usize>, (usize, usize)>) {
-    let mut output = String::new();
-    let mut spans: HashMap<Vec<usize>, (usize, usize)> = HashMap::new();
-    build_spans_recursive(ast, &[], &mut output, &mut spans);
-    (output, spans)
-}
-
-fn build_spans_recursive(
-    expr: &Expression,
-    current_path: &[usize],
-    output: &mut String,
-    spans: &mut HashMap<Vec<usize>, (usize, usize)>,
-) {
-    let start_pos = output.len();
-
-    match expr {
-        Expression::Literal(val) => {
-            output.push_str(&value_to_display(val));
-        }
-
-        Expression::CellRef { sheet, col, row, .. } => {
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') {
-                    output.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    output.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            output.push_str(col);
-            output.push_str(&row.to_string());
-        }
-
-        Expression::Range { sheet, start, end, .. } => {
-            if let Some(sheet_name) = sheet {
-                if sheet_name.contains(' ') {
-                    output.push_str(&format!("'{}'!", sheet_name));
-                } else {
-                    output.push_str(&format!("{}!", sheet_name));
-                }
-            }
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(start, &child_path, output, spans);
-            output.push(':');
-            child_path.pop();
-            child_path.push(1);
-            build_spans_recursive(end, &child_path, output, spans);
-        }
-
-        Expression::ColumnRef { sheet, start_col, end_col, .. } => {
-            if let Some(sheet_name) = sheet {
-                output.push_str(&format!("{}!", sheet_name));
-            }
-            output.push_str(start_col);
-            output.push(':');
-            output.push_str(end_col);
-        }
-
-        Expression::RowRef { sheet, start_row, end_row, .. } => {
-            if let Some(sheet_name) = sheet {
-                output.push_str(&format!("{}!", sheet_name));
-            }
-            output.push_str(&start_row.to_string());
-            output.push(':');
-            output.push_str(&end_row.to_string());
-        }
-
-        Expression::BinaryOp { left, op, right } => {
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(left, &child_path, output, spans);
-
-            output.push_str(binary_op_str(op));
-
-            child_path.pop();
-            child_path.push(1);
-            build_spans_recursive(right, &child_path, output, spans);
-        }
-
-        Expression::UnaryOp { op, operand } => {
-            output.push_str(unary_op_str(op));
-
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(operand, &child_path, output, spans);
-        }
-
-        Expression::FunctionCall { func, args, .. } => {
-            output.push_str(&builtin_fn_name(func));
-            output.push('(');
-            for (i, arg) in args.iter().enumerate() {
-                if i > 0 {
-                    output.push_str(", ");
-                }
-                let mut child_path = current_path.to_vec();
-                child_path.push(i);
-                build_spans_recursive(arg, &child_path, output, spans);
-            }
-            output.push(')');
-        }
-
-        Expression::TableRef { table_name, specifier, .. } => {
-            output.push_str(table_name);
-            output.push('[');
-            output.push_str(&table_specifier_to_display(specifier));
-            output.push(']');
-        }
-
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            if start_sheet.contains(' ') || end_sheet.contains(' ') {
-                output.push_str(&format!("'{}:{}'!", start_sheet, end_sheet));
-            } else {
-                output.push_str(&format!("{}:{}!", start_sheet, end_sheet));
-            }
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(reference, &child_path, output, spans);
-        }
-
-        Expression::IndexAccess { target, index } => {
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(target, &child_path, output, spans);
-            output.push('[');
-            let mut idx_path = current_path.to_vec();
-            idx_path.push(1);
-            build_spans_recursive(index, &idx_path, output, spans);
-            output.push(']');
-        }
-
-        Expression::ListLiteral { elements } => {
-            output.push('{');
-            for (i, elem) in elements.iter().enumerate() {
-                if i > 0 {
-                    output.push_str(", ");
-                }
-                let mut child_path = current_path.to_vec();
-                child_path.push(i);
-                build_spans_recursive(elem, &child_path, output, spans);
-            }
-            output.push('}');
-        }
-
-        Expression::DictLiteral { entries } => {
-            output.push('{');
-            for (i, (key, value)) in entries.iter().enumerate() {
-                if i > 0 {
-                    output.push_str(", ");
-                }
-                let mut key_path = current_path.to_vec();
-                key_path.push(i * 2);
-                build_spans_recursive(key, &key_path, output, spans);
-                output.push_str(": ");
-                let mut val_path = current_path.to_vec();
-                val_path.push(i * 2 + 1);
-                build_spans_recursive(value, &val_path, output, spans);
-            }
-            output.push('}');
-        }
-
-        Expression::NamedRef { name, .. } => {
-            output.push_str(name);
-        }
-
-        Expression::SpillRef { cell, .. } => {
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(cell, &child_path, output, spans);
-            output.push('#');
-        }
-
-        Expression::ImplicitIntersection { operand } => {
-            output.push('@');
-            let mut child_path = current_path.to_vec();
-            child_path.push(0);
-            build_spans_recursive(operand, &child_path, output, spans);
-        }
-    }
-
-    spans.insert(current_path.to_vec(), (start_pos, output.len()));
+    engine::ast_render::render_with_spans(ast, false)
 }
 
 // ============================================================================
@@ -1063,8 +897,10 @@ pub fn get_formula_eval_plan(
                 let ctx = crate::TableRefContext {
                     tables: &tables_map,
                     table_names: &table_names_map,
+                    sheet_names: &sheet_names,
                     current_sheet_index: active_sheet,
                     current_row: row,
+                    current_col: col,
                 };
                 let r = crate::resolve_table_refs_in_ast(&resolved, &ctx);
                 drop(table_names_map);

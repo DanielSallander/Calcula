@@ -630,6 +630,7 @@ pub(crate) fn add_conditional_format_impl(
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
     let mut next_id = state.next_cf_rule_id.lock().unwrap();
 
+    let previous = cf_storage.get(&active_sheet).cloned().unwrap_or_default();
     let rules = cf_storage.entry(active_sheet).or_insert_with(Vec::new);
 
     // Calculate priority (lowest = highest priority, add at end)
@@ -651,6 +652,20 @@ pub(crate) fn add_conditional_format_impl(
     // Sort by priority
     rules.sort_by_key(|r| r.priority);
 
+    // BUG-0020. Conditional formatting was the one persisted store whose own
+    // commands recorded NOTHING: adding a rule was invisible to Ctrl+Z, which
+    // Excel has always undone. `next_cf_rule_id` is deliberately NOT rolled
+    // back — ids must stay unique across an undo/redo/re-add cycle, exactly as
+    // the sheet-id and entity-id counters do.
+    drop(next_id);
+    drop(cf_storage);
+    crate::undo_commands::record_conditional_formats_undo(
+        state,
+        active_sheet,
+        previous,
+        "Add conditional format",
+    );
+
     CFResult::ok(rule)
 }
 
@@ -661,8 +676,18 @@ pub fn update_conditional_format(
     file_state: State<FileState>,
     params: UpdateCFParams,
 ) -> CFResult {
+    update_conditional_format_impl(&state, &file_state, params)
+}
+
+/// Command body over plain references, so the undo contract is unit-testable
+/// without a Tauri `State`.
+pub(crate) fn update_conditional_format_impl(
+    state: &AppState,
+    file_state: &FileState,
+    params: UpdateCFParams,
+) -> CFResult {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let rules = match cf_storage.get_mut(&active_sheet) {
@@ -670,10 +695,17 @@ pub fn update_conditional_format(
         None => return CFResult::err("No conditional formats on this sheet"),
     };
 
-    let rule = match rules.iter_mut().find(|r| r.id == params.rule_id) {
-        Some(r) => r,
-        None => return CFResult::err("Rule not found"),
-    };
+    if !rules.iter().any(|r| r.id == params.rule_id) {
+        return CFResult::err("Rule not found");
+    }
+    // Snapshot only once the rule is known to exist: a refusal must leave the
+    // undo stack untouched, or Ctrl+Z starts consuming entries that undo
+    // nothing.
+    let previous = rules.clone();
+    let rule = rules
+        .iter_mut()
+        .find(|r| r.id == params.rule_id)
+        .expect("presence checked above");
 
     if let Some(new_rule) = params.rule {
         rule.rule = new_rule;
@@ -691,7 +723,16 @@ pub fn update_conditional_format(
         rule.enabled = enabled;
     }
 
-    CFResult::ok(rule.clone())
+    let updated = rule.clone();
+    drop(cf_storage);
+    crate::undo_commands::record_conditional_formats_undo(
+        state,
+        active_sheet,
+        previous,
+        "Edit conditional format",
+    );
+
+    CFResult::ok(updated)
 }
 
 /// Delete a conditional format rule
@@ -701,8 +742,18 @@ pub fn delete_conditional_format(
     file_state: State<FileState>,
     rule_id: u64,
 ) -> CFResult {
+    delete_conditional_format_impl(&state, &file_state, rule_id)
+}
+
+/// Command body over plain references, so the undo contract is unit-testable
+/// without a Tauri `State`.
+pub(crate) fn delete_conditional_format_impl(
+    state: &AppState,
+    file_state: &FileState,
+    rule_id: u64,
+) -> CFResult {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let rules = match cf_storage.get_mut(&active_sheet) {
@@ -710,12 +761,21 @@ pub fn delete_conditional_format(
         None => return CFResult::err("No conditional formats on this sheet"),
     };
 
+    let previous = rules.clone();
     let initial_len = rules.len();
     rules.retain(|r| r.id != rule_id);
 
     if rules.len() == initial_len {
         return CFResult::err("Rule not found");
     }
+
+    drop(cf_storage);
+    crate::undo_commands::record_conditional_formats_undo(
+        state,
+        active_sheet,
+        previous,
+        "Delete conditional format",
+    );
 
     CFResult::ok_empty()
 }
@@ -727,14 +787,27 @@ pub fn reorder_conditional_formats(
     file_state: State<FileState>,
     rule_ids: Vec<u64>,
 ) -> CFResult {
+    reorder_conditional_formats_impl(&state, &file_state, rule_ids)
+}
+
+/// Command body over plain references, so the undo contract is unit-testable
+/// without a Tauri `State`.
+pub(crate) fn reorder_conditional_formats_impl(
+    state: &AppState,
+    file_state: &FileState,
+    rule_ids: Vec<u64>,
+) -> CFResult {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let rules = match cf_storage.get_mut(&active_sheet) {
         Some(r) => r,
         None => return CFResult::err("No conditional formats on this sheet"),
     };
+
+    let previous = rules.clone();
+    let order_before: Vec<(u64, u32)> = rules.iter().map(|r| (r.id, r.priority)).collect();
 
     // Assign new priorities based on order in rule_ids
     for (priority, id) in rule_ids.iter().enumerate() {
@@ -745,6 +818,20 @@ pub fn reorder_conditional_formats(
 
     // Sort by new priority
     rules.sort_by_key(|r| r.priority);
+
+    let order_after: Vec<(u64, u32)> = rules.iter().map(|r| (r.id, r.priority)).collect();
+    let changed = order_before != order_after;
+    drop(cf_storage);
+    // A reorder that reorders nothing records nothing: an undo entry that
+    // restores an identical list is a Ctrl+Z that visibly does nothing.
+    if changed {
+        crate::undo_commands::record_conditional_formats_undo(
+            state,
+            active_sheet,
+            previous,
+            "Reorder conditional formats",
+        );
+    }
 
     CFResult::ok_empty()
 }
@@ -871,8 +958,24 @@ pub fn clear_conditional_formats_in_range(
     end_col: u32,
     sheet_index: Option<usize>,
 ) -> Result<u32, String> {
-    let target_sheet = resolve_cf_sheet(&state, sheet_index)?;
-    let effect = DocumentEffect::mutates(&file_state);
+    clear_conditional_formats_in_range_impl(
+        &state, &file_state, start_row, start_col, end_row, end_col, sheet_index,
+    )
+}
+
+/// Command body over plain references, so the undo contract is unit-testable
+/// without a Tauri `State`.
+pub(crate) fn clear_conditional_formats_in_range_impl(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    sheet_index: Option<usize>,
+) -> Result<u32, String> {
+    let target_sheet = resolve_cf_sheet(state, sheet_index)?;
+    let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
     let min_row = start_row.min(end_row);
@@ -885,6 +988,7 @@ pub fn clear_conditional_formats_in_range(
         None => return Ok(0),
     };
 
+    let previous = rules.clone();
     let initial_len = rules.len();
 
     rules.retain(|rule| {
@@ -896,7 +1000,18 @@ pub fn clear_conditional_formats_in_range(
         })
     });
 
-    Ok((initial_len - rules.len()) as u32)
+    let removed = (initial_len - rules.len()) as u32;
+    drop(cf_storage);
+    if removed > 0 {
+        crate::undo_commands::record_conditional_formats_undo(
+            state,
+            target_sheet,
+            previous,
+            "Clear conditional formats",
+        );
+    }
+
+    Ok(removed)
 }
 
 // ============================================================================

@@ -381,6 +381,21 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
             .iter()
             .any(|o| published_sheet_ids.contains(&o.sheet_id))
         || wb.theme != engine::theme::ThemeDefinition::default()
+        // A DYNAMIC-ARRAY SPILL EXTENT on a published sheet. It fails this
+        // function's test in its sharpest form: an older app pulls the package
+        // "successfully", writes the spilled cells as ordinary literals, and
+        // silently drops the record of which origin owns them -- so the
+        // subscriber gets an array that LOOKS right, is protected by nothing,
+        // and collapses to an error the first time anything re-evaluates its
+        // origin (register 2ab). Refusing the pull is the honest failure.
+        //
+        // Cell-only packages with no array still return false here and stay
+        // pullable by older apps, which is the point of the whole function.
+        || request.sheet_indices.iter().any(|&idx| {
+            wb.sheets
+                .get(idx)
+                .is_some_and(|s| s.cells.values().any(|c| c.spill.is_some()))
+        })
 }
 
 /// Publish selected sheets from a workbook to a local registry.

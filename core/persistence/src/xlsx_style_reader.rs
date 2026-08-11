@@ -38,6 +38,17 @@ pub struct XlsxStyleData {
     /// Sheet visibility from workbook.xml `state` ("hidden"/"veryHidden"),
     /// keyed by 1-based workbook.xml sheet order. Absent = visible.
     pub sheet_visibility: HashMap<usize, String>,
+    /// `<workbookPr date1904="1">` — the workbook uses the **1904 date
+    /// system**, whose epoch is 1904-01-01 rather than 1900-01-00.
+    ///
+    /// Excel has shipped two date systems since 1985 (the 1904 one is the
+    /// Macintosh default and is still written by Excel for Mac and by
+    /// Numbers-exported files), and a serial number means a date four years
+    /// and a day apart depending on which one the workbook declares. Calcula
+    /// stores 1900-system serials, so this flag is what tells the importer to
+    /// convert; ignoring it -- which is what happened before -- imports every
+    /// date in the file 1462 days early, with nothing anywhere saying so.
+    pub date1904: bool,
 }
 
 /// Font properties parsed from <font> elements.
@@ -243,6 +254,8 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
 
     // Sheet visibility rides workbook.xml (same order as the mapping above).
     data.sheet_visibility = parse_sheet_visibility(&mut archive);
+    // ... and so does the date system.
+    data.date1904 = parse_date1904(&mut archive);
 
     if !logical_sheet_paths.is_empty() {
         // Use the relationship-based mapping (1-based logical index → path)
@@ -1177,6 +1190,43 @@ pub(crate) fn parse_sheet_visibility(
         buf.clear();
     }
     result
+}
+
+/// Parse `<workbookPr date1904="…">` from xl/workbook.xml.
+///
+/// The attribute is a BOOLEAN in the OOXML sense, so all four spellings Excel
+/// and its imitators emit have to be accepted: `1`, `true`, `0`, `false`.
+/// Reading only `="1"` would silently take the 1900 branch on a LibreOffice
+/// file, which writes `date1904="true"`.
+///
+/// ECMA-376 also allows the equivalent `dateCompatibility`/`date1904` pair in
+/// the strict-schema `x15ac` extension; that is out of scope and would be a
+/// separate finding if a file in the wild is ever seen using it alone.
+pub(crate) fn parse_date1904(archive: &mut zip::ZipArchive<std::fs::File>) -> bool {
+    let Ok(wb_xml) = read_zip_entry(archive, "xl/workbook.xml") else {
+        return false;
+    };
+    let mut reader = Reader::from_str(&wb_xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag = e.local_name();
+                if std::str::from_utf8(tag.as_ref()).unwrap_or("") == "workbookPr" {
+                    let flag = get_attr(e, "date1904")
+                        .or_else(|| get_attr(e, "dateCompatibility"))
+                        .unwrap_or_default();
+                    return matches!(flag.trim(), "1" | "true" | "True" | "TRUE");
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    false
 }
 
 /// Parse a sheet's `_rels` part into rid -> (type, resolved target path).

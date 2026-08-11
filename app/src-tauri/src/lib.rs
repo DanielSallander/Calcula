@@ -64,11 +64,17 @@ pub mod persistence;
 pub mod document_effect;
 pub mod api_types;
 pub mod calculation;
+/// The LOAD half of dynamic-array spill ownership (§2ab): restore the spill
+/// map from the extents a v7+ `.cala` carries, or recover it by evaluation for
+/// anything written before the extent existed.
+pub mod spill_restore;
 pub mod eval_budget;
 pub mod commands;
 pub mod formula;
 pub mod logging;
 pub mod sheets;
+/// The ONE rule for what a sheet may be called (register F6, product half).
+pub mod sheet_names;
 pub mod undo_commands;
 pub mod undo_history;
 pub mod merge_commands;
@@ -79,6 +85,8 @@ pub mod named_ranges;
 /// Excel-parity named-range resolution: a stored formula keeps its NAME and the
 /// name is expanded at EVALUATION, with a name -> dependents edge of its own.
 pub mod name_resolution;
+pub mod table_deps;
+pub mod object_deps;
 pub mod data_validation;
 pub mod comments;
 pub mod notes;
@@ -223,10 +231,19 @@ mod document_store_reset_tests;
 mod script_security_census_tests;
 
 #[cfg(test)]
+mod object_deps_census_tests;
+
+#[cfg(test)]
+mod object_deps_tests;
+
+#[cfg(test)]
 mod defined_name_sheet_ops_tests;
 
 #[cfg(test)]
 mod formula_serialisation_tests;
+
+#[cfg(test)]
+mod state_digest_lock_order_tests;
 
 // ============================================================================
 // APPLICATION STATE
@@ -348,6 +365,17 @@ pub struct AppState {
     pub name_dependents: Mutex<name_resolution::NameDependentsMap>,
     /// Track which names each formula cell resolves through (for cleanup).
     pub name_dependencies: Mutex<name_resolution::NameDependenciesMap>,
+    /// STRUCTURED-REFERENCE dependencies: UPPERCASE table name -> formula cells
+    /// on the ACTIVE sheet that read it.
+    ///
+    /// The table twin of `name_dependents`, and it exists for the same reason
+    /// (§2aj). A formula now STORES `Sales[Amount]` rather than the rectangle it
+    /// expanded to at entry, so growing, shrinking, renaming or deleting the
+    /// table changes what the formula MEANS without touching any cell its
+    /// cell-level edges mention. See `table_deps`.
+    pub table_dependents: Mutex<table_deps::TableDependentsMap>,
+    /// Track which tables each formula cell reads (for cleanup).
+    pub table_dependencies: Mutex<table_deps::TableDependenciesMap>,
     /// Cross-sheet dependencies: (sheet_name, row, col) -> set of (sheet_index, row, col) that depend on it
     pub cross_sheet_dependents: Mutex<CrossSheetDependentsMap>,
     /// Track which cross-sheet cells each formula depends on (for cleanup)
@@ -458,6 +486,23 @@ pub struct AppState {
     /// Reverse spill map: (sheet_index, row, col) -> (origin_row, origin_col)
     /// Used to detect #SPILL! errors when a spill cell is occupied
     pub spill_hosts: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
+    /// WHAT BLOCKED a `#SPILL!`: (sheet_index, origin_row, origin_col) ->
+    /// (blocking_row, blocking_col), the FIRST occupied cell the array needed.
+    ///
+    /// `CellValue::Error` carries no payload, so the obstruction's address has
+    /// to live somewhere for the error-checking pane to name it — and naming it
+    /// is the whole point of `#SPILL!` over `#VALUE!`: the remedy is "clear
+    /// THAT cell", which is unsayable without the address. Excel shows the same
+    /// thing (its error menu offers "Select Obstructing Cells").
+    ///
+    /// STALENESS IS UNOBSERVABLE, which is why this needs no tear-down of its
+    /// own: the map is only ever READ for a cell whose value is
+    /// `CellError::Spill`, and a cell can only hold that value from an
+    /// evaluation that wrote this entry in the same breath. An entry left
+    /// behind by a deleted origin belongs to a cell that is no longer
+    /// `#SPILL!`, so nothing looks it up. It is reset with the other two spill
+    /// maps when the document is replaced.
+    pub spill_blocks: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
     /// Hidden rows set by the Advanced Filter extension (per sheet)
     pub advanced_filter_hidden_rows: Mutex<HashMap<usize, Vec<u32>>>,
     /// Document theme (colors + fonts). Defaults to Office theme.
@@ -669,6 +714,8 @@ pub fn create_app_state() -> AppState {
         row_dependencies: Mutex::new(StripeDependenciesMap::default()),
         name_dependents: Mutex::new(name_resolution::NameDependentsMap::default()),
         name_dependencies: Mutex::new(name_resolution::NameDependenciesMap::default()),
+        table_dependents: Mutex::new(table_deps::TableDependentsMap::default()),
+        table_dependencies: Mutex::new(table_deps::TableDependenciesMap::default()),
         cross_sheet_dependents: Mutex::new(CrossSheetDependentsMap::default()),
         cross_sheet_dependencies: Mutex::new(CrossSheetDependenciesMap::default()),
         undo_stack: undo_history::UndoHistory::new(UndoStack::new()),
@@ -706,6 +753,7 @@ pub fn create_app_state() -> AppState {
         sheet_visibility: document_effect::Persisted::new(vec!["visible".to_string()]),
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
+        spill_blocks: Mutex::new(HashMap::new()),
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
         theme: crate::document_effect::Persisted::new(engine::ThemeDefinition::default()),
         scenarios: document_effect::Persisted::new(HashMap::new()),
@@ -1049,6 +1097,14 @@ pub fn column_index_to_letter(mut idx: u32) -> String {
     result
 }
 
+/// `(sheet, origin row, origin col) -> the cells that array spilled INTO`.
+///
+/// The authoritative extent of every dynamic array in the workbook. Not
+/// persisted as state — `.cala` v7 stamps each origin's extent onto the cell and
+/// `spill_restore` rebuilds this on load — and written in exactly one place,
+/// `commands::data::apply_spill_decision`.
+pub type SpillRangeMap = HashMap<(usize, u32, u32), Vec<(u32, u32)>>;
+
 /// Checks if an AST contains any SpillRef nodes that need resolution.
 pub fn ast_has_spill_refs(ast: &ParserExpr) -> bool {
     match ast {
@@ -1076,10 +1132,23 @@ pub fn ast_has_spill_refs(ast: &ParserExpr) -> bool {
 
 /// Resolves SpillRef nodes in the AST by replacing them with Range expressions
 /// based on the current spill_ranges state.
+///
+/// `sheet_names` is what makes a QUALIFIED spill ref work. The lookup key used
+/// to be `(current_sheet_index, row, col)` unconditionally, while the ref's own
+/// `sheet` was copied into the Range that got built -- so `=SUM(Sheet2!A1#)`
+/// looked the anchor up in the ACTIVE sheet's spill map, missed, and fell back
+/// to the bare single cell. The formula silently became `=SUM(Sheet2!A1)`: one
+/// cell instead of the whole array, no error, a different number. An unqualified
+/// ref keeps using `current_sheet_index`, which is the same behaviour as before.
+///
+/// A qualifier naming a sheet that does not exist resolves to no index and takes
+/// the same miss path it always did -- it must NOT silently fall back to the
+/// active sheet, which would answer with a different sheet's array.
 pub fn resolve_spill_refs_in_ast(
     ast: &ParserExpr,
     spill_ranges: &HashMap<(usize, u32, u32), Vec<(u32, u32)>>,
     current_sheet_index: usize,
+    sheet_names: &[String],
 ) -> ParserExpr {
     match ast {
         ParserExpr::SpillRef { cell, .. } => {
@@ -1088,8 +1157,21 @@ pub fn resolve_spill_refs_in_ast(
                 let col_idx = col_letter_to_index(col);
                 let row_idx = row - 1; // Convert to 0-based
 
-                // Look up the spill range for this cell
-                let key = (current_sheet_index, row_idx, col_idx);
+                // Look up the spill range for this cell, on the sheet the REF
+                // names rather than the one that happens to be active.
+                let anchor_sheet = match sheet {
+                    Some(name) => {
+                        match sheet_names.iter().position(|s| s.eq_ignore_ascii_case(name)) {
+                            Some(idx) => idx,
+                            // Unknown sheet: leave the ref alone (the fallback
+                            // below returns the single cell), rather than
+                            // resolving against a sheet the user did not name.
+                            None => usize::MAX,
+                        }
+                    }
+                    None => current_sheet_index,
+                };
+                let key = (anchor_sheet, row_idx, col_idx);
                 if let Some(spill_cells) = spill_ranges.get(&key) {
                     // Compute the bounding box (origin + all spill cells)
                     let mut min_row = row_idx;
@@ -1134,45 +1216,45 @@ pub fn resolve_spill_refs_in_ast(
             }
         }
         ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
-            left: Box::new(resolve_spill_refs_in_ast(left, spill_ranges, current_sheet_index)),
+            left: Box::new(resolve_spill_refs_in_ast(left, spill_ranges, current_sheet_index, sheet_names)),
             op: op.clone(),
-            right: Box::new(resolve_spill_refs_in_ast(right, spill_ranges, current_sheet_index)),
+            right: Box::new(resolve_spill_refs_in_ast(right, spill_ranges, current_sheet_index, sheet_names)),
         },
         ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
             op: op.clone(),
-            operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index)),
+            operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index, sheet_names)),
         },
         ParserExpr::FunctionCall { func, args, .. } => ParserExpr::FunctionCall {
             func: func.clone(),
-            args: args.iter().map(|a| resolve_spill_refs_in_ast(a, spill_ranges, current_sheet_index)).collect(),
+            args: args.iter().map(|a| resolve_spill_refs_in_ast(a, spill_ranges, current_sheet_index, sheet_names)).collect(),
             ref_site_id: Default::default(),
         },
         ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
-            start: Box::new(resolve_spill_refs_in_ast(start, spill_ranges, current_sheet_index)),
-            end: Box::new(resolve_spill_refs_in_ast(end, spill_ranges, current_sheet_index)),
+            start: Box::new(resolve_spill_refs_in_ast(start, spill_ranges, current_sheet_index, sheet_names)),
+            end: Box::new(resolve_spill_refs_in_ast(end, spill_ranges, current_sheet_index, sheet_names)),
             ref_site_id: Default::default(),
         },
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
-            target: Box::new(resolve_spill_refs_in_ast(target, spill_ranges, current_sheet_index)),
-            index: Box::new(resolve_spill_refs_in_ast(index, spill_ranges, current_sheet_index)),
+            target: Box::new(resolve_spill_refs_in_ast(target, spill_ranges, current_sheet_index, sheet_names)),
+            index: Box::new(resolve_spill_refs_in_ast(index, spill_ranges, current_sheet_index, sheet_names)),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
-            operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index)),
+            operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index, sheet_names)),
         },
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
-            reference: Box::new(resolve_spill_refs_in_ast(reference, spill_ranges, current_sheet_index)),
+            reference: Box::new(resolve_spill_refs_in_ast(reference, spill_ranges, current_sheet_index, sheet_names)),
             ref_site_id: Default::default(),
         },
         ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
-            elements: elements.iter().map(|e| resolve_spill_refs_in_ast(e, spill_ranges, current_sheet_index)).collect(),
+            elements: elements.iter().map(|e| resolve_spill_refs_in_ast(e, spill_ranges, current_sheet_index, sheet_names)).collect(),
         },
         ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
             entries: entries.iter().map(|(k, v)| (
-                resolve_spill_refs_in_ast(k, spill_ranges, current_sheet_index),
-                resolve_spill_refs_in_ast(v, spill_ranges, current_sheet_index),
+                resolve_spill_refs_in_ast(k, spill_ranges, current_sheet_index, sheet_names),
+                resolve_spill_refs_in_ast(v, spill_ranges, current_sheet_index, sheet_names),
             )).collect(),
         },
         // All other nodes (Literal, CellRef, ColumnRef, RowRef, NamedRef, TableRef) pass through
@@ -1216,6 +1298,37 @@ pub fn extract_all_references(expr: &ParserExpr, grid: &Grid) -> ExtractedRefs {
     let mut refs = ExtractedRefs::new();
     extract_references_recursive(expr, grid, &mut refs);
     refs
+}
+
+/// The references a **stored** formula reads — the only correct way to ask that
+/// question of a cell now that the document keeps indirections.
+///
+/// `extract_references_recursive` cannot see through a `NamedRef` or a
+/// `TableRef`: neither carries cell coordinates, so both are skipped and the
+/// formula looks like it reads nothing. That was harmless while both were
+/// spliced away at entry, and it is not harmless now — D2 left the name case
+/// exposed at the ORDERING walks, and §2aj would have added every structured
+/// reference to the same population.
+///
+/// What "exposed" means concretely: `build_workbook_plan` orders F9's whole
+/// workbook from these edges, so a `=SUM(Sales[Amount])` with no precedent edge
+/// sorts as an input rather than as a dependent, and computes from whatever the
+/// table's own formula cells held BEFORE the pass. The value then depends on
+/// hash-iteration order, which is the exact class this program exists to close.
+///
+/// Expanding first costs one tree clone per formula that actually uses an
+/// indirection; `eval_ast` returns `Cow::Borrowed` for every other formula, so
+/// a workbook with no names and no tables pays two `is_empty()` checks per cell.
+pub fn stored_ast_references(
+    ast: &ParserExpr,
+    grid: &Grid,
+    name_tables: name_resolution::NameTables<'_>,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> ExtractedRefs {
+    let expanded = name_resolution::eval_ast(ast, &name_tables.at(sheet_index, row, col));
+    extract_all_references(&expanded, grid)
 }
 
 fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut ExtractedRefs) {
@@ -1746,20 +1859,20 @@ fn resolve_names_in_ast_with_shadows(
 }
 
 // ============================================================================
-// ONE TYPED FORMULA, TWO FORMS  (D2 — Excel parity for defined names)
+// ONE TYPED FORMULA, TWO FORMS  (D2 — defined names; §2aj — structured refs)
 // ============================================================================
 
 /// The two forms a freshly typed formula takes.
 ///
 /// **`stored` is what the document keeps** and what the formula bar shows: the
-/// tree the user typed, with structured-table and spill references resolved
-/// (those are POSITIONAL — `[@Price]` means a different cell on every row, and
-/// `A1#` means whatever that spill covers right now — so they cannot survive as
-/// text) but **defined names left exactly as typed**.
+/// tree the user typed, with **defined names and structured table references
+/// left exactly as typed** and only SPILL references (`A1#`) resolved.
 ///
-/// `expanded` is the same tree with the names spliced in. It is what this edit
-/// evaluates and what `extract_all_references` reads, and it is `None` when the
-/// formula names nothing, so the overwhelmingly common case pays no clone.
+/// `expanded` is the same tree with the names spliced in and the specifiers
+/// flattened to ranges. It is what this edit evaluates and what
+/// `extract_all_references` reads, and it is `None` when the formula has neither
+/// a name nor a structured reference, so the overwhelmingly common case pays no
+/// clone.
 ///
 /// WHY THE SPLIT EXISTS. `update_cell` used to store the EXPANDED tree: with
 /// `RATE` = `$D$5`, typing `=RATE` left the cell holding `$D$5`. Excel stores the
@@ -1767,8 +1880,22 @@ fn resolve_names_in_ast_with_shadows(
 /// formula that uses it; storing the expansion makes a defined name a one-shot
 /// typing macro instead. See `name_resolution` for the evaluation half and for
 /// the dependency edge that keeps the two in step.
+///
+/// **A STRUCTURED REFERENCE IS THE SAME DEFECT** (§2aj), so it now takes the
+/// same route. `=SUM(Sales[Amount])` used to be stored as `=SUM($A$2:$A$4)` — a
+/// fixed rectangle in absolute coordinates, which is precisely what a
+/// structured reference exists NOT to be. Adding a row to `Sales` left the
+/// total at its old number with nothing saying so. The cell now keeps the
+/// specifier, `name_resolution::eval_ast` resolves it against the table's
+/// CURRENT extent on every evaluation, and `table_deps` carries the
+/// table -> formula edge that makes a resize a recalculation. See `table_deps`.
+///
+/// SPILL REFERENCES STAY RESOLVED AT ENTRY, and that is not an inconsistency
+/// left standing by accident: resolving one needs `state.spill_ranges`, a Mutex
+/// the evaluator would have to take once per evaluated dependent, and the
+/// register tracks it separately as §3bf.
 pub struct EnteredFormula {
-    /// The form the cell keeps. Names intact.
+    /// The form the cell keeps. Names and structured references intact.
     pub stored: ParserExpr,
     /// The form this edit evaluates. `None` when it would equal `stored`.
     expanded: Option<ParserExpr>,
@@ -1781,52 +1908,89 @@ impl EnteredFormula {
     }
 }
 
-/// Resolve the POSITIONAL reference kinds — structured table refs and spill
-/// refs. Both are resolved at entry in both forms, because neither can be
-/// re-derived later from the cell alone.
-fn resolve_positional_refs(
+/// Flatten every structured table reference in `ast` against the workbook's
+/// CURRENT tables.
+///
+/// `sheet_names` is passed IN, and for the deadlock reason
+/// [`resolve_spill_refs_at_entry`] documents rather than for convenience: every
+/// caller already holds `state.sheet_names.read()` across this call. It is used
+/// to QUALIFY a reference to a table on another sheet.
+fn resolve_table_refs_now(
     state: &AppState,
     ast: &ParserExpr,
     sheet_index: usize,
     row: u32,
+    col: u32,
+    sheet_names: &[String],
 ) -> ParserExpr {
-    let resolved = if ast_has_table_refs(ast) {
-        let tables_map = state.tables.read().unwrap();
-        let table_names_map = state.table_names.read().unwrap();
-        let ctx = TableRefContext {
-            tables: &tables_map,
-            table_names: &table_names_map,
-            current_sheet_index: sheet_index,
-            current_row: row,
-        };
-        let r = resolve_table_refs_in_ast(ast, &ctx);
-        drop(table_names_map);
-        drop(tables_map);
-        r
-    } else {
-        ast.clone()
-    };
-
-    if ast_has_spill_refs(&resolved) {
-        let spill_ranges_map = state.spill_ranges.lock().unwrap();
-        let r = resolve_spill_refs_in_ast(&resolved, &spill_ranges_map, sheet_index);
-        drop(spill_ranges_map);
-        r
-    } else {
-        resolved
+    if !ast_has_table_refs(ast) {
+        return ast.clone();
     }
+    let tables_map = state.tables.read().unwrap();
+    let table_names_map = state.table_names.read().unwrap();
+    let ctx = TableRefContext {
+        tables: &tables_map,
+        table_names: &table_names_map,
+        current_sheet_index: sheet_index,
+        current_row: row,
+        current_col: col,
+        sheet_names,
+    };
+    let r = resolve_table_refs_in_ast(ast, &ctx);
+    drop(table_names_map);
+    drop(tables_map);
+    r
+}
+
+/// Expand `A1#` for the tree THIS edit evaluates — never for the tree the cell
+/// stores (§3bf: the stored form keeps the `#`, and `name_resolution::eval_ast`
+/// re-expands it against the live map on every later evaluation).
+///
+/// `sheet_names` is passed IN rather than read off `state`. Every caller
+/// already holds `state.sheet_names.read()` across this call, and
+/// `std::sync::RwLock` does not promise a recursive read is safe -- on Windows
+/// (SRWLock) a second read on the same thread deadlocks outright as soon as a
+/// writer is queued. Taking the lock here hung the suite.
+fn resolve_spill_refs_at_entry(
+    state: &AppState,
+    ast: &ParserExpr,
+    sheet_index: usize,
+    sheet_names: &[String],
+) -> ParserExpr {
+    if !ast_has_spill_refs(ast) {
+        return ast.clone();
+    }
+    let spill_ranges_map = state.spill_ranges.lock().unwrap();
+    let r = resolve_spill_refs_in_ast(ast, &spill_ranges_map, sheet_index, sheet_names);
+    drop(spill_ranges_map);
+    r
 }
 
 /// Split ONE parsed formula into the form the cell stores and the form this
 /// edit evaluates. The single recipe behind `update_cell`, `update_cells_batch`
-/// and `fill_range`, so all three agree about what a name means.
+/// and `fill_range`, so all three agree about what a name and a structured
+/// reference mean.
 pub fn split_entered_formula(
     state: &AppState,
     parsed: &ParserExpr,
     sheet_index: usize,
     row: u32,
+    col: u32,
+    sheet_names: &[String],
 ) -> EnteredFormula {
-    let mut stored = resolve_positional_refs(state, parsed, sheet_index, row);
+    // §3bf. THE `#` IS KEPT. It used to be resolved into a fixed `Range` right
+    // here, in the form the cell STORES — so `=SUM(A1#)` was kept, rendered in
+    // the formula bar and saved as `=SUM(A1:A4)`, and stopped following its
+    // array the instant the array changed length. In Excel `A1#` is a LIVE
+    // reference to whatever the array currently spans, which is the whole point
+    // of the operator; the stated blocker (the extent could not be re-derived
+    // from the cell later) went away when v7 started persisting it.
+    //
+    // Same recipe as a defined name (D2) and a structured reference (§2aj):
+    // keep the indirection in `stored`, expand it only into the tree THIS edit
+    // evaluates, and let `name_resolution::eval_ast` re-expand it against the
+    // live map on every later evaluation.
+    let mut stored = parsed.clone();
 
     // The lexer UPPERCASES bare identifiers, which never showed while the name
     // was expanded away at entry. Now that the cell keeps it, put the name back
@@ -1836,16 +2000,42 @@ pub fn split_entered_formula(
         let named_ranges_map = state.named_ranges.read().unwrap();
         name_resolution::restamp_name_casing(&mut stored, &named_ranges_map);
     }
+    // Same argument, one authority over: the lexer shouts a table name and
+    // `parse_bracket_content` shouts the column, so `Sales[Amount]` would be
+    // kept as `SALES[AMOUNT]` (§2t, for tables).
+    if ast_has_table_refs(&stored) {
+        let tables_map = state.tables.read().unwrap();
+        let table_names_map = state.table_names.read().unwrap();
+        table_deps::restamp_table_casing(&mut stored, &tables_map, &table_names_map);
+    }
+    // And once more for the SHEET qualifier (§2ai): `=Data!A1` lexes as
+    // `DATA!A1`, and the workbook's own sheet list is the authority.
+    sheet_names::restamp_sheet_casing(&mut stored, sheet_names);
 
-    let expanded = if ast_has_named_refs(&stored) {
-        let named_ranges_map = state.named_ranges.read().unwrap();
-        let mut visited = HashSet::new();
-        let spliced = resolve_names_in_ast(&stored, &named_ranges_map, sheet_index, &mut visited);
-        drop(named_ranges_map);
-        // Again, because a name's `refers_to` may itself be a structured
-        // reference (`=Table1[Amount]`) that only becomes visible once the name
-        // is expanded.
-        Some(resolve_positional_refs(state, &spliced, sheet_index, row))
+    let needs_names = ast_has_named_refs(&stored);
+    let needs_tables = ast_has_table_refs(&stored);
+    // A spill ref makes the expanded form MANDATORY: the evaluator resolves
+    // neither `A1#` nor a name, so a formula that is nothing but `=SUM(A1#)`
+    // would reach it unexpanded and answer nonsense.
+    let needs_spills = ast_has_spill_refs(&stored);
+    let expanded = if needs_names || needs_tables || needs_spills {
+        let spliced = if needs_names {
+            let named_ranges_map = state.named_ranges.read().unwrap();
+            let mut visited = HashSet::new();
+            let out =
+                resolve_names_in_ast(&stored, &named_ranges_map, sheet_index, &mut visited);
+            drop(named_ranges_map);
+            out
+        } else {
+            stored.clone()
+        };
+        // The table pass runs AFTER the name splice, not instead of it: a
+        // name's `refers_to` may itself be a structured reference
+        // (`=Table1[Amount]`) that only becomes visible once the name is
+        // expanded, and a spill ref may arrive the same way.
+        let flattened =
+            resolve_table_refs_now(state, &spliced, sheet_index, row, col, sheet_names);
+        Some(resolve_spill_refs_at_entry(state, &flattened, sheet_index, sheet_names))
     } else {
         None
     };
@@ -1916,6 +2106,7 @@ pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
 // ============================================================================
 
 /// Context needed to resolve structured table references.
+#[derive(Clone, Copy)]
 pub struct TableRefContext<'a> {
     /// All tables indexed by sheet_index -> table_id -> Table
     pub tables: &'a tables::TableStorage,
@@ -1925,6 +2116,25 @@ pub struct TableRefContext<'a> {
     pub current_sheet_index: usize,
     /// The row of the formula cell (0-indexed) — needed for @ (this-row) references
     pub current_row: u32,
+    /// The column of the formula cell (0-indexed).
+    ///
+    /// Needed for the SAME reason as `current_row`, and it was missing. A bare
+    /// `[@Amount]` means "the table THIS CELL IS IN", and `find_table_at_cell`
+    /// decided that on the row range alone — so a formula in a far column on the
+    /// same rows resolved against a table it is not in, answering with a
+    /// plausible NUMBER where Excel answers `#NAME?`. A cell is inside a
+    /// rectangle on BOTH axes or it is not inside it.
+    pub current_col: u32,
+    /// The workbook's sheet names, in index order.
+    ///
+    /// NOT decoration, and NOT for casing. A table's NAME is workbook-wide, so
+    /// `=SUM(Sales[Amount])` is legal on any sheet — but the range it resolves
+    /// to was built with `sheet: None`, which means "the sheet the formula is
+    /// on". Written on Sheet2 against a table on Sheet1, that silently read
+    /// Sheet2's `A2:A4`: the right rectangle on the wrong sheet, with no error
+    /// anywhere. This is what lets the resolution QUALIFY the range when the
+    /// table lives elsewhere.
+    pub sheet_names: &'a [String],
 }
 
 /// Resolves all `TableRef` nodes in a parser AST by converting them to
@@ -2103,14 +2313,31 @@ fn resolve_single_table_ref(
     ctx: &TableRefContext,
 ) -> ParserExpr {
     // Find the table
-    let table = if table_name.is_empty() {
-        // Empty table name — infer from current cell position
-        find_table_at_cell(ctx.tables, ctx.current_sheet_index, ctx.current_row)
+    // A BARE `[@Col]` means "the table this cell is in", so it is by definition
+    // on the current sheet and carries no qualifier. A NAMED reference may name
+    // a table anywhere in the workbook.
+    let found = if table_name.is_empty() {
+        find_table_at_cell(
+            ctx.tables,
+            ctx.current_sheet_index,
+            ctx.current_row,
+            ctx.current_col,
+        )
+        .map(|t| (t, ctx.current_sheet_index))
     } else {
         find_table_by_name(table_name, ctx.tables, ctx.table_names)
     };
 
-    let table = match table {
+    // The sheet qualifier every range below is built with: `None` when the table
+    // is on the formula's own sheet (which is the overwhelmingly common case and
+    // the only one that used to work), the sheet's OFFICIAL name otherwise.
+    let qualifier: Option<String> = found.and_then(|(_, sheet)| {
+        (sheet != ctx.current_sheet_index)
+            .then(|| ctx.sheet_names.get(sheet).cloned())
+            .flatten()
+    });
+
+    let table = match found.map(|(t, _)| t) {
         Some(t) => t,
         None => {
             // Table not found — leave as unresolvable (will become #NAME?)
@@ -2128,26 +2355,26 @@ fn resolve_single_table_ref(
     // Convert 0-based grid columns to 1-based A1 column letters
     match specifier {
         ParserTableSpecifier::Column(col_name) => {
-            resolve_column_ref(&table, col_name, false)
+            resolve_column_ref(&table, col_name, qualifier)
         }
         ParserTableSpecifier::ThisRow(col_name) => {
-            resolve_this_row_ref(&table, col_name, ctx.current_row)
+            resolve_this_row_ref(&table, col_name, ctx.current_row, qualifier)
         }
         ParserTableSpecifier::ColumnRange(start_col, end_col) => {
-            resolve_column_range(&table, start_col, end_col, false)
+            resolve_column_range(&table, start_col, end_col, qualifier)
         }
         ParserTableSpecifier::ThisRowRange(start_col, end_col) => {
-            resolve_this_row_range(&table, start_col, end_col, ctx.current_row)
+            resolve_this_row_range(&table, start_col, end_col, ctx.current_row, qualifier)
         }
         ParserTableSpecifier::AllRows => {
-            make_range(None, table.start_row, table.start_col, table.end_row, table.end_col)
+            make_range(qualifier, table.start_row, table.start_col, table.end_row, table.end_col)
         }
         ParserTableSpecifier::DataRows => {
-            make_range(None, table.data_start_row(), table.start_col, table.data_end_row(), table.end_col)
+            make_range(qualifier, table.data_start_row(), table.start_col, table.data_end_row(), table.end_col)
         }
         ParserTableSpecifier::Headers => {
             if table.style_options.header_row {
-                make_range(None, table.start_row, table.start_col, table.start_row, table.end_col)
+                make_range(qualifier, table.start_row, table.start_col, table.start_row, table.end_col)
             } else {
                 // No header row — return error
                 ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string(), ref_site_id: Default::default() }
@@ -2155,38 +2382,62 @@ fn resolve_single_table_ref(
         }
         ParserTableSpecifier::Totals => {
             if table.style_options.total_row {
-                make_range(None, table.end_row, table.start_col, table.end_row, table.end_col)
+                make_range(qualifier, table.end_row, table.start_col, table.end_row, table.end_col)
             } else {
                 ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::SpecialColumn(special_spec, col_name) => {
-            resolve_special_column(&table, special_spec, col_name, ctx.current_row)
+            resolve_special_column(&table, special_spec, col_name, qualifier)
         }
     }
 }
 
-/// Finds a table by name using the name registry.
+/// Finds a table by name using the name registry, WITH the sheet it lives on.
+///
+/// The sheet index comes from the registry rather than from `Table::sheet_index`
+/// deliberately: the registry is the authority the lookup already went through,
+/// so the pair cannot disagree with itself.
 fn find_table_by_name<'a>(
     name: &str,
     tables: &'a tables::TableStorage,
     table_names: &tables::TableNameRegistry,
-) -> Option<&'a tables::Table> {
+) -> Option<(&'a tables::Table, usize)> {
     let key = name.to_uppercase();
     let (sheet_index, table_id) = table_names.get(&key)?;
-    tables.get(sheet_index)?.get(table_id)
+    Some((tables.get(sheet_index)?.get(table_id)?, *sheet_index))
 }
 
-/// Finds the table that contains the given cell (for implicit table name resolution).
+/// Finds the table that CONTAINS the given cell (for implicit table name
+/// resolution — the bare `[@Column]` form, which means "the table this cell is
+/// in").
+///
+/// BOTH AXES. This used to match on the row range alone, which made every cell
+/// on a table's rows — however far to the side — look like part of it. A bare
+/// specifier in a far column then resolved against a table the formula is not
+/// in and returned a NUMBER; Excel returns `#NAME?`, because the unqualified
+/// form is only legal inside the table (from anywhere else the reference must
+/// name its table, `Sales[@Amount]`).
+///
+/// The ADJACENT column is not this case and must not be confused with it:
+/// `check_table_auto_expand` absorbs a cell one column past `end_col` INTO the
+/// table, so by the time a formula there is resolved the table really does
+/// contain it. That is Excel's behaviour too, and it is handled by extending
+/// the rectangle rather than by matching outside it.
 fn find_table_at_cell(
     tables: &tables::TableStorage,
     sheet_index: usize,
     current_row: u32,
+    current_col: u32,
 ) -> Option<&tables::Table> {
     // Look through all tables on the current sheet
     if let Some(sheet_tables) = tables.get(&sheet_index) {
         for table in sheet_tables.values() {
-            if current_row >= table.start_row && current_row <= table.end_row {
+            if current_row >= table.start_row
+                && current_row <= table.end_row
+                && current_col >= table.start_col
+                && current_col <= table.end_col
+            {
                 return Some(table);
             }
         }
@@ -2210,13 +2461,13 @@ fn index_to_col_letters(col_index: u32) -> String {
 fn resolve_column_ref(
     table: &tables::Table,
     col_name: &str,
-    _include_headers: bool,
+    sheet: Option<String>,
 ) -> ParserExpr {
     match table.get_column_index(col_name) {
         Some(col_idx) => {
             let abs_col = table.start_col + col_idx as u32;
             make_range(
-                None,
+                sheet,
                 table.data_start_row(),
                 abs_col,
                 table.data_end_row(),
@@ -2235,6 +2486,7 @@ fn resolve_this_row_ref(
     table: &tables::Table,
     col_name: &str,
     current_row: u32,
+    sheet: Option<String>,
 ) -> ParserExpr {
     match table.get_column_index(col_name) {
         Some(col_idx) => {
@@ -2242,7 +2494,7 @@ fn resolve_this_row_ref(
             let col_letters = index_to_col_letters(abs_col);
             // Row is 1-indexed in the AST
             ParserExpr::CellRef {
-                sheet: None,
+                sheet,
                 col: col_letters,
                 row: current_row + 1,
                 col_absolute: true,
@@ -2262,7 +2514,7 @@ fn resolve_column_range(
     table: &tables::Table,
     start_col: &str,
     end_col: &str,
-    _include_headers: bool,
+    sheet: Option<String>,
 ) -> ParserExpr {
     let start_idx = table.get_column_index(start_col);
     let end_idx = table.get_column_index(end_col);
@@ -2272,7 +2524,7 @@ fn resolve_column_range(
             let abs_start_col = table.start_col + si as u32;
             let abs_end_col = table.start_col + ei as u32;
             make_range(
-                None,
+                sheet,
                 table.data_start_row(),
                 abs_start_col,
                 table.data_end_row(),
@@ -2292,6 +2544,7 @@ fn resolve_this_row_range(
     start_col: &str,
     end_col: &str,
     current_row: u32,
+    sheet: Option<String>,
 ) -> ParserExpr {
     let start_idx = table.get_column_index(start_col);
     let end_idx = table.get_column_index(end_col);
@@ -2301,7 +2554,7 @@ fn resolve_this_row_range(
             let abs_start_col = table.start_col + si as u32;
             let abs_end_col = table.start_col + ei as u32;
             make_range(
-                None,
+                sheet,
                 current_row,
                 abs_start_col,
                 current_row,
@@ -2320,7 +2573,7 @@ fn resolve_special_column(
     table: &tables::Table,
     special: &ParserTableSpecifier,
     col_name: &str,
-    _current_row: u32,
+    sheet: Option<String>,
 ) -> ParserExpr {
     let col_idx = match table.get_column_index(col_name) {
         Some(idx) => idx,
@@ -2336,23 +2589,23 @@ fn resolve_special_column(
     match special {
         ParserTableSpecifier::Headers => {
             if table.style_options.header_row {
-                make_range(None, table.start_row, abs_col, table.start_row, abs_col)
+                make_range(sheet, table.start_row, abs_col, table.start_row, abs_col)
             } else {
                 ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::Totals => {
             if table.style_options.total_row {
-                make_range(None, table.end_row, abs_col, table.end_row, abs_col)
+                make_range(sheet, table.end_row, abs_col, table.end_row, abs_col)
             } else {
                 ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::AllRows => {
-            make_range(None, table.start_row, abs_col, table.end_row, abs_col)
+            make_range(sheet, table.start_row, abs_col, table.end_row, abs_col)
         }
         ParserTableSpecifier::DataRows => {
-            make_range(None, table.data_start_row(), abs_col, table.data_end_row(), abs_col)
+            make_range(sheet, table.data_start_row(), abs_col, table.data_end_row(), abs_col)
         }
         _ => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_SPECIAL_{}", table.name),
@@ -2764,13 +3017,98 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
     }
 }
 
-/// Scans all formula cells across all grids and applies a repair function.
-/// Used by sheet delete/rename to update 3D reference bookends.
-pub fn repair_all_formulas(
-    grids: &mut [Grid],
+/// One cell whose REPAIRED formula text cannot be read back.
+///
+/// WHY THIS TYPE EXISTS (register §3bc, the `.ok()` leftover). The repair used
+/// to store `parser::parse(&new_formula).ok().map(Box::new)`: a repaired
+/// formula that failed to re-parse became `ast = None`, which is a cell with a
+/// stale value, an EMPTY formula bar and no error anywhere. That swallow is the
+/// mechanism that made every renderer defect silent — the 47 debug-formatted
+/// function names, the missing parentheses, the sheet-name quoting, the `""`
+/// escape — for however long each of them existed. Each produced text that
+/// would not lex, and each was turned into a quietly deleted formula instead of
+/// a visible failure.
+///
+/// EXCEL DECIDES THE SHAPE, per the standing parity rule: Excel refuses the
+/// operation rather than corrupting the workbook. So does this — the repair is
+/// PLAN-THEN-COMMIT and writes nothing at all unless every repaired formula in
+/// the workbook re-parses, and the refusal names the cell so whoever can act on
+/// it (the user, and the log) is told which formula stopped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormulaRepairRefusal {
+    /// Index into the `grids` slice the repair was given.
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    /// The formula as it stands in the workbook now (raw form).
+    pub original: String,
+    /// The text the repair produced, which is what would not parse.
+    pub repaired: String,
+    pub parse_error: String,
+}
+
+impl FormulaRepairRefusal {
+    /// A message for the user. `sheet_names` is the caller's own sheet list,
+    /// indexed the same way as the grids it passed in; an out-of-range index
+    /// degrades to the number rather than panicking.
+    pub fn message(&self, operation: &str, sheet_names: &[String]) -> String {
+        let sheet = sheet_names
+            .get(self.sheet_index)
+            .cloned()
+            .unwrap_or_else(|| format!("#{}", self.sheet_index));
+        format!(
+            "Cannot {}: the formula in {}!{} would be rewritten to `{}`, which cannot be read back ({}). \
+             Nothing was changed.",
+            operation,
+            sheet,
+            calcula_format::cell_ref::to_a1(self.row, self.col),
+            self.repaired,
+            self.parse_error,
+        )
+    }
+}
+
+impl std::fmt::Display for FormulaRepairRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sheet #{} {} : `{}` -> `{}` ({})",
+            self.sheet_index,
+            calcula_format::cell_ref::to_a1(self.row, self.col),
+            self.original,
+            self.repaired,
+            self.parse_error
+        )
+    }
+}
+
+/// What a planned repair does to one cell once the whole plan is accepted.
+enum PlannedRepair {
+    /// Replace the cell's AST with this already-parsed tree.
+    Rewrite(Box<ParserExpr>),
+    /// The formula's reference is gone: the cell becomes `#REF!`.
+    RefError,
+}
+
+/// PLAN the repair of every formula in every grid WITHOUT touching any of them.
+///
+/// Every repaired formula is parsed HERE, before anything is written, so the
+/// caller learns about an unreadable result while the workbook is still intact.
+/// `skip_sheets` omits grids from the walk. Two callers need it: `delete_sheet`
+/// pre-flights the repair before it removes the doomed sheet, and formulas on
+/// that sheet are about to cease to exist, so refusing the delete because of one
+/// of them would be a false refusal; and both sheet commands check the ACTIVE
+/// sheet from `state.grid` instead, because `grids[active]` can lag behind it.
+fn plan_formula_repair(
+    grids: &[Grid],
+    skip_sheets: &[usize],
     repair_fn: &dyn Fn(&str) -> Option<String>,
-) {
-    for grid in grids.iter_mut() {
+) -> Result<Vec<(usize, u32, u32, PlannedRepair)>, FormulaRepairRefusal> {
+    let mut plan: Vec<(usize, u32, u32, PlannedRepair)> = Vec::new();
+    for (sheet_index, grid) in grids.iter().enumerate() {
+        if skip_sheets.contains(&sheet_index) {
+            continue;
+        }
         // RAW, not the display form. `formula_string()` COLLAPSES the internal
         // `__INVOKE__("MyFn", <lambda>, args)` marker a named LAMBDA call
         // carries down to `MyFn(args)`. Repairing that text and re-parsing it
@@ -2780,31 +3118,87 @@ pub fn repair_all_formulas(
         // every named-function call in the workbook, on every sheet, whether or
         // not it mentioned the sheet being changed. The raw form round-trips
         // through the repair untouched.
-        let formula_cells: Vec<((u32, u32), String)> = grid.cells.iter()
+        let mut formula_cells: Vec<((u32, u32), String)> = grid.cells.iter()
             .filter_map(|((r, c), cell)| {
                 cell.formula_string_raw().map(|f| ((*r, *c), f))
             })
             .collect();
+        // Deterministic order so a workbook with two unreadable results always
+        // refuses on the same one and the message does not depend on hash order.
+        formula_cells.sort_by_key(|((r, c), _)| (*r, *c));
 
         for ((row, col), formula) in formula_cells {
             match repair_fn(&formula) {
                 Some(new_formula) => {
                     if new_formula != formula {
-                        if let Some(cell) = grid.cells.get_mut(&(row, col)) {
-                            cell.ast = parser::parse(&new_formula).ok().map(Box::new);
+                        match parser::parse(&new_formula) {
+                            Ok(ast) => plan.push((
+                                sheet_index,
+                                row,
+                                col,
+                                PlannedRepair::Rewrite(Box::new(ast)),
+                            )),
+                            Err(e) => {
+                                return Err(FormulaRepairRefusal {
+                                    sheet_index,
+                                    row,
+                                    col,
+                                    original: formula.clone(),
+                                    repaired: new_formula,
+                                    parse_error: e.to_string(),
+                                })
+                            }
                         }
                     }
                 }
-                None => {
-                    // Formula should become #REF!
-                    if let Some(cell) = grid.cells.get_mut(&(row, col)) {
-                        cell.value = CellValue::Error(CellError::Ref);
-                        cell.ast = None;
-                    }
-                }
+                // Formula should become #REF!
+                None => plan.push((sheet_index, row, col, PlannedRepair::RefError)),
             }
         }
     }
+    Ok(plan)
+}
+
+/// Would the repair go through? Answers without writing anything.
+///
+/// This is the PRE-FLIGHT for a caller that has destructive work to do before
+/// the repair itself can run (`delete_sheet` removes the sheet first). Calling
+/// it means the repair is parsed twice, which is the price of being able to
+/// refuse the whole command before the first mutation — and both sheet
+/// operations are already whole-workbook walks.
+pub fn check_formulas_repairable(
+    grids: &[Grid],
+    skip_sheets: &[usize],
+    repair_fn: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), FormulaRepairRefusal> {
+    plan_formula_repair(grids, skip_sheets, repair_fn).map(|_| ())
+}
+
+/// Scans all formula cells across all grids and applies a repair function.
+/// Used by sheet delete/rename to update 3D reference bookends.
+///
+/// ALL OR NOTHING. Every repaired formula is parsed before ANY cell is written;
+/// if one of them cannot be read back the workbook is left exactly as it was
+/// and the offending cell is returned. A caller that has already mutated other
+/// state must undo that mutation, or refuse before it makes it — see
+/// `check_formulas_repairable`.
+pub fn repair_all_formulas(
+    grids: &mut [Grid],
+    repair_fn: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), FormulaRepairRefusal> {
+    let plan = plan_formula_repair(grids, &[], repair_fn)?;
+    for (sheet_index, row, col, outcome) in plan {
+        let Some(grid) = grids.get_mut(sheet_index) else { continue };
+        let Some(cell) = grid.cells.get_mut(&(row, col)) else { continue };
+        match outcome {
+            PlannedRepair::Rewrite(ast) => cell.ast = Some(ast),
+            PlannedRepair::RefError => {
+                cell.value = CellValue::Error(CellError::Ref);
+                cell.ast = None;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
@@ -5047,6 +5441,7 @@ pub fn run() {
             // Slicer commands
             slicer::create_slicer,
             slicer::delete_slicer,
+            object_deps::list_object_dependents,
             slicer::update_slicer,
             slicer::get_slicer,
             slicer::clear_slicer_filter,

@@ -211,8 +211,9 @@ pub(crate) fn replace_all_off_sheet(
     )?;
 
     // SPILL PROTECTION against the match list, on the TARGET sheet — see the
-    // active twin. It matters MORE here: this path recalculates through the
-    // whole-sheet `recalc_after_off_sheet_write`, which is not spill-aware.
+    // active twin. Rewriting a spilled VALUE in place is refused whatever the
+    // recalculation can do afterwards: the cell is derived state that no
+    // formula produced, so a replacement in it is a value nothing owns.
     crate::commands::data::check_spill_protection_cells(state, target, &matches)?;
 
     let grids = state.grids.lock_pending().unwrap();

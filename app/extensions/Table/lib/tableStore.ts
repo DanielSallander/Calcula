@@ -29,6 +29,29 @@ import {
   type CreateTableParams,
 } from "@api/backend";
 import { cellEvents } from "@api";
+import { emitAppEvent, AppEvents } from "@api/events";
+
+/**
+ * Announce that a table deletion cascaded into other object stores (§3bn).
+ *
+ * Deleting a table deletes the slicers bound to it, backend-side. The Slicer
+ * extension holds its own cache and its overlay claims a rectangle on the grid,
+ * so without this the removed slicer keeps PAINTING and keeps swallowing every
+ * click that lands on it -- which is exactly the symptom that turned the orphan
+ * into a 120 s click-retry timeout in the invariant runner.
+ *
+ * A domain announcement rather than a feature event: the Shell translator owns
+ * the mapping from "slicer" to "slicers:refresh", and an extension naming
+ * another extension's event would be the seam violation the domains exist to
+ * prevent. Emitted unconditionally -- a refresh with nothing to refresh is a
+ * cache re-read, while a missed one is a ghost control.
+ */
+function announceObjectCascade(): void {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "ribbonFilter"],
+    source: "commit",
+  });
+}
 
 // Re-export backend types for consumers
 export type { Table, TableResult, TableStyleOptions };
@@ -94,6 +117,7 @@ export async function deleteTableAsync(tableId: string): Promise<boolean> {
   const result = await backendDeleteTable(tableId);
   if (result.success) {
     await refreshCache();
+    announceObjectCascade();
   }
   return result.success;
 }
@@ -124,6 +148,9 @@ export async function convertToRangeAsync(tableId: string): Promise<boolean> {
   const result = await backendConvertToRange(tableId);
   if (result.success) {
     await refreshCache();
+    // Convert to Range destroys the table object, so it carries the identical
+    // cascade to a delete -- including the slicers Excel removes with it.
+    announceObjectCascade();
   }
   return result.success;
 }

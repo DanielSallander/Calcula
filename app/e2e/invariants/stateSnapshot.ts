@@ -2,7 +2,7 @@
 // PURPOSE: Captures a dual snapshot of logical (backend) and visual (DOM) state
 //          for invariant checking during monkey testing.
 
-import type { Page } from "@playwright/test";
+import type { ConsoleMessage, Page } from "@playwright/test";
 
 // ============================================================================
 // Snapshot Types
@@ -91,28 +91,146 @@ export interface StateSnapshot {
 // Console/Error Tracking
 // ============================================================================
 
+/**
+ * One console message or page error, as it arrived, with the walk step it
+ * arrived during and how long into the run that was.
+ *
+ * WHY A RING AND NOT JUST THE ERRORS. S13 was a `no-console-errors` failure on
+ * a fresh soak seed that never reproduced in sixteen replays. Everything that
+ * could have explained it had been discarded before the bundle was written:
+ *
+ *   - the walker reports a refused/failed script mount with `console.warn`
+ *     (`[walker] script mount refused/failed:`) and only `console.error` was
+ *     captured, so the one line naming the cause was dropped on the floor;
+ *   - `isKnownNoise()` dropped its matches with no record at all, so a
+ *     mis-calibrated filter is indistinguishable from a quiet run;
+ *   - nothing recorded WHEN anything happened, so a ten-second mount deadline
+ *     and an instant failure produced identical evidence.
+ *
+ * An unreproducible failure with a complete bundle beats another sixteen
+ * replays, so everything the page says is kept, in order, with timestamps.
+ */
+export interface ConsoleEntry {
+  /** Walk step during which the message arrived (0 = before the first action). */
+  step: number;
+  /** Milliseconds since `installErrorTracking()`. */
+  atMs: number;
+  /** "error" | "warning" | "log" | "info" | "debug" | ... | "pageerror". */
+  type: string;
+  text: string;
+  /** `url:line:col` the browser attributed the message to, when it reports one. */
+  location: string | null;
+  /** True when `isKnownNoise()` kept this out of the console-error invariant. */
+  filtered: boolean;
+}
+
+export interface ConsoleLog {
+  entries: ConsoleEntry[];
+  /** Entries evicted by the ring — non-zero means `entries` is a TAIL. */
+  dropped: number;
+  capacity: number;
+  /** Wall-clock start the `atMs` offsets are relative to. */
+  startedAt: string;
+}
+
+/**
+ * Ring capacity. A 150-action walk at 250ms settle produces a few hundred
+ * console lines in Vite dev; 2000 keeps a whole ordinary walk verbatim, and
+ * `dropped` says so out loud when it does not.
+ */
+const CONSOLE_RING_CAPACITY = 2000;
+
 /** Accumulated errors since last snapshot - managed by the runner */
 let pendingConsoleErrors: string[] = [];
 let pendingJsExceptions: string[] = [];
 
+/** Everything the page said, in order (see ConsoleEntry). */
+let consoleRing: ConsoleEntry[] = [];
+let consoleRingDropped = 0;
+let trackingStartedAtMs = Date.now();
+let trackingStartedAtIso = new Date().toISOString();
+
+/** The step the runner is currently executing, stamped onto every entry. */
+let currentStep = 0;
+
+/** The live listener pair, so a re-install can detach it (see below). */
+let attached: {
+  page: Page;
+  onConsole: (msg: ConsoleMessage) => void;
+  onPageError: (error: Error) => void;
+} | null = null;
+
+/** Stamp subsequent console entries with the walk step they belong to. */
+export function setWalkStep(step: number): void {
+  currentStep = step;
+}
+
+function pushRingEntry(entry: ConsoleEntry): void {
+  consoleRing.push(entry);
+  while (consoleRing.length > CONSOLE_RING_CAPACITY) {
+    consoleRing.shift();
+    consoleRingDropped++;
+  }
+}
+
 /**
  * Install listeners on the page that accumulate console errors and JS exceptions.
  * Call once at the start of a test run.
+ *
+ * IDEMPOTENT BY DETACHING FIRST. The shrinker builds a fresh runner for every
+ * replay and every runner installs tracking, so without the detach a 30-replay
+ * shrink finishes with 31 live listeners on one page — each pushing the same
+ * message into the same buffer, which multiplies every console error by the
+ * replay number and makes the ring's "N errors" meaningless.
  */
 export function installErrorTracking(page: Page): void {
+  if (attached) {
+    try {
+      attached.page.off("console", attached.onConsole);
+      attached.page.off("pageerror", attached.onPageError);
+    } catch {
+      // Page already closed — the listeners went with it.
+    }
+    attached = null;
+  }
+
   pendingConsoleErrors = [];
   pendingJsExceptions = [];
+  consoleRing = [];
+  consoleRingDropped = 0;
+  currentStep = 0;
+  trackingStartedAtMs = Date.now();
+  trackingStartedAtIso = new Date().toISOString();
 
-  page.on("console", (msg) => {
-    if (msg.type() === "error") {
-      const text = msg.text();
-      // Filter out known noisy errors that aren't real bugs
-      if (isKnownNoise(text)) return;
+  const onConsole = (msg: ConsoleMessage): void => {
+    const type = msg.type();
+    const text = msg.text();
+    // Filter out known noisy errors that aren't real bugs — but RECORD the
+    // fact, so a filter that is swallowing a real defect is visible.
+    const filtered = type === "error" && isKnownNoise(text);
+    let location: string | null = null;
+    try {
+      const loc = msg.location();
+      location = loc?.url
+        ? `${loc.url}:${loc.lineNumber}:${loc.columnNumber}`
+        : null;
+    } catch {
+      location = null;
+    }
+    pushRingEntry({
+      step: currentStep,
+      atMs: Date.now() - trackingStartedAtMs,
+      type,
+      text,
+      location,
+      filtered,
+    });
+    if (type === "error" && !filtered) {
       pendingConsoleErrors.push(text);
     }
-  });
+  };
 
-  page.on("pageerror", (error) => {
+  const onPageError = (error: Error): void => {
     // Capture the top stack frames alongside the message so monkey-found
     // crashes are root-causable. In Vite dev the frames reference the served
     // module URL + line (e.g. .../extensions/Controls/index.ts:125:30), which
@@ -122,10 +240,23 @@ export function installErrorTracking(page: Page): void {
       .slice(1, 6)
       .map((l) => l.trim())
       .filter(Boolean);
-    pendingJsExceptions.push(
-      frames.length ? `${error.message} | ${frames.join(" | ")}` : error.message
-    );
-  });
+    const text = frames.length
+      ? `${error.message} | ${frames.join(" | ")}`
+      : error.message;
+    pushRingEntry({
+      step: currentStep,
+      atMs: Date.now() - trackingStartedAtMs,
+      type: "pageerror",
+      text,
+      location: null,
+      filtered: false,
+    });
+    pendingJsExceptions.push(text);
+  };
+
+  page.on("console", onConsole);
+  page.on("pageerror", onPageError);
+  attached = { page, onConsole, onPageError };
 }
 
 /** Drain accumulated errors (returns and clears the buffer). */
@@ -137,6 +268,16 @@ export function drainErrors(): { consoleErrors: string[]; jsExceptions: string[]
   pendingConsoleErrors = [];
   pendingJsExceptions = [];
   return result;
+}
+
+/** Everything the page has said since tracking was installed. */
+export function getConsoleLog(): ConsoleLog {
+  return {
+    entries: [...consoleRing],
+    dropped: consoleRingDropped,
+    capacity: CONSOLE_RING_CAPACITY,
+    startedAt: trackingStartedAtIso,
+  };
 }
 
 function isKnownNoise(text: string): boolean {

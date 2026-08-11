@@ -32,13 +32,56 @@ export interface ShrinkOptions {
   verbose?: boolean;
 }
 
+/**
+ * What a shrink actually established about its own result.
+ *
+ * THIS WAS A BOOLEAN AND THE BOOLEAN LIED. `stillFails` was initialised to
+ * `true` and only ever assigned by the final confirmation replay — which is
+ * skipped when the replay cap or the time budget is exhausted, the NORMAL
+ * outcome on a long trace. So a shrink that ran out of budget wrote
+ * `replayConfirmed: true` into the bundle without a single replay having
+ * reproduced anything. Three genuinely different results were sharing one
+ * `false` and a fourth was hiding inside `true`:
+ *
+ *   confirmed      — a replay reproduced the original violation on the
+ *                    minimized trace. This is the only value that licenses
+ *                    "here is a repro".
+ *   not-reproduced — replays ran and the original violation never fired. Read
+ *                    `otherOutcomes` before calling it noise: it may have
+ *                    failed reliably a DIFFERENT way.
+ *   unverified     — the budget ran out before anything reproduced. Nothing is
+ *                    known either way; this is not evidence of absence.
+ */
+export type ShrinkVerdict = "confirmed" | "not-reproduced" | "unverified";
+
 export interface ShrinkResult {
   minimized: ActionTrace;
   replays: number;
-  /** True if the minimized trace was re-confirmed to fail. */
-  stillFails: boolean;
+  /** What the shrink established — see ShrinkVerdict. */
+  verdict: ShrinkVerdict;
   /** True if minimization stopped early (budget/cap). */
   truncated: boolean;
+  /**
+   * Every violation id a replay produced that was NOT the one being minimized,
+   * with how many replays produced it — plus `"(passed)"` for replays that did
+   * not fail at all.
+   *
+   * WHY THIS EXISTS. `matches()` accepts only `originalViolationId`, so a
+   * replay that fails with a DIFFERENT id is treated exactly like a replay
+   * that passed, and the only trace of it was one `[shrink]` console line
+   * that nothing read. That threw away the strongest signal a shrink run can
+   * produce: on soak seed 20260811 the original violation (a script-mount
+   * timeout) never reproduced once in 16 replays, so the bundle recorded
+   * `replayConfirmed: false` and read as "nothing here" — while TWELVE OF
+   * TWELVE replays of the 14-action subset had failed, every one of them with
+   * `no-js-exceptions`. A deterministic failure was sitting inside a bundle
+   * that said the failure did not reproduce.
+   *
+   * A run whose original id never reproduces but which fails reliably with
+   * another id is not a non-reproducible failure. It is a DIFFERENT
+   * reproducible failure, and the report has to be able to say so.
+   */
+  otherOutcomes: Record<string, number>;
 }
 
 /**
@@ -62,6 +105,16 @@ export async function minimizeTrace(
 
   let replays = 0;
   let truncated = false;
+  /** See ShrinkResult.otherOutcomes — the signal `matches()` discards. */
+  const otherOutcomes: Record<string, number> = {};
+
+  const record = (outcome: ReplayOutcome): void => {
+    const key = !outcome.failed
+      ? "(passed)"
+      : (outcome.violationId ?? "(unknown)");
+    if (outcome.failed && key === originalViolationId) return;
+    otherOutcomes[key] = (otherOutcomes[key] ?? 0) + 1;
+  };
 
   const matches = (outcome: ReplayOutcome): boolean => {
     if (!outcome.failed) return false;
@@ -76,6 +129,7 @@ export async function minimizeTrace(
     replays++;
     const candidate = subTrace(current, keep);
     const outcome = await replay(candidate);
+    record(outcome);
     if (verbose) {
       console.log(
         `  [shrink] replay ${replays}: ${candidate.actions.length} actions -> ` +
@@ -86,6 +140,13 @@ export async function minimizeTrace(
   }
 
   let current = failingTrace;
+  /**
+   * Has any replay demonstrated that `current` fails? Every accepted reduction
+   * IS such a demonstration (the candidate was kept precisely because it
+   * matched), so a shrink that reduced anything at all has already confirmed
+   * its result even if the budget dies before the final confirmation replay.
+   */
+  let confirmedByReplay = false;
 
   // ---- Phase 1: chunk removal with halving ----
   let chunkCount = 2;
@@ -109,6 +170,7 @@ export async function minimizeTrace(
 
       if (await failsWith(keep, current)) {
         current = subTrace(current, keep);
+        confirmedByReplay = true;
         removedSomething = true;
         // Re-derive chunking against the smaller trace.
         chunkCount = Math.max(2, chunkCount - 1);
@@ -130,6 +192,7 @@ export async function minimizeTrace(
       const keep = current.actions.map((_, j) => j !== i);
       if (await failsWith(keep, current)) {
         current = subTrace(current, keep);
+        confirmedByReplay = true;
         improved = true;
       }
     }
@@ -140,12 +203,45 @@ export async function minimizeTrace(
   }
 
   // ---- Confirm the final minimized trace ----
-  let stillFails = true;
+  //
+  // The confirmation replay is the ideal, but it is exactly what the budget
+  // takes away first, so the fallback is the strongest thing already known:
+  // whether any accepted reduction reproduced the failure. `unverified` is a
+  // real answer and it is not `true`.
+  let verdict: ShrinkVerdict = confirmedByReplay ? "confirmed" : "unverified";
   if (budgetLeft()) {
     replays++;
     const outcome = await replay(current);
-    stillFails = matches(outcome);
+    record(outcome);
+    verdict = matches(outcome) ? "confirmed" : "not-reproduced";
   }
 
-  return { minimized: current, replays, stillFails, truncated };
+  // A shrink that never reproduced its own violation is only "inconclusive" if
+  // the replays also PASSED. If they failed with something else, say which —
+  // in the log as well as the result, because the log is what a human reads
+  // first and the bundle's `replayConfirmed: false` is what misled the last
+  // pass into filing a reproducible defect as noise.
+  if (verdict !== "confirmed" && verbose) {
+    const failed = Object.entries(otherOutcomes).filter(([id]) => id !== "(passed)");
+    if (failed.length > 0) {
+      const summary = failed
+        .sort((a, b) => b[1] - a[1])
+        .map(([id, n]) => `${id} x${n}`)
+        .join(", ");
+      console.log(
+        `  [shrink] "${originalViolationId}" never reproduced, but replays DID fail: ` +
+          `${summary} (${otherOutcomes["(passed)"] ?? 0} passed). ` +
+          `This is a different reproducible failure, not an absent one.`
+      );
+    }
+    if (verdict === "unverified") {
+      console.log(
+        `  [shrink] UNVERIFIED: the budget (${maxReplays} replays / ` +
+          `${Math.round(timeBudgetMs / 1000)}s) ran out before any replay ` +
+          `reproduced "${originalViolationId}". Nothing is known either way.`
+      );
+    }
+  }
+
+  return { minimized: current, replays, verdict, truncated, otherOutcomes };
 }

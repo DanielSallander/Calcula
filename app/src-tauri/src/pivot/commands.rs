@@ -455,6 +455,8 @@ pub fn create_pivot_inner(
     // Write pivot output to destination grid (empty for now, but reserves the space)
     {
         let mut styles = state.style_registry.write(&effect).unwrap();
+        // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+        let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
 
         // Verify destination sheet exists
@@ -489,7 +491,6 @@ pub fn create_pivot_inner(
             // IMPORTANT: If dest_sheet is the currently active sheet, sync state.grid
             let active_sheet = *state.active_sheet.read().unwrap();
             if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.write(&effect).unwrap();
                 // Copy the cells we just wrote to state.grid as well
                 for ((r, c), cell) in dest_grid.cells.iter() {
                     grid.set_cell(*r, *c, cell.clone());
@@ -701,6 +702,9 @@ pub fn undo_pivot_overwrite(
                                 // Restore cells that were overwritten by the pivot expansion
                                 if !snapshot.overwritten_cells.is_empty() {
                                     {
+                                        // CANONICAL GRID LOCK ORDER: `grid`
+                                        // before `grids`.
+                                        let mut grid = state.grid.write(&effect).unwrap();
                                         let mut grids = state.grids.write(&effect).unwrap();
                                         if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
                                             for sc in &snapshot.overwritten_cells {
@@ -709,7 +713,6 @@ pub fn undo_pivot_overwrite(
                                         }
                                         let active_sheet = *state.active_sheet.read().unwrap();
                                         if snapshot.dest_sheet_idx == active_sheet {
-                                            let mut grid = state.grid.write(&effect).unwrap();
                                             for sc in &snapshot.overwritten_cells {
                                                 grid.set_cell(sc.row, sc.col, sc.cell.clone());
                                             }
@@ -1403,6 +1406,8 @@ pub fn delete_pivot_table(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -1410,6 +1415,32 @@ pub fn delete_pivot_table(
     let effect = pivot_mutation_token(&pivot_state, &file_state, pivot_id)?;
 
     log_info!("PIVOT", "delete_pivot_table pivot_id={}", pivot_id);
+
+    // §3bn — THE CASCADE, run here for two reasons. The token above already
+    // proved the pivot exists, so nothing below can refuse; and the restores it
+    // produces have to land inside the ONE undo transaction opened a few lines
+    // down, which means computing them before it opens (the cascade takes the
+    // slicer / timeline / filter locks, and the undo lock is never held across
+    // a store lock).
+    //
+    // A pivot is the widest source in the workbook: slicers bind to it, timeline
+    // slicers bind ONLY to it, and ribbon filters list it as a target. All three
+    // used to survive the delete pointing at an id that resolved to nothing.
+    let cascade = crate::object_deps::cascade_deleted_sources(
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        &effect,
+        &[crate::object_deps::DeletedSource::pivot(pivot_id)],
+    );
+    if !cascade.is_empty() {
+        log_info!(
+            "PIVOT",
+            "delete_pivot_table {} cascaded: {}",
+            pivot_id,
+            cascade.describe()
+        );
+    }
 
     // Get pivot info before removing
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
@@ -1431,8 +1462,14 @@ pub fn delete_pivot_table(
             cache: cache.clone(),
         };
         let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+        {
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            undo_stack.begin_transaction("Delete pivot table");
+        }
+        // Cascade restores FIRST so the reverse replay puts the pivot back
+        // before the slicers that point at it.
+        crate::object_deps::record_source_cascade_undo(&state, &cascade);
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Delete pivot table");
         undo_stack.record_custom_restore("pivot_delete".to_string(), data, "Delete pivot table");
         undo_stack.commit_transaction();
     }
@@ -1445,6 +1482,8 @@ pub fn delete_pivot_table(
     
     // Clear the pivot area from the grid
     if let Some(ref region) = old_region {
+        // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+        let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             clear_pivot_region_from_grid(
@@ -1454,11 +1493,10 @@ pub fn delete_pivot_table(
                 region.end_row,
                 region.end_col,
             );
-            
+
             // Sync to state.grid if this is the active sheet
             let active_sheet = *state.active_sheet.read().unwrap();
             if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.write(&effect).unwrap();
                 for row in region.start_row..=region.end_row {
                     for col in region.start_col..=region.end_col {
                         grid.clear_cell(row, col);
@@ -5593,11 +5631,12 @@ pub async fn create_pivot_from_bi_model(
     // Write empty pivot placeholder to grid
     {
         let mut styles = state.style_registry.write(&effect).unwrap();
+        // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+        let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let active_sheet = *state.active_sheet.read().unwrap();
             let pivot_merges = if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.write(&effect).unwrap();
                 let merges = write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
                 grid.recalculate_bounds();
                 merges
@@ -7224,8 +7263,9 @@ pub fn show_report_filter_pages(
         let mut sheet_names = state.sheet_names.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
 
-        // Skip if sheet already exists
-        if sheet_names.contains(&sheet_name) {
+        // Skip if sheet already exists -- IGNORING CASE, the comparison the
+        // rest of the crate makes when it looks a sheet up by name.
+        if crate::sheet_names::ensure_sheet_name_is_free(&sheet_name, &sheet_names, None).is_err() {
             continue;
         }
 
@@ -7257,21 +7297,16 @@ pub fn show_report_filter_pages(
     Ok(created_sheets)
 }
 
-/// Sanitizes a string for use as a sheet name.
+/// Coerce a FIELD VALUE into a legal sheet name.
+///
+/// One rule, one place: this was a second copy of Excel's character set and
+/// length limit, and it had already drifted from the rule entry enforces -- it
+/// knew nothing about a leading or trailing apostrophe, or about `History`,
+/// both of which entry refuses. `crate::sheet_names` is the single
+/// representation; this is the coercing face of it, for names built out of data
+/// where there is no user to show a message to.
 fn sanitize_sheet_name(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | '?' | '*' | '[' | ']' | ':' => '_',
-            _ => c,
-        })
-        .take(31) // Excel limit
-        .collect();
-    if sanitized.is_empty() {
-        "Sheet".to_string()
-    } else {
-        sanitized
-    }
+    crate::sheet_names::sanitize_sheet_name(name)
 }
 
 // ============================================================================

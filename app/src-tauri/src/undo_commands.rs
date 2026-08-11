@@ -97,12 +97,18 @@ pub(crate) enum MutationDomain {
     /// puts a deleted shape back has to tell it to re-read — `grid:refresh`
     /// repaints from that same stale store and changes nothing.
     Controls,
+    /// Conditional-formatting rule DEFINITIONS. Its own domain for the same
+    /// reason `Validations` is: the ConditionalFormatting extension caches the
+    /// rule list in `cfStore.state.rules` and `grid:refresh` only makes it
+    /// re-EVALUATE that cache, so an undo that adds or removes a rule has to
+    /// say so or the grid keeps painting by the undone rule set.
+    ConditionalFormats,
 }
 
 impl MutationDomain {
     /// Every domain, in declaration order — the iteration order of a set, so a
     /// workbook announces identically on every run.
-    const ALL: [MutationDomain; 11] = [
+    const ALL: [MutationDomain; 12] = [
         MutationDomain::Pivot,
         MutationDomain::Slicer,
         MutationDomain::RibbonFilter,
@@ -114,6 +120,7 @@ impl MutationDomain {
         MutationDomain::Validations,
         MutationDomain::Annotations,
         MutationDomain::Controls,
+        MutationDomain::ConditionalFormats,
     ];
 
     /// The wire name the Shell translator keys off, or `None` for a domain that
@@ -131,6 +138,7 @@ impl MutationDomain {
             MutationDomain::Validations => Some("validations"),
             MutationDomain::Annotations => Some("annotations"),
             MutationDomain::Controls => Some("controls"),
+            MutationDomain::ConditionalFormats => Some("conditionalFormats"),
         }
     }
 }
@@ -186,6 +194,29 @@ pub struct UndoState {
     /// probe this first: `begin_transaction` is a no-op while a transaction is
     /// open, so an unconditional commit would close SOMEONE ELSE'S group early.
     pub transaction_open: bool,
+    /// The history ids on the undo stack, oldest first.
+    ///
+    /// Exists because `undo_depth` is a SIZE, not a position, and the two were
+    /// being confused. The undo-round-trip oracle remembered a depth, acted,
+    /// and then undid `depth_now - depth_then` steps to return to the
+    /// remembered state -- arithmetic that is only sound while the history cap
+    /// is out of reach. Past the cap, every push drops the oldest entry, the
+    /// depth stops growing, and the difference under-counts: the oracle walked
+    /// back a fraction of the distance and reported whatever the walk had done
+    /// in between as an undo defect. (That is the whole of S12's "un-undone
+    /// cell edit" and "table restored that never existed" -- the two leftovers
+    /// were the OLDEST actions of the window, which is what "did not go back
+    /// far enough" looks like from the outside.)
+    ///
+    /// With ids the question is exact: remember the id on top, and later count
+    /// the entries ABOVE it. If it is absent, the remembered state is
+    /// unreachable and no step count restores it.
+    pub undo_seqs: Vec<u64>,
+    /// How many transactions the size cap has dropped over this document's
+    /// lifetime. The only evidence eviction leaves.
+    pub evicted_total: u64,
+    /// The history cap (Excel keeps 100 too).
+    pub history_limit: usize,
 }
 
 /// Convert engine::UndoMergeRegion to api_types::MergedRegion
@@ -253,6 +284,8 @@ pub(crate) fn rebuild_all_dependencies(state: &AppState) {
             named_ranges: &named_ranges,
             tables: &tables,
             table_names: &table_names,
+            sheet_names: &sheet_names,
+            spill_ranges: &state.spill_ranges,
         },
         state,
     );
@@ -282,6 +315,8 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
     let mut name_dependents_map = state.name_dependents.lock().unwrap();
     let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
+    let mut table_dependents_map = state.table_dependents.lock().unwrap();
+    let mut table_dependencies_map = state.table_dependencies.lock().unwrap();
     let mut cross_sheet_dependents = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies = state.cross_sheet_dependencies.lock().unwrap();
 
@@ -297,6 +332,11 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     // only and are rebuilt with it.
     name_dependents_map.clear();
     name_dependencies_map.clear();
+    // STRUCTURED-REFERENCE edges are single-sheet for the same reason (§2aj):
+    // keyed by table name with no sheet dimension, so they describe the active
+    // sheet only and are rebuilt with it.
+    table_dependents_map.clear();
+    table_dependencies_map.clear();
 
     // The cross-sheet maps are GLOBAL across sheets — only rebuild the
     // ACTIVE sheet's edges. Wholesale clearing here would orphan every other
@@ -333,7 +373,7 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
             // the first sheet switch or structural undo would quietly drop that
             // edge and editing the precedent would move nothing.
             let expanded =
-                crate::name_resolution::eval_ast(ast, &name_tables.at(active_sheet, row));
+                crate::name_resolution::eval_ast(ast, &name_tables.at(active_sheet, row, col));
             let refs = extract_all_references(&expanded, &grid);
 
             if !refs.cells.is_empty() {
@@ -369,6 +409,19 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
                     names,
                     &mut name_dependencies_map,
                     &mut name_dependents_map,
+                );
+            }
+            // ...and the TABLE edges, from the same tree and for the same
+            // reason: the stored form keeps `Sales[Amount]` (§2aj), so a sheet
+            // switch or a structural undo would otherwise drop every edge that
+            // makes a table resize a recalculation.
+            let read_tables = crate::table_deps::tables_of_cell(cell);
+            if !read_tables.is_empty() {
+                crate::table_deps::update_table_dependencies(
+                    (row, col),
+                    read_tables,
+                    &mut table_dependencies_map,
+                    &mut table_dependents_map,
                 );
             }
             if !refs.cross_sheet_cells.is_empty() {
@@ -416,6 +469,9 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
         undo_depth: undo_stack.undo_depth(),
         redo_depth: undo_stack.redo_depth(),
         transaction_open: undo_stack.has_open_transaction(),
+        undo_seqs: undo_stack.undo_seqs(),
+        evicted_total: undo_stack.evicted_total(),
+        history_limit: undo_stack.max_size(),
     }
 }
 
@@ -482,8 +538,15 @@ pub(crate) fn apply_changes(
     // override and resurrects the undone edit.
     let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
 
-    // Build the inverse transaction
+    // Build the inverse transaction.
+    //
+    // It inherits the popped transaction's history id. The inverse IS the same
+    // point in history seen from the other side, so undo-then-redo has to put
+    // the SAME id back on the undo stack -- a fresh one would make every
+    // caller that remembered that point (the undo-round-trip oracle) conclude
+    // the point had been lost.
     let mut inverse_transaction = Transaction::new(description.clone());
+    inverse_transaction.seq = transaction.seq;
 
     // Apply changes in REVERSE order for proper undo/redo semantics
     for change in transaction.changes.iter().rev() {
@@ -1108,7 +1171,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         ("obj_comments", MutationDomains::of(Annotations)),
         ("obj_notes", MutationDomains::of(Annotations)),
         ("obj_hyperlinks", MutationDomains::of(Hyperlinks)),
-        ("obj_conditional_formats", NONE),
+        ("obj_conditional_formats", MutationDomains::of(ConditionalFormats)),
         ("obj_sheet_protection", NONE), ("obj_sheet_protection_record", NONE),
         // Carries the per-sheet OUTLINE among its four stores.
         ("obj_coord_stores", MutationDomains::of(Outline)),
@@ -1422,9 +1485,9 @@ fn apply_sheet_structural_restore(
     report.wrote_sheet(idx);
 
     let mut inverse = {
+        let mut mirror = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
         let active = *state.active_sheet.read().unwrap();
-        let mut mirror = state.grid.write(&effect).unwrap();
         let mut mirror_cw = state.column_widths.write(&effect).unwrap();
         let mut mirror_rh = state.row_heights.write(&effect).unwrap();
         let mut all_cw = state.all_column_widths.write(&effect).unwrap();
@@ -1640,9 +1703,9 @@ fn apply_calp_reset_restore(
         // widths/heights live in the MIRRORS (take-semantics) — capture and
         // restore through them for that sheet.
         let mut inverse = {
+            let mut mirror = state.grid.write(&effect).unwrap();
             let mut grids = state.grids.write(&effect).unwrap();
             let active = *state.active_sheet.read().unwrap();
-            let mut mirror = state.grid.write(&effect).unwrap();
             let mut mirror_cw = state.column_widths.write(&effect).unwrap();
             let mut mirror_rh = state.row_heights.write(&effect).unwrap();
             let mut all_cw = state.all_column_widths.write(&effect).unwrap();
@@ -2142,6 +2205,11 @@ fn apply_pivot_definition_restore(
 
         // Restore cells that were overwritten by the previous pivot expansion
         if !snapshot.overwritten_cells.is_empty() {
+            // CANONICAL GRID LOCK ORDER: `grid` before `grids` — see the note in
+            // `state_digest.rs`. The mirror used to be taken inside the
+            // active-sheet branch, i.e. AFTER `grids`, which is the order that
+            // deadlocks against the background recalculation pass.
+            let mut grid = state.grid.write(&effect).unwrap();
             let mut grids = state.grids.write(&effect).unwrap();
             if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
                 for sc in &snapshot.overwritten_cells {
@@ -2150,7 +2218,6 @@ fn apply_pivot_definition_restore(
             }
             let active_sheet = *state.active_sheet.read().unwrap();
             if snapshot.dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.write(&effect).unwrap();
                 for sc in &snapshot.overwritten_cells {
                     grid.set_cell(sc.row, sc.col, sc.cell.clone());
                 }
@@ -2198,6 +2265,8 @@ fn apply_pivot_create_restore(
         // Clear the pivot grid region
         let old_region = get_pivot_region(state, pivot_id);
         if let Some(ref region) = old_region {
+            // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+            let mut grid = state.grid.write(&effect).unwrap();
             let mut grids = state.grids.write(&effect).unwrap();
             if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
                 clear_pivot_region_from_grid(
@@ -2208,7 +2277,6 @@ fn apply_pivot_create_restore(
 
                 let active_sheet = *state.active_sheet.read().unwrap();
                 if dest_sheet_idx == active_sheet {
-                    let mut grid = state.grid.write(&effect).unwrap();
                     for row in region.start_row..=region.end_row {
                         for col in region.start_col..=region.end_col {
                             grid.clear_cell(row, col);
@@ -2728,12 +2796,10 @@ pub(crate) fn record_sheet_protection_record_undo(
 ///
 /// Whole-sheet Vec swap because the Vec ORDER is evaluation semantics
 /// (`priority` ordering, and `stop_if_true` breaks the loop), so restoring
-/// rules individually could not reproduce it.
-///
-/// This is the FIRST undo entry conditional formatting has ever had — the CF
-/// commands themselves record none (tracked as BUG-0020). It exists so a
-/// structural shift of rule ranges is undoable; it does not make add/update/
-/// delete undoable.
+/// rules individually could not reproduce it. The same reason makes it the
+/// right shape for the rule COMMANDS too: `add` recomputes a priority from the
+/// current maximum and re-sorts, and `reorder` renumbers every rule, so no
+/// per-rule inverse exists.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ConditionalFormatsObjSnapshot {
     sheet_index: usize,
@@ -2748,6 +2814,23 @@ pub(crate) fn conditional_formats_snapshot_bytes(
 ) -> Vec<u8> {
     serde_json::to_vec(&ConditionalFormatsObjSnapshot { sheet_index, previous })
         .unwrap_or_default()
+}
+
+/// Record undo for a command that rewrites one sheet's conditional-format
+/// rules. `previous` is the rule list BEFORE the mutation (empty = the sheet
+/// had none, and undo restores exactly that).
+///
+/// Call AFTER dropping the `conditional_formats` guard: this takes the
+/// undo-stack lock and `record_object_undo` opens its own transaction when
+/// none is open.
+pub(crate) fn record_conditional_formats_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+    description: &str,
+) {
+    let data = conditional_formats_snapshot_bytes(sheet_index, previous);
+    record_object_undo(state, "obj_conditional_formats", data, description);
 }
 
 /// Snapshot for the "obj_cell_types" CustomRestore — every cell-type
@@ -3107,14 +3190,45 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_autofilter snapshot: {}", e); return; }
             };
-            let mut auto_filters = state.auto_filters.write(effect).unwrap();
-            let current = auto_filters.remove(&snap.sheet_index);
-            push_obj_inverse(inverse_transaction, kind, &AutoFilterObjSnapshot {
-                sheet_index: snap.sheet_index,
-                previous: current,
-            });
-            if let Some(prev) = snap.previous {
-                auto_filters.insert(snap.sheet_index, prev);
+            let restored_filter = {
+                let mut auto_filters = state.auto_filters.write(effect).unwrap();
+                let current = auto_filters.remove(&snap.sheet_index);
+                push_obj_inverse(inverse_transaction, kind, &AutoFilterObjSnapshot {
+                    sheet_index: snap.sheet_index,
+                    previous: current,
+                });
+                if let Some(prev) = snap.previous {
+                    auto_filters.insert(snap.sheet_index, prev);
+                }
+                auto_filters.get(&snap.sheet_index).cloned()
+            };
+            // OWNERSHIP IS DERIVED, AND UNDO IS ONE OF THE PLACES THAT HAS TO
+            // RE-DERIVE IT.
+            //
+            // `Table.auto_filter_id` is not persisted and is not maintained
+            // incrementally: `relink_autofilter_owner` recomputes it "wherever
+            // the sheet's filter is created, replaced or removed" (tables.rs).
+            // An undo does all three and did none of the recomputing, so
+            // winding back past a filter change left every table on the sheet
+            // claiming nothing — the table's own filter button silently stopped
+            // being the filter's owner.
+            //
+            // Found by the soak walk's undo round-trip oracle on fresh seed
+            // 1786446166374, which failed twice out of two runs with
+            // `tables.<id>.autoFilterId: "<id>" -> "<absent>"` and passes 150/150
+            // with this in place.
+            //
+            // The `auto_filters` guard is DROPPED before `tables` is taken — one
+            // lock at a time. `Persisted<T>` is a Mutex, not an RwLock, so every
+            // pair held simultaneously is another edge in a graph that has
+            // deadlocked this app repeatedly; this arm adds none.
+            if let Ok(mut tables) = state.tables.write(effect) {
+                if let Some(sheet_tables) = tables.get_mut(&snap.sheet_index) {
+                    crate::tables::relink_autofilter_owner(
+                        sheet_tables,
+                        restored_filter.as_ref(),
+                    );
+                }
             }
         }
         "obj_validation" => {
@@ -3798,7 +3912,9 @@ mod restore_registry_tests {
             ("obj_comments", true, obj_plus(Annotations)),
             ("obj_notes", true, obj_plus(Annotations)),
             ("obj_hyperlinks", true, obj_plus(Hyperlinks)),
-            ("obj_conditional_formats", true, OBJ),
+            // ConditionalFormats, not bare OBJ: the extension caches the rule
+            // LIST, and `grid:refresh` only makes it re-evaluate that cache.
+            ("obj_conditional_formats", true, obj_plus(ConditionalFormats)),
             ("obj_sheet_protection", true, OBJ),
             ("obj_sheet_protection_record", true, OBJ),
             ("obj_coord_stores", true, obj_plus(Outline)),
@@ -4347,3 +4463,7 @@ mod sheet_tagged_restore_tests {
 #[cfg(test)]
 #[path = "undo_sheet_domain_tests.rs"]
 mod undo_sheet_domain_tests;
+
+#[cfg(test)]
+#[path = "undo_s12_soak_leak_tests.rs"]
+mod undo_s12_soak_leak_tests;

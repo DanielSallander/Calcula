@@ -41,6 +41,7 @@ pub fn get_error_indicators(
     end_col: u32,
 ) -> Vec<CellErrorIndicator> {
     let grid = state.grid.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
     let mut indicators = Vec::new();
 
     for row in start_row..=end_row {
@@ -73,7 +74,11 @@ pub fn get_error_indicators(
                             row,
                             col,
                             error_type: error_indicator_type(err).to_string(),
-                            message: error_explanation(err, &error_display),
+                            message: error_explanation(
+                                err,
+                                &error_display,
+                                spill_obstruction(&state, active_sheet, row, col),
+                            ),
                         });
                     }
                 }
@@ -99,15 +104,48 @@ pub fn get_error_indicators(
 fn error_indicator_type(err: &engine::CellError) -> &'static str {
     match err {
         engine::CellError::Limit => "calculationLimit",
+        // Same argument as `#LIMIT!`, one step further: `#SPILL!`'s remedy is
+        // not in the formula at all, it is in ANOTHER CELL. Excel gives it its
+        // own error-checking class with a "Select Obstructing Cells" action for
+        // exactly that reason, and a shared "formulaError" category would make
+        // "4 arrays are blocked" unanswerable.
+        engine::CellError::Spill => "spillBlocked",
         _ => "formulaError",
     }
+}
+
+/// The address of whatever is blocking the dynamic array at `(row, col)`, if
+/// that cell is currently `#SPILL!`.
+///
+/// Read from `AppState.spill_blocks`, which the three spill-decision sites in
+/// `commands/data.rs` write in the same breath as the error value — so a
+/// `#SPILL!` without an entry means the map and the cell value have drifted,
+/// and the message says so rather than inventing an address.
+fn spill_obstruction(state: &AppState, sheet: usize, row: u32, col: u32) -> Option<String> {
+    let blocks = state.spill_blocks.lock().ok()?;
+    let &(br, bc) = blocks.get(&(sheet, row, col))?;
+    Some(calcula_format::cell_ref::to_a1(br, bc))
 }
 
 /// The message shown next to the indicator. For `#LIMIT!` this must NOT read
 /// like a type error: a user sent to "check your arguments" by a runaway
 /// recursion will not find anything wrong with them.
-fn error_explanation(err: &engine::CellError, display: &str) -> String {
+fn error_explanation(
+    err: &engine::CellError,
+    display: &str,
+    obstruction: Option<String>,
+) -> String {
     match err {
+        engine::CellError::Spill => match obstruction {
+            Some(at) => format!(
+                "{}: this formula returns a range of values, and it cannot write                  them because {} is not empty. Clear {} (or move this formula)                  and the array will spill.",
+                display, at, at
+            ),
+            None => format!(
+                "{}: this formula returns a range of values and something is                  occupying the cells it needs. Clear them and the array will                  spill.",
+                display
+            ),
+        },
         engine::CellError::Limit => format!(
             "{}: this formula exceeded the calculation limit. It is either far \
              more expensive than a single cell is allowed to be, or it never \

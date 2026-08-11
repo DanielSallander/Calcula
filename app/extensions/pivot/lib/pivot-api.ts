@@ -277,7 +277,16 @@ export async function getPivotCellWindow(
  * Deletes a pivot table.
  */
 export async function deletePivotTable(pivotId: PivotId): Promise<void> {
-  return apiDeletePivotTable(pivotId);
+  await apiDeletePivotTable(pivotId);
+  // §3bn: the delete cascaded into the slicers and timeline slicers bound to
+  // this pivot and pruned it from every ribbon filter that targeted it. Those
+  // extensions cache their own objects and paint their own overlays, so a
+  // removed one goes on rendering -- and swallowing clicks -- until it re-reads.
+  // Domains, not feature events: the Shell owns that mapping.
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "pivot", "ribbonFilter"],
+    source: "commit",
+  });
 }
 
 /**

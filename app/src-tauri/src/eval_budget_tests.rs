@@ -341,8 +341,8 @@ fn a_long_batch_of_cheap_expressions_never_trips_the_aggregate() {
 fn state_with_formulas(count: u32) -> crate::AppState {
     let state = crate::create_app_state();
     {
-        let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         let mut mirror = state.grid.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+        let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
         grids[0].set_cell(0, 0, Cell::new_number(7.0));
         mirror.set_cell(0, 0, Cell::new_number(7.0));
         for r in 1..=count {

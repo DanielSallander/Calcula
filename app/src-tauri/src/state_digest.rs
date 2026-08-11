@@ -215,6 +215,102 @@ fn digest_cells(
 /// Reads the active sheet from the `state.grid` mirror (NOT `grids[active]`,
 /// which is stale — see get_watch_cells in commands/data.rs) and all other
 /// sheets from `state.grids`.
+// ============================================================================
+// DEADLOCK WATCHDOG
+// ============================================================================
+//
+// TWICE IN ONE SESSION the app stopped answering with this function's own entry
+// line as the last thing in the log and no completion, no panic and no crash --
+// once on soak seed 20260810, once on 1786446166374. A hang leaves no evidence
+// at all: the window goes "Not Responding", every later test in the run fails
+// against a dead page, and the only thing anyone can say afterwards is "it was
+// in the digest somewhere".
+//
+// The digest takes about thirty locks. `Persisted<T>` is a **Mutex**, not an
+// RwLock -- `read()` is `lock()` -- so every one of them excludes every other
+// holder, and any of them can be the one. Knowing WHICH is the whole diagnosis,
+// and it is the one thing the log could not say.
+//
+// So the digest now announces the phase it is in, and a watchdog thread prints
+// the last phase reached if the call has not finished. It costs one relaxed
+// atomic store per phase and one thread per digest -- the digest is a test-only
+// oracle command, invoked a few times per checkpoint, so that is nothing.
+//
+// This does not FIX a deadlock. It converts one from "the app is wedged and
+// nobody knows why" into a line naming the section, which is the difference
+// between a defect that can be fixed and one that has now cost three passes.
+
+/// Phase names, indexed by the atomic below. Order is the digest's own order.
+const DIGEST_PHASES: &[&str] = &[
+    "0: entry",
+    "1: per-sheet block (grid, grids, dims, merges, freeze, tab colors, zoom)",
+    "2: named ranges + named styles",
+    "3: tables",
+    "4: slicers + ribbon filters + charts + sparklines",
+    "5: pivots",
+    "6: conditional formats + data validation",
+    "7: comments + notes + hyperlinks + auto filters + outlines + scenarios",
+    "8: controls + computed properties",
+    "9: protection + advanced-filter hidden rows",
+    "10: protected regions + pivot layouts + object scripts + theme + defaults",
+    "11: assembling the result",
+];
+
+static DIGEST_PHASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn digest_phase(index: usize) {
+    DIGEST_PHASE.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Prints the last phase reached if the digest has not returned in time.
+struct DigestWatchdog {
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl DigestWatchdog {
+    /// How long a digest may take before it is reported as stuck. Generous: a
+    /// full digest of a large workbook on a debug build is still well under a
+    /// second, and this must never cry wolf on a merely slow machine.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn start() -> Self {
+        digest_phase(0);
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Self::BUDGET;
+            while std::time::Instant::now() < deadline {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let phase = DIGEST_PHASE.load(std::sync::atomic::Ordering::Relaxed);
+            let name = DIGEST_PHASES.get(phase).copied().unwrap_or("<unknown>");
+            crate::log_error!(
+                "DIGEST",
+                "STUCK: the workbook digest has not returned in {:?}. Last phase \
+                 reached: {}. A lock this phase takes is held by another thread \
+                 and never released -- the app is deadlocked, the window will \
+                 stop answering, and every later command will queue behind it.",
+                Self::BUDGET,
+                name
+            );
+        });
+        DigestWatchdog { finished }
+    }
+}
+
+impl Drop for DigestWatchdog {
+    fn drop(&mut self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[tauri::command]
 pub fn get_workbook_state_digest(
     state: State<AppState>,
@@ -223,21 +319,75 @@ pub fn get_workbook_state_digest(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     options: Option<DigestOptions>,
 ) -> Result<WorkbookStateDigest, String> {
+    build_workbook_state_digest(
+        &state,
+        &pivot_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        options,
+    )
+}
+
+/// The digest itself, as a PLAIN FUNCTION over the states.
+///
+/// Split out of the command for the reason `run_calculation_pass` gives for the
+/// same split: a `#[tauri::command]` body takes `State` and cannot be called
+/// from a unit test, so its LOCK ORDER -- the thing that hung the app -- could
+/// only ever be asserted against its source text. It is now asserted by running
+/// it, from `state_digest_lock_order_tests`.
+pub(crate) fn build_workbook_state_digest(
+    state: &AppState,
+    pivot_state: &crate::pivot::types::PivotState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    options: Option<DigestOptions>,
+) -> Result<WorkbookStateDigest, String> {
     let opts = options.unwrap_or_default();
     log_info!("DIGEST", "get_workbook_state_digest cells_only={}", opts.cells_only);
-
-    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-    let sheet_count = sheet_names.len();
-    let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
+    let _watchdog = DigestWatchdog::start();
 
     let mut used_styles: BTreeMap<usize, Value> = BTreeMap::new();
-    let mut sheets: Vec<SheetDigest> = Vec::with_capacity(sheet_count);
 
     // ---- Per-sheet content ----
-    {
-        let grids = state.grids.read().map_err(|e| e.to_string())?;
+    //
+    // LOCK ORDER IS LOAD-BEARING HERE, AND GETTING IT WRONG HUNG THE WHOLE APP.
+    //
+    // `run_calculation_pass` takes `grid` (the active-sheet mirror) and THEN
+    // `grids` (every sheet), holds both for the entire evaluation, and -- since
+    // it was made an async command so Cancel could work -- runs on a background
+    // thread. A synchronous command runs on the MAIN thread. So the two really
+    // do overlap, and this command used to take the same two locks the other
+    // way round:
+    //
+    //   pass   (bg thread): grid.write()  held ... wants grids.write()
+    //   digest (main)     : grids.read()  held ... wants grid.read()
+    //
+    // Neither can proceed. The main thread is inside a sync command, so the
+    // WebView2 message pump stops with it: the window goes "Not Responding" and
+    // there is no crash, no panic and no log line -- the last thing written is
+    // this function's own "DIGEST" line, with no matching CMD completion.
+    // OBSERVED LIVE on the soak walk (seed 20260810): the app hung for 27
+    // minutes until it was killed, and every replay the minimiser attempted
+    // afterwards timed out against a dead page.
+    //
+    // So this block acquires in the PASS's order: grid, grids, sheet_names,
+    // active_sheet, style_registry, locale. Everything else it reads
+    // (dimensions, merges, freeze configs) the pass either clones before it
+    // takes any grid lock, or never touches.
+    digest_phase(1);
+    let sheets_and_styles = {
+        // `grid` FIRST, then `grids` — the pass's order. The two lines below
+        // were the other way round in the shipped tree even though the comment
+        // above and both guards in `state_digest_lock_order_tests` describe
+        // this order: the fix's prose landed and its code did not. It hung the
+        // app again, live, on soak seed 1786446166374 (see the register).
         let active_grid = state.grid.read().map_err(|e| e.to_string())?;
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+        let sheet_count = sheet_names.len();
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
+        let mut sheets: Vec<SheetDigest> = Vec::with_capacity(sheet_count);
         let styles = state.style_registry.read().map_err(|e| e.to_string())?;
         let all_cw = state.all_column_widths.read().map_err(|e| e.to_string())?;
         let all_rh = state.all_row_heights.read().map_err(|e| e.to_string())?;
@@ -383,7 +533,9 @@ pub fn get_workbook_state_digest(
                 scroll_area: scroll_areas.get(i).cloned().flatten(),
             });
         }
-    }
+        (sheets, sheet_names, active_sheet)
+    };
+    let (sheets, sheet_names, active_sheet) = sheets_and_styles;
 
     let mut digest = WorkbookStateDigest {
         version: 1,
@@ -424,6 +576,7 @@ pub fn get_workbook_state_digest(
     }
 
     // ---- Workbook-level stores ----
+    digest_phase(2);
     if let Ok(named_ranges) = state.named_ranges.read() {
         for (name, nr) in named_ranges.iter() {
             digest.named_ranges.insert(name.clone(), to_value_or_null(nr));
@@ -434,6 +587,7 @@ pub fn get_workbook_state_digest(
             digest.named_styles.insert(name.clone(), to_value_or_null(ns));
         }
     }
+    digest_phase(3);
     if let Ok(tables) = state.tables.read() {
         for sheet_tables in tables.values() {
             for (id, table) in sheet_tables.iter() {
@@ -441,6 +595,7 @@ pub fn get_workbook_state_digest(
             }
         }
     }
+    digest_phase(4);
     if let Ok(slicers) = slicer_state.slicers.read() {
         for (id, slicer) in slicers.iter() {
             digest.slicers.insert(id_key(id), to_value_or_null(slicer));
@@ -470,6 +625,7 @@ pub fn get_workbook_state_digest(
             groups.sort_unstable();
         }
     }
+    digest_phase(5);
     if let Ok(pivot_tables) = pivot_state.pivot_tables.read() {
         for (id, (definition, _cache)) in pivot_tables.iter() {
             digest.pivots.insert(id_key(id), to_value_or_null(definition));
@@ -482,6 +638,7 @@ pub fn get_workbook_state_digest(
     // which any delete-the-last-rule path produces, including the structural
     // shift — showed up as a phantom `"0": []` that vanished across a
     // save/reload or undo/redo round trip and was reported as a diff.
+    digest_phase(6);
     if let Ok(cf) = state.conditional_formats.read() {
         for (sheet, defs) in cf.iter() {
             if defs.is_empty() {
@@ -514,6 +671,7 @@ pub fn get_workbook_state_digest(
         }
         value
     }
+    digest_phase(7);
     if let Ok(comments) = state.comments.read() {
         for (sheet, sheet_comments) in comments.iter() {
             for ((row, col), comment) in sheet_comments.iter() {
@@ -570,6 +728,7 @@ pub fn get_workbook_state_digest(
                 .insert(sheet.to_string(), to_value_or_null(list));
         }
     }
+    digest_phase(8);
     if let Ok(controls) = state.controls.read() {
         for ((sheet, row, col), metadata) in controls.iter() {
             digest.controls.insert(
@@ -613,6 +772,7 @@ pub fn get_workbook_state_digest(
             );
         }
     }
+    digest_phase(9);
     if let Ok(protection) = state.sheet_protection.read() {
         for (sheet, p) in protection.iter() {
             digest
@@ -632,6 +792,7 @@ pub fn get_workbook_state_digest(
                 .insert(sheet.to_string(), sorted);
         }
     }
+    digest_phase(10);
     if let Ok(regions) = state.protected_regions.lock() {
         let mut list: Vec<Value> = regions
             .iter()
@@ -661,6 +822,7 @@ pub fn get_workbook_state_digest(
         digest.theme = to_value_or_null(&*theme);
     }
 
+    digest_phase(11);
     let default_row_height = *state.default_row_height.read().map_err(|e| e.to_string())?;
     let default_column_width = *state.default_column_width.read().map_err(|e| e.to_string())?;
     let reference_style = state.reference_style.lock().map_err(|e| e.to_string())?.clone();

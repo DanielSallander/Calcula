@@ -91,10 +91,18 @@ pub fn update_chart(
 }
 
 /// Delete a chart entry by ID.
+///
+/// §3bn: a pane-control slider or dropdown can be BOUND to a chart parameter
+/// (`chartParamTarget`), and the binding used to outlive the chart — every drag
+/// then drove a chart id that resolved to nothing. The control SURVIVES with its
+/// name, its value and its place in the strip (every `GET.CONTROLVALUE` reading
+/// it keeps working); only the dead binding goes. Deleting a chart must not
+/// delete the slider.
 #[tauri::command]
 pub fn delete_chart(
     state: State<AppState>,
     file_state: State<FileState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     id: identity::EntityId,
 ) -> Result<(), String> {
     // allowEditObjects option gate. The sheet comes from the chart itself, so
@@ -121,7 +129,37 @@ pub fn delete_chart(
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         charts.retain(|c| c.id != id);
     }
+    // §3bn: pane controls bound to this chart's parameters. Computed before the
+    // transaction opens because it takes the pane-control lock.
+    let pruned_controls =
+        crate::object_deps::cascade_deleted_charts(&pane_control_state, &[id]);
+    // ONE transaction for the chart and everything the delete unbound.
+    // `record_chart_undo` joins an already-open transaction rather than opening
+    // its own, so the cascade entries recorded first restore LAST — after the
+    // chart is back for them to point at.
+    //
+    // The `opened` flag is not ceremony: `begin_transaction` is a NO-OP when one
+    // is already open, but `commit_transaction` is not — an unconditional pair
+    // called from inside a script batch would commit the CALLER's transaction
+    // early and split one undo step into two. Same guard `create_table` uses.
+    let opened_transaction = {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let opened = !undo_stack.has_open_transaction();
+        if opened {
+            undo_stack.begin_transaction("Delete chart".to_string());
+        }
+        opened
+    };
+    crate::object_deps::record_pane_control_prune_undo(
+        &state,
+        &pruned_controls,
+        "Restore chart binding",
+    );
     crate::undo_commands::record_chart_undo(&state, id, Some(previous), "Delete chart");
+    if opened_transaction {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo_stack.commit_transaction();
+    }
     // C10: a deleted chart must not leave its object script mounted/persisted.
     crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &id.to_string());
     Ok(())

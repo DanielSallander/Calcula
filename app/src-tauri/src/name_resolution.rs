@@ -92,6 +92,27 @@ pub struct NameTables<'a> {
     pub named_ranges: &'a HashMap<String, NamedRange>,
     pub tables: &'a crate::tables::TableStorage,
     pub table_names: &'a crate::tables::TableNameRegistry,
+    /// The workbook's sheet names, in index order — for QUALIFYING a structured
+    /// reference that names a table on another sheet. See
+    /// [`crate::TableRefContext::sheet_names`]: without it, `=SUM(Sales[Amount])`
+    /// written on Sheet2 resolved to Sheet2's own `A2:A4`.
+    pub sheet_names: &'a [String],
+    /// The LIVE spill map, for `A1#` (§3bf).
+    ///
+    /// THE LOCK IS TAKEN HERE, per evaluated cell that actually contains a
+    /// spill reference, and that is deliberate rather than an oversight. A
+    /// snapshot cannot work: within ONE cascade an array is re-laid and then a
+    /// formula reading `A1#` is evaluated, so anything taken at the start of the
+    /// pass would answer with the extent that cascade just replaced — §3bf
+    /// again, merely narrowed to one pass. The gate is
+    /// [`crate::ast_has_spill_refs`], the same shape `ast_has_table_refs`
+    /// already costs on this path, so a workbook with no `#` never locks.
+    ///
+    /// **A caller must not hold this lock across an evaluation.** `std::Mutex`
+    /// is not reentrant and this would deadlock;
+    /// `no_spill_map_holder_also_resolves_a_formula` in `spill_ref_tests`
+    /// enumerates the crate and refuses the combination.
+    pub spill_ranges: &'a std::sync::Mutex<crate::SpillRangeMap>,
 }
 
 impl<'a> NameTables<'a> {
@@ -100,13 +121,16 @@ impl<'a> NameTables<'a> {
     /// `sheet_index` is the sheet the cell LIVES ON, not the active sheet: name
     /// scope is per sheet, and the cross-sheet walk evaluates cells on sheets
     /// the user is not looking at.
-    pub fn at(&self, sheet_index: usize, row: u32) -> NameEvalCtx<'a> {
+    pub fn at(&self, sheet_index: usize, row: u32, col: u32) -> NameEvalCtx<'a> {
         NameEvalCtx {
             named_ranges: self.named_ranges,
             tables: self.tables,
             table_names: self.table_names,
+            sheet_names: self.sheet_names,
+            spill_ranges: self.spill_ranges,
             sheet_index,
             row,
+            col,
         }
     }
 }
@@ -116,34 +140,77 @@ pub struct NameEvalCtx<'a> {
     pub named_ranges: &'a HashMap<String, NamedRange>,
     pub tables: &'a crate::tables::TableStorage,
     pub table_names: &'a crate::tables::TableNameRegistry,
+    /// See [`NameTables::sheet_names`].
+    pub sheet_names: &'a [String],
+    /// See [`NameTables::spill_ranges`].
+    pub spill_ranges: &'a std::sync::Mutex<crate::SpillRangeMap>,
     /// Scope: a sheet-scoped name resolves only on its own sheet.
     pub sheet_index: usize,
     /// The evaluating cell's row — only consulted for `[@ThisRow]` table refs
     /// reached through a name's definition.
     pub row: u32,
+    /// The evaluating cell's column, for the same reason as `row`. A bare
+    /// `[@Column]` resolves against the table the cell is INSIDE, and a
+    /// rectangle is not entered on one axis. See
+    /// [`crate::TableRefContext::current_col`].
+    pub col: u32,
 }
 
-/// The AST to hand the evaluator for a STORED formula that may name a named
-/// range. Borrowed — zero cost — when there is nothing to expand.
+/// The AST to hand the evaluator for a STORED formula that may name a defined
+/// range or a table. Borrowed — zero cost — when there is nothing to expand.
 ///
-/// SPILL REFERENCES (`A1#`) reached through a name's definition are deliberately
-/// NOT resolved here: doing so needs `state.spill_ranges`, a Mutex this would
-/// take once per evaluated dependent. The entry path still resolves the spill
-/// refs a user typed directly, which is the only shape that has ever worked.
+/// TWO INDIRECTIONS, ONE GATE. A stored formula can now hold a defined name
+/// (D2) *and* a structured table reference (§2aj), and both are resolved HERE,
+/// against the workbook as it is at the moment of evaluation. That is what makes
+/// `=SUM(Sales[Amount])` follow the table when it grows: nothing rewrites the
+/// stored formula, the specifier simply resolves against a different extent.
+///
+/// The table half is checked SECOND and on the already-expanded tree, because a
+/// name's `refers_to` may itself be a structured reference (`=Table1[Amount]`),
+/// so a specifier can appear only after the name splice.
+///
+/// THREE INDIRECTIONS SINCE §3bf, and the third is the spill reference. `A1#`
+/// used to be frozen into the STORED form at entry, so `=SUM(A1#)` was kept,
+/// rendered and saved as `=SUM(A1:A4)` and did not follow its array when the
+/// array grew or shrank — in Excel `A1#` is a LIVE reference to whatever the
+/// array currently spans, which is its entire purpose. It is resolved here now,
+/// for the same reason and by the same recipe as the other two: nothing
+/// rewrites the stored formula, the `#` simply resolves against a different
+/// extent. It is resolved LAST because a name's `refers_to` may itself be a
+/// spill reference, so a `#` can appear only after the name splice.
 pub fn eval_ast<'a>(stored: &'a Expression, ctx: &NameEvalCtx<'_>) -> Cow<'a, Expression> {
-    if !needs_name_resolution(stored, ctx.named_ranges) {
+    let has_names = needs_name_resolution(stored, ctx.named_ranges);
+    let has_tables = crate::ast_has_table_refs(stored);
+    let has_spills = crate::ast_has_spill_refs(stored);
+    if !has_names && !has_tables && !has_spills {
         return Cow::Borrowed(stored);
     }
-    let mut visited = HashSet::new();
-    let expanded = crate::resolve_names_in_ast(stored, ctx.named_ranges, ctx.sheet_index, &mut visited);
+    let expanded = if has_names {
+        let mut visited = HashSet::new();
+        crate::resolve_names_in_ast(stored, ctx.named_ranges, ctx.sheet_index, &mut visited)
+    } else {
+        stored.clone()
+    };
     let expanded = if crate::ast_has_table_refs(&expanded) {
         let table_ctx = crate::TableRefContext {
             tables: ctx.tables,
             table_names: ctx.table_names,
             current_sheet_index: ctx.sheet_index,
             current_row: ctx.row,
+            current_col: ctx.col,
+            sheet_names: ctx.sheet_names,
         };
         crate::resolve_table_refs_in_ast(&expanded, &table_ctx)
+    } else {
+        expanded
+    };
+    // The lock is taken and released HERE, around a pure map read: no
+    // evaluation happens inside it. See `NameTables::spill_ranges`.
+    let expanded = if crate::ast_has_spill_refs(&expanded) {
+        let map = ctx.spill_ranges.lock().unwrap();
+        let out = crate::resolve_spill_refs_in_ast(&expanded, &map, ctx.sheet_index, ctx.sheet_names);
+        drop(map);
+        out
     } else {
         expanded
     };

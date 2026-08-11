@@ -57,6 +57,7 @@ export const CELL_ERROR_LITERALS: readonly string[] = [
   "#CONFLICT!",
   "#BLOCKED!",
   "#LIMIT!",
+  "#SPILL!",
 ];
 
 /**

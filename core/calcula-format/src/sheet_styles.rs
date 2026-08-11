@@ -51,6 +51,9 @@ pub fn apply_sheet_styles(
                         formula: None,
                         style_index,
                         rich_text: None,
+                        // A style-only cell has no formula, so it can never be
+                        // a spill origin.
+                        spill: None,
                     },
                 );
             }
@@ -88,6 +91,7 @@ mod tests {
                 formula: None,
                 style_index: 3,
                 rich_text: None,
+                spill: None,
             },
         );
         cells.insert(
@@ -97,6 +101,7 @@ mod tests {
                 formula: None,
                 style_index: 0, // Default — should not appear in styles.json
                 rich_text: None,
+                spill: None,
             },
         );
 
@@ -113,6 +118,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
         loaded_cells.insert(
@@ -122,6 +128,7 @@ mod tests {
                 formula: None,
                 style_index: 0,
                 rich_text: None,
+                spill: None,
             },
         );
 

@@ -323,7 +323,11 @@ export type MutationDomain =
   | "hyperlinks"
   | "validations"
   | "annotations"
-  | "controls";
+  | "controls"
+  // Conditional-formatting rule DEFINITIONS. Separate from a repaint for the
+  // same reason "validations" is: the extension caches the rule LIST, and
+  // grid:refresh only makes it re-evaluate that cache.
+  | "conditionalFormats";
 
 /** Payload of AppEvents.MUTATION_REFRESH. */
 export interface MutationRefreshPayload {

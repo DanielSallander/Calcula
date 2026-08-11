@@ -951,6 +951,8 @@ pub(crate) fn update_pivot_in_grid(
     let old_region = get_pivot_region(state, pivot_id);
 
     let mut styles = state.style_registry.write(effect).unwrap();
+    // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+    let mut active_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
         // Clear old pivot area first if it exists
@@ -971,8 +973,6 @@ pub(crate) fn update_pivot_in_grid(
         let is_active = dest_sheet_idx == active_sheet;
 
         let pivot_merges = if is_active {
-            let mut active_grid = state.grid.write(&effect).unwrap();
-
             // Clear old region from active grid too
             if let Some(ref region) = old_region {
                 if region.sheet_index == dest_sheet_idx {
@@ -1577,8 +1577,10 @@ pub(crate) fn recalculate_sheet_formulas(
                     let ctx = crate::TableRefContext {
                         tables: &tables_map,
                         table_names: &table_names_map,
+                        sheet_names: &sheet_names,
                         current_sheet_index: active_sheet,
                         current_row: row,
+                        current_col: col,
                     };
                     crate::resolve_table_refs_in_ast(&resolved, &ctx)
                 } else {

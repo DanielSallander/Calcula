@@ -51,14 +51,14 @@ export const KNOWN_ISSUES: KnownIssue[] = [
       "PivotState.pivot_tables. Contradicts [verified] undo.pivot-filter — " +
       "needs investigation. Found 2026-06-11.",
   },
-  {
-    ledgerId: "BUG-0020",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["conditionalFormats."],
-    reason:
-      "Conditional formatting rules are not undo-registered (surfaced once " +
-      "the walker's CF action used the correct serde tag). Found 2026-06-11.",
-  },
+  // BUG-0020 (conditionalFormats.*) WAS HERE and is gone because the defect is
+  // fixed, not because it was re-classified. The CF commands recorded no undo
+  // entry at all — add/update/delete/reorder/clear were invisible to Ctrl+Z,
+  // which Excel has always undone. They now snapshot the sheet's whole rule
+  // list (`obj_conditional_formats`) and announce the `conditionalFormats`
+  // refresh domain. Covered by `undo_s12_soak_leak_tests` in the app crate.
+  // Fixed 2026-08-11 out of the S12 soak bundle, where it was the ONE finding
+  // of the three that was a real product defect.
 ];
 
 export interface FilteredViolations {

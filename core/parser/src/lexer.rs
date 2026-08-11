@@ -177,12 +177,65 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // SCIENTIFIC NOTATION. Excel reads `=1E3` as 1000, `=2.5E2+1` as 251 and
+        // `=1E-3` as 0.001. Without this the lexer produced Number(1) followed by
+        // Identifier("E3") -- two tokens with no operator between them, so the
+        // parse failed and `update_cell` stored the user's text AS TEXT. A cell
+        // holding the string "=1E3" with no error anywhere is the silent class
+        // this register keeps cataloguing, and it was reachable by typing a
+        // number the way half of science writes one. (The bare cell entry `1E3`
+        // was always 1000 -- it is the FORMULA lexer that could not read it.)
+        //
+        // COMMIT-ONLY-IF-VALID. `E` is also the start of a column name, so the
+        // exponent is accepted only when an optional sign is followed by at
+        // least one digit. The lookahead runs on a CLONE of the iterator and the
+        // real one is advanced only on success, so `=1E`, `=1E+` and `=1EUR`
+        // consume nothing and still lex as they did before.
+        if let Some(exponent) = self.peek_exponent() {
+            for _ in 0..exponent.chars().count() {
+                self.input.next();
+            }
+            number_str.push_str(&exponent);
+        }
+
         if let Ok(n) = number_str.parse::<f64>() {
             Token::Number(n)
         } else {
             // Fallback if parsing fails (e.g. just ".")
             Token::Illegal(first_char)
         }
+    }
+
+    /// The exponent suffix (`E3`, `e+10`, `E-3`) starting at the current
+    /// position, or `None` when what follows is not one. Consumes nothing.
+    fn peek_exponent(&self) -> Option<String> {
+        let mut look = self.input.clone();
+        let marker = match look.next() {
+            Some(c @ ('e' | 'E')) => c,
+            _ => return None,
+        };
+        let mut suffix = String::from(marker);
+        match look.peek() {
+            Some(&c @ ('+' | '-')) => {
+                suffix.push(c);
+                look.next();
+            }
+            _ => {}
+        }
+        // At least one digit, or this is a column name and not an exponent.
+        match look.peek() {
+            Some(&c) if c.is_ascii_digit() => {}
+            _ => return None,
+        }
+        while let Some(&c) = look.peek() {
+            if c.is_ascii_digit() {
+                suffix.push(c);
+                look.next();
+            } else {
+                break;
+            }
+        }
+        Some(suffix)
     }
 
     fn read_identifier(&mut self, first_char: char) -> Token {

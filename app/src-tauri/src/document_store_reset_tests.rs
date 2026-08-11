@@ -615,6 +615,21 @@ fn the_undo_stack_does_not_survive_the_document_it_belongs_to() {
     );
     assert_eq!(stack.undo_depth(), 0, "undo depth must be zero");
     assert_eq!(stack.redo_depth(), 0, "redo depth must be zero");
+    // ...and the ids do not restart. A transaction id names a point in ONE
+    // document's history; if the counter restarted, a marker remembered in
+    // workbook A could be matched by an unrelated transaction in workbook B —
+    // the same document-blindness as the before-image above, one level up.
+    drop(stack);
+    {
+        let mut stack = s.state.undo_stack.lock().unwrap();
+        stack.record_cell_change(0, 0, 105, None);
+        assert!(
+            stack.undo_seqs() > vec![1],
+            "the id counter restarted with the new document: {:?}",
+            stack.undo_seqs()
+        );
+    }
+    let stack = s.state.undo_stack.lock().unwrap();
     assert!(
         !stack.has_open_transaction(),
         "an open transaction from the previous document would swallow the new \

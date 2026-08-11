@@ -12,6 +12,7 @@ import { getGridStateSnapshot } from "@api/state";
 import * as api from "./slicer-api";
 import { SlicerEvents } from "./slicerEvents";
 import { ensureBiFieldInPivotCache } from "./slicerFilterBridge";
+import { emitAppEvent, AppEvents } from "@api/events";
 
 // ============================================================================
 // Module-level cache
@@ -70,6 +71,14 @@ export async function deleteSlicerAsync(slicerId: string): Promise<boolean> {
     itemsCache.delete(slicerId);
     await refreshCache();
     window.dispatchEvent(new CustomEvent(SlicerEvents.SLICER_DELETED, { detail: { slicerId } }));
+    // §3bn: ribbon filters name canvas slicers in crossFilterSlicerTargets, and
+    // the backend just pruned this one out of them. The Controls pane caches
+    // those filters, so without the announcement it keeps a cross-link to a
+    // slicer that no longer exists and re-resolves it on every selection.
+    emitAppEvent(AppEvents.MUTATION_REFRESH, {
+      domains: ["ribbonFilter"],
+      source: "commit",
+    });
     return true;
   } catch (err) {
     console.error("[Slicer] Failed to delete slicer:", err);

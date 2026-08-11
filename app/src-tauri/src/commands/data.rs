@@ -204,6 +204,71 @@ fn take_spills_where(
     released
 }
 
+/// Record — or clear — WHAT is blocking the dynamic array at `(row, col)`.
+///
+/// `#SPILL!` exists as a distinct error precisely because its remedy is
+/// specific: "clear the cells the array needs", not "fix the argument". That
+/// remedy is unsayable without an ADDRESS, and `CellValue::Error` carries no
+/// payload, so the address is kept beside the value in `AppState.spill_blocks`
+/// and read back by the error-checking pane
+/// (`error_checking::error_explanation`). Excel does the same thing — its
+/// error menu offers "Select Obstructing Cells".
+///
+/// THE THREE CALL SITES ARE THE THREE PLACES A SPILL IS DECIDED, and they must
+/// stay symmetric: `Some(blocker)` on the blocked branch, `None` on the branch
+/// that spills successfully. Recording without clearing would leave a stale
+/// address to be named the next time the same origin blocked for a DIFFERENT
+/// reason.
+pub(crate) fn note_spill_block(
+    state: &AppState,
+    sheet: usize,
+    row: u32,
+    col: u32,
+    blocker: Option<(u32, u32)>,
+) {
+    let Ok(mut blocks) = state.spill_blocks.lock() else {
+        return;
+    };
+    match blocker {
+        Some(at) => {
+            blocks.insert((sheet, row, col), at);
+        }
+        None => {
+            blocks.remove(&(sheet, row, col));
+        }
+    }
+}
+
+/// The dynamic-array origins currently reporting `#SPILL!` BECAUSE of the cell
+/// at `(row, col)`.
+///
+/// The reverse of [`note_spill_block`], and the reason that map is worth
+/// keeping beyond the error message: it is the only way to find the array a
+/// given cell is obstructing without re-evaluating every formula on the sheet.
+/// Costs one lock and an `is_empty()` on a workbook with no blocked array.
+pub(crate) fn origins_blocked_by(
+    state: &AppState,
+    sheet: usize,
+    row: u32,
+    col: u32,
+) -> Vec<(u32, u32)> {
+    let Ok(blocks) = state.spill_blocks.lock() else {
+        return Vec::new();
+    };
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let mut origins: Vec<(u32, u32)> = blocks
+        .iter()
+        .filter(|(&(s, _, _), &at)| s == sheet && at == (row, col))
+        .map(|(&(_, r, c), _)| (r, c))
+        .collect();
+    // Deterministic order: the cascade's shape must not depend on HashMap
+    // iteration, or two identical workbooks recalculate differently.
+    origins.sort_unstable();
+    origins
+}
+
 /// [`take_spills_where`] for a RECTANGLE of origins — the shape every clear and
 /// every single-cell rewrite has.
 pub(crate) fn take_spills_owned_within(
@@ -237,8 +302,9 @@ pub(crate) fn take_spills_owned_by_any(
 /// surface's non-active-sheet install, and the three `.calp` override commands.
 /// They cannot use the seed-based tear-down in
 /// `recalc_after_active_sheet_bulk_rewrite` because they never produce seeds,
-/// and they recalculate through `recalculate_sheet_values`, which is
-/// whole-sheet and not spill-aware.
+/// and `recalculate_sheet_values` — spill-aware since §3bm — only VISITS cells
+/// that still hold a formula, so an origin whose formula the wholesale write
+/// replaced is never reached and its claim would survive forever.
 ///
 /// IT DROPS THE CLAIM AND LEAVES THE CELLS. That is the deliberate difference
 /// from `take_spills_owned_within` + `erase_released_spill_cells`. The grid
@@ -401,18 +467,28 @@ fn spilled_cells_owned_within(
         .collect()
 }
 
-/// Erase cells released by [`take_spills_owned_within`] from the ACTIVE-sheet
-/// mirror and its `grids` entry, reporting each as blank so the caller's IPC
-/// reply repaints it.
+/// Erase cells released by [`take_spills_owned_within`] from the sheet that
+/// owned them — and from the active-sheet mirror when that IS the sheet —
+/// reporting each as blank so the caller's IPC reply repaints it.
+///
+/// `sheet` names the sheet the released cells live on; `active_sheet` names the
+/// mirror. They are separate parameters and not one, because the recalculation
+/// pass reaches sheets the user is not looking at: removing `(r, c)` from the
+/// mirror because a BACKGROUND sheet released it would erase an unrelated cell
+/// on screen. Every edit-path caller passes the same index twice, which is what
+/// it always did.
 fn erase_released_spill_cells(
     grid: &mut Grid,
     grids: &mut [Grid],
+    active_sheet: usize,
     sheet: usize,
     released: &[(u32, u32)],
     updated_cells: &mut Vec<CellData>,
 ) {
     for &(r, c) in released {
-        grid.cells.remove(&(r, c));
+        if sheet == active_sheet {
+            grid.cells.remove(&(r, c));
+        }
         if sheet < grids.len() {
             grids[sheet].cells.remove(&(r, c));
         }
@@ -425,11 +501,217 @@ fn erase_released_spill_cells(
             style_index: 0,
             row_span: 1,
             col_span: 1,
-            sheet_index: None,
+            // NAMED for an off-sheet erase, so Core cannot paint a background
+            // sheet's blank onto the sheet on screen (the same rule
+            // `mark_off_sheet_circular_cells` follows).
+            sheet_index: if sheet == active_sheet { None } else { Some(sheet) },
             rich_text: None,
             accounting_layout: None,
         });
     }
+}
+
+/// Release the dynamic array the formula at `(row, col)` owns, on any sheet:
+/// drop its `spill_ranges` / `spill_hosts` claims and erase the cells it gave
+/// up. The tear-down half of [`apply_spill_decision`], separate only because a
+/// value that is written WITHOUT evaluating a result — the `#CIRCULAR!` stamp a
+/// recalculation pass writes over a cycle's members — owes the same release and
+/// has no `EvalResult` to hand it.
+///
+/// COST on a workbook with no dynamic array: one `spill_ranges` lock and one
+/// `is_empty()` (see [`take_spills_where`]).
+pub(crate) fn release_origin_spill(
+    state: &AppState,
+    grid: &mut Grid,
+    grids: &mut [Grid],
+    active_sheet: usize,
+    sheet: usize,
+    row: u32,
+    col: u32,
+    updated_cells: &mut Vec<CellData>,
+) {
+    let released = take_spills_owned_within(state, sheet, row, col, row, col);
+    erase_released_spill_cells(grid, grids, active_sheet, sheet, &released, updated_cells);
+}
+
+/// **THE ONE SPILL DECISION.** Given the raw result of ONE formula cell, decide
+/// whether it spills, write whatever it spills, maintain the ownership maps,
+/// and return the value the ORIGIN cell must hold.
+///
+/// # Why this is one function
+///
+/// It was three, character for character: `update_cell_impl`, the cascade's
+/// `reevaluate_formula_cell` and `update_cells_batch_core` each carried their
+/// own copy, and [`note_spill_block`]'s doc had to *ask* the three to stay
+/// symmetric. They did not stay symmetric — only one of them consulted
+/// `spill_hosts` for an own-spill target — and, worse, the RECALCULATION pass
+/// (F9, Shift+F9 and every save through `calculate_before_save`) had no copy at
+/// all: it wrote `EvalResult::to_cell_value()`, which collapses an array to its
+/// first element. A blocked array's `#SPILL!` became a plausible number on
+/// save, and a shrunk array kept its stale tail while `spill_ranges` still
+/// claimed the old rectangle (§3bm). A fourth copy would have been the fourth
+/// place to get it wrong, so there is now exactly one, and
+/// `only_one_function_decides_a_spill` in `spill_map_tests` pins that.
+///
+/// # What it does, in order
+///
+/// 1. **Releases what this origin used to own**, through the ONE tear-down
+///    (§2y), and erases the cells it gave up. This is what makes a SHRINKING
+///    array correct: `=SEQUENCE(2)` where `=SEQUENCE(4)` was must leave rows 3
+///    and 4 empty and unclaimed.
+/// 2. **Refuses where blocked.** A target cell holding anything this origin
+///    does not own means the array cannot land: the origin reports `#SPILL!`
+///    and the blocker's ADDRESS is recorded for the error pane. Nothing is
+///    written, so the blocker's own content is never overwritten.
+/// 3. **Spills**, writing each cell with `ast: None` and style 0 (= inherit, so
+///    the row/column tiers decide the display), claiming them in `spill_hosts`
+///    and recording the extent in `spill_ranges`.
+///
+/// A scalar result takes step 1 and then clears any `#SPILL!` address the
+/// origin had recorded — an array that becomes a number is no longer blocked by
+/// anything, and a stale address would be named the next time it blocked.
+///
+/// # Sheets
+///
+/// `sheet` is the sheet the formula lives on; `active_sheet` is the mirror
+/// (`state.grid`). Writes always land in `grids[sheet]`, and additionally in
+/// the mirror when the two are the same. That separation is the whole reason
+/// the recalculation pass can use this at all: it plans the WORKBOOK, and the
+/// three edit-path callers were all active-sheet-bound.
+///
+/// Locking: takes `spill_ranges` then `spill_hosts` (the canonical order), and
+/// `spill_blocks` separately — all leaf mutexes, all acquired AFTER the grid
+/// guards the caller holds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_spill_decision(
+    state: &AppState,
+    grid: &mut Grid,
+    grids: &mut [Grid],
+    active_sheet: usize,
+    sheet: usize,
+    row: u32,
+    col: u32,
+    raw_result: &EvalResult,
+    styles: &StyleRegistry,
+    locale: &engine::LocaleSettings,
+    updated_cells: &mut Vec<CellData>,
+) -> engine::CellValue {
+    // 1. The range this origin used to own dies here, whatever replaces it.
+    release_origin_spill(
+        state,
+        grid,
+        grids,
+        active_sheet,
+        sheet,
+        row,
+        col,
+        updated_cells,
+    );
+
+    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
+    if spill_rows <= 1 && spill_cols <= 1 {
+        note_spill_block(state, sheet, row, col, None);
+        return raw_result.to_cell_value();
+    }
+
+    let spill_values = raw_result.to_spill_values();
+
+    // 2. Is anything in the way? Step 1 already erased this origin's own former
+    // footprint, so an occupied target is somebody else's — but `spill_hosts`
+    // is still consulted, because a target claimed by a DIFFERENT origin whose
+    // own re-evaluation is still ahead of us in the plan must block, and a cell
+    // this origin still owns must not.
+    let mut spill_blocked: Option<(u32, u32)> = None;
+    for &(dr, dc, _) in &spill_values {
+        if dr == 0 && dc == 0 {
+            continue; // the origin itself
+        }
+        let target_r = row + dr;
+        let target_c = col + dc;
+        let occupied = sheet < grids.len()
+            && grids[sheet]
+                .get_cell(target_r, target_c)
+                .is_some_and(|existing| existing.value != engine::CellValue::Empty);
+        if occupied {
+            let is_own_spill = state
+                .spill_hosts
+                .lock()
+                .unwrap()
+                .get(&(sheet, target_r, target_c))
+                .is_some_and(|origin| *origin == (row, col));
+            if !is_own_spill {
+                spill_blocked = Some((target_r, target_c));
+                break;
+            }
+        }
+    }
+
+    if let Some(blocker) = spill_blocked {
+        note_spill_block(state, sheet, row, col, Some(blocker));
+        return engine::CellValue::Error(engine::CellError::Spill);
+    }
+
+    // 3. It spills.
+    note_spill_block(state, sheet, row, col, None);
+    let mut new_spill_cells = Vec::new();
+    {
+        let mut spill_ranges = state.spill_ranges.lock().unwrap();
+        let mut spill_hosts = state.spill_hosts.lock().unwrap();
+
+        for (dr, dc, cv) in &spill_values {
+            if *dr == 0 && *dc == 0 {
+                continue; // the origin keeps its own formula and value
+            }
+            let target_r = row + dr;
+            let target_c = col + dc;
+
+            let spill_cell = engine::Cell {
+                ast: None,
+                value: cv.clone(),
+                style_index: 0,
+                rich_text: None,
+            };
+            if sheet < grids.len() {
+                grids[sheet].set_cell(target_r, target_c, spill_cell.clone());
+            }
+            if sheet == active_sheet {
+                grid.set_cell(target_r, target_c, spill_cell);
+            }
+
+            // Spill cells carry style 0 (= inherit), so the row/column tiers
+            // decide how they are displayed. Resolved on the cell's OWN sheet.
+            let effective = if sheet == active_sheet {
+                grid.effective_style_index(target_r, target_c)
+            } else if sheet < grids.len() {
+                grids[sheet].effective_style_index(target_r, target_c)
+            } else {
+                0
+            };
+            let display = format_cell_value(cv, styles.get(effective), locale);
+            updated_cells.push(CellData {
+                row: target_r,
+                col: target_c,
+                display,
+                display_color: None,
+                formula: None,
+                style_index: 0,
+                row_span: 1,
+                col_span: 1,
+                sheet_index: if sheet == active_sheet { None } else { Some(sheet) },
+                rich_text: None,
+                accounting_layout: None,
+            });
+
+            new_spill_cells.push((target_r, target_c));
+            spill_hosts.insert((sheet, target_r, target_c), (row, col));
+        }
+
+        if !new_spill_cells.is_empty() {
+            spill_ranges.insert((sheet, row, col), new_spill_cells);
+        }
+    }
+
+    raw_result.to_cell_value()
 }
 
 /// User-facing name of a protected region's owner object.
@@ -772,8 +1054,8 @@ pub fn get_range_cells_typed(
 
     let active_sheet = *state.active_sheet.read().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
-    let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let protection = state.sheet_protection.read().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -834,8 +1116,8 @@ pub fn get_watch_cells(
     state: State<AppState>,
     requests: Vec<(usize, u32, u32)>,
 ) -> Vec<Option<CellData>> {
-    let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -1294,6 +1576,8 @@ fn update_cell_impl(
     // and in declaration order, so the canonical lock order stays one sequence.
     let mut name_dependents_map = state.name_dependents.lock().unwrap();
     let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
+    let mut table_dependents_map = state.table_dependents.lock().unwrap();
+    let mut table_dependencies_map = state.table_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
@@ -1358,13 +1642,34 @@ fn update_cell_impl(
             &mut grid,
             &mut grids,
             active_sheet,
+            active_sheet,
             &released,
             &mut updated_cells,
         );
     }
 
-    // Handle empty value - clear the cell
-    if value.trim().is_empty() {
+    // ---- CLEAR AND WRITE BOTH FALL THROUGH TO THE ONE CASCADE -------------
+    //
+    // The clear branch used to `return Ok(...)` at the end of this block --
+    // BEFORE the recalculation below -- so clearing a cell left every dependent
+    // holding its old value. Measured, not inferred: A1 = 5 and B1 = `=A1+1`
+    // reads 6; press Delete on A1 and B1 still reads 6, where Excel reads 1.
+    // The stale number is not merely displayed, it is what the next save
+    // writes, and Delete is the single most-used editing key there is.
+    //
+    // The two branches are alternatives, not an early exit: each does its own
+    // grid write, dependency-map maintenance, `updated_cells` entry, override
+    // record and undo entry, and then BOTH reach the cascade. Nothing else in
+    // this function distinguishes them -- which is the point, because a second
+    // exit from a function that owns the cascade is how the cascade got skipped
+    // in the first place.
+    let clearing = value.trim().is_empty();
+    // Hoisted out of the write branch so the perf line below has them on both
+    // paths.
+    let perf_t2_parsed;
+    let perf_t3_stored;
+
+    if clearing {
         grid.clear_cell(row, col);
         // Also update the grids vector
         if active_sheet < grids.len() {
@@ -1400,6 +1705,12 @@ fn update_cell_impl(
             Default::default(),
             &mut name_dependencies_map,
             &mut name_dependents_map,
+        );
+        crate::table_deps::update_table_dependencies(
+            (row, col),
+            Default::default(),
+            &mut table_dependencies_map,
+            &mut table_dependents_map,
         );
 
         // Get merge span info for the cleared cell
@@ -1444,268 +1755,233 @@ fn update_cell_impl(
         // Already dirtied by the `effect` bound above -- one `mutates` per
         // command, not one per branch. See DocumentEffect::mutates.
 
-        return Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed: false });
-    }
+        // The cleared cell is stored and its edges are gone; the
+        // cascade below is what makes its DEPENDENTS agree.
+        perf_t2_parsed = Instant::now();
+        perf_t3_stored = Instant::now();
+    } else {
+        // Parse the input
+        let mut cell = parse_cell_input(&value, &locale);
 
-    // Parse the input
-    let mut cell = parse_cell_input(&value, &locale);
+        // Preserve existing style
+        if let Some(existing) = grid.get_cell(row, col) {
+            cell.style_index = existing.style_index;
+        }
 
-    // Preserve existing style
-    if let Some(existing) = grid.get_cell(row, col) {
-        cell.style_index = existing.style_index;
-    }
+        // If it's a formula, evaluate it using multi-sheet context
+        if let Some(formula) = cell.formula_string() {
+            // Extract references for dependency tracking AND cache the AST
+            match parser::parse(&formula) {
+                Ok(parsed) => {
+                    // THE CELL KEEPS THE NAME (Excel parity, D2). `stored` is what
+                    // this cell will hold and what the formula bar will show;
+                    // `evaluated()` is the same tree with defined names spliced in,
+                    // which is what this edit evaluates and what dependency
+                    // extraction reads. See `split_entered_formula`.
+                    let entered = crate::split_entered_formula(&state, &parsed, active_sheet, row, col, &sheet_names);
+                    let resolved = entered.evaluated();
 
-    // If it's a formula, evaluate it using multi-sheet context
-    if let Some(formula) = cell.formula_string() {
-        // Extract references for dependency tracking AND cache the AST
-        match parser::parse(&formula) {
-            Ok(parsed) => {
-                // THE CELL KEEPS THE NAME (Excel parity, D2). `stored` is what
-                // this cell will hold and what the formula bar will show;
-                // `evaluated()` is the same tree with defined names spliced in,
-                // which is what this edit evaluates and what dependency
-                // extraction reads. See `split_entered_formula`.
-                let entered = crate::split_entered_formula(&state, &parsed, active_sheet, row);
-                let resolved = entered.evaluated();
+                    let refs = extract_all_references(resolved, &grid);
 
-                let refs = extract_all_references(resolved, &grid);
+                    log_debug!("DEPS", "update_cell({},{}) formula='{}' extracted_refs: cells={:?} cross_sheet={:?} columns={:?} rows={:?}",
+                        row, col, formula, refs.cells, refs.cross_sheet_cells, refs.columns, refs.rows);
 
-                log_debug!("DEPS", "update_cell({},{}) formula='{}' extracted_refs: cells={:?} cross_sheet={:?} columns={:?} rows={:?}",
-                    row, col, formula, refs.cells, refs.cross_sheet_cells, refs.columns, refs.rows);
-
-                update_dependencies(
-                    (row, col),
-                    refs.cells,
-                    &mut dependencies_map,
-                    &mut dependents_map,
-                );
-                update_column_dependencies(
-                    (row, col),
-                    refs.columns,
-                    &mut column_dependencies_map,
-                    &mut column_dependents_map,
-                );
-                update_row_dependencies(
-                    (row, col),
-                    refs.rows,
-                    &mut row_dependencies_map,
-                    &mut row_dependents_map,
-                );
-
-                // Track cross-sheet dependencies, under the workbook's OFFICIAL
-                // sheet spelling (see normalize_cross_sheet_refs).
-                update_cross_sheet_dependencies(
-                    (active_sheet, row, col),
-                    crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, &sheet_names),
-                    &mut cross_sheet_dependencies_map,
-                    &mut cross_sheet_dependents_map,
-                );
-
-                // DEFINED-NAME edges, read from the tree the cell KEEPS — the
-                // expanded one no longer mentions the name at all.
-                {
-                    let mut names = crate::name_resolution::NameSet::default();
-                    crate::name_resolution::collect_names(&entered.stored, &mut names);
-                    crate::name_resolution::update_name_dependencies(
+                    update_dependencies(
                         (row, col),
-                        names,
-                        &mut name_dependencies_map,
-                        &mut name_dependents_map,
+                        refs.cells,
+                        &mut dependencies_map,
+                        &mut dependents_map,
+                    );
+                    update_column_dependencies(
+                        (row, col),
+                        refs.columns,
+                        &mut column_dependencies_map,
+                        &mut column_dependents_map,
+                    );
+                    update_row_dependencies(
+                        (row, col),
+                        refs.rows,
+                        &mut row_dependencies_map,
+                        &mut row_dependents_map,
+                    );
+
+                    // Track cross-sheet dependencies, under the workbook's OFFICIAL
+                    // sheet spelling (see normalize_cross_sheet_refs).
+                    update_cross_sheet_dependencies(
+                        (active_sheet, row, col),
+                        crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, &sheet_names),
+                        &mut cross_sheet_dependencies_map,
+                        &mut cross_sheet_dependents_map,
+                    );
+
+                    // DEFINED-NAME edges, read from the tree the cell KEEPS — the
+                    // expanded one no longer mentions the name at all.
+                    {
+                        let mut names = crate::name_resolution::NameSet::default();
+                        crate::name_resolution::collect_names(&entered.stored, &mut names);
+                        crate::name_resolution::update_name_dependencies(
+                            (row, col),
+                            names,
+                            &mut name_dependencies_map,
+                            &mut name_dependents_map,
+                        );
+                    }
+
+                    // STRUCTURED-REFERENCE edges, the same argument one authority
+                    // over (§2aj): the cell keeps `Sales[Amount]`, and a resize
+                    // changes what that means without touching any cell the
+                    // cell-level edges above mention.
+                    {
+                        let mut tables = crate::table_deps::TableSet::default();
+                        crate::table_deps::collect_table_names(&entered.stored, &mut tables);
+                        crate::table_deps::update_table_dependencies(
+                            (row, col),
+                            tables,
+                            &mut table_dependencies_map,
+                            &mut table_dependents_map,
+                        );
+                    }
+
+                    // PERF: Convert the already-parsed AST directly instead of re-parsing.
+                    // The cell keeps the NAME-BEARING tree; only the evaluation
+                    // below sees the expansion.
+                    let engine_ast = crate::convert_expr(resolved);
+                    cell.set_cached_ast(crate::convert_expr(&entered.stored));
+                    // Build EvalContext with current cell position and dimension state
+                    let rh_map = state.row_heights.read().unwrap().clone();
+                    let cw_map = state.column_widths.read().unwrap().clone();
+                    let eval_ctx = engine::EvalContext {
+                        cube_prefetch: cube_arc.clone(),
+                        current_row: Some(row),
+                        current_col: Some(col),
+                        row_heights: Some(rh_map),
+                        column_widths: Some(cw_map),
+                        hidden_rows: None,
+                        control_values: Some(control_values.clone()),
+                    };
+                    let raw_result = evaluate_formula_raw_with_files_and_pivot(
+                        &grids,
+                        &sheet_names,
+                        active_sheet,
+                        &engine_ast,
+                        eval_ctx,
+                        Some(&styles),
+                        &user_files,
+                        Some(&pivot_data_fn),
+                        Some(&gather_fn),
+                        udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
+                    );
+
+                    // The range this cell used to own was already released, above,
+                    // BEFORE the formula was evaluated — see the hoisted
+                    // tear-down. THE ONE SPILL DECISION runs its own release
+                    // too, which finds nothing left to release here (one
+                    // `spill_ranges` lock and an `is_empty()`), and then decides
+                    // the spill.
+                    cell.value = apply_spill_decision(
+                        state,
+                        &mut grid,
+                        &mut grids,
+                        active_sheet,
+                        active_sheet,
+                        row,
+                        col,
+                        &raw_result,
+                        &styles,
+                        &locale,
+                        &mut updated_cells,
                     );
                 }
-
-                // PERF: Convert the already-parsed AST directly instead of re-parsing.
-                // The cell keeps the NAME-BEARING tree; only the evaluation
-                // below sees the expansion.
-                let engine_ast = crate::convert_expr(resolved);
-                cell.set_cached_ast(crate::convert_expr(&entered.stored));
-                // Build EvalContext with current cell position and dimension state
-                let rh_map = state.row_heights.read().unwrap().clone();
-                let cw_map = state.column_widths.read().unwrap().clone();
-                let eval_ctx = engine::EvalContext {
-                    cube_prefetch: cube_arc.clone(),
-                    current_row: Some(row),
-                    current_col: Some(col),
-                    row_heights: Some(rh_map),
-                    column_widths: Some(cw_map),
-                    hidden_rows: None,
-                    control_values: Some(control_values.clone()),
-                };
-                let raw_result = evaluate_formula_raw_with_files_and_pivot(
-                    &grids,
-                    &sheet_names,
-                    active_sheet,
-                    &engine_ast,
-                    eval_ctx,
-                    Some(&styles),
-                    &user_files,
-                    Some(&pivot_data_fn),
-                    Some(&gather_fn),
-                    udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
-                );
-
-                // The range this cell used to own was already released, above,
-                // BEFORE the formula was evaluated — see the hoisted tear-down.
-
-                // Handle spill for array results
-                let (spill_rows, spill_cols) = raw_result.spill_dimensions();
-                if spill_rows > 1 || spill_cols > 1 {
-                    let spill_values = raw_result.to_spill_values();
-                    let mut spill_blocked = false;
-
-                    // Check if any spill cell is already occupied (not by a previous spill from this cell)
-                    for &(dr, dc, _) in &spill_values {
-                        if dr == 0 && dc == 0 { continue; } // origin cell
-                        let target_r = row + dr;
-                        let target_c = col + dc;
-                        // Check if target is occupied by real data (not empty and not a spill from this origin)
-                        if let Some(existing) = grid.get_cell(target_r, target_c) {
-                            if existing.value != engine::CellValue::Empty {
-                                spill_blocked = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if spill_blocked {
-                        cell.value = engine::CellValue::Error(engine::CellError::Value);
-                    } else {
-                        // Write the origin cell value (first element)
-                        cell.value = raw_result.to_cell_value();
-
-                        // Write spill cells
-                        let mut new_spill_cells = Vec::new();
-                        let mut spill_ranges = state.spill_ranges.lock().unwrap();
-                        let mut spill_hosts = state.spill_hosts.lock().unwrap();
-
-                        for (dr, dc, cv) in spill_values {
-                            if dr == 0 && dc == 0 { continue; } // skip origin
-                            let target_r = row + dr;
-                            let target_c = col + dc;
-
-                            let spill_cell = engine::Cell {
-                                ast: None,
-                                value: cv.clone(),
-                                style_index: 0,
-                                rich_text: None,
-                            };
-                            grid.set_cell(target_r, target_c, spill_cell.clone());
-                            if active_sheet < grids.len() {
-                                grids[active_sheet].set_cell(target_r, target_c, spill_cell);
-                            }
-
-                            // Spill cells carry style 0 (= inherit), so the row/
-                            // column tiers decide how they are displayed.
-                            let style = styles.get(grid.effective_style_index(target_r, target_c));
-                            let display = format_cell_value(&cv, style, &locale);
-                            updated_cells.push(CellData {
-                                row: target_r, col: target_c, display,
-                                display_color: None, formula: None, style_index: 0,
-                                row_span: 1, col_span: 1, sheet_index: None,
-                                rich_text: None,
-                                accounting_layout: None,
-                            });
-
-                            new_spill_cells.push((target_r, target_c));
-                            spill_hosts.insert((active_sheet, target_r, target_c), (row, col));
-                        }
-
-                        if !new_spill_cells.is_empty() {
-                            spill_ranges.insert((active_sheet, row, col), new_spill_cells);
-                        }
-                    }
-                } else {
-                    cell.value = raw_result.to_cell_value();
+                Err(_e) => {
+                    // Formula parse error - dependencies won't be tracked
+                    // Still try to evaluate (will return error)
+                    let result =
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files);
+                    cell.value = result;
                 }
             }
-            Err(_e) => {
-                // Formula parse error - dependencies won't be tracked
-                // Still try to evaluate (will return error)
-                let result =
-                    evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files);
-                cell.value = result;
-            }
+        } else {
+            // Clear dependencies for non-formula cells
+            update_dependencies(
+                (row, col),
+                Default::default(),
+                &mut dependencies_map,
+                &mut dependents_map,
+            );
+            // Clear cross-sheet dependencies for non-formula cells
+            update_cross_sheet_dependencies(
+                (active_sheet, row, col),
+                Default::default(),
+                &mut cross_sheet_dependencies_map,
+                &mut cross_sheet_dependents_map,
+            );
+            update_column_dependencies(
+                (row, col),
+                Default::default(),
+                &mut column_dependencies_map,
+                &mut column_dependents_map,
+            );
+            update_row_dependencies(
+                (row, col),
+                Default::default(),
+                &mut row_dependencies_map,
+                &mut row_dependents_map,
+            );
         }
-    } else {
-        // Clear dependencies for non-formula cells
-        update_dependencies(
-            (row, col),
-            Default::default(),
-            &mut dependencies_map,
-            &mut dependents_map,
+
+        perf_t2_parsed = Instant::now();
+
+        // Store the cell
+        grid.set_cell(row, col, cell.clone());
+        // Also update the grids vector to keep them in sync
+        if active_sheet < grids.len() {
+            grids[active_sheet].set_cell(row, col, cell.clone());
+        }
+
+        // Get the display value
+        let style = styles.get(grid.effective_style_index(row, col));
+        let display = format_cell_value(&cell.value, style, &locale);
+        perf_t3_stored = Instant::now();
+
+        // Get merge span info
+        let merge_info = merged_regions
+            .iter()
+            .find(|r| r.start_row == row && r.start_col == col);
+        let (row_span, col_span) = if let Some(region) = merge_info {
+            (
+                region.end_row - region.start_row + 1,
+                region.end_col - region.start_col + 1,
+            )
+        } else {
+            (1, 1)
+        };
+
+        updated_cells.push(CellData {
+            row,
+            col,
+            display,
+            display_color: None,
+            formula: formula_display(&cell, &locale),
+            style_index: grid.effective_style_index(row, col),
+            row_span,
+            col_span,
+            sheet_index: None, // Current active sheet
+            rich_text: None,
+            accounting_layout: None,
+        });
+
+        // Record subscriber override for the edited cell (subscribed sheets only)
+        crate::calp_commands::record_subscription_override_edits(
+            &state,
+                &effect,
+            active_sheet,
+            &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
         );
-        // Clear cross-sheet dependencies for non-formula cells
-        update_cross_sheet_dependencies(
-            (active_sheet, row, col),
-            Default::default(),
-            &mut cross_sheet_dependencies_map,
-            &mut cross_sheet_dependents_map,
-        );
-        update_column_dependencies(
-            (row, col),
-            Default::default(),
-            &mut column_dependencies_map,
-            &mut column_dependents_map,
-        );
-        update_row_dependencies(
-            (row, col),
-            Default::default(),
-            &mut row_dependencies_map,
-            &mut row_dependents_map,
-        );
+
+        // Record undo after successful change
+        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
+
     }
-
-    let perf_t2_parsed = Instant::now();
-
-    // Store the cell
-    grid.set_cell(row, col, cell.clone());
-    // Also update the grids vector to keep them in sync
-    if active_sheet < grids.len() {
-        grids[active_sheet].set_cell(row, col, cell.clone());
-    }
-
-    // Get the display value
-    let style = styles.get(grid.effective_style_index(row, col));
-    let display = format_cell_value(&cell.value, style, &locale);
-    let perf_t3_stored = Instant::now();
-
-    // Get merge span info
-    let merge_info = merged_regions
-        .iter()
-        .find(|r| r.start_row == row && r.start_col == col);
-    let (row_span, col_span) = if let Some(region) = merge_info {
-        (
-            region.end_row - region.start_row + 1,
-            region.end_col - region.start_col + 1,
-        )
-    } else {
-        (1, 1)
-    };
-
-    updated_cells.push(CellData {
-        row,
-        col,
-        display,
-        display_color: None,
-        formula: formula_display(&cell, &locale),
-        style_index: grid.effective_style_index(row, col),
-        row_span,
-        col_span,
-        sheet_index: None, // Current active sheet
-        rich_text: None,
-        accounting_layout: None,
-    });
-
-    // Record subscriber override for the edited cell (subscribed sheets only)
-    crate::calp_commands::record_subscription_override_edits(
-        &state,
-            &effect,
-        active_sheet,
-        &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
-    );
-
-    // Record undo after successful change
-    undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
     // Recalculate dependents if automatic mode
     if *calc_mode == "automatic" {
@@ -1746,6 +2022,30 @@ fn update_cell_impl(
             for v in volatile {
                 if (v.row, v.col) != (row, col) && recalc_set.insert((v.row, v.col)) {
                     recalc_order.push((v.row, v.col));
+                }
+            }
+        }
+        // ARRAYS THIS EDIT UNBLOCKED. A dynamic array blocked by an occupied
+        // cell is `#SPILL!`, and clearing the obstruction is the remedy the
+        // error names -- but the origin does not DEPEND on the cell that was in
+        // its way, so no dependency edge reaches it and the cascade walked
+        // straight past. The array stayed `#SPILL!` until the user re-entered
+        // the formula, which is the one thing the error message does not tell
+        // them to do. (Excel re-spills the instant the blocker is cleared.)
+        //
+        // `spill_blocks` is what makes this cheap: it already records WHICH
+        // cell blocked each origin, for the error message, so unblocking is a
+        // reverse lookup on a map that is empty in every workbook with no
+        // blocked array. Convergent when several cells block one array -- the
+        // re-evaluation simply records the next blocker and stays `#SPILL!`.
+        for origin in origins_blocked_by(&state, active_sheet, row, col) {
+            if origin != (row, col) && recalc_set.insert(origin) {
+                recalc_order.push(origin);
+                // ...and whatever reads the array, which was reading an error.
+                for dep in get_recalculation_order(origin, &dependents_map) {
+                    if recalc_set.insert(dep) {
+                        recalc_order.push(dep);
+                    }
                 }
             }
         }
@@ -1803,6 +2103,7 @@ fn update_cell_impl(
         // walk, also used by the targeted control recalc
         // (recalc_control_dependents in control_values.rs).
         cascade_cross_sheet_dependents(
+            state,
             &mut grid,
             &mut grids,
             &sheet_names,
@@ -1817,6 +2118,8 @@ fn update_cell_impl(
                 named_ranges: &cascade_named_ranges,
                 tables: &cascade_tables,
                 table_names: &cascade_table_names,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
             },
             &[(row, col)],
             &recalc_order,
@@ -2016,8 +2319,11 @@ pub(crate) fn reevaluate_formula_cell(
             named_ranges,
             tables,
             table_names,
+            sheet_names: sheet_names,
+            spill_ranges: &state.spill_ranges,
             sheet_index: active_sheet,
             row: dep_row,
+            col: dep_col,
         };
         let eval_target = crate::name_resolution::eval_ast(cached_ast, &name_ctx);
         let result = evaluate_formula_raw_with_files_and_pivot(
@@ -2043,41 +2349,23 @@ pub(crate) fn reevaluate_formula_cell(
         // stores must keep the name, exactly as the entry path does (D2). It
         // resolves names only for the value it returns.
         *cache_misses += 1;
-        if let Ok(engine_ast) = parser::parse(formula).map(|parsed| {
-            let resolved = if crate::ast_has_named_refs(&parsed) {
-                let mut visited = HashSet::new();
-                crate::resolve_names_in_ast(&parsed, named_ranges, active_sheet, &mut visited)
-            } else {
-                parsed
+        // Re-parsed, then expanded through the SAME `eval_ast` the cached path
+        // uses — names, structured references and `A1#` alike. It used to
+        // hand-roll all three, which is how the two halves of this function
+        // could disagree about what a formula meant; §3bf added the third
+        // indirection and made a second copy indefensible.
+        if let Ok(parsed) = parser::parse(formula).map_err(|e| format!("{}", e)) {
+            let name_ctx = crate::name_resolution::NameEvalCtx {
+                named_ranges,
+                tables,
+                table_names,
+                sheet_names: sheet_names,
+                spill_ranges: &state.spill_ranges,
+                sheet_index: active_sheet,
+                row: dep_row,
+                col: dep_col,
             };
-            let resolved = if crate::ast_has_table_refs(&resolved) {
-                let ctx = crate::TableRefContext {
-                    tables,
-                    table_names,
-                    current_sheet_index: active_sheet,
-                    current_row: dep_row,
-                };
-                crate::resolve_table_refs_in_ast(&resolved, &ctx)
-            } else {
-                resolved
-            };
-            // Resolve spill-range refs (A1#) so the rare cache-miss path
-            // matches the main update_cell eval (cached ASTs already carry
-            // this resolution from when the formula was entered).
-            let resolved = if crate::ast_has_spill_refs(&resolved) {
-                let spill_ranges_map = state.spill_ranges.lock().unwrap();
-                let resolved = crate::resolve_spill_refs_in_ast(
-                    &resolved,
-                    &spill_ranges_map,
-                    active_sheet,
-                );
-                drop(spill_ranges_map);
-                resolved
-            } else {
-                resolved
-            };
-            crate::convert_expr(&resolved)
-        }).map_err(|e| format!("{}", e)) {
+            let engine_ast = crate::name_resolution::eval_ast(&parsed, &name_ctx).into_owned();
             let result = evaluate_formula_raw_with_files_and_pivot(
                 &*grids,
                 sheet_names,
@@ -2111,85 +2399,20 @@ pub(crate) fn reevaluate_formula_cell(
         }
     };
 
-    // Clear any previous spill range for this dependent cell, through the ONE
-    // tear-down.
-    {
-        let released = take_spills_owned_within(state, active_sheet, dep_row, dep_col, dep_row, dep_col);
-        erase_released_spill_cells(grid, grids, active_sheet, &released, updated_cells);
-    }
-
-    // Handle spill for array results
-    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
-    let cell_value = if spill_rows > 1 || spill_cols > 1 {
-        let spill_values = raw_result.to_spill_values();
-        let mut spill_blocked = false;
-
-        for &(dr, dc, _) in &spill_values {
-            if dr == 0 && dc == 0 { continue; }
-            let target_r = dep_row + dr;
-            let target_c = dep_col + dc;
-            if let Some(existing) = grid.get_cell(target_r, target_c) {
-                if existing.value != engine::CellValue::Empty {
-                    // Check if it's a spill cell from this same origin
-                    let spill_hosts = state.spill_hosts.lock().unwrap();
-                    let is_own_spill = spill_hosts.get(&(active_sheet, target_r, target_c))
-                        .map_or(false, |origin| *origin == (dep_row, dep_col));
-                    if !is_own_spill {
-                        spill_blocked = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if spill_blocked {
-            engine::CellValue::Error(engine::CellError::Value)
-        } else {
-            // Write spill cells
-            let mut new_spill_cells = Vec::new();
-            let mut spill_ranges = state.spill_ranges.lock().unwrap();
-            let mut spill_hosts = state.spill_hosts.lock().unwrap();
-
-            for (dr, dc, cv) in &spill_values {
-                if *dr == 0 && *dc == 0 { continue; }
-                let target_r = dep_row + dr;
-                let target_c = dep_col + dc;
-
-                let spill_cell = engine::Cell {
-                    ast: None,
-                    value: cv.clone(),
-                    style_index: 0,
-                    rich_text: None,
-                };
-                grid.set_cell(target_r, target_c, spill_cell.clone());
-                if active_sheet < grids.len() {
-                    grids[active_sheet].set_cell(target_r, target_c, spill_cell);
-                }
-
-                // Spill cells carry style 0 (= inherit), so the row/column
-                // tiers decide how they are displayed.
-                let style = styles.get(grid.effective_style_index(target_r, target_c));
-                let display = format_cell_value(cv, style, locale);
-                updated_cells.push(CellData {
-                    row: target_r, col: target_c, display,
-                    display_color: None, formula: None, style_index: 0,
-                    row_span: 1, col_span: 1, sheet_index: None,
-                    rich_text: None, accounting_layout: None,
-                });
-
-                new_spill_cells.push((target_r, target_c));
-                spill_hosts.insert((active_sheet, target_r, target_c), (dep_row, dep_col));
-            }
-
-            if !new_spill_cells.is_empty() {
-                spill_ranges.insert((active_sheet, dep_row, dep_col), new_spill_cells);
-            }
-
-            raw_result.to_cell_value()
-        }
-    } else {
-        raw_result.to_cell_value()
-    };
+    // Tear-down, blocked-check and spill, through THE ONE SPILL DECISION.
+    let cell_value = apply_spill_decision(
+        state,
+        grid,
+        grids,
+        active_sheet,
+        active_sheet,
+        dep_row,
+        dep_col,
+        &raw_result,
+        styles,
+        locale,
+        updated_cells,
+    );
 
     // Update the origin cell
     let mut updated_dep = dep_cell.clone();
@@ -2262,7 +2485,17 @@ struct SheetDependencyIndex {
 }
 
 impl SheetDependencyIndex {
-    fn build(grid: &Grid) -> Self {
+    /// `name_tables` and `sheet_index` are not decoration. A stored formula
+    /// keeps its defined names (D2) and its structured references (§2aj), and
+    /// `extract_all_references` can see through neither -- so an off-sheet
+    /// `=SUM(Sales[Amount])` built straight from `cell.ast` would look like a
+    /// formula that reads nothing and sort as an INPUT, computing from whatever
+    /// the table held before this cascade started.
+    fn build(
+        grid: &Grid,
+        sheet_index: usize,
+        name_tables: crate::name_resolution::NameTables<'_>,
+    ) -> Self {
         let mut index = SheetDependencyIndex {
             cells: crate::DependencyMap::default(),
             columns: crate::StripeDependentsMap::default(),
@@ -2270,7 +2503,7 @@ impl SheetDependencyIndex {
         };
         for (&(row, col), cell) in &grid.cells {
             let Some(ast) = &cell.ast else { continue };
-            let refs = extract_all_references(ast, grid);
+            let refs = crate::stored_ast_references(ast, grid, name_tables, sheet_index, row, col);
             for precedent in refs.cells {
                 index.cells.entry(precedent).or_default().insert((row, col));
             }
@@ -2312,11 +2545,19 @@ impl SheetDependencyIndex {
 /// and record it in `updated_cells`. Returns `false` when the cell is missing
 /// or holds no formula — nothing changed, so nothing propagates from it.
 ///
-/// SCALAR-ONLY, deliberately: no spill maintenance and no per-cell
-/// position/preserve context, the behaviour `update_cell` has always had off
-/// the active sheet.
+/// SPILLS, through the shared [`apply_spill_decision`]. It did not use to: it
+/// wrote `to_cell_value()`, so a dynamic array on a sheet the user was not
+/// looking at collapsed to its first element the moment an edit on another
+/// sheet reached it. That was tolerable only while NOTHING off the active sheet
+/// spilled; §3bm gave the recalculation pass the decision for every sheet it
+/// plans, and leaving this one scalar would have made the same workbook hold
+/// different values depending on whether F9 or an edit last ran — the exact
+/// path-dependence `EvalSurface`'s doc forbids.
+///
+/// Still no per-cell position/preserve context, which is unchanged.
 #[allow(clippy::too_many_arguments)]
 fn recalc_walked_cell(
+    state: &AppState,
     grid: &mut Grid,
     grids: &mut [Grid],
     sheet_names: &[String],
@@ -2344,13 +2585,13 @@ fn recalc_walked_cell(
     };
 
     // Use the cached AST if available; otherwise re-parse the rendered string.
-    let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+    let raw_result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
         // Defined names are expanded on the way into the evaluator (D2), against
         // the DEPENDENT'S OWN sheet — a sheet-scoped name means something
         // different over there, and this walk is on another sheet by definition.
         let eval_target = crate::name_resolution::eval_ast(
             cached_ast,
-            &name_tables.at(dep_sheet_idx, dep_row),
+            &name_tables.at(dep_sheet_idx, dep_row, dep_col),
         );
         crate::evaluate_formula_raw_with_ast_files_and_cube(
             &*grids,
@@ -2362,17 +2603,36 @@ fn recalc_walked_cell(
             None,
             Some(control_values.clone()),
         )
-        .to_cell_value()
     } else {
         // (GET.CONTROLVALUE unavailable here (v1): string path)
-        evaluate_formula_multi_sheet_with_files(
+        match evaluate_formula_multi_sheet_with_files(
             &*grids,
             sheet_names,
             dep_sheet_idx,
             &formula,
             user_files,
-        )
+        ) {
+            engine::CellValue::Number(n) => engine::EvalResult::Number(n),
+            engine::CellValue::Text(s) => engine::EvalResult::Text(s),
+            engine::CellValue::Boolean(b) => engine::EvalResult::Boolean(b),
+            engine::CellValue::Error(e) => engine::EvalResult::Error(e),
+            _ => engine::EvalResult::Text(String::new()),
+        }
     };
+
+    let result = apply_spill_decision(
+        state,
+        grid,
+        grids,
+        active_sheet,
+        dep_sheet_idx,
+        dep_row,
+        dep_col,
+        &raw_result,
+        styles,
+        locale,
+        updated_cells,
+    );
 
     let mut updated_dep = dep_cell;
     updated_dep.value = result;
@@ -2442,9 +2702,9 @@ fn recalc_walked_cell(
 /// topological order, through `SheetDependencyIndex` — that sheet's graph, not
 /// the active sheet's.
 ///
-/// LIMITATION: dependents re-evaluated by this walk are written as SCALAR
-/// values (no spill maintenance, no per-cell position/preserve context) — the
-/// behaviour `update_cell` has always had on this path.
+/// Dependents re-evaluated by this walk spill through the shared
+/// [`apply_spill_decision`], on their own sheet — see `recalc_walked_cell`.
+/// What they still do not get is per-cell position/preserve context.
 ///
 /// # BUG-0019
 ///
@@ -2460,6 +2720,7 @@ fn recalc_walked_cell(
 /// a cell the caller already did.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cascade_cross_sheet_dependents(
+    state: &AppState,
     grid: &mut Grid,
     grids: &mut Vec<Grid>,
     sheet_names: &[String],
@@ -2535,7 +2796,8 @@ pub(crate) fn cascade_cross_sheet_dependents(
         for (dep_sheet_idx, mut seeds) in by_sheet {
             seeds.sort_unstable();
             if !sheet_indexes.contains_key(&dep_sheet_idx) {
-                let built = SheetDependencyIndex::build(&grids[dep_sheet_idx]);
+                let built =
+                    SheetDependencyIndex::build(&grids[dep_sheet_idx], dep_sheet_idx, name_tables);
                 sheet_indexes.insert(dep_sheet_idx, built);
             }
             let order = sheet_indexes[&dep_sheet_idx].recalc_order(&seeds);
@@ -2545,6 +2807,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
                     continue;
                 }
                 let changed = recalc_walked_cell(
+                    state,
                     grid,
                     grids,
                     sheet_names,
@@ -2849,6 +3112,8 @@ pub(crate) fn update_cells_batch_core(
     // and in declaration order, so the canonical lock order stays one sequence.
     let mut name_dependents_map = state.name_dependents.lock().unwrap();
     let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
+    let mut table_dependents_map = state.table_dependents.lock().unwrap();
+    let mut table_dependencies_map = state.table_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
@@ -2921,6 +3186,7 @@ pub(crate) fn update_cells_batch_core(
             erase_released_spill_cells(
                 &mut grid,
                 &mut grids,
+                active_sheet,
                 active_sheet,
                 &released,
                 &mut updated_cells,
@@ -3009,7 +3275,7 @@ pub(crate) fn update_cells_batch_core(
                     // THE CELL KEEPS THE NAME (Excel parity, D2) — one recipe,
                     // shared with update_cell and fill_range.
                     let entered =
-                        crate::split_entered_formula(&state, &parsed, active_sheet, row);
+                        crate::split_entered_formula(&state, &parsed, active_sheet, row, col, &sheet_names);
                     let resolved = entered.evaluated();
 
                     let refs = extract_all_references(resolved, &grid);
@@ -3053,6 +3319,18 @@ pub(crate) fn update_cells_batch_core(
                         );
                     }
 
+                    // STRUCTURED-REFERENCE edges (§2aj), same tree.
+                    {
+                        let mut tables = crate::table_deps::TableSet::default();
+                        crate::table_deps::collect_table_names(&entered.stored, &mut tables);
+                        crate::table_deps::update_table_dependencies(
+                            (row, col),
+                            tables,
+                            &mut table_dependencies_map,
+                            &mut table_dependents_map,
+                        );
+                    }
+
                     // PERF: Convert the already-parsed AST directly instead of re-parsing.
                     // This eliminates a redundant parse_formula() call per cell.
                     let engine_ast = crate::convert_expr(resolved);
@@ -3083,75 +3361,21 @@ pub(crate) fn update_cells_batch_core(
 
                     // The range this cell used to own was already released, at
                     // the top of the loop, BEFORE the formula was evaluated —
-                    // see the hoisted tear-down there.
-
-                    // Handle spill for array results
-                    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
-                    if spill_rows > 1 || spill_cols > 1 {
-                        let spill_values = raw_result.to_spill_values();
-                        let mut spill_blocked = false;
-
-                        for &(dr, dc, _) in &spill_values {
-                            if dr == 0 && dc == 0 { continue; }
-                            let target_r = row + dr;
-                            let target_c = col + dc;
-                            if let Some(existing) = grid.get_cell(target_r, target_c) {
-                                if existing.value != engine::CellValue::Empty {
-                                    spill_blocked = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if spill_blocked {
-                            cell.value = engine::CellValue::Error(engine::CellError::Value);
-                        } else {
-                            cell.value = raw_result.to_cell_value();
-
-                            let mut new_spill_cells = Vec::new();
-                            let mut spill_ranges = state.spill_ranges.lock().unwrap();
-                            let mut spill_hosts = state.spill_hosts.lock().unwrap();
-
-                            for (dr, dc, cv) in spill_values {
-                                if dr == 0 && dc == 0 { continue; }
-                                let target_r = row + dr;
-                                let target_c = col + dc;
-
-                                let spill_cell = engine::Cell {
-                                    ast: None,
-                                    value: cv.clone(),
-                                    style_index: 0,
-                                    rich_text: None,
-                                };
-                                grid.set_cell(target_r, target_c, spill_cell.clone());
-                                if active_sheet < grids.len() {
-                                    grids[active_sheet].set_cell(target_r, target_c, spill_cell);
-                                }
-
-                                // Spill cells carry style 0 (= inherit), so the
-                                // row/column tiers decide how they display.
-                                let spill_style =
-                                    styles.get(grid.effective_style_index(target_r, target_c));
-                                let display = format_cell_value(&cv, spill_style, &locale);
-                                updated_cells.push(CellData {
-                                    row: target_r, col: target_c, display,
-                                    display_color: None, formula: None, style_index: 0,
-                                    row_span: 1, col_span: 1, sheet_index: None,
-                                    rich_text: None,
-                                    accounting_layout: None,
-                                });
-
-                                new_spill_cells.push((target_r, target_c));
-                                spill_hosts.insert((active_sheet, target_r, target_c), (row, col));
-                            }
-
-                            if !new_spill_cells.is_empty() {
-                                spill_ranges.insert((active_sheet, row, col), new_spill_cells);
-                            }
-                        }
-                    } else {
-                        cell.value = raw_result.to_cell_value();
-                    }
+                    // see the hoisted tear-down there. THE ONE SPILL DECISION
+                    // releases again (finding nothing) and then decides.
+                    cell.value = apply_spill_decision(
+                        &state,
+                        &mut grid,
+                        &mut grids,
+                        active_sheet,
+                        active_sheet,
+                        row,
+                        col,
+                        &raw_result,
+                        &styles,
+                        &locale,
+                        &mut updated_cells,
+                    );
                 }
                 Err(_e) => {
                     let result =
@@ -3295,8 +3519,10 @@ pub(crate) fn update_cells_batch_core(
                                 named_ranges: &batch_named_ranges,
                                 tables: &batch_tables,
                                 table_names: &batch_table_names,
+                                sheet_names: &sheet_names,
+                                spill_ranges: &state.spill_ranges,
                             }
-                            .at(active_sheet, *dep_row),
+                            .at(active_sheet, *dep_row, *dep_col),
                         );
                         crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
@@ -3328,8 +3554,10 @@ pub(crate) fn update_cells_batch_core(
                                     let ctx = crate::TableRefContext {
                                         tables: &batch_tables,
                                         table_names: &batch_table_names,
+                                        sheet_names: &sheet_names,
                                         current_sheet_index: active_sheet,
                                         current_row: *dep_row,
+                                        current_col: *dep_col,
                                     };
                                     crate::resolve_table_refs_in_ast(&resolved, &ctx)
                                 } else {
@@ -3431,6 +3659,7 @@ pub(crate) fn update_cells_batch_core(
         // non-active sheet's own dependents, so a paste feeding a summary sheet
         // updated the first hop and nothing beyond it.
         cascade_cross_sheet_dependents(
+            &state,
             &mut grid,
             &mut grids,
             &sheet_names,
@@ -3445,6 +3674,8 @@ pub(crate) fn update_cells_batch_core(
                 named_ranges: &batch_named_ranges,
                 tables: &batch_tables,
                 table_names: &batch_table_names,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
             },
             &cells_needing_recalc,
             &all_recalc_order,
@@ -4520,9 +4751,11 @@ pub(crate) fn sort_range_off_sheet(
         params.start_row.max(params.end_row), params.start_col.max(params.end_col),
     )?;
     // A sort PERMUTES the block, so it refuses any rectangle holding part of an
-    // array — cells or origin — rather than trying to carry one. That matters
-    // more here than on the active sheet: this path recalculates through
-    // `recalc_after_off_sheet_write`, which is whole-sheet and not spill-aware.
+    // array — cells or origin — rather than trying to carry one. The
+    // recalculation behind this path (`recalc_after_off_sheet_write` ->
+    // `recalculate_sheet_values`) re-lays an array whose ORIGIN still holds its
+    // formula (§3bm), but a permutation MOVES the origin, and a moved origin's
+    // old claim has no seed to release it — so the refusal stands.
     check_no_array_within(
         state, target,
         params.start_row.min(params.end_row), params.start_col.min(params.end_col),
@@ -4656,11 +4889,15 @@ pub(crate) fn sort_range_off_sheet(
                         if let Some(cell) = cell_opt {
                             let mut cell = cell.clone();
                             if row_delta != 0 {
-                                if let Some(formula) = cell.formula_string() {
+                                if let Some(formula) =
+                                    crate::commands::structure::formula_to_rewrite(&cell)
+                                {
                                     let shifted = crate::commands::structure::shift_formula_internal(
                                         &formula, row_delta, 0,
                                     );
-                                    cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                                    crate::commands::structure::store_rewritten_formula(
+                                        &mut cell, &shifted, "sort", target_row, target_col,
+                                    );
                                 }
                             }
                             grid.set_cell(target_row, target_col, cell);
@@ -4717,11 +4954,15 @@ pub(crate) fn sort_range_off_sheet(
                         if let Some(cell) = cell_opt {
                             let mut cell = cell.clone();
                             if col_delta != 0 {
-                                if let Some(formula) = cell.formula_string() {
+                                if let Some(formula) =
+                                    crate::commands::structure::formula_to_rewrite(&cell)
+                                {
                                     let shifted = crate::commands::structure::shift_formula_internal(
                                         &formula, 0, col_delta,
                                     );
-                                    cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                                    crate::commands::structure::store_rewritten_formula(
+                                        &mut cell, &shifted, "sort", target_row, target_col,
+                                    );
                                 }
                             }
                             grid.set_cell(target_row, target_col, cell);
@@ -4989,11 +5230,15 @@ pub fn sort_range(
                         // computes from the wrong rows (BUG-0010).
                         let mut cell = cell.clone();
                         if row_delta != 0 {
-                            if let Some(formula) = cell.formula_string() {
+                            if let Some(formula) =
+                                crate::commands::structure::formula_to_rewrite(&cell)
+                            {
                                 let shifted = crate::commands::structure::shift_formula_internal(
                                     &formula, row_delta, 0,
                                 );
-                                cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                                crate::commands::structure::store_rewritten_formula(
+                                    &mut cell, &shifted, "sort", target_row, target_col,
+                                );
                             }
                         }
                         let cell = &cell;
@@ -5061,6 +5306,8 @@ pub fn sort_range(
                     named_ranges: &rebuild_named_ranges,
                     tables: &rebuild_tables,
                     table_names: &rebuild_table_names,
+                    sheet_names: &sheet_names_for_rebuild,
+                    spill_ranges: &state.spill_ranges,
                 },
                 &state,
             );
@@ -5137,11 +5384,15 @@ pub fn sort_range(
                         // BUG-0010).
                         let mut cell = cell.clone();
                         if col_delta != 0 {
-                            if let Some(formula) = cell.formula_string() {
+                            if let Some(formula) =
+                                crate::commands::structure::formula_to_rewrite(&cell)
+                            {
                                 let shifted = crate::commands::structure::shift_formula_internal(
                                     &formula, 0, col_delta,
                                 );
-                                cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                                crate::commands::structure::store_rewritten_formula(
+                                    &mut cell, &shifted, "sort", target_row, target_col,
+                                );
                             }
                         }
                         let cell = &cell;
@@ -5209,6 +5460,8 @@ pub fn sort_range(
                     named_ranges: &rebuild_named_ranges,
                     tables: &rebuild_tables,
                     table_names: &rebuild_table_names,
+                    sheet_names: &sheet_names_for_rebuild,
+                    spill_ranges: &state.spill_ranges,
                 },
                 &state,
             );
@@ -5569,8 +5822,8 @@ pub fn get_used_range(
 ) -> Result<UsedRangeResult, String> {
     let active_sheet = *state.active_sheet.read().unwrap();
     let target_sheet = sheet_index.unwrap_or(active_sheet);
-    let grids = state.grids.read().unwrap();
     let active_grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let grid: &Grid = if target_sheet == active_sheet {
         &active_grid
     } else if target_sheet < grids.len() {
@@ -5999,6 +6252,8 @@ pub fn remove_duplicates(
                 named_ranges: &rebuild_named_ranges,
                 tables: &rebuild_tables,
                 table_names: &rebuild_table_names,
+                sheet_names: &sheet_names_for_rebuild,
+                spill_ranges: &state.spill_ranges,
             },
             &state,
         );
@@ -6195,6 +6450,7 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
                 &mut grid,
                 &mut grids,
                 active_sheet,
+                active_sheet,
                 &released,
                 updated_cells,
             );
@@ -6307,6 +6563,7 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     }
 
     cascade_cross_sheet_dependents(
+        state,
         &mut grid,
         &mut grids,
         &sheet_names,
@@ -6321,6 +6578,8 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
             named_ranges: &named_ranges,
             tables: &tables,
             table_names: &table_names,
+            sheet_names: &sheet_names,
+            spill_ranges: &state.spill_ranges,
         },
         &live_seeds,
         &recalc_order,
@@ -6550,15 +6809,15 @@ pub fn update_cell_on_sheets(
             };
             let is_formula = cell_template.has_formula();
 
-            // If formula, parse and convert the AST once for reuse across sheets
-            let engine_ast = if let Some(formula) = cell_template.formula_string() {
-                match parser::parse(&formula) {
-                    Ok(parser_ast) => Some(crate::convert_expr(&parser_ast)),
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
+            // Convert the AST once for reuse across sheets.
+            //
+            // FROM THE TREE, not from a render of it. This used to render
+            // `cell_template` back to TEXT with `formula_string()` and parse that
+            // text again -- a round trip through the display form, which
+            // collapses a named-LAMBDA call's `__INVOKE__` marker and drops the
+            // lambda (register §2ae). The template already holds the parsed tree
+            // this needs, so the round trip bought nothing and could only lose.
+            let engine_ast = cell_template.ast.as_deref().map(crate::convert_expr);
 
             for &sheet_idx in &sheet_indices {
                 if sheet_idx == active_sheet || sheet_idx >= grids.len() {
@@ -6694,10 +6953,12 @@ pub fn clear_range_on_sheets(
         let effective_end_row = end_row.min(grid.max_row);
         let effective_end_col = end_col.min(grid.max_col);
 
-        // SPILL TEAR-DOWN (§2y), in the same critical section as the clear —
-        // `recalc_after_off_sheet_write` is whole-sheet and not spill-aware, so
-        // there is no later phase to do it in. Released cells are erased and
-        // never recorded for undo (see `spilled_cells_owned_within`).
+        // SPILL TEAR-DOWN (§2y), in the same critical section as the clear.
+        // `recalc_after_off_sheet_write` re-lays arrays whose origin still
+        // holds a formula (§3bm), and a CLEAR is exactly the case it cannot
+        // help with: the origin's formula is gone, so nothing visits it and
+        // nothing would release its claim. Released cells are erased and never
+        // recorded for undo (see `spilled_cells_owned_within`).
         let released_spill = take_spills_owned_within(
             &state, sheet_idx, start_row, start_col, effective_end_row, effective_end_col,
         );
@@ -6878,6 +7139,8 @@ pub fn fill_range(
     // and in declaration order, so the canonical lock order stays one sequence.
     let mut name_dependents_map = state.name_dependents.lock().unwrap();
     let mut name_dependencies_map = state.name_dependencies.lock().unwrap();
+    let mut table_dependents_map = state.table_dependents.lock().unwrap();
+    let mut table_dependencies_map = state.table_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
@@ -6971,12 +7234,22 @@ pub fn fill_range(
                 new_cell.rich_text = None;
 
                 // If the source has a formula, shift the references
-                if let Some(formula) = src.formula_string() {
+                if let Some(formula) = crate::commands::structure::formula_to_rewrite(src) {
                     let shifted = crate::commands::structure::shift_formula_internal(
                         &formula,
                         row_delta,
                         col_delta,
                     );
+                    // RAW, not the display form: formula_string() collapses a
+                    // named-LAMBDA call's __INVOKE__ marker, so filling one down
+                    // a column re-parsed it as an unknown function and the whole
+                    // fill produced #NAME?.
+                    //
+                    // The unparseable case is handled by the Err arm below -- it
+                    // leaves the cell showing #VALUE!, which is a VISIBLE
+                    // failure, so unlike the sort and insert paths there is
+                    // nothing here to keep: the source cell's own AST would
+                    // reference the wrong cells if it were carried over.
                     new_cell.ast = parser::parse(&shifted).ok().map(Box::new);
 
                     // Parse and evaluate the shifted formula
@@ -6985,7 +7258,7 @@ pub fn fill_range(
                             // THE CELL KEEPS THE NAME (Excel parity, D2) — one
                             // recipe, shared with update_cell and the batch writer.
                             let entered = crate::split_entered_formula(
-                                &state, &parsed, active_sheet, tr,
+                                &state, &parsed, active_sheet, tr, tc, &sheet_names,
                             );
                             let resolved = entered.evaluated();
 
@@ -7036,6 +7309,21 @@ pub fn fill_range(
                                 );
                             }
 
+                            // STRUCTURED-REFERENCE edges (§2aj), same tree.
+                            {
+                                let mut tables = crate::table_deps::TableSet::default();
+                                crate::table_deps::collect_table_names(
+                                    &entered.stored,
+                                    &mut tables,
+                                );
+                                crate::table_deps::update_table_dependencies(
+                                    (tr, tc),
+                                    tables,
+                                    &mut table_dependencies_map,
+                                    &mut table_dependents_map,
+                                );
+                            }
+
                             // Convert AST and evaluate
                             let engine_ast = crate::convert_expr(resolved);
                             new_cell.set_cached_ast(crate::convert_expr(&entered.stored));
@@ -7066,9 +7354,19 @@ pub fn fill_range(
                             new_cell.value = raw_result.to_cell_value();
                         }
                         Err(e) => {
-                            // If formula can't be parsed after shifting, store as error
+                            // If formula can't be parsed after shifting, store as
+                            // error. LOUD (register section 3bc): text a rewrite
+                            // produced and cannot read back is a defect in the
+                            // rewriter, and it used to be filed at debug level
+                            // where nobody would ever see it.
                             new_cell.value = engine::CellValue::Error(engine::CellError::Value);
-                            log_debug!("FILL", "fill_range: failed to parse shifted formula '{}': {}", shifted, e);
+                            crate::log_error!(
+                                "FILL",
+                                "fill produced unreadable formula text at {} -- the cell is #VALUE!: `{}` ({})",
+                                calcula_format::cell_ref::to_a1(tr, tc),
+                                shifted,
+                                e
+                            );
                         }
                     }
                 }
@@ -7210,8 +7508,10 @@ pub fn fill_range(
                                 named_ranges: &batch_named_ranges,
                                 tables: &batch_tables,
                                 table_names: &batch_table_names,
+                                sheet_names: &sheet_names,
+                                spill_ranges: &state.spill_ranges,
                             }
-                            .at(active_sheet, *dep_row),
+                            .at(active_sheet, *dep_row, *dep_col),
                         );
                         crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
@@ -7242,8 +7542,10 @@ pub fn fill_range(
                                     let ctx = crate::TableRefContext {
                                         tables: &batch_tables,
                                         table_names: &batch_table_names,
+                                        sheet_names: &sheet_names,
                                         current_sheet_index: active_sheet,
                                         current_row: *dep_row,
+                                        current_col: *dep_col,
                                     };
                                     crate::resolve_table_refs_in_ast(&resolved, &ctx)
                                 } else {
@@ -7318,6 +7620,7 @@ pub fn fill_range(
         // `cascade_cross_sheet_dependents`). Was a second hand-copy of the same
         // partial walk; a fill that fed another sheet propagated one hop only.
         cascade_cross_sheet_dependents(
+            &state,
             &mut grid,
             &mut grids,
             &sheet_names,
@@ -7332,6 +7635,8 @@ pub fn fill_range(
                 named_ranges: &batch_named_ranges,
                 tables: &batch_tables,
                 table_names: &batch_table_names,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
             },
             &cells_needing_recalc,
             &all_recalc_order,
@@ -7570,6 +7875,16 @@ mod d3_cascade_seed_tests;
 #[path = "d2_named_range_tests.rs"]
 mod d2_named_range_tests;
 
+/// §2aj — a typed formula keeps its STRUCTURED REFERENCE and the specifier
+/// resolves at EVALUATION, as in Excel, with a table -> dependents edge so
+/// growing, shrinking, renaming or deleting a table moves every formula that
+/// reads it. Carries §2ai (the sheet-qualifier restamp) too, because the two are
+/// the same lexer defect with different authorities. A CHILD module of `data`
+/// for the same reason as above.
+#[cfg(test)]
+#[path = "structured_ref_tests.rs"]
+mod structured_ref_tests;
+
 /// §2y — the spill map has ONE maintainer, and every path that removes or
 /// overwrites a spill ORIGIN reaches it. A CHILD module of `data` for the same
 /// reason as above: it drives `check_spill_protection`, the shared tear-down
@@ -7577,6 +7892,28 @@ mod d2_named_range_tests;
 #[cfg(test)]
 #[path = "spill_map_tests.rs"]
 mod spill_map_tests;
+
+/// §2ab — a dynamic array's OWNERSHIP survives a save and a reload, over a REAL
+/// `.cala` round trip. A CHILD module of `data` for the same reason as above:
+/// it reuses the `Workbook` harness and drives the shared cascade.
+#[cfg(test)]
+#[path = "spill_persistence_tests.rs"]
+mod spill_persistence_tests;
+
+/// §3bm — the RECALCULATION pass spills, exactly as an edit does: F9, Shift+F9,
+/// the background whole-sheet pass and the cross-sheet walk all end in THE ONE
+/// SPILL DECISION. A CHILD module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "recalc_spill_tests.rs"]
+mod recalc_spill_tests;
+
+/// §3bf — `A1#` is a LIVE reference: the stored formula keeps the `#` and it
+/// resolves at EVALUATION against the current extent, with a dependency edge,
+/// exactly as D2 does for a defined name and §2aj for a structured reference.
+/// A CHILD module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "spill_ref_tests.rs"]
+mod spill_ref_tests;
 
 /// D8 / §2s — a structural edit must recalculate, because a formula whose value
 /// depends on the SHAPE or POSITION of its reference (or of its own cell) goes

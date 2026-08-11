@@ -2315,6 +2315,18 @@ pub fn calp_pull(
             sheet_ids.push(pulled.sheet.id);
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
+            // DYNAMIC-ARRAY OWNERSHIP for the pulled sheet (§2ab). The package
+            // carries the same spill extents a `.cala` does -- both sides go
+            // through `cells_to_sheet_data` / `sheet_data_to_cells` -- so the
+            // subscriber's arrays are owned the moment they land, without any
+            // recalculation, which is the whole point of persisting the extent
+            // rather than recomputing it. Called under the grid locks, which is
+            // the canonical order for the spill maps.
+            crate::spill_restore::restore_spill_extents_for_sheet(
+                state.inner(),
+                base_index + i,
+                &pulled.sheet,
+            );
             chart_index_map.insert(pulled.sheet.id, base_index + i);
             pkg_to_index.insert(pulled.package_sheet_id, base_index + i);
         }
@@ -2433,6 +2445,18 @@ pub fn calp_pull(
             );
         }
     }
+
+    // §2t ON THE DISTRIBUTION PATH. A package stores every formula as TEXT and
+    // `to_grid()` above re-parsed it, and the lexer upper-cases every bare
+    // identifier -- so a publisher's `=BudgetTotal*2` arrives in the
+    // subscriber's workbook as `=BUDGETTOTAL*2`, exactly the defect §2t fixed
+    // for `open_file` and the sheet operations. This is the same restamp those
+    // paths run, over the name table this pull has just added to: the pulled
+    // names AND the subscriber's own are both authorities for the spelling of
+    // a formula on a pulled sheet. Costs nothing when no name is defined (the
+    // restamp returns on the first `is_empty()`), and it is cosmetic by
+    // construction -- every name lookup uppercases.
+    crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
     // Materialize pulled conditional formats onto the (remapped) local sheet index.
     // Pulled sheets are freshly appended, so each lands on an empty per-sheet Vec.
@@ -3598,7 +3622,22 @@ pub fn calp_get_overrides(
 /// Materialize an OverrideValue into a grid cell, preserving the cell's style.
 /// Formula cells get their AST set with an Empty value — the caller is
 /// responsible for triggering a recalculation pass afterwards.
-fn write_override_value(grid: &mut engine::Grid, row: u32, col: u32, value: &calp::OverrideValue) {
+///
+/// `spellings` carries the workbook's THREE naming authorities, and it is not
+/// optional: an override stores its formula as TEXT and re-parsing it here runs
+/// the same lexer that upper-cases every bare identifier, so `=BudgetTotal*2`
+/// landed in the grid as `=BUDGETTOTAL*2` (§2t on the overlay path),
+/// `=SUM(Sales[Amount])` as `=SUM(SALES[AMOUNT])` (§2aj's casing half) and
+/// `=Data!A1` as `=DATA!A1` (§2ai). The restamps are the same three entry and
+/// `open_file` use, applied to the one AST this writes rather than to the whole
+/// workbook.
+fn write_override_value(
+    grid: &mut engine::Grid,
+    row: u32,
+    col: u32,
+    value: &calp::OverrideValue,
+    spellings: &WorkbookSpellings<'_>,
+) {
     let style_index = grid.get_cell(row, col).map(|c| c.style_index).unwrap_or(0);
     match value {
         calp::OverrideValue::Empty => {
@@ -3625,7 +3664,8 @@ fn write_override_value(grid: &mut engine::Grid, row: u32, col: u32, value: &cal
         }
         calp::OverrideValue::Formula { formula } => {
             match parser::parse(formula) {
-                Ok(ast) => {
+                Ok(mut ast) => {
+                    spellings.restamp(&mut ast);
                     grid.set_cell(row, col, engine::Cell {
                         ast: Some(Box::new(ast)),
                         value: engine::CellValue::Empty,
@@ -3647,6 +3687,28 @@ fn write_override_value(grid: &mut engine::Grid, row: u32, col: u32, value: &cal
                 }
             }
         }
+    }
+}
+
+/// The three authorities a re-parsed formula has to be re-spelled from, held
+/// together so a caller cannot take two of them and forget the third.
+///
+/// Borrowed rather than cloned: the caller already holds the guards, and the
+/// lock order they were taken in (named_ranges -> tables -> table_names ->
+/// sheet_names -> grid -> grids) is the one `restamp_workbook_name_casing`
+/// established.
+struct WorkbookSpellings<'a> {
+    named_ranges: &'a std::collections::HashMap<String, crate::named_ranges::NamedRange>,
+    tables: &'a crate::tables::TableStorage,
+    table_names: &'a crate::tables::TableNameRegistry,
+    sheet_names: &'a [String],
+}
+
+impl WorkbookSpellings<'_> {
+    fn restamp(&self, ast: &mut engine::Expression) {
+        crate::name_resolution::restamp_name_casing(ast, self.named_ranges);
+        crate::table_deps::restamp_table_casing(ast, self.tables, self.table_names);
+        crate::sheet_names::restamp_sheet_casing(ast, self.sheet_names);
     }
 }
 
@@ -3683,13 +3745,40 @@ fn apply_override_value_to_grid(
         }
     };
 
+    // NAMING AUTHORITIES BEFORE THE GRIDS, the lock order
+    // `restamp_workbook_name_casing` already established.
+    let named_ranges = match state.named_ranges.read() {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let tables = match state.tables.read() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let table_names = match state.table_names.read() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let sheet_names = match state.sheet_names.read() {
+        Ok(s) => s.clone(),
+        Err(_) => return false,
+    };
+    let spellings = WorkbookSpellings {
+        named_ranges: &named_ranges,
+        tables: &tables,
+        table_names: &table_names,
+        sheet_names: &sheet_names,
+    };
+
     {
         let mut grids = match state.grids.write(effect) {
             Ok(g) => g,
             Err(_) => return false,
         };
         match grids.get_mut(sheet_index) {
-            Some(grid) => write_override_value(grid, position.0, position.1, value),
+            Some(grid) => {
+                write_override_value(grid, position.0, position.1, value, &spellings)
+            }
             None => return false,
         }
     }
@@ -3698,15 +3787,20 @@ fn apply_override_value_to_grid(
     let active = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
     if active == sheet_index {
         if let Ok(mut grid) = state.grid.write(effect) {
-            write_override_value(&mut grid, position.0, position.1, value);
+            write_override_value(&mut grid, position.0, position.1, value, &spellings);
         }
     }
+    drop(spellings);
+    drop(sheet_names);
+    drop(table_names);
+    drop(tables);
+    drop(named_ranges);
 
     // SPILL CLAIMS ON THE WRITTEN SHEET (§2y). An override lands a VALUE on a
-    // cell chosen by id, which can be the ORIGIN of a dynamic array — and the
-    // three commands that call this recalculate through the whole-sheet
-    // `recalculate_sheet_values`, which is not spill-aware, so nothing else
-    // would ever notice the formula had gone. The claim is dropped; the cells
+    // cell chosen by id, which can be the ORIGIN of a dynamic array — and
+    // `recalculate_sheet_values` (spill-aware since §3bm) only visits cells
+    // that still hold a FORMULA, so an origin the override overwrote is never
+    // reached and nothing else would notice the formula had gone. The claim is dropped; the cells
     // are left, because the override layer is authoritative about content (see
     // `release_spills_orphaned_by_grid`).
     if let Ok(grids) = state.grids.read() {
@@ -4299,6 +4393,15 @@ pub fn calp_refresh_apply(
                             grids[grid_idx] = grid;
                             all_cw[grid_idx] = pulled.sheet.column_widths.clone();
                             all_rh[grid_idx] = pulled.sheet.row_heights.clone();
+                            // The whole grid at this index was just replaced, so
+                            // every spill claim the OLD content made is void.
+                            // `restore_spill_extents_for_sheet` sweeps the index
+                            // before installing the incoming sheet's extents.
+                            crate::spill_restore::restore_spill_extents_for_sheet(
+                                state.inner(),
+                                grid_idx,
+                                &pulled.sheet,
+                            );
                         }
                     }
                 } else {
@@ -4308,6 +4411,11 @@ pub fn calp_refresh_apply(
                     sheet_ids.push(pulled.sheet.id);
                     all_cw.push(pulled.sheet.column_widths.clone());
                     all_rh.push(pulled.sheet.row_heights.clone());
+                    crate::spill_restore::restore_spill_extents_for_sheet(
+                        state.inner(),
+                        grids.len() - 1,
+                        &pulled.sheet,
+                    );
                 }
             }
         }
@@ -4401,6 +4509,12 @@ pub fn calp_refresh_apply(
                 }
             }
         }
+
+        // §2t ON THE DISTRIBUTION PATH -- see the identical call in `calp_pull`. A
+        // refreshed sheet's formulas were just rebuilt from the package's stored
+        // TEXT, and the lexer upper-cases every bare identifier, so without this a
+        // refresh re-spells every defined name on every refreshed sheet.
+        crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
         // CF/DV: RESET each refreshed sheet's per-sheet entry, then apply v2's, so
         // rules the publisher added/changed/removed in v2 all land (extend would
@@ -5601,9 +5715,22 @@ pub fn calp_dev_subscribe(
             sheet_ids.push(pulled.sheet.id);
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
+            // Dev preview = subscriber fidelity, spill ownership included.
+            crate::spill_restore::restore_spill_extents_for_sheet(
+                state.inner(),
+                grids.len() - 1,
+                &pulled.sheet,
+            );
         }
         map
     };
+
+    // §2t ON THE DISTRIBUTION PATH -- the same restamp `calp_pull` runs, for
+    // the same reason: `to_grid()` above rebuilt every formula from stored TEXT
+    // and the lexer upper-cases bare identifiers, so a dev preview would show
+    // the author `=BUDGETTOTAL` where their workbook says `=BudgetTotal`. Dev
+    // preview claims subscriber fidelity; this is part of that claim.
+    crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
     // Dev preview = subscriber fidelity: presentation state, tables and
     // controls materialize exactly like a real pull (controls sanitized the
@@ -5772,6 +5899,11 @@ pub fn calp_dev_refresh(
                     all_cw[grid_idx] = pulled.sheet.column_widths.clone();
                     all_rh[grid_idx] = pulled.sheet.row_heights.clone();
                     map.insert(pulled.source_sheet_id, grid_idx);
+                    crate::spill_restore::restore_spill_extents_for_sheet(
+                        state.inner(),
+                        grid_idx,
+                        &pulled.sheet,
+                    );
                 }
             } else {
                 // New sheet added since last pull — append.
@@ -5781,10 +5913,18 @@ pub fn calp_dev_refresh(
                 sheet_ids.push(pulled.sheet.id);
                 all_cw.push(pulled.sheet.column_widths.clone());
                 all_rh.push(pulled.sheet.row_heights.clone());
+                crate::spill_restore::restore_spill_extents_for_sheet(
+                    state.inner(),
+                    grids.len() - 1,
+                    &pulled.sheet,
+                );
             }
         }
         map
     };
+
+    // §2t ON THE DISTRIBUTION PATH -- see `calp_pull`.
+    crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
     // Dev refresh mirrors the real refresh: presentation state resets to the
     // source's, this subscription's own tables are replaced with the new set,
@@ -13762,6 +13902,14 @@ pub fn calp_reset_subscription(
             grid.remap_style_indices(&remap);
             if *idx < grids.len() {
                 grids[*idx] = grid;
+                // Reset to package replaces the sheet's whole grid, so the
+                // subscriber's own spill claims for it go with it and the
+                // package's extents take their place.
+                crate::spill_restore::restore_spill_extents_for_sheet(
+                    state.inner(),
+                    *idx,
+                    &pulled.sheet,
+                );
             }
             if *idx < all_cw.len() {
                 all_cw[*idx] = pulled.sheet.column_widths.clone();
@@ -13785,9 +13933,17 @@ pub fn calp_reset_subscription(
     );
     if let Some((idx, _, pulled)) = targets.iter().find(|(idx, _, _)| *idx == active_idx) {
         {
-            let grids = state.grids.read().map_err(|e| e.to_string())?;
-            if let Some(grid) = grids.get(*idx) {
-                *state.grid.write(&mirror_effect).map_err(|e| e.to_string())? = grid.clone();
+            // ONE LOCK AT A TIME. This used to take `grid` while still holding
+            // `grids`, which is the inverted order the recalculation pass
+            // deadlocks against; cloning the source sheet out first means
+            // neither guard is ever alive while the other is acquired, which is
+            // the only arrangement that needs no ordering rule at all.
+            let pulled_grid = {
+                let grids = state.grids.read().map_err(|e| e.to_string())?;
+                grids.get(*idx).cloned()
+            };
+            if let Some(grid) = pulled_grid {
+                *state.grid.write(&mirror_effect).map_err(|e| e.to_string())? = grid;
             }
         }
         *state.column_widths.write(&mirror_effect).map_err(|e| e.to_string())? =
@@ -13812,6 +13968,12 @@ pub fn calp_reset_subscription(
             *m = merges.clone();
         });
     }
+
+    // §2t ON THE DISTRIBUTION PATH -- see `calp_pull`. A reset rebuilds each
+    // tracked sheet's formulas from the package's stored TEXT through the same
+    // lexer, so without this a "reset to published state" also re-spells every
+    // defined name on those sheets in capitals.
+    crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
     // Clear the override layer for the reset sheets — the pristine content IS
     // the state now; stale overrides would re-assert the discarded edits.

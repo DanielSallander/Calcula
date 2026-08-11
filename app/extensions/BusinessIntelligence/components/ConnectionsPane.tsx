@@ -23,6 +23,7 @@ import { createModelPivot } from "../lib/modelPivot";
 import { MODEL_DIALOG_ID } from "../manifest";
 import type { ConnectionInfo } from "../types";
 import { confirmAsync, promptAsync } from "@api/dialogs";
+import { listObjectDependents } from "@api/backend";
 
 // ============================================================================
 // Styles
@@ -334,9 +335,34 @@ export function ConnectionsPane(
   const handleDelete = useCallback(
     async (connectionId: string, connectionName: string) => {
       // AWAITED: the bare form deleted the connection AND its BI regions on Cancel.
+      //
+      // §3bn: a connection is the one owner whose dependents are deliberately
+      // LEFT pointing at nothing — Excel keeps a PivotTable whose connection is
+      // gone and lets it fail to refresh, and cascading here would destroy
+      // laid-out pivots because a connection string went stale. That is only
+      // defensible if the user is TOLD, so the confirm names the pivots and
+      // filters that will stop refreshing, exactly as deleting a macro names
+      // the buttons that link it. A failed lookup must not block the delete:
+      // the plain confirm still runs.
+      let dependentWarning = "";
+      try {
+        const dependents = await listObjectDependents("biConnection", connectionId);
+        if (dependents.length > 0) {
+          const shown = dependents.slice(0, 6).map((d) => `${d.kind} "${d.name}"`);
+          const more = dependents.length > shown.length ? ", …" : "";
+          dependentWarning =
+            `
+
+${dependents.length} object(s) read this connection ` +
+            `(${shown.join(", ")}${more}). They are KEPT, but will fail to ` +
+            `refresh until a matching connection exists again.`;
+        }
+      } catch {
+        // The query is advisory; never let it stop the user deleting.
+      }
       if (
         !(await confirmAsync(
-          `Delete connection "${connectionName}"? This will also remove any associated BI regions.`,
+          `Delete connection "${connectionName}"? This will also remove any associated BI regions.${dependentWarning}`,
         ))
       ) {
         return;

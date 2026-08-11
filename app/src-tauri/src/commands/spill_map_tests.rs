@@ -474,7 +474,7 @@ fn restoring_spilled_literals_beside_a_restored_origin_is_what_blocks_the_respil
 
     assert_eq!(
         wb.value(0, 0, 0),
-        CellValue::Error(CellError::Value),
+        CellValue::Error(CellError::Spill),
         "a blocked spill is supposed to report an error in the origin — if this \
          ever stops being true, the reason the cleared spill cells get no undo \
          entry has changed and `spilled_cells_owned_within` needs re-reading"
@@ -1008,62 +1008,109 @@ fn a_match_list_containing_a_spilled_value_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
-// 5c. §2ab — the map does not SURVIVE a reload, and nothing rebuilds it
+// 5c. §2ab — the map DOES survive a reload, and this is the mechanism
 // ---------------------------------------------------------------------------
 
-/// CHARACTERISATION TEST for a defect this pass FILED rather than fixed: the
-/// spill map is session state (`reset_document_scoped_stores` clears it, and
-/// `persistence.rs` never writes it) while the spilled CELLS are saved as
-/// ordinary literals. So a reload produces a workbook whose arrays are painted
-/// but unowned, and the first recalculation of an origin finds its own cells
-/// occupied by values it does not own and collapses to `#VALUE!`.
+/// §2ab, INVERTED — this test used to assert the defect and now asserts the
+/// fix, which is why the name changed rather than the file.
 ///
-/// This asserts the CURRENT behaviour so the register's account of §2ab stays
-/// true and cannot drift. **If you have just fixed §2ab, this test is supposed
-/// to fail** — invert it: the map must come back, and the origin must keep its
-/// array.
+/// WHAT IT USED TO SAY. The spill map was session state
+/// (`reset_document_scoped_stores` clears it and nothing refilled it) while the
+/// spilled CELLS were saved as ordinary literals. A reload therefore produced a
+/// workbook whose arrays were painted but unowned, and the first recalculation
+/// of an origin found its own cells occupied by values it did not own and
+/// collapsed to `#VALUE!`.
 ///
-/// It reproduces the reload STATE rather than doing file I/O: the two things
-/// that make it are `spill_ranges`/`spill_hosts` empty and the spilled values
-/// present as plain cells, which is exactly what `open_file` leaves behind.
+/// WHAT CLOSED IT. `.cala` now stores the array's EXTENT on its origin
+/// (`SavedCell::spill`, format version 7 — the same thing xlsx stores as `ref`
+/// on `<f t="array">`), and `open_file` restores the map from it. This test
+/// keeps reproducing the reload STATE rather than doing file I/O, so it pins
+/// the STRUCTURAL claim — "the map is what stands between a reopened array and
+/// `#VALUE!`" — while `spill_persistence_tests` proves the round trip over real
+/// `.cala` bytes.
+///
+/// The first half is therefore still the OLD behaviour, deliberately: it is
+/// what a build without the restore does, and it must keep failing that way so
+/// nobody concludes the collapse was imaginary. The second half is the fix.
 #[test]
-fn a_reloaded_workbook_has_no_spill_map_and_the_origin_collapses_2ab() {
-    let wb = workbook_with_a_spill();
-
+fn the_restored_spill_map_is_what_keeps_a_reloaded_origin_alive_2ab() {
+    // ---- Without the map: exactly what §2ab measured -----------------------
+    let broken = workbook_with_a_spill();
     // What `reset_document_scoped_stores` does on load — the cells stay,
     // because the grid comes back from the file.
-    wb.state.spill_ranges.lock().unwrap().clear();
-    wb.state.spill_hosts.lock().unwrap().clear();
+    broken.state.spill_ranges.lock().unwrap().clear();
+    broken.state.spill_hosts.lock().unwrap().clear();
+    assert_eq!(broken.value(0, 2, 0), CellValue::Number(3.0));
 
-    // The values are still painted, and are now ordinary literals: editable,
-    // with nothing to tell the user they were ever part of an array.
-    assert_eq!(wb.value(0, 2, 0), CellValue::Number(3.0));
-    assert!(
-        spill_ranges_of(&wb).is_empty(),
-        "if this now holds an entry, the load path rebuilds the spill map and \
-         §2ab is FIXED — invert this test"
-    );
-
-    // ...and the first recalculation of the origin destroys the array.
     let mut updated = Vec::new();
     recalc_after_active_sheet_bulk_rewrite(
-        &wb.state,
-        &wb.files,
-        &wb.pane,
-        &wb.filters,
+        &broken.state,
+        &broken.files,
+        &broken.pane,
+        &broken.filters,
         &[(0, 0)],
         &mut updated,
     );
     assert_eq!(
-        wb.value(0, 0, 0),
-        CellValue::Error(CellError::Value),
-        "the origin no longer collapses on the first recalculation after a \
-         reload — §2ab is FIXED, invert this test"
+        broken.value(0, 0, 0),
+        CellValue::Error(CellError::Spill),
+        "an unowned array must still collapse — this is the defect the restore \
+         exists to prevent, and if it stops happening the restore has stopped \
+         being load-bearing"
     );
     assert_eq!(
-        wb.value(0, 2, 0),
+        broken.value(0, 2, 0),
         CellValue::Number(3.0),
-        "the orphaned literals are still there, now beside a #VALUE! origin"
+        "...leaving the orphaned literals beside a #SPILL! origin"
+    );
+
+    // ---- With the map restored: the array survives -------------------------
+    let fixed = workbook_with_a_spill();
+    fixed.state.spill_ranges.lock().unwrap().clear();
+    fixed.state.spill_hosts.lock().unwrap().clear();
+
+    // The one line `open_file` gained. `A1:A4` is what the file's `sp` field
+    // says, so this is the same claim the restore installs.
+    let saved_sheet = {
+        let mut sheet = persistence::Sheet::new("Sheet1".to_string());
+        sheet.cells.insert(
+            (0, 0),
+            persistence::SavedCell {
+                value: persistence::SavedCellValue::Number(1.0),
+                formula: Some("SEQUENCE(4)".to_string()),
+                style_index: 0,
+                rich_text: None,
+                spill: Some((3, 0)),
+            },
+        );
+        sheet
+    };
+    crate::spill_restore::restore_spill_extents_for_sheet(&fixed.state, 0, &saved_sheet);
+    assert_eq!(
+        spill_ranges_of(&fixed),
+        vec![((0, 0, 0), vec![(1, 0), (2, 0), (3, 0)])],
+        "the restore must put the ownership back"
+    );
+
+    let mut updated = Vec::new();
+    recalc_after_active_sheet_bulk_rewrite(
+        &fixed.state,
+        &fixed.files,
+        &fixed.pane,
+        &fixed.filters,
+        &[(0, 0)],
+        &mut updated,
+    );
+    assert_eq!(
+        fixed.value(0, 0, 0),
+        CellValue::Number(1.0),
+        "with the map restored the origin re-spills onto cells it owns instead \
+         of reading them as foreign data"
+    );
+    assert_eq!(fixed.value(0, 3, 0), CellValue::Number(4.0));
+    assert_eq!(
+        spill_ranges_of(&fixed),
+        vec![((0, 0, 0), vec![(1, 0), (2, 0), (3, 0)])]
     );
 }
 
@@ -1090,10 +1137,18 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
     // (file relative to src/, function, reason it needs no spill maintenance)
     const EXEMPT: &[(&str, &str, &str)] = &[
         // -- It IS the spill machinery, or an inner step of it ---------------
-        ("commands/data.rs", "reevaluate_formula_cell", "the per-cell evaluator that tears the old range down and spills the new one — the OTHER half of the maintenance rule"),
-        ("commands/data.rs", "update_cell_impl", "the single-cell edit path: releases through take_spills_owned_within on both its clear and its rewrite branch"),
-        ("commands/data.rs", "update_cells_batch_core", "same, per written cell"),
         ("commands/data.rs", "erase_released_spill_cells", "IS the tear-down's grid half: it erases exactly the cells take_spills_* released"),
+        // §3bm REMOVED SIX ENTRIES FROM THIS LIST, and that is the point of the
+        // change. `update_cell_impl`, `update_cells_batch_core`,
+        // `reevaluate_formula_cell`, `recalc_walked_cell`,
+        // `run_calculation_pass` and `recalculate_sheet_values` were each
+        // exempt with a reason; three of them carried their own hand-copied
+        // spill decision and three said, in prose, that they removed no origin
+        // — which was true and beside the point, because they REPLACED an
+        // array's value without re-laying its rectangle. They now all reach
+        // `apply_spill_decision` (or `release_origin_spill`) and are classified
+        // by the detector rather than by a sentence. An exemption that has to
+        // be argued is the shape this register keeps finding defects behind.
         // -- Style only: an origin's FORMULA is untouched, so its spill lives -
         ("commands/styles.rs", "apply_formatting", "style_index only — no formula is removed, so no range is orphaned"),
         ("commands/styles.rs", "apply_formatting_to_sheets", "style_index only"),
@@ -1107,6 +1162,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("mcp/tools.rs", "apply_cell_formatting", "style_index only"),
         // -- Rewrites formula REFERENCES, not the formulas' existence --------
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; every origin keeps its formula"),
+        ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; every origin keeps its formula"),
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; every origin keeps its formula"),
         ("commands/structure.rs", "shift_cross_sheet_formulas", "re-points references inside surviving formulas"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "re-points references inside surviving formulas"),
@@ -1135,11 +1191,9 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("scenario_manager.rs", "scenario_summary", "builds a report block from values it evaluated"),
         ("animation_commands.rs", "apply_set_ops_and_recalc", "transient frame playback"),
         // -- Whole-sheet / whole-workbook evaluation --------------------------
-        ("calculation.rs", "run_calculation_pass", "F9 / Shift+F9: re-evaluates formulas in place and removes no origin. It does not REBUILD the map either — see §2ab"),
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the sheet-scoped pass"),
-        ("calculation.rs", "recalculate_sheet_values", "whole-sheet evaluation; removes no origin. Not spill-aware — see §2ab"),
         ("pivot/operations.rs", "recalculate_sheet_formulas", "whole-sheet evaluation; removes no origin"),
-        ("persistence.rs", "open_file", "document replacement: reset_document_scoped_stores clears both spill maps for the outgoing document. It does not REBUILD them for the incoming one — see §2ab and `a_reloaded_workbook_has_no_spill_map_and_the_origin_collapses_2ab`"),
+        ("persistence.rs", "open_file", "document replacement: reset_document_scoped_stores clears both spill maps for the outgoing document, and `spill_restore::restore_spill_map_on_load` refills them for the incoming one from the extents the file carries (§2ab). Neither half writes a document cell"),
         // -- Helper: the CALLER maintains --------------------------------------
         ("consolidate.rs", "consolidate_data_inner", "`consolidate_data` seeds the shared cascade over its updated_cells"),
         ("calp_commands.rs", "write_override_value", "the raw write; its one caller apply_override_value_to_grid releases orphaned claims on the written sheet"),
@@ -1168,10 +1222,17 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("tables.rs", "set_calculated_column", "writes a table column; seeds the shared cascade"),
         // -- Reads, or writes something that is not the document ---------------
         ("commands/data.rs", "get_viewport_cells", "read path: builds the payload the canvas paints"),
-        ("commands/data.rs", "recalc_walked_cell", "the cross-sheet walk's per-cell step, off the active sheet"),
         ("scripting/udf.rs", "collect_udf_calls", "collects call sites; writes no document cell"),
         ("state_digest.rs", "digest_cells", "hashes cells"),
-        ("state_digest.rs", "get_workbook_state_digest", "hashes the workbook"),
+        // `get_workbook_state_digest` WAS exempt here. Its body moved into
+        // `build_workbook_state_digest` so the lock-order guards could call it
+        // without a Tauri `State`, and the exemption did not move with it — so
+        // this census has been RED in the tree, naming a read-only function,
+        // and the stale-entry half of the same census then named the wrapper.
+        // It is read-only: the `cells.insert(` the detector matches is an
+        // insert into the digest's OWN output map, and the function takes both
+        // grid locks with `.read()`.
+        ("state_digest.rs", "build_workbook_state_digest", "read-only: `cells` is the digest's own output BTreeMap, not a grid cell store; both grid locks are taken with .read()"),
         ("tracing.rs", "trace_precedents", "builds a trace overlay"),
         ("lib.rs", "extract_references_recursive", "walks an AST"),
     ];
@@ -1552,6 +1613,13 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         "cells.remove(",
         "cells.insert(",
         "erase_released_spill_cells(",
+        // §3bm. THE ONE SPILL DECISION and its tear-down half. Both write
+        // cells, and both are also listed under MAINTAINS below, because the
+        // maintenance is exactly what they are — so a function that reaches
+        // either has discharged the rule, and one that reaches neither while
+        // writing cells still has to answer for itself.
+        "apply_spill_decision(",
+        "release_origin_spill(",
         "consolidate_data_inner(",
         "write_override_value(",
         "shift_per_sheet_cell_map(",
@@ -1561,6 +1629,8 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         "write_table_formula_cell(",
         "apply_override_value_to_grid(",
         "shift_per_sheet_cell_stores(",
+        // §2aj: the column rename's write, exactly like the table rename's.
+        "rename_table_column_in_formulas(",
     ];
     const MAINTAINS: &[&str] = &[
         "take_spills_owned_within(",
@@ -1568,10 +1638,16 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         "take_spills_where(",
         "spilled_cells_owned_within(",
         "recalc_after_active_sheet_bulk_rewrite(",
+        // §2aj. Reaches the line above and nothing else -- see the note on
+        // `RECALC` in `bulk_rewrite_recalc_tests`, and the test that pins it.
+        "recalc_after_table_change(",
         "shift_flat_cell_stores(",
         "release_spills_orphaned_by_grid(",
         "check_no_array_within(",
         "check_spill_protection_cells(",
+        // §3bm: see the note in WRITES.
+        "apply_spill_decision(",
+        "release_origin_spill(",
     ];
 
     let stripped = strip_test_modules(text);

@@ -14,6 +14,169 @@ use engine::style::CellStyle;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// Strip Excel's "future function" namespace prefixes from a stored formula.
+///
+/// Excel stores every function added after 2007 with a namespace prefix so that
+/// Excel 2007 opens the file without silently computing something else:
+/// `_xlfn.` for the function itself, `_xlfn._xlws.` for the worksheet-only
+/// dynamic-array functions (FILTER, SORT), and `_xlpm.` for LAMBDA parameter
+/// names. The prefixes are a STORAGE detail, not part of the function name --
+/// Excel's own UI shows `STDEV.S`, never `_xlfn.STDEV.S`.
+///
+/// Calcula implements all of these, so the only thing that stood between it and
+/// correct import of any modern .xlsx was this strip: the lexer accepts `_` as a
+/// start character and `.` as a continuation, so `_xlfn.STDEV.S` lexed as ONE
+/// identifier, resolved to no builtin, and every post-2007 function in the file
+/// evaluated to `#NAME?`.
+///
+/// The scan is STRING-LITERAL AWARE. `=CONCAT("_xlfn.NOT_A_FUNC",A1)` is a
+/// formula whose text legitimately contains the prefix; rewriting inside the
+/// quotes would corrupt the user's data. Doubled quotes (`""`) are Excel's
+/// escape for a literal quote inside a string and keep us inside the literal.
+///
+/// The export side needs no counterpart: `rust_xlsxwriter::Formula::new`
+/// re-adds the prefixes from its own table when it writes the formula back.
+pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
+    const PREFIXES: [&str; 3] = ["_xlfn._xlws.", "_xlfn.", "_xlpm."];
+
+    let bytes = formula.as_bytes();
+    let mut out = String::with_capacity(formula.len());
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < bytes.len() {
+        let c = bytes[i];
+
+        if in_string {
+            out.push(c as char);
+            if c == b'"' {
+                // `""` inside a literal is an escaped quote, not the end.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    out.push('"');
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == b'"' {
+            in_string = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+
+        // Only strip at an identifier BOUNDARY: the prefix must not be the tail
+        // of a longer name (a user range named `MY_xlfn.X` is not a prefix).
+        let at_boundary = i == 0 || {
+            let prev = bytes[i - 1];
+            !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+        };
+        if at_boundary {
+            if let Some(p) = PREFIXES
+                .iter()
+                .find(|p| formula[i..].starts_with(**p))
+            {
+                i += p.len();
+                continue;
+            }
+        }
+
+        out.push(c as char);
+        i += 1;
+    }
+
+    out
+}
+
+/// Map calamine's error enum onto the literal Excel spells it with.
+///
+/// This used to be `format!("{:?}", e)`, which wrote calamine's DEBUG names --
+/// `Div0`, `NA`, `Ref`, `Name`, `Null`, `Num` -- into the saved value. Nothing
+/// reads those back: `CellError::from_literal` matches `#...` literals and falls
+/// through to `Value`, so EVERY error cell imported from an .xlsx became
+/// `#VALUE!`, changing what `ERROR.TYPE` reports and which branch `IFERROR`
+/// takes. It is the same defect `SavedCellValue::from_value` carries a comment
+/// about having fixed on the `.cala` side; the xlsx sibling was missed.
+fn error_literal(e: &calamine::CellErrorType) -> String {
+    use calamine::CellErrorType as E;
+    match e {
+        E::Div0 => "#DIV/0!",
+        E::NA => "#N/A",
+        E::Name => "#NAME?",
+        E::Null => "#NULL!",
+        E::Num => "#NUM!",
+        E::Ref => "#REF!",
+        E::Value => "#VALUE!",
+        // Excel writes this while an external query is still loading. It has no
+        // literal of its own in Excel's error set; `#N/A` is what a stale query
+        // cell shows once the fetch is abandoned, which is the closest true
+        // statement Calcula can make about a value it does not have.
+        E::GettingData => "#N/A",
+    }
+    .to_string()
+}
+
+/// Days between the 1900 and 1904 date-system epochs.
+///
+/// 1904-01-01 is serial 1462 in the 1900 system and serial 0 in the 1904 one,
+/// so a 1904 serial becomes a 1900 serial by adding this. Four years and a day:
+/// the extra day is Excel's deliberate 1900-02-29, a date that never existed
+/// and which Lotus 1-2-3 had, which the 1904 system does not reproduce.
+pub(crate) const DATE_SYSTEM_OFFSET: f64 = 1462.0;
+
+/// Should a cell carrying this format have its serial converted from the 1904
+/// date system to the 1900 one?
+///
+/// The conversion is a DATE conversion, and applying it to a number that is
+/// not a date corrupts it, so this is deliberately narrow:
+///
+/// * `Date` — always. This is the case the whole feature exists for.
+/// * `Time` — only when the value carries a DATE PART (`>= 1`). A bare time of
+///   day (0.5 = noon) is the same number in both systems; adding 1462 to it
+///   would still display as noon but would silently turn a duration into an
+///   instant in 1904.
+/// * `Custom` — when the format string contains an unquoted `y` or `d`, the
+///   two tokens that cannot appear in a pure time format (`m` is ambiguous:
+///   it is both "month" and "minute"). An ELAPSED format (`[h]`, `[mm]`,
+///   `[ss]`) is a DURATION and is never converted, whatever else it contains.
+/// * everything else — never.
+fn converts_from_1904(format: &engine::style::NumberFormat, value: f64) -> bool {
+    use engine::style::NumberFormat;
+
+    /// `[h]`, `[mm]`, `[ss]` — Excel's ELAPSED-time brackets. A cell using one
+    /// holds a DURATION, not an instant, and a duration has no epoch: 1.25 is
+    /// thirty hours in both date systems. Built-in numFmtId 46 (`[h]:mm:ss`)
+    /// parses to `Time`, not `Custom`, so this check has to cover both arms.
+    fn is_elapsed(fmt: &str) -> bool {
+        fmt.contains("[h") || fmt.contains("[H") || fmt.contains("[m") || fmt.contains("[s")
+    }
+
+    match format {
+        NumberFormat::Date { format } => !is_elapsed(format),
+        NumberFormat::Time { format } => !is_elapsed(format) && value >= 1.0,
+        NumberFormat::Custom { format } => {
+            if is_elapsed(format) {
+                return false;
+            }
+            let mut in_quotes = false;
+            let mut has_date_token = false;
+            for ch in format.chars() {
+                match ch {
+                    '"' => in_quotes = !in_quotes,
+                    'y' | 'Y' | 'd' | 'D' if !in_quotes => has_date_token = true,
+                    _ => {}
+                }
+            }
+            has_date_token
+        }
+        _ => false,
+    }
+}
+
 pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     let mut workbook: Xlsx<_> = open_workbook(path)?;
     let sheet_names = workbook.sheet_names().to_vec();
@@ -26,6 +189,10 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
 
     // ---------- Second pass: parse styles and sheet metadata from raw XML ----------
     let style_data = parse_xlsx_styles(path);
+    // `<workbookPr date1904="1">`: every date serial in this file counts from
+    // 1904-01-01 and has to be moved onto Calcula's 1900 epoch. See
+    // `converts_from_1904` for exactly which cells that is.
+    let date1904 = style_data.as_ref().map_or(false, |sd| sd.date1904);
 
     // Pre-build the CellStyle palette from XLSX XF records.
     // Index 0 in calcula_styles is always the default style.
@@ -149,7 +316,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     Data::Float(f) => SavedCellValue::Number(*f),
                     Data::Int(i) => SavedCellValue::Number(*i as f64),
                     Data::Bool(b) => SavedCellValue::Boolean(*b),
-                    Data::Error(e) => SavedCellValue::Error(format!("{:?}", e)),
+                    Data::Error(e) => SavedCellValue::Error(error_literal(e)),
                     Data::DateTime(dt) => SavedCellValue::Number(dt.as_f64()),
                     Data::DateTimeIso(s) => SavedCellValue::Text(s.clone()),
                     Data::DurationIso(s) => SavedCellValue::Text(s.clone()),
@@ -163,10 +330,31 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     .copied()
                     .unwrap_or(0);
 
-                // Skip truly empty cells (no value AND default style)
-                if is_empty && style_index == 0 {
-                    continue;
-                }
+                // ---- THE 1904 DATE SYSTEM (register S10) -------------------
+                // A Mac-authored workbook counts from 1904-01-01, and Calcula
+                // stores 1900-system serials. Ignoring the flag -- which is
+                // what this reader did -- imported EVERY DATE IN THE FILE four
+                // years and a day early, with nothing on screen saying so:
+                // the numbers are all valid dates, just the wrong ones.
+                //
+                // The shift needs the resolved FORMAT (only a date-formatted
+                // number is a date), which is why it lives here rather than in
+                // the value match above.
+                let saved_value = if date1904 {
+                    match saved_value {
+                        SavedCellValue::Number(n)
+                            if converts_from_1904(
+                                &calcula_styles[style_index].number_format,
+                                n,
+                            ) =>
+                        {
+                            SavedCellValue::Number(n + DATE_SYSTEM_OFFSET)
+                        }
+                        other => other,
+                    }
+                } else {
+                    saved_value
+                };
 
                 // Try to get formula if available
                 // Convert absolute cell position to formula range's relative coordinates
@@ -176,11 +364,21 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                         let fr_col = (actual_col - formula_start.1) as usize;
                         fr.get((fr_row, fr_col))
                             .filter(|f| !f.is_empty())
-                            .map(|f| format!("={}", f))
+                            .map(|f| format!("={}", strip_future_function_prefixes(f)))
                     } else {
                         None
                     }
                 });
+
+                // Skip truly empty cells (no value AND default style AND no
+                // formula). The formula lookup used to sit BELOW this skip, so a
+                // cell written as `<c r="A1"><f>A1*2</f></c>` -- a formula with
+                // no cached `<v>`, which LibreOffice and several generators emit
+                // whenever the sheet is set to recalculate on load -- was
+                // dropped entirely and the formula was lost with it.
+                if is_empty && style_index == 0 && formula.is_none() {
+                    continue;
+                }
 
                 cells.insert(
                     (actual_row, actual_col),
@@ -189,6 +387,10 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                         formula,
                         style_index,
                         rich_text: None,
+                        // xlsx array formulas are not read as arrays here (see
+                        // the `format_version: 0` note below); the host's spill
+                        // recovery re-derives the extent by evaluating.
+                        spill: None,
                     },
                 );
             }
@@ -211,6 +413,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                                 formula: None,
                                 style_index: calcula_idx,
                                 rich_text: None,
+                                spill: None,
                             },
                         );
                     }
@@ -393,6 +596,14 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         sheet_protections: Vec::new(),
         workbook_protection: None,
         pending_recalc: None,
+        // `.xlsx` carries no `.cala` format_version, and this reader does not
+        // read xlsx's own array-formula `ref` attributes either (calamine's
+        // formula range gives the text, not the `t="array"`/`ref` pair), so an
+        // imported dynamic array arrives as an origin formula plus loose
+        // literals. `0` puts it below every gate, which is what makes the
+        // host's spill recovery run over an import — the same treatment a
+        // pre-v7 `.cala` gets, and for the same reason.
+        format_version: 0,
     };
 
     // Sparklines have no native xlsx form — the meta carry is the only source.

@@ -111,6 +111,13 @@ pub fn create_ribbon_filter(
 }
 
 /// Delete a ribbon filter.
+///
+/// §3bn: filters cross-filter EACH OTHER — `cross_filter_targets` holds sibling
+/// FILTER ids, not pivots — so deleting one left every sibling that named it
+/// holding a dead id, which the item-fetch path then re-resolved on every
+/// selection change. The prune is
+/// [`crate::object_deps::cascade_deleted_filters`], recorded into the same undo
+/// transaction so one Ctrl+Z restores the filter and the links to it together.
 #[tauri::command]
 pub fn delete_ribbon_filter(
     state: State<AppState>,
@@ -130,6 +137,12 @@ pub fn delete_ribbon_filter(
         .remove(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
 
+    let pruned_siblings = crate::object_deps::cascade_deleted_filters(
+        &ribbon_filter_state,
+        &effect,
+        &[filter_id],
+    );
+
     // Record undo for ribbon filter deletion (undo = recreate)
     {
         #[derive(serde::Serialize)]
@@ -138,8 +151,16 @@ pub fn delete_ribbon_filter(
             previous: RibbonFilter,
         }
         let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: removed }).unwrap_or_default();
+        {
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            undo_stack.begin_transaction("Delete ribbon filter");
+        }
+        crate::object_deps::record_filter_prune_undo(
+            &state,
+            &pruned_siblings,
+            "Restore filter cross-links",
+        );
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Delete ribbon filter");
         undo_stack.record_custom_restore("ribbon_filter_delete".to_string(), data, "Delete ribbon filter");
         undo_stack.commit_transaction();
     }

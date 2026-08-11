@@ -13,8 +13,25 @@ export type { ActionInstance, ActionTrace } from "./trace";
 export { createTrace, saveTrace, loadTrace, subTrace } from "./trace";
 export type { ActionSource, GeneratorSourceOptions, TraceReplayLog } from "./sources";
 export { createGeneratorSource, createTraceSource, mulberry32 } from "./sources";
-export type { WalkOptions, WalkResult } from "./walkRunner";
+export type {
+  ActionTiming,
+  CheckpointTiming,
+  WalkOptions,
+  WalkResult,
+} from "./walkRunner";
 export { WalkRunner, formatWalkReport } from "./walkRunner";
-export type { ReplayFn, ReplayOutcome, ShrinkOptions, ShrinkResult } from "./shrinker";
+export type {
+  ReplayFn,
+  ReplayOutcome,
+  ShrinkOptions,
+  ShrinkResult,
+  ShrinkVerdict,
+} from "./shrinker";
 export { minimizeTrace } from "./shrinker";
+export type {
+  FailureBundle,
+  FailureBundleOptions,
+  ScriptHostProbe,
+} from "./failureBundle";
+export { writeFailureBundle, probeScriptHost, appLogPath } from "./failureBundle";
 export { deepResetForWalk } from "./reset";

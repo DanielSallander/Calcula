@@ -332,6 +332,49 @@ pub(crate) fn apply_user_hidden_to_sheet(
         crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
 }
 
+/// Stamp sheet `i`'s DYNAMIC-ARRAY SPILL EXTENTS onto the saved sheet, from the
+/// host's `spill_ranges` map — the only authority for which origin owns which
+/// cells.
+///
+/// WHY THE SAVE PATH AND NOT `SavedCell::from_cell`. `engine::Cell` has no
+/// notion of a spill: a spilled `2` and a typed `2` are the same struct. The
+/// ownership lives in `AppState.spill_ranges`, so it has to be joined onto the
+/// cells here, exactly as the user-hidden sets are joined above.
+///
+/// A RECTANGLE, because that is what the reader needs and what Excel writes
+/// (`ref` on `<f t="array">`). `spill_ranges` holds the cell LIST the origin
+/// wrote; the extent is its bounding box, taken over the origin as well so a
+/// row-vector array records `A1:A4` and not `A2:A4`.
+///
+/// AN ORIGIN THAT IS NO LONGER A FORMULA IS SKIPPED. The map is maintained
+/// (§2y) so this should not happen, but if a stale claim ever survived, writing
+/// it would hand the load path ownership of cells with nothing to re-derive
+/// them from — a claim that can only destroy data. Dropping it degrades to the
+/// pre-v7 behaviour, which is recoverable.
+pub(crate) fn apply_spill_extents_to_sheet(
+    state: &AppState,
+    sheet: &mut persistence::Sheet,
+    sheet_index: usize,
+) {
+    let Ok(spill_ranges) = state.spill_ranges.lock() else {
+        return;
+    };
+    for (&(sheet_idx, origin_row, origin_col), cells) in spill_ranges.iter() {
+        if sheet_idx != sheet_index || cells.is_empty() {
+            continue;
+        }
+        let Some(origin) = sheet.cells.get_mut(&(origin_row, origin_col)) else {
+            continue;
+        };
+        if origin.formula.is_none() {
+            continue;
+        }
+        let end_row = cells.iter().map(|&(r, _)| r).max().unwrap_or(origin_row).max(origin_row);
+        let end_col = cells.iter().map(|&(_, c)| c).max().unwrap_or(origin_col).max(origin_col);
+        origin.spill = Some((end_row, end_col));
+    }
+}
+
 /// Re-hydrate every sheet's USER-hidden sets from a loaded workbook.
 ///
 /// LOAD IS HALF THE FIX: without this the save is write-only, exactly like the
@@ -368,25 +411,58 @@ pub(crate) fn restamp_workbook_name_casing(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
 ) {
-    let Ok(named_ranges) = state.named_ranges.read() else { return };
-    if named_ranges.is_empty() {
+    // THREE AUTHORITIES, ONE PASS, and the name is now the historical half of
+    // what this does. The lexer uppercases every bare identifier, and a formula
+    // that came back from a file has been through the lexer — so all three of
+    // the things a formula can name come back shouting:
+    //
+    //   * a DEFINED NAME, from the Name Manager           (§2t)
+    //   * a TABLE and its COLUMN, from the table registry (§2aj's casing half)
+    //   * a SHEET QUALIFIER, from `state.sheet_names`     (§2ai)
+    //
+    // They are done together because they are the same defect with three
+    // authorities, and because separating them would give the census three call
+    // sites to police instead of one. Each is individually gated: a workbook
+    // with no tables pays one `is_empty()` for the table pass.
+    let named_ranges = state.named_ranges.read().ok();
+    let tables = state.tables.read().ok();
+    let table_names = state.table_names.read().ok();
+    let sheet_names = state.sheet_names.read().ok().map(|n| n.clone());
+
+    let has_names = named_ranges.as_ref().is_some_and(|n| !n.is_empty());
+    let has_tables = table_names.as_ref().is_some_and(|t| !t.is_empty());
+    let has_sheets = sheet_names.as_ref().is_some_and(|s| !s.is_empty());
+    if !has_names && !has_tables && !has_sheets {
         return;
     }
+
+    let respell_one = |g: &mut engine::Grid| -> usize {
+        let mut n = 0usize;
+        if let Some(nr) = named_ranges.as_ref() {
+            n += crate::name_resolution::restamp_grid_name_casing(g, nr);
+        }
+        if let (Some(t), Some(tn)) = (tables.as_ref(), table_names.as_ref()) {
+            n += crate::table_deps::restamp_grid_table_casing(g, t, tn);
+        }
+        if let Some(sn) = sheet_names.as_ref() {
+            n += crate::sheet_names::restamp_grid_sheet_casing(g, sn);
+        }
+        n
+    };
+
     let mut respelled = 0usize;
     if let Ok(mut grid) = state.grid.write(effect) {
-        respelled +=
-            crate::name_resolution::restamp_grid_name_casing(&mut grid, &named_ranges);
+        respelled += respell_one(&mut grid);
     }
     if let Ok(mut grids) = state.grids.write(effect) {
         for g in grids.iter_mut() {
-            respelled +=
-                crate::name_resolution::restamp_grid_name_casing(g, &named_ranges);
+            respelled += respell_one(g);
         }
     }
     if respelled > 0 {
         crate::log_info!(
             "LOAD",
-            "restamped {} formula(s) to the Name Manager's capitalisation",
+            "restamped {} formula(s) to the workbook's own capitalisation",
             respelled
         );
     }
@@ -477,8 +553,8 @@ pub fn build_workbook_for_save(
     state: &State<AppState>,
     user_files_state: &State<UserFilesState>,
 ) -> Result<Workbook, String> {
-    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let active_grid = state.grid.read().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
@@ -521,6 +597,9 @@ pub fn build_workbook_for_save(
             .unwrap_or_else(|| format!("Sheet{}", i + 1));
         let mut sheet = persistence::Sheet::from_grid(id, name, grid_ref, &styles, &dimensions);
         apply_user_hidden_to_sheet(&state, &mut sheet, i);
+        // Dynamic-array ownership. Joined on here for the same reason the
+        // user-hidden sets are: it lives in AppState, not in the grid.
+        apply_spill_extents_to_sheet(&state, &mut sheet, i);
         workbook.sheets.push(sheet);
     }
 
@@ -2562,7 +2641,33 @@ pub fn open_file(
             all_rh_vec.push(sheet.row_heights.clone());
         }
 
-        // Set sheet names
+        // Set sheet names.
+        //
+        // LOAD ACCEPTS AND CARRIES. Entry enforces Excel's rule
+        // (`crate::sheet_names`), but a workbook already on disk may hold a name
+        // that rule refuses -- one written before the rule existed, or one an
+        // `.xlsx` / `.calp` publisher produced. Refusing to open the file would
+        // trade a cosmetic problem for a total one, so the name is kept exactly
+        // as written and only RECORDED. The rule applies the next time the user
+        // renames that sheet.
+        {
+            let carried: Vec<String> = workbook
+                .sheets
+                .iter()
+                .filter_map(|s| {
+                    crate::sheet_names::load_violation(&s.name)
+                        .map(|why| format!("'{}' ({})", s.name, why))
+                })
+                .collect();
+            if !carried.is_empty() {
+                crate::log_warn!(
+                    "LOAD",
+                    "carried {} sheet name(s) that entry would refuse: {}",
+                    carried.len(),
+                    carried.join("; ")
+                );
+            }
+        }
         let mut names = state.sheet_names.write(&load_effect).map_err(|e| e.to_string())?;
         *names = workbook.sheets.iter().map(|s| s.name.clone()).collect();
 
@@ -3348,6 +3453,30 @@ pub fn open_file(
     restamp_workbook_name_casing(&state, &load_effect);
     crate::undo_commands::rebuild_all_dependencies(&state);
 
+    // DYNAMIC-ARRAY SPILL OWNERSHIP FOR THE WORKBOOK JUST READ (§2ab), and the
+    // half `reset_document_scoped_stores` always assumed existed. It clears
+    // both spill maps for the OUTGOING document; this refills them for the
+    // incoming one, either from the extents a v7+ file carries or — for a file
+    // written before the extent existed, and for every `.xlsx` — by proving
+    // each array against the values the file restored.
+    //
+    // POSITION. After the grids, the style registry, the named ranges and the
+    // tables are installed, because the recovery path evaluates formulas
+    // through all four; after `restamp_workbook_name_casing` and
+    // `rebuild_all_dependencies` so nothing here races a later rewrite of the
+    // same ASTs; and BEFORE the CellData payload below, so a workbook whose
+    // arrays this recovered paints from the same state it just proved.
+    //
+    // It cannot dirty the document: it writes no cell on either path (the
+    // recovery claims a footprint only where the file's own values already
+    // agree with it), and it touches nothing `DocumentEffect` guards.
+    crate::spill_restore::restore_spill_map_on_load(
+        state.inner(),
+        user_files_state.inner(),
+        &workbook.sheets,
+        workbook.format_version,
+    );
+
     let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -3716,7 +3845,15 @@ pub(crate) fn reset_document_scoped_stores(
     // File > Open, the first Ctrl+Z applies workbook A's before-image to
     // workbook B's coordinates — a silent, undoable-looking overwrite of a cell
     // the user never edited, in a document that had no undo history to spend.
-    *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
+    //
+    // `clear()`, not a fresh `UndoStack::new()`. The two empty the stack
+    // identically, but a fresh stack also restarts the transaction-ID counter
+    // at 1 — and those IDs are how a caller names a point in history it means
+    // to return to (the undo-round-trip oracle does exactly that). Restarting
+    // them lets a marker remembered in workbook A be MATCHED by an unrelated
+    // transaction in workbook B, which is the same "nothing in it names the
+    // document it came from" mistake this block exists to fix, one level up.
+    state.undo_stack.lock().map_err(|e| e.to_string())?.clear();
 
     // ---- The dependency graph, in every direction it is indexed ------------
     // Cell -> cell, the two stripe (whole row / whole column) forms, the
@@ -3733,6 +3870,11 @@ pub(crate) fn reset_document_scoped_stores(
     state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
     state.name_dependents.lock().map_err(|e| e.to_string())?.clear();
     state.name_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    // Same argument for the STRUCTURED-REFERENCE edges (§2aj): they are keyed by
+    // table NAME, and `Sales` in the new workbook is not the `Sales` in the old
+    // one.
+    state.table_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.table_dependencies.lock().map_err(|e| e.to_string())?.clear();
 
     // ---- Table NAMES -------------------------------------------------------
     // The reverse index of `tables` (cleared above), never serialized on its
@@ -3764,6 +3906,9 @@ pub(crate) fn reset_document_scoped_stores(
     //     document's cells with no undo entry for them.
     state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
     state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
+    // The #SPILL! obstruction map has the same document scope: an address in
+    // the previous workbook would otherwise be named in this one's error pane.
+    state.spill_blocks.lock().map_err(|e| e.to_string())?.clear();
 
     // ---- Conditional-format rule id counter --------------------------------
     // Ids are per-document, so a fresh document restarts at 1.
@@ -4208,10 +4353,10 @@ pub fn get_ai_context(
     state: State<AppState>,
     options: AiSerializeOptions,
 ) -> Result<String, String> {
+    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
-    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
     // Build sheet inputs — use stored grids for non-active sheets, active grid for current.
@@ -4495,6 +4640,7 @@ pub fn xlsx_save_loss_report(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    user_files_state: State<UserFilesState>,
     window: tauri::Window,
 ) -> Result<Vec<String>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -4602,8 +4748,130 @@ pub fn xlsx_save_loss_report(
         "Scheduled jobs (they stop running: xlsx cannot carry a schedule)",
     );
 
+    // ---- Stores the writer drops that this report used to stay silent about --
+    //
+    // Cross-referencing the 24 checks above against `persistence::Workbook`'s
+    // field list and against what `xlsx_writer.rs` actually emits (it writes
+    // sheets, charts, tables, sparklines, properties and named_ranges — nothing
+    // else) turned up eight more stores that were destroyed WITHOUT a word.
+    // `XLSX_LOSS_COVERAGE` below now pins the whole field list so the next one
+    // fails a test instead of a user's document.
+
+    // The worst of them: `state.controls` is the CELL-ANCHORED control store —
+    // every embedded IMAGE lives here. The existing "Pane controls" line checks
+    // `pane_control_state.controls`, a DIFFERENT store (the side pane's
+    // sliders/dropdowns), so a workbook full of pictures reported no loss at all.
+    check(
+        !state.controls.read().map_err(|e| e.to_string())?.is_empty(),
+        "Embedded images and cell-anchored controls",
+    );
+    // The content-addressed bytes those controls point at.
+    check(
+        !state.media.read().map_err(|e| e.to_string())?.is_empty(),
+        "Embedded media (image data)",
+    );
+    check(
+        !user_files_state.files.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Attached files (the in-document file store)",
+    );
+    // Only a CUSTOMISED theme is a loss; the Office default survives by being
+    // what the reader assumes anyway.
+    check(
+        *state.theme.read().map_err(|e| e.to_string())? != engine::ThemeDefinition::default(),
+        "Document theme (colors and font pair revert to the default)",
+    );
+    // The xlsx reader hard-codes Calcula's defaults for both of these, so a
+    // workbook whose author changed them comes back with different geometry.
+    check(
+        (*state.default_row_height.read().map_err(|e| e.to_string())?
+            - ::persistence::DEFAULT_ROW_HEIGHT_PX)
+            .abs()
+            > f64::EPSILON
+            || (*state.default_column_width.read().map_err(|e| e.to_string())?
+                - ::persistence::DEFAULT_COLUMN_WIDTH_PX)
+                .abs()
+                > f64::EPSILON,
+        "Default row height / column width",
+    );
+    // Rich text is per-cell, so this one has to look at cells. `any`
+    // short-circuits on the first hit and the grid is sparse.
+    check(
+        state
+            .grids
+            .read()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|g| g.cells.values().any(|c| c.rich_text.is_some())),
+        "In-cell rich text (mixed fonts/colors within one cell)",
+    );
+
     Ok(lost)
 }
+
+/// EVERY field of `persistence::Workbook`, and what a `.xlsx` save does with it.
+///
+/// The loss report is a hand-maintained list, and a hand-maintained list with no
+/// producer drifts — which is exactly what happened: it grew to 24 checks while
+/// eight stores (images, media, attached files, theme, grid defaults, rich text,
+/// active sheet, saved pivot layouts) were dropped in silence. This table is
+/// what `the_loss_report_covers_every_workbook_field` walks, and the fields come
+/// out of `core/persistence/src/lib.rs` at TEST TIME, so adding a field to
+/// `Workbook` without deciding its xlsx fate fails a test.
+///
+/// `WRITTEN` = the xlsx writer emits it. `REPORTED` = dropped, and the user is
+/// told. `SILENT` = dropped without a line, WITH the reason it does not need one.
+#[cfg(test)]
+pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
+    ("sheets", "WRITTEN: cells, formulas, styles, merges, widths, freeze"),
+    ("tables", "WRITTEN: as xlsx tables"),
+    ("charts", "WRITTEN: as xlsx charts"),
+    ("sparklines", "WRITTEN"),
+    ("named_ranges", "WRITTEN: as defined names"),
+    ("properties", "WRITTEN on export (the READER ignores them, which is a separate one-way loss, S8)"),
+    ("conditional_formats", "REPORTED: 'Conditional formatting'"),
+    ("data_validations", "REPORTED: 'Data validation'"),
+    ("pivot_definitions", "REPORTED: 'Pivot tables'"),
+    ("bi_pivot_metadata", "REPORTED with the pivots it annotates ('Pivot tables')"),
+    ("pivot_layouts", "REPORTED with the pivots they lay out ('Pivot tables')"),
+    ("slicers", "REPORTED: 'Slicers'"),
+    ("ribbon_filters", "REPORTED: 'Ribbon filters'"),
+    ("pane_controls", "REPORTED: 'Pane controls'"),
+    ("comments", "REPORTED: 'Threaded comments'"),
+    ("scenarios", "REPORTED: 'What-if scenarios'"),
+    ("outlines", "REPORTED: 'Outline groups'"),
+    ("object_scripts", "REPORTED: 'Object scripts'"),
+    ("scripts", "REPORTED: 'Workbook scripts (incl. custom functions)'"),
+    ("notebooks", "REPORTED: 'Notebooks'"),
+    ("cell_types", "REPORTED: 'Cell types (bricks)'"),
+    ("cell_behaviors", "REPORTED: 'Cell behaviors (bricks)'"),
+    ("sheet_protections", "REPORTED: 'Sheet/workbook protection'"),
+    ("workbook_protection", "REPORTED: 'Sheet/workbook protection'"),
+    ("bi_connections", "REPORTED: 'BI model connections'"),
+    ("bi_connection_roles", "REPORTED with the connections they belong to"),
+    ("bi_connection_caches", "REPORTED with the connections they cache"),
+    ("extension_data", "REPORTED: 'Extension data (animations, grid reports, ...)'"),
+    ("controls", "REPORTED: 'Embedded images and cell-anchored controls'"),
+    ("media", "REPORTED: 'Embedded media (image data)'"),
+    ("user_files", "REPORTED: 'Attached files (the in-document file store)'"),
+    ("theme", "REPORTED when customised: 'Document theme'"),
+    ("default_row_height", "REPORTED when non-default: 'Default row height / column width'"),
+    ("default_column_width", "REPORTED when non-default: 'Default row height / column width'"),
+    (
+        "active_sheet",
+        "SILENT: which tab was selected is a view preference, not document \
+         content. The reader hard-codes 0; nothing the user authored is lost.",
+    ),
+    (
+        "pending_recalc",
+        "SILENT: a transient marker meaning 'recalculate on next open'. It is \
+         recomputed, never authored, and xlsx has fullCalcOnLoad for the same job.",
+    ),
+    (
+        "format_version",
+        "SILENT: the .cala stamp. An .xlsx carries its own format identity and \
+         this number has no meaning inside one.",
+    ),
+];
 
 #[tauri::command]
 pub fn auto_recover_save(

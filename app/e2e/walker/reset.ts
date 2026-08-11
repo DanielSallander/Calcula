@@ -57,9 +57,26 @@ export async function deepResetForWalk(page: Page): Promise<void> {
     } catch { /* none */ }
 
     try {
+      // THROUGH THE EXTENSION'S OWN DELETE, like every other teardown here.
+      // A raw `delete_table` invoke removes the table from the backend and
+      // tells the frontend nothing: the Table store keeps its cache, the
+      // contextual Table Design tab stays registered, and the walk starts in a
+      // state the product cannot reach. That is what seed 20260810 failed on --
+      // at STEP 1, with an unrelated action, because the violation was already
+      // true before the walk began.
+      const store = (await (window as any).__calcImport(
+        new URL("/extensions/Table/lib/tableStore.ts", document.baseURI).href,
+      )) as {
+        getAllTables?: () => Array<{ id: string }>;
+        deleteTableAsync?: (id: string) => Promise<boolean>;
+      };
       const tables = await tauri.core.invoke("get_all_tables", {}).catch(() => []);
       for (const t of (tables as any[]) ?? []) {
-        await tauri.core.invoke("delete_table", { tableId: t.id }).catch(() => {});
+        if (store?.deleteTableAsync) {
+          await store.deleteTableAsync(t.id).catch(() => {});
+        } else {
+          await tauri.core.invoke("delete_table", { tableId: t.id }).catch(() => {});
+        }
       }
     } catch { /* none */ }
 

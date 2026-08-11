@@ -61,6 +61,18 @@ export class OracleBattery {
   private checkpointCount = 0;
   /** Suppressed violations accumulated across the run (for reporting). */
   readonly suppressed: Array<{ violation: OracleViolation; ledgerId: string }> = [];
+  /**
+   * Checkpoints an oracle DECLINED to decide, with the reason. Not defects and
+   * not suppressions: the question could not be asked. Today the only source is
+   * `undo-history-unreachable` — the walk pushed more than the 100-entry undo
+   * cap holds, so the checkpoint state is no longer on the stack and no number
+   * of undo steps returns to it.
+   *
+   * Collected rather than dropped because a run where most late checkpoints
+   * end up here is a WEAK run, and that has to be visible: it is how the
+   * round-trip oracle silently stops testing anything on a long walk.
+   */
+  readonly undecided: Array<{ checkpoint: number; violation: OracleViolation }> = [];
 
   constructor(options: OracleBatteryOptions) {
     this.tmpDir = options.tmpDir;
@@ -118,7 +130,22 @@ export class OracleBattery {
       undoBaselineReset = true;
     }
 
-    const { active, suppressed } = filterKnownIssues(violations);
+    // Undecidable checkpoints are pulled out BEFORE the known-issues ledger.
+    // They are not defects, so failing the walk on one reports the harness's
+    // own blind spot as a product bug (which is what S11 and S12's first two
+    // findings were); and they are not suppressions either, so hiding them in
+    // the ledger would make the blind spot invisible instead.
+    const decidable: OracleViolation[] = [];
+    for (const v of violations) {
+      if (v.invariantId === "undo-history-unreachable") {
+        this.undecided.push({ checkpoint: this.checkpointCount, violation: v });
+        console.warn(`  [oracle] ${v.message}`);
+      } else {
+        decidable.push(v);
+      }
+    }
+
+    const { active, suppressed } = filterKnownIssues(decidable);
     for (const s of suppressed) {
       this.suppressed.push({ violation: s.violation, ledgerId: s.issue.ledgerId });
     }

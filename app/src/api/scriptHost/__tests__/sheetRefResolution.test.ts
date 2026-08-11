@@ -11,7 +11,7 @@
 //              accepted an index (assertActiveSheet resolves it).
 
 import { describe, expect, it, vi } from "vitest";
-import { vSheetRef, vCellSet, vBatch, vRangeWrite } from "../validators";
+import { vSheetRef, vSheetRename, vCellSet, vBatch, vRangeWrite } from "../validators";
 import {
   resolveSheetRefIn,
   scriptCellInput,
@@ -30,11 +30,29 @@ describe("vSheetRef accepts an index or a name, and nothing else", () => {
     expect(vSheetRef([100])).toBe(true);
   });
 
-  it("accepts a plausible sheet name (the rename validator's character rules)", () => {
+  it("accepts a plausible sheet name", () => {
     expect(vSheetRef(["Sheet1"])).toBe(true);
     expect(vSheetRef(["Q1 Budget"])).toBe(true);
     expect(vSheetRef(["Försäljning 2026"])).toBe(true);
     expect(vSheetRef(["x".repeat(255)])).toBe(true);
+  });
+
+  // A REFERENCE is looser than a RENAME, deliberately. Entry now enforces
+  // Excel's rule (31 chars, none of : \ / ? * [ ], no edge apostrophe, not
+  // "History"), but LOADING a workbook accepts and carries a name that breaks
+  // it -- refusing to open a file over a sheet name would trade a cosmetic
+  // problem for a total one. A script therefore has to be able to ADDRESS such
+  // a sheet even though it could never CREATE one.
+  it("accepts a name that entry would refuse, because a loaded workbook may hold one", () => {
+    expect(vSheetRef(["Bad:Name"])).toBe(true);
+    expect(vSheetRef(["Q1/Q2"])).toBe(true);
+    expect(vSheetRef(["History"])).toBe(true);
+    expect(vSheetRef(["x".repeat(40)])).toBe(true);
+    // ...and the rename validator refuses every one of them.
+    expect(vSheetRename([0, "Bad:Name"])).not.toBe(true);
+    expect(vSheetRename([0, "Q1/Q2"])).not.toBe(true);
+    expect(vSheetRename([0, "History"])).not.toBe(true);
+    expect(vSheetRename([0, "x".repeat(40)])).not.toBe(true);
   });
 
   it("rejects a negative, fractional or non-finite index", () => {
@@ -48,9 +66,6 @@ describe("vSheetRef accepts an index or a name, and nothing else", () => {
     expect(vSheetRef([""])).not.toBe(true);
     expect(vSheetRef(["   "])).not.toBe(true);
     expect(vSheetRef(["x".repeat(256)])).not.toBe(true);
-    for (const ch of [":", "\\", "/", "?", "*", "[", "]"]) {
-      expect(vSheetRef([`Bad${ch}Name`]), `illegal char ${ch}`).not.toBe(true);
-    }
   });
 
   it("rejects every other type", () => {

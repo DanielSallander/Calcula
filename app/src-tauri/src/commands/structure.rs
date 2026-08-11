@@ -1697,11 +1697,11 @@ pub(crate) fn insert_rows_impl(
         .collect();
 
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = cell.formula_string() {
+        if let Some(formula) = formula_to_rewrite(cell) {
             let updated_formula = shift_formula_rows_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, row, count as i32);
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
+                store_rewritten_formula(&mut updated_cell, &updated_formula, "insert rows", *r, *c);
                 grid.cells.insert((*r, *c), updated_cell);
                 // Kind 1: rewritten AST, at the position it will hold after the
                 // move below.
@@ -2123,11 +2123,11 @@ pub(crate) fn insert_columns_impl(
         .collect();
 
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = cell.formula_string() {
+        if let Some(formula) = formula_to_rewrite(cell) {
             let updated_formula = shift_formula_cols_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, col, count as i32);
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
+                store_rewritten_formula(&mut updated_cell, &updated_formula, "insert columns", *r, *c);
                 grid.cells.insert((*r, *c), updated_cell);
                 // Kind 1: rewritten AST, at the position it will hold after the
                 // move below.
@@ -2995,11 +2995,11 @@ pub(crate) fn delete_rows_impl(
         .collect();
 
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = cell.formula_string() {
+        if let Some(formula) = formula_to_rewrite(cell) {
             let updated_formula = shift_formula_rows_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, row, -(count as i32));
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
+                store_rewritten_formula(&mut updated_cell, &updated_formula, "delete rows", *r, *c);
                 grid.cells.insert((*r, *c), updated_cell);
                 // Kind 1: rewritten AST, at the position it will hold after the
                 // move below.
@@ -3479,11 +3479,11 @@ pub(crate) fn delete_columns_impl(
         .collect();
 
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = cell.formula_string() {
+        if let Some(formula) = formula_to_rewrite(cell) {
             let updated_formula = shift_formula_cols_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, col, -(count as i32));
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
+                store_rewritten_formula(&mut updated_cell, &updated_formula, "delete columns", *r, *c);
                 grid.cells.insert((*r, *c), updated_cell);
                 // Kind 1: rewritten AST, at the position it will hold after the
                 // move below.
@@ -3857,7 +3857,7 @@ pub fn relocate_cell_references(
             }
 
             if let Some(cell) = grid.get_cell(r, c) {
-                if let Some(formula) = cell.formula_string() {
+                if let Some(formula) = formula_to_rewrite(cell) {
                     let new_formula = relocate_references_in_formula(
                         &formula,
                         src_min_row,
@@ -3867,7 +3867,7 @@ pub fn relocate_cell_references(
                         delta_row,
                         delta_col,
                     );
-                    if new_formula != *formula {
+                    if new_formula != formula {
                         rewrites.push((r, c, new_formula));
                     }
                 }
@@ -3895,13 +3895,16 @@ pub fn relocate_cell_references(
             &user_files,
         );
 
-        // Build new cell
+        // Build new cell. The relocated text is parsed through the shared
+        // helper: if it cannot be read back the cell KEEPS the formula it has
+        // rather than being blanked (register §3bc).
         let mut new_cell = Cell {
-            ast: parser::parse(new_formula).ok().map(Box::new),
+            ast: prev.as_ref().and_then(|c| c.ast.clone()),
             value: cell_value,
             style_index: existing_style_index,
             rich_text: prev.as_ref().and_then(|c| c.rich_text.clone()),
         };
+        store_rewritten_formula(&mut new_cell, new_formula, "cut/paste relocation", *r, *c);
 
         // Parse the formula to extract references for dependency tracking
         if let Ok(parsed) = parser::parse(new_formula) {
@@ -4620,6 +4623,71 @@ fn qualifier_prefix(quoted: &Option<String>, bare: &Option<String>) -> String {
     }
 }
 
+// ============================================================================
+// READING AND STORING A FORMULA THAT IS ABOUT TO BE REWRITTEN
+// ============================================================================
+// Every structural rewrite in this crate -- insert/delete rows and columns,
+// sort, fill, cut-and-paste relocation -- does the same three things: read a
+// cell's formula as TEXT, rewrite the references in that text, and store the
+// re-parsed result back. Both ends of that had a defect, and both were silent.
+//
+// READ: `formula_string()` is the DISPLAY form. It COLLAPSES the internal
+// `__INVOKE__("MyFn", <lambda>, args)` marker a named LAMBDA call carries down
+// to `MyFn(args)`. Re-parsing that yields `Custom("MYFN")` with no lambda
+// attached -- an unknown user function -- so inserting a row above a cell that
+// called a named LAMBDA turned the call into `#NAME?`. This is the same defect
+// the sheet-rename repair was fixed for (register §3ba, finding 2); these call
+// sites were not part of that fix.
+//
+// STORE: `parser::parse(&rewritten).ok().map(Box::new)` swallowed a parse
+// failure into `ast = None` -- a cell keeping a stale value with an EMPTY
+// formula bar and no error anywhere (register §3bc). `shift_cross_sheet_formulas`
+// already refused to do that ("a formula we cannot re-parse is left exactly as
+// it was rather than being silently blanked"); the other eleven sites had not
+// caught up.
+//
+// Both are now one pair of helpers, so a twelfth call site cannot get either
+// half wrong. `no_structural_rewrite_swallows_a_parse_failure` is the census.
+
+/// A cell's formula in the form a rewrite must read: the RAW one, with the
+/// `__INVOKE__` marker of a named-LAMBDA call intact.
+pub(crate) fn formula_to_rewrite(cell: &Cell) -> Option<String> {
+    cell.formula_string_raw()
+}
+
+/// Store a rewritten formula on `cell`, or KEEP the formula it already has.
+///
+/// Returns `true` when the rewrite was stored. `false` means the rewriter
+/// produced text that cannot be read back, which is a defect in the rewriter,
+/// not in the user's workbook -- so the user's formula stays exactly as it was
+/// and the failure is logged at ERROR. It is deliberately not silent and
+/// deliberately not destructive: those were the two ways this used to go wrong.
+pub(crate) fn store_rewritten_formula(
+    cell: &mut Cell,
+    rewritten: &str,
+    operation: &str,
+    row: u32,
+    col: u32,
+) -> bool {
+    match parser::parse(rewritten) {
+        Ok(ast) => {
+            cell.ast = Some(Box::new(ast));
+            true
+        }
+        Err(e) => {
+            crate::log_error!(
+                "STRUCT",
+                "{} produced unreadable formula text at {} -- keeping the cell's own formula: `{}` ({})",
+                operation,
+                calcula_format::cell_ref::to_a1(row, col),
+                rewritten,
+                e
+            );
+            false
+        }
+    }
+}
+
 /// Shift the row part of every reference in `formula` that targets `edited_sheet`.
 ///
 /// `formula_sheet` is the sheet the formula LIVES on, which is what an
@@ -5020,7 +5088,7 @@ fn shift_cross_sheet_formulas(
 
         let mut previous: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
         for ((r, c), cell) in candidates {
-            let Some(formula) = cell.formula_string() else { continue };
+            let Some(formula) = formula_to_rewrite(&cell) else { continue };
             // A formula on ANOTHER sheet can only reach the edited sheet
             // through a QUALIFIED reference — unqualified refs mean this sheet.
             // Skipping the '!'-free majority avoids rendering and regex-scanning
@@ -5108,7 +5176,7 @@ fn shift_cross_sheet_formulas_for_off_sheet_edit(
 
         let mut previous: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
         for ((r, c), cell) in candidates {
-            let Some(formula) = cell.formula_string() else { continue };
+            let Some(formula) = formula_to_rewrite(&cell) else { continue };
             // Only QUALIFIED references can reach the edited sheet from here.
             if !formula.contains('!') {
                 continue;
@@ -5556,7 +5624,7 @@ pub(crate) fn off_sheet_structural_edit(
             .map(|(&pos, cell)| (pos, cell.clone()))
             .collect();
         for ((r, c), cell) in &all_cells {
-            if let Some(formula) = cell.formula_string() {
+            if let Some(formula) = formula_to_rewrite(cell) {
                 let updated = match edit {
                     SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(
                         &formula, &edited_sheet_name, &edited_sheet_name, at, count as i32,
@@ -5573,7 +5641,13 @@ pub(crate) fn off_sheet_structural_edit(
                 };
                 if updated != formula {
                     let mut updated_cell = cell.clone();
-                    updated_cell.ast = parser::parse(&updated).ok().map(Box::new);
+                    store_rewritten_formula(
+                        &mut updated_cell,
+                        &updated,
+                        "off-sheet structural edit",
+                        *r,
+                        *c,
+                    );
                     grid.cells.insert((*r, *c), updated_cell);
                 }
             }

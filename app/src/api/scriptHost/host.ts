@@ -4014,7 +4014,10 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       if (!result.success) {
         throw new BrokerError("ValidationError", result.error || "deleteTable failed");
       }
-      await announceObjectsChanged();
+      // A table delete CASCADES into the slicers bound to it and prunes it out
+      // of the ribbon filters that named it, so the announcement has to reach
+      // those stores — "objects" does not. See announceObjectCascade.
+      await announceObjectCascade();
       return undefined;
     }
     case "api.createNamedRange": {
@@ -5689,6 +5692,17 @@ export async function executeTableStructureAspect(
   // announcement its own Design-tab dialogs make; Pivot/Charts/AutoFilter
   // listen too. Then the generic objects refresh repaints the grid.
   emitAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, {});
+  // `table.convertToRange` DISSOLVES the table, and §3bt gave it the identical
+  // cascade `delete_table` runs — the slicers bound to it are deleted and the
+  // ribbon filters that named it are pruned. The Table extension's own
+  // `convertToRangeAsync` announces that; this path must too, or the slicer
+  // goes on painting a rectangle that swallows clicks. Every other aspect here
+  // only reshapes a table that still exists, so it keeps the narrower
+  // announcement.
+  if (aspect === "table.convertToRange") {
+    await announceObjectCascade();
+    return;
+  }
   await announceObjectsChanged();
 }
 
@@ -10398,6 +10412,34 @@ async function requirePivotApi(): Promise<PivotApi> {
 async function announceObjectsChanged(): Promise<void> {
   emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["objects"] });
   (await import("../grid")).refreshGridData();
+}
+
+/**
+ * An object that OTHER objects point at was deleted, so the backend ran a
+ * CASCADE (§3bt's `DEPENDENCY_MATRIX`): the slicers bound to it are gone, the
+ * ribbon filters that named it are pruned, a pane control's chart binding is
+ * cleared.
+ *
+ * The "objects" domain does NOT reach any of those. It fans out to charts,
+ * sparklines, the table-definitions event, animation, grid and protection —
+ * and every one of the cascade's own victims lives in a store that is not on
+ * that list. The extensions cache their own objects and paint their own
+ * overlays, so a slicer the backend deleted goes on rendering AND on claiming
+ * pointer events over the cells underneath until its store re-reads. That is
+ * not cosmetic: it is the wedge that took `state-consistency` to a 120 s
+ * click-retry timeout on seed 1786421716252.
+ *
+ * The Table extension's own `deleteTableAsync` has always announced this; the
+ * broker calls `backend.deleteTable` DIRECTLY (it has to — the script tier
+ * checks and the active-sheet assertion live here), so it has to announce it
+ * too. Domains, never feature events: the Shell owns the mapping.
+ */
+async function announceObjectCascade(): Promise<void> {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "ribbonFilter", "paneControl"],
+    source: "commit",
+  });
+  await announceObjectsChanged();
 }
 
 /** A pivot's shape changed: the "pivot" domain reaches the Pivot extension's

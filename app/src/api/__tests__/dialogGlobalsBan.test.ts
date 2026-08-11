@@ -12,22 +12,36 @@
 //          If someone deletes or weakens the rule, THIS test fails — the guard
 //          on the guard.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ESLint } from "eslint";
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
-/** Lint a synthetic source as if it lived at `relPath`, using the real config. */
-async function lint(relPath: string, source: string): Promise<ESLint.LintResult> {
-  const eslint = new ESLint({
+// ONE ESLint instance for the whole file, not one per case.
+//
+// Loading the real project config is the expensive part, and it was being paid
+// 23 times. Under the full suite (`npx vitest run`, everything in parallel) the
+// FIRST case took 40s and blew the 30s test timeout, while the same file passes
+// in 2s on its own -- a load-order flake that looks exactly like a broken lint
+// rule in the log. Nothing about the check depends on a fresh instance: `cwd`
+// and the config are constant, and the per-case `filePath` is an argument to
+// `lintText`.
+let shared: ESLint | null = null;
+function eslintInstance(): ESLint {
+  shared ??= new ESLint({
     cwd: APP_DIR,
     overrideConfigFile: path.join(APP_DIR, "eslint.config.boundaries.js"),
     // The file does not exist on disk; ignore-file resolution must not object.
     ignore: false,
   });
-  const [result] = await eslint.lintText(source, {
+  return shared;
+}
+
+/** Lint a synthetic source as if it lived at `relPath`, using the real config. */
+async function lint(relPath: string, source: string): Promise<ESLint.LintResult> {
+  const [result] = await eslintInstance().lintText(source, {
     filePath: path.join(APP_DIR, relPath),
   });
   return result;
@@ -42,6 +56,24 @@ function dialogErrors(result: ESLint.LintResult): string[] {
 }
 
 describe("the dialog-globals ban", () => {
+  // WARM THE CONFIG IN SETUP, because that is where the cost actually is.
+  //
+  // Sharing one `ESLint` instance (above) cut 23 config loads to one, but the
+  // surviving load is still charged to whichever test runs FIRST, and it is a
+  // real project config resolved over a large tree. Under `npx vitest run` with
+  // every other file in flight it has been measured at over 30s, so the first
+  // case died on the default per-test timeout and the whole file reported a
+  // failure that reads exactly like a deleted lint rule. Nothing was wrong with
+  // the rule on any of those runs.
+  //
+  // The load is SETUP, not assertion, so it is billed to setup with a budget
+  // that reflects the worst contention seen (212s in one full run). Every test
+  // below then keeps the ordinary timeout and stays a real signal: this hook
+  // makes the guard reliable, it does not soften anything it checks.
+  beforeAll(async () => {
+    await lint("src/core/lib/__warmup__.ts", "export const warm = 1;\n");
+  }, 300_000);
+
   // Every syntactic shape the defect has actually taken in this repo.
   const SHAPES: [name: string, code: string][] = [
     ["qualified window.confirm", `if (!window.confirm("q")) { /* */ }`],

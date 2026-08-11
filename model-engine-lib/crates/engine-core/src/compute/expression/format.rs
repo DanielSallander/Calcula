@@ -190,7 +190,16 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             format!("{v}")
         }
         Expression::LiteralString(v) => {
-            format!("\"{v}\"")
+            // `""` is DAX's escape for a literal quote inside a string, and the
+            // tokenizer now reads it. Without the doubling here, any string
+            // containing a `"` formatted to text that will not re-parse -- and
+            // since CONTEXT expression TEXT is the authoring form (the host
+            // round-trips through `to_text()` / `parse_context`), that text is
+            // what gets stored and shown. An expression arriving by a non-parser
+            // route (model JSON, a `biModel*` command taking a tree, a
+            // connector-derived calculated column) could therefore be corrupted
+            // or refused on the way back through the Model Editor.
+            format!("\"{}\"", v.replace('"', "\"\""))
         }
         Expression::Blank => "BLANK()".to_string(),
         Expression::Aggregate { operation, operand } => {

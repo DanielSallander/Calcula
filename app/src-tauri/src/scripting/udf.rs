@@ -334,46 +334,24 @@ pub fn collect_udf_calls(
         }
         if let Some(formula) = cell.formula_string() {
             if let Ok(parsed) = parser::parse(&formula) {
-                // Resolve named references.
-                let resolved = if crate::ast_has_named_refs(&parsed) {
-                    let named_ranges_map = state.named_ranges.read().unwrap();
-                    let mut visited = HashSet::new();
-                    crate::resolve_names_in_ast(
-                        &parsed,
-                        &named_ranges_map,
-                        sheet_index,
-                        &mut visited,
-                    )
-                } else {
-                    parsed
-                };
-                // Resolve structured table references.
-                let resolved = if crate::ast_has_table_refs(&resolved) {
-                    let tables_map = state.tables.read().unwrap();
-                    let table_names_map = state.table_names.read().unwrap();
-                    let ctx = crate::TableRefContext {
-                        tables: &tables_map,
-                        table_names: &table_names_map,
-                        current_sheet_index: sheet_index,
-                        current_row: row,
-                    };
-                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
-                } else {
-                    resolved
-                };
-                // Resolve spill range references.
-                let resolved = if crate::ast_has_spill_refs(&resolved) {
-                    let spill_ranges_map = state.spill_ranges.lock().unwrap();
-                    crate::resolve_spill_refs_in_ast(
-                        &resolved,
-                        &spill_ranges_map,
-                        sheet_index,
-                    )
-                } else {
-                    resolved
-                };
-                let engine_ast = crate::convert_expr(&resolved);
-                cell.set_cached_ast(engine_ast);
+                // THE SAME RECIPE `update_cell` USES, through the same
+                // function. This used to be a hand-rolled fourth copy of the
+                // name/table/spill resolution, and it cached the RESOLVED tree
+                // — so once §3bf made the real edit path keep `A1#`, this
+                // scratch cell held a different formula from the one the user
+                // was typing, and the UDF discovery scanned the wrong text.
+                // `split_entered_formula` also removes a `spill_ranges` lock
+                // from a function that goes on to evaluate formulas, which is
+                // now a deadlock shape (see `NameTables::spill_ranges`).
+                let entered = crate::split_entered_formula(
+                    &state,
+                    &parsed,
+                    sheet_index,
+                    row,
+                    col,
+                    &sheet_names,
+                );
+                cell.set_cached_ast(crate::convert_expr(&entered.stored));
             }
             // On parse error we still store the cell (no AST); it won't
             // surface UDF calls, which is correct.
@@ -424,6 +402,8 @@ pub fn collect_udf_calls(
         named_ranges: &udf_named_ranges,
         tables: &udf_tables,
         table_names: &udf_table_names,
+        sheet_names: &sheet_names,
+        spill_ranges: &state.spill_ranges,
     };
 
     // --- Candidate scan over the ACTIVE sheet only (see the fn doc). A cell
@@ -435,7 +415,7 @@ pub fn collect_udf_calls(
         let Some(stored_ast) = cell.get_cached_ast() else {
             continue;
         };
-        let expanded = crate::name_resolution::eval_ast(stored_ast, &name_tables.at(sheet_index, r));
+        let expanded = crate::name_resolution::eval_ast(stored_ast, &name_tables.at(sheet_index, r, c));
         let formula = engine::ast_render::render_formula(&expanded);
         let upper_formula = formula.to_uppercase();
         if !udf_name_set
@@ -466,7 +446,7 @@ pub fn collect_udf_calls(
             if let Some(stored_ast) = cell.get_cached_ast() {
                 let ast = crate::name_resolution::eval_ast(
                     stored_ast,
-                    &name_tables.at(sheet_index, r),
+                    &name_tables.at(sheet_index, r, c),
                 )
                 .into_owned();
                 let eval_ctx = engine::EvalContext {

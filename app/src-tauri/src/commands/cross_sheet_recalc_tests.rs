@@ -1225,7 +1225,8 @@ fn rename_sheet_like_the_command(wb: &Workbook, index: usize, new_name: &str) {
         let new_n = new_name.to_string();
         crate::repair_all_formulas(&mut grids, &|formula| {
             Some(crate::repair_3d_refs_on_rename(formula, &old, &new_n))
-        });
+        })
+        .expect("the rename repair must not refuse in this fixture");
         *wb.state.grid.write(&clean).unwrap() = grids[active].clone();
     }
     crate::sheets::rename_cross_sheet_dependency_keys(&wb.state, &old_name, new_name);

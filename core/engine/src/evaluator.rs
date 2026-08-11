@@ -47,6 +47,85 @@ fn fuel_units(n: u64) -> i64 {
     }
 }
 
+/// THE ONE numeric-overflow gate for arithmetic results.
+///
+/// Excel's largest representable magnitude is 1.7976931348623158E+308 and a
+/// calculation that passes it answers `#NUM!` — "the result is too large to
+/// represent", which is a NUMBER problem, not an argument-TYPE problem. Before
+/// this existed the engine kept the IEEE infinity and painted it: `=1E308*10`
+/// displayed `inf`, a token that is not a number, not an error, and not
+/// anything a user can act on. NaN goes the same way (`=(-8)^(1/3)` in Excel is
+/// `#NUM!`).
+///
+/// Every arithmetic operator funnels through here so that there is ONE answer
+/// to "what happens when a formula overflows" instead of one per operator.
+#[inline]
+fn finite_or_num(result: f64) -> EvalResult {
+    if result.is_finite() {
+        EvalResult::Number(result)
+    } else {
+        EvalResult::Error(CellError::Num)
+    }
+}
+
+/// `base ^ exponent` with Excel's three outcomes.
+///
+/// `0 ^ negative` is a DIVISION by zero (x^-n is 1/x^n) and Excel says so with
+/// `#DIV/0!` — IEEE would hand back +inf, which `finite_or_num` alone would
+/// have mislabelled `#NUM!`. Everything else that leaves the reals — the
+/// classic `(-8) ^ (1/3)` — or overflows is `#NUM!`.
+fn power_result(base: f64, exponent: f64) -> EvalResult {
+    if base == 0.0 && exponent < 0.0 {
+        return EvalResult::Error(CellError::Div0);
+    }
+    finite_or_num(base.powf(exponent))
+}
+
+/// The maximum `places` any base-conversion function can be asked for.
+///
+/// Excel's own ceiling is the 10-character width of the two's-complement forms
+/// these functions produce, so nothing legitimate ever exceeds it. It is also
+/// the ALLOCATION bound: `places` reaches `format!("{:0>width$}")` as a width,
+/// and before this cap `=DEC2BIN(5, 1000000000)` asked the formatter for a
+/// one-gigabyte string on a single keystroke. `#NUM!` is both Excel's answer
+/// and the cheap one.
+const MAX_PLACES: usize = 10;
+
+/// Read the optional `places` argument of a base-conversion function.
+///
+/// Excel: "If places is not an integer, it is truncated. If places is
+/// nonnumeric, [the function] returns the #VALUE! error value. If places is
+/// zero or negative, [the function] returns the #NUM! error value." Missing is
+/// legal and means "no padding".
+fn places_arg(
+    ev: &Evaluator,
+    args: &[Expression],
+    idx: usize,
+) -> Result<Option<usize>, CellError> {
+    if args.len() <= idx {
+        return Ok(None);
+    }
+    match ev.evaluate(&args[idx]).as_number() {
+        Some(n) if n >= 1.0 && n <= MAX_PLACES as f64 => Ok(Some(n.trunc() as usize)),
+        Some(_) => Err(CellError::Num),
+        None => Err(CellError::Value),
+    }
+}
+
+/// Zero-pad a base-conversion result to `places` characters.
+///
+/// Excel: "If [the function] requires more than places characters, it returns
+/// the #NUM! error value." Negative inputs already carry their full
+/// 10-character two's-complement form, so they pass through untouched — Excel
+/// ignores `places` for them.
+fn pad_to_places(text: String, places: Option<usize>) -> Result<String, CellError> {
+    match places {
+        None => Ok(text),
+        Some(p) if text.len() > p => Err(CellError::Num),
+        Some(p) => Ok(format!("{:0>width$}", text, width = p)),
+    }
+}
+
 /// `n * ceil(log2 n)`, saturating: the comparison count of a sort. Charged at
 /// the FULL rate rather than the arithmetic rate because the evaluator's
 /// comparators build owned `String` sort keys.
@@ -1524,21 +1603,21 @@ impl<'a> Evaluator<'a> {
 
     fn eval_add(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Number(l + r),
+            (Some(l), Some(r)) => finite_or_num(l + r),
             _ => EvalResult::Error(CellError::Value),
         }
     }
 
     fn eval_subtract(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Number(l - r),
+            (Some(l), Some(r)) => finite_or_num(l - r),
             _ => EvalResult::Error(CellError::Value),
         }
     }
 
     fn eval_multiply(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Number(l * r),
+            (Some(l), Some(r)) => finite_or_num(l * r),
             _ => EvalResult::Error(CellError::Value),
         }
     }
@@ -1546,21 +1625,14 @@ impl<'a> Evaluator<'a> {
     fn eval_divide(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         match (left.as_number(), right.as_number()) {
             (Some(_), Some(r)) if r == 0.0 => EvalResult::Error(CellError::Div0),
-            (Some(l), Some(r)) => EvalResult::Number(l / r),
+            (Some(l), Some(r)) => finite_or_num(l / r),
             _ => EvalResult::Error(CellError::Value),
         }
     }
 
     fn eval_power(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => {
-                let result = l.powf(r);
-                if result.is_nan() || result.is_infinite() {
-                    EvalResult::Error(CellError::Value)
-                } else {
-                    EvalResult::Number(result)
-                }
-            }
+            (Some(l), Some(r)) => power_result(l, r),
             _ => EvalResult::Error(CellError::Value),
         }
     }
@@ -3071,6 +3143,14 @@ impl<'a> Evaluator<'a> {
             1.0
         };
 
+        // Excel: "If number is positive and significance is negative, FLOOR
+        // returns the #NUM! error value." The reverse -- negative number with
+        // positive significance -- is legal. FLOOR.PRECISE and FLOOR.MATH take
+        // |significance| instead and have no such error, which is why this
+        // guard belongs here and not in the shared tail.
+        if num > 0.0 && significance < 0.0 {
+            return EvalResult::Error(CellError::Num);
+        }
         let result = (num / significance).floor() * significance;
         EvalResult::Number(result)
     }
@@ -3095,6 +3175,12 @@ impl<'a> Evaluator<'a> {
             1.0
         };
 
+        // Excel: "If number is positive and significance is negative, CEILING
+        // returns the #NUM! error value." See FLOOR for why CEILING.PRECISE
+        // and CEILING.MATH are exempt.
+        if num > 0.0 && significance < 0.0 {
+            return EvalResult::Error(CellError::Num);
+        }
         let result = (num / significance).ceil() * significance;
         EvalResult::Number(result)
     }
@@ -3105,7 +3191,10 @@ impl<'a> Evaluator<'a> {
         }
 
         let num = match self.evaluate(&args[0]).as_number() {
-            Some(n) if n < 0.0 => return EvalResult::Error(CellError::Value),
+            // Excel: "If number is negative, SQRT returns the #NUM! error
+            // value." A negative number is the RIGHT TYPE and the WRONG VALUE,
+            // which is exactly the line #NUM! and #VALUE! divide on.
+            Some(n) if n < 0.0 => return EvalResult::Error(CellError::Num),
             Some(n) => n,
             None => return EvalResult::Error(CellError::Value),
         };
@@ -3128,12 +3217,7 @@ impl<'a> Evaluator<'a> {
             None => return EvalResult::Error(CellError::Value),
         };
 
-        let result = base.powf(exponent);
-        if result.is_nan() || result.is_infinite() {
-            EvalResult::Error(CellError::Value)
-        } else {
-            EvalResult::Number(result)
-        }
+        power_result(base, exponent)
     }
 
     fn fn_mod(&self, args: &[Expression]) -> EvalResult {
@@ -4703,7 +4787,9 @@ impl<'a> Evaluator<'a> {
             Some(n) => n.floor() as i64,
             None => return EvalResult::Error(CellError::Value),
         };
-        if bottom > top { return EvalResult::Error(CellError::Value); }
+        // Excel: "If bottom is greater than top, RANDBETWEEN returns the
+        // #NUM! error value."
+        if bottom > top { return EvalResult::Error(CellError::Num); }
         // Generate random using hashing
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
@@ -4718,14 +4804,22 @@ impl<'a> Evaluator<'a> {
 
     fn fn_log(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        // EXCEL'S THREE OUTCOMES, and they are three different errors:
+        //   LOG("x")   -> #VALUE!   wrong TYPE
+        //   LOG(0)     -> #NUM!     right type, outside the domain
+        //   LOG(10, 1) -> #DIV/0!   base 1 makes ln(base) zero, and Excel
+        //                           surfaces the division, not the domain
         let n = match self.evaluate(&args[0]).as_number() {
             Some(n) if n > 0.0 => n,
-            _ => return EvalResult::Error(CellError::Value),
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
         };
         let base = if args.len() == 2 {
             match self.evaluate(&args[1]).as_number() {
-                Some(b) if b > 0.0 && (b - 1.0).abs() > 1e-10 => b,
-                _ => return EvalResult::Error(CellError::Value),
+                Some(b) if (b - 1.0).abs() <= 1e-10 => return EvalResult::Error(CellError::Div0),
+                Some(b) if b > 0.0 => b,
+                Some(_) => return EvalResult::Error(CellError::Num),
+                None => return EvalResult::Error(CellError::Value),
             }
         } else {
             10.0
@@ -4737,7 +4831,8 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
             Some(n) if n > 0.0 => EvalResult::Number(n.log10()),
-            _ => EvalResult::Error(CellError::Value),
+            Some(_) => EvalResult::Error(CellError::Num),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
@@ -4745,14 +4840,16 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
             Some(n) if n > 0.0 => EvalResult::Number(n.ln()),
-            _ => EvalResult::Error(CellError::Value),
+            Some(_) => EvalResult::Error(CellError::Num),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
     fn fn_exp(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
-            Some(n) => EvalResult::Number(n.exp()),
+            // EXP(1000) overflows the double; Excel answers #NUM!.
+            Some(n) => finite_or_num(n.exp()),
             None => EvalResult::Error(CellError::Value),
         }
     }
@@ -4773,7 +4870,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
             Some(n) if (-1.0..=1.0).contains(&n) => EvalResult::Number(n.asin()),
-            Some(_) => EvalResult::Error(CellError::Value),
+            Some(_) => EvalResult::Error(CellError::Num),
             None => EvalResult::Error(CellError::Value),
         }
     }
@@ -4781,7 +4878,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
             Some(n) if (-1.0..=1.0).contains(&n) => EvalResult::Number(n.acos()),
-            Some(_) => EvalResult::Error(CellError::Value),
+            Some(_) => EvalResult::Error(CellError::Num),
             None => EvalResult::Error(CellError::Value),
         }
     }
@@ -4855,7 +4952,8 @@ impl<'a> Evaluator<'a> {
         for arg in args {
             match self.evaluate(arg).as_number() {
                 Some(n) if n >= 0.0 => result = gcd(result, n as u64),
-                _ => return EvalResult::Error(CellError::Value),
+                Some(_) => return EvalResult::Error(CellError::Num),
+                None => return EvalResult::Error(CellError::Value),
             }
         }
         EvalResult::Number(result as f64)
@@ -4869,7 +4967,8 @@ impl<'a> Evaluator<'a> {
         for arg in args {
             match self.evaluate(arg).as_number() {
                 Some(n) if n >= 0.0 => result = lcm(result, n as u64),
-                _ => return EvalResult::Error(CellError::Value),
+                Some(_) => return EvalResult::Error(CellError::Num),
+                None => return EvalResult::Error(CellError::Value),
             }
         }
         EvalResult::Number(result as f64)
@@ -4877,9 +4976,21 @@ impl<'a> Evaluator<'a> {
 
     fn fn_combin(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let n = match self.evaluate(&args[0]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
-        if k > n { return EvalResult::Error(CellError::Value); }
+        // Excel: "If number < 0, number_chosen < 0, or number < number_chosen,
+        // COMBIN returns the #NUM! error value." The negative checks have to
+        // happen BEFORE the `as u64` cast, which saturates -1 to 0 and would
+        // otherwise turn COMBIN(-1, 0) into a legal 1.
+        let n = match self.evaluate(&args[0]).as_number() {
+            Some(v) if v >= 0.0 => v as u64,
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let k = match self.evaluate(&args[1]).as_number() {
+            Some(v) if v >= 0.0 => v as u64,
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
+        };
+        if k > n { return EvalResult::Error(CellError::Num); }
         // k is derived from arguments: COMBIN(1e18, 5e17) loops 5e17 times.
         let k = k.min(n - k);
         charge_arith!(self, k);
@@ -4901,7 +5012,9 @@ impl<'a> Evaluator<'a> {
                 for i in 2..=n { result = result.saturating_mul(i); }
                 EvalResult::Number(result as f64)
             }
-            _ => EvalResult::Error(CellError::Value),
+            // Excel: "If number is negative, FACT returns the #NUM! error value."
+            Some(_) => EvalResult::Error(CellError::Num),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
@@ -5145,7 +5258,8 @@ impl<'a> Evaluator<'a> {
         for arg in args {
             match self.evaluate(arg).as_number() {
                 Some(n) if n >= 0.0 => nums.push(n as u64),
-                _ => return EvalResult::Error(CellError::Value),
+                Some(_) => return EvalResult::Error(CellError::Num),
+                None => return EvalResult::Error(CellError::Value),
             }
         }
         let total: u64 = nums.iter().sum();
@@ -5163,11 +5277,28 @@ impl<'a> Evaluator<'a> {
 
     fn fn_combina(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let n = match self.evaluate(&args[0]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
+        // Excel: "If number < 0 or number_chosen < 0, COMBINA returns the
+        // #NUM! error value." Same saturating-cast trap as COMBIN.
+        let n = match self.evaluate(&args[0]).as_number() {
+            Some(v) if v >= 0.0 => v as u64,
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let k = match self.evaluate(&args[1]).as_number() {
+            Some(v) if v >= 0.0 => v as u64,
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
+        };
         // COMBINA(n, k) = COMBIN(n + k - 1, k)
         if n == 0 && k == 0 { return EvalResult::Number(1.0); }
         let nn = n + k - 1;
+        // PANIC GUARD, and it was reachable: with n = 0 and k >= 1, `nn` is
+        // k - 1 and `nn - k` underflows a u64 — a debug-build panic inside the
+        // evaluator, i.e. the whole recalculation dies, from typing
+        // `=COMBINA(0,1)`. C(k-1, k) is 0 for every k >= 1, which is the value
+        // the symmetry shortcut below would have produced had it not
+        // underflowed first.
+        if nn < k { return EvalResult::Number(0.0); }
         let kk = k.min(nn - k);
         charge_arith!(self, kk);
         let mut result = 1u64;
@@ -5190,7 +5321,10 @@ impl<'a> Evaluator<'a> {
                 }
                 EvalResult::Number(result as f64)
             }
-            _ => EvalResult::Error(CellError::Value),
+            // Excel: "If number is negative, FACTDOUBLE returns the #NUM!
+            // error value." (-1 is legal and answers 1.)
+            Some(_) => EvalResult::Error(CellError::Num),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
@@ -5198,7 +5332,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
             Some(n) if n >= 0.0 => EvalResult::Number((n * std::f64::consts::PI).sqrt()),
-            Some(_) => EvalResult::Error(CellError::Value),
+            Some(_) => EvalResult::Error(CellError::Num),
             None => EvalResult::Error(CellError::Value),
         }
     }
@@ -5482,7 +5616,7 @@ impl<'a> Evaluator<'a> {
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = nums.len() as f64;
                 let rank = k_val * (n + 1.0) - 1.0;
-                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Value); }
+                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Num); }
                 let lower = rank.floor() as usize;
                 let frac = rank - lower as f64;
                 if lower >= nums.len() - 1 {
@@ -5504,7 +5638,7 @@ impl<'a> Evaluator<'a> {
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = nums.len() as f64;
                 let rank = k_val * (n + 1.0) - 1.0;
-                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Value); }
+                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Num); }
                 let lower = rank.floor() as usize;
                 let frac = rank - lower as f64;
                 if lower >= nums.len() - 1 {
@@ -5716,10 +5850,44 @@ impl<'a> Evaluator<'a> {
 
     fn fn_date(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let year = match self.evaluate(&args[0]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        // Excel: "If year is less than 0 or is 10000 or greater, Excel returns
+        // the #NUM! error value." Unvalidated before this, so DATE(-5000,1,1)
+        // answered a large negative serial that no date function could read
+        // back.
+        let year = match self.evaluate(&args[0]).as_number() {
+            // "If year is between 0 (zero) and 1899 inclusive, Excel adds that
+            // value to 1900 to calculate the year" -- DATE(99,1,1) is 1999,
+            // not the year 99. Missing before, so two-digit years silently
+            // produced dates 1900 years early.
+            Some(n) if (0.0..1900.0).contains(&n) => n as i32 + 1900,
+            Some(n) if (1900.0..10000.0).contains(&n) => n as i32,
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
+        };
         let month = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
         let day = match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(date_serial::date_to_serial(year, month, day))
+        // Month overflow and underflow are LEGAL and roll the year
+        // (DATE(2020,13,1) is 2021-01-01, DATE(2020,0,1) is 2019-12-01), but
+        // the ROLLED year still has to land inside the representable range.
+        // The roll is replicated here rather than trusted to
+        // `date_to_serial`, whose year loop simply does not run below 1900 --
+        // so DATE(1900,-500,1) rolled to the year 1858 and then answered the
+        // serial for 1900-04-01, a wrong DATE with no error anywhere.
+        let rolled_year = if (1..=12).contains(&month) {
+            year
+        } else {
+            year + (month - 1).div_euclid(12)
+        };
+        if !(1900..10000).contains(&rolled_year) {
+            return EvalResult::Error(CellError::Num);
+        }
+        // The DAY can still push below the epoch (DATE(1900,1,-100)), which
+        // Excel cannot represent and answers #NUM!.
+        let serial = date_serial::date_to_serial(year, month, day);
+        if serial < 0.0 {
+            return EvalResult::Error(CellError::Num);
+        }
+        EvalResult::Number(serial)
     }
 
     fn fn_year(&self, args: &[Expression]) -> EvalResult {
@@ -6354,7 +6522,7 @@ impl<'a> Evaluator<'a> {
     fn fn_large(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if k > numbers.len() { return EvalResult::Error(CellError::Value); }
         numbers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         EvalResult::Number(numbers[k - 1])
@@ -6363,7 +6531,7 @@ impl<'a> Evaluator<'a> {
     fn fn_small(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if k > numbers.len() { return EvalResult::Error(CellError::Value); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         EvalResult::Number(numbers[k - 1])
@@ -6390,7 +6558,7 @@ impl<'a> Evaluator<'a> {
     fn fn_percentile(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = numbers.len() as f64;
@@ -6465,7 +6633,7 @@ impl<'a> Evaluator<'a> {
         let pv = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let fv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
         let pmt_type = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
-        if nper == 0.0 { return EvalResult::Error(CellError::Value); }
+        if nper == 0.0 { return EvalResult::Error(CellError::Num); }
         let pmt = if rate.abs() < 1e-10 {
             -(pv + fv) / nper
         } else {
@@ -6538,7 +6706,7 @@ impl<'a> Evaluator<'a> {
                 npv += cf / pv_factor;
                 if i > 0 { dnpv -= (i as f64) * cf / (1.0 + guess).powi(i as i32 + 1); }
             }
-            if dnpv.abs() < 1e-15 { return EvalResult::Error(CellError::Value); }
+            if dnpv.abs() < 1e-15 { return EvalResult::Error(CellError::Num); }
             let new_guess = guess - npv / dnpv;
             if (new_guess - guess).abs() < 1e-10 { return EvalResult::Number(new_guess); }
             guess = new_guess;
@@ -6560,7 +6728,7 @@ impl<'a> Evaluator<'a> {
             let pmt_factor = if pmt_type == 1 { 1.0 + guess } else { 1.0 };
             let f = pv * pvif + pmt * pmt_factor * (pvif - 1.0) / guess + fv;
             let df = nper * pv * (1.0 + guess).powf(nper - 1.0) + pmt * pmt_factor * (nper * guess * (1.0 + guess).powf(nper - 1.0) - (pvif - 1.0)) / (guess * guess);
-            if df.abs() < 1e-15 { return EvalResult::Error(CellError::Value); }
+            if df.abs() < 1e-15 { return EvalResult::Error(CellError::Num); }
             let new_guess = guess - f / df;
             if (new_guess - guess).abs() < 1e-10 { return EvalResult::Number(new_guess); }
             guess = new_guess;
@@ -6576,13 +6744,13 @@ impl<'a> Evaluator<'a> {
         let fv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
         let pmt_type = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         if rate.abs() < 1e-10 {
-            if pmt.abs() < 1e-10 { return EvalResult::Error(CellError::Value); }
+            if pmt.abs() < 1e-10 { return EvalResult::Error(CellError::Num); }
             return EvalResult::Number(-(pv + fv) / pmt);
         }
         let pmt_factor = if pmt_type == 1 { 1.0 + rate } else { 1.0 };
         let num = -fv + pmt * pmt_factor / rate;
         let den = pv + pmt * pmt_factor / rate;
-        if num / den <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if num / den <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number((num / den).ln() / (1.0 + rate).ln())
     }
 
@@ -6590,7 +6758,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((cost - salvage) / life)
     }
 
@@ -6598,10 +6766,10 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
-        let period = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let month = if args.len() == 5 { match self.evaluate(&args[4]).as_number() { Some(n) => n as i32, None => 12 } } else { 12 };
-        if cost <= 0.0 || life == 0 { return EvalResult::Error(CellError::Value); }
+        if cost <= 0.0 || life == 0 { return EvalResult::Error(CellError::Num); }
         let rate = (1.0 - (salvage / cost).powf(1.0 / life as f64) * 1000.0).round() / 1000.0;
         let mut total_dep = 0.0;
         let mut current_value = cost;
@@ -6624,8 +6792,8 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let period = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let factor = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(2.0) } else { 2.0 };
         let mut current_value = cost;
         for p in 1..=(period as i32) {
@@ -9109,7 +9277,7 @@ impl<'a> Evaluator<'a> {
         let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
         let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 0 } } else { 0 };
-        if !(0..=4).contains(&basis) { return EvalResult::Error(CellError::Value); }
+        if !(0..=4).contains(&basis) { return EvalResult::Error(CellError::Num); }
         EvalResult::Number(date_serial::yearfrac(start, end, basis))
     }
 
@@ -9288,7 +9456,7 @@ impl<'a> Evaluator<'a> {
         if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
         // Take ln of y values for linear regression
         let ln_ys: Vec<f64> = known_ys.iter().map(|&y| if y > 0.0 { y.ln() } else { return f64::NAN }).collect();
-        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Value); }
+        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Num); }
         let n = ln_ys.len() as f64;
         let sum_x: f64 = known_xs.iter().sum();
         let sum_y: f64 = ln_ys.iter().sum();
@@ -9359,7 +9527,7 @@ impl<'a> Evaluator<'a> {
         if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
         // Take ln of y values
         let ln_ys: Vec<f64> = known_ys.iter().map(|&y| if y > 0.0 { y.ln() } else { return f64::NAN }).collect();
-        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Value); }
+        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Num); }
         let n = ln_ys.len() as f64;
         let sum_x: f64 = known_xs.iter().sum();
         let sum_y: f64 = ln_ys.iter().sum();
@@ -9380,7 +9548,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         let z = (x - mean) / std_dev;
         if cumulative {
@@ -9396,7 +9564,7 @@ impl<'a> Evaluator<'a> {
         // T.DIST(x, deg_freedom, cumulative)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             // Use approximation via normal distribution for large df
@@ -9412,15 +9580,15 @@ impl<'a> Evaluator<'a> {
     fn fn_chisq_dist(&self, args: &[Expression]) -> EvalResult {
         // CHISQ.DIST(x, deg_freedom, cumulative)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Value), None => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         let k = df / 2.0;
         if cumulative {
             EvalResult::Number(lower_gamma_regularized(k, x / 2.0))
         } else {
             // PDF: (x^(k-1) * e^(-x/2)) / (2^k * Gamma(k))
-            if x == 0.0 && k < 1.0 { return EvalResult::Error(CellError::Value); }
+            if x == 0.0 && k < 1.0 { return EvalResult::Error(CellError::Num); }
             let ln_pdf = (k - 1.0) * x.ln() - x / 2.0 - k * 2.0_f64.ln() - gamma_ln(k);
             EvalResult::Number(ln_pdf.exp())
         }
@@ -9429,9 +9597,9 @@ impl<'a> Evaluator<'a> {
     fn fn_f_dist(&self, args: &[Expression]) -> EvalResult {
         // F.DIST(x, deg_freedom1, deg_freedom2, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Value), None => return EvalResult::Error(CellError::Value) };
-        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
-        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             // CDF using regularized incomplete beta function
@@ -9450,11 +9618,11 @@ impl<'a> Evaluator<'a> {
     fn fn_binom_dist(&self, args: &[Expression]) -> EvalResult {
         // BINOM.DIST(number_s, trials, probability_s, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let n = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
-        if s > n { return EvalResult::Error(CellError::Value); }
+        if s > n { return EvalResult::Error(CellError::Num); }
         if cumulative {
             let mut sum = 0.0;
             for k in 0..=s {
@@ -9469,8 +9637,8 @@ impl<'a> Evaluator<'a> {
     fn fn_poisson_dist(&self, args: &[Expression]) -> EvalResult {
         // POISSON.DIST(x, mean, cumulative)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let mean = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             let mut sum = 0.0;
@@ -9486,9 +9654,9 @@ impl<'a> Evaluator<'a> {
     fn fn_confidence_norm(&self, args: &[Expression]) -> EvalResult {
         // CONFIDENCE.NORM(alpha, standard_dev, size)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let alpha = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let z = norm_inv(1.0 - alpha / 2.0);
         EvalResult::Number(z * std_dev / size.sqrt())
     }
@@ -9496,9 +9664,9 @@ impl<'a> Evaluator<'a> {
     fn fn_confidence_t(&self, args: &[Expression]) -> EvalResult {
         // CONFIDENCE.T(alpha, standard_dev, size)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let alpha = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 2.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 2.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = size - 1.0;
         let t = t_inv(1.0 - alpha / 2.0, df);
         EvalResult::Number(t * std_dev / size.sqrt())
@@ -9509,9 +9677,9 @@ impl<'a> Evaluator<'a> {
     fn fn_norm_inv(&self, args: &[Expression]) -> EvalResult {
         // NORM.INV(probability, mean, standard_dev)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(norm_inv(p) * std_dev + mean)
     }
 
@@ -9531,15 +9699,15 @@ impl<'a> Evaluator<'a> {
     fn fn_norm_s_inv(&self, args: &[Expression]) -> EvalResult {
         // NORM.S.INV(probability)
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(norm_inv(p))
     }
 
     fn fn_t_dist_2t(&self, args: &[Expression]) -> EvalResult {
         // T.DIST.2T(x, deg_freedom)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(2.0 * (1.0 - t_cdf(x, df)))
     }
 
@@ -9547,23 +9715,23 @@ impl<'a> Evaluator<'a> {
         // T.DIST.RT(x, deg_freedom)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(1.0 - t_cdf(x, df))
     }
 
     fn fn_t_inv(&self, args: &[Expression]) -> EvalResult {
         // T.INV(probability, deg_freedom) - left-tailed
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(t_inv(p, df))
     }
 
     fn fn_t_inv_2t(&self, args: &[Expression]) -> EvalResult {
         // T.INV.2T(probability, deg_freedom) - two-tailed
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(t_inv(1.0 - p / 2.0, df))
     }
 
@@ -9572,8 +9740,8 @@ impl<'a> Evaluator<'a> {
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
         let arr1 = self.eval_flat(&args[0]);
         let arr2 = self.eval_flat(&args[1]);
-        let tails = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
-        let test_type = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let tails = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let test_type = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
         let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
         let n1 = nums1.len() as f64;
@@ -9616,16 +9784,16 @@ impl<'a> Evaluator<'a> {
     fn fn_chisq_dist_rt(&self, args: &[Expression]) -> EvalResult {
         // CHISQ.DIST.RT(x, deg_freedom)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(1.0 - lower_gamma_regularized(df / 2.0, x / 2.0))
     }
 
     fn fn_chisq_inv(&self, args: &[Expression]) -> EvalResult {
         // CHISQ.INV(probability, deg_freedom) - left-tailed
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 0.0 { return EvalResult::Number(0.0); }
         EvalResult::Number(chisq_inv_impl(p, df))
     }
@@ -9633,8 +9801,8 @@ impl<'a> Evaluator<'a> {
     fn fn_chisq_inv_rt(&self, args: &[Expression]) -> EvalResult {
         // CHISQ.INV.RT(probability, deg_freedom) - right-tailed
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 1.0 { return EvalResult::Number(0.0); }
         EvalResult::Number(chisq_inv_impl(1.0 - p, df))
     }
@@ -9648,7 +9816,7 @@ impl<'a> Evaluator<'a> {
         let mut chi2 = 0.0;
         for (a, e) in actual.iter().zip(expected.iter()) {
             let av = match a.as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-            let ev = match e.as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+            let ev = match e.as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
             chi2 += (av - ev).powi(2) / ev;
         }
         let df = (actual.len() - 1) as f64;
@@ -9659,9 +9827,9 @@ impl<'a> Evaluator<'a> {
     fn fn_f_dist_rt(&self, args: &[Expression]) -> EvalResult {
         // F.DIST.RT(x, deg_freedom1, deg_freedom2)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
-        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let z = d1 * x / (d1 * x + d2);
         EvalResult::Number(1.0 - regularized_beta(d1 / 2.0, d2 / 2.0, z))
     }
@@ -9669,9 +9837,9 @@ impl<'a> Evaluator<'a> {
     fn fn_f_inv(&self, args: &[Expression]) -> EvalResult {
         // F.INV(probability, deg_freedom1, deg_freedom2) - left-tailed
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
-        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 0.0 { return EvalResult::Number(0.0); }
         EvalResult::Number(f_inv_impl(p, d1, d2))
     }
@@ -9679,9 +9847,9 @@ impl<'a> Evaluator<'a> {
     fn fn_f_inv_rt(&self, args: &[Expression]) -> EvalResult {
         // F.INV.RT(probability, deg_freedom1, deg_freedom2)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
-        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 1.0 { return EvalResult::Number(0.0); }
         EvalResult::Number(f_inv_impl(1.0 - p, d1, d2))
     }
@@ -9712,9 +9880,9 @@ impl<'a> Evaluator<'a> {
     fn fn_binom_inv(&self, args: &[Expression]) -> EvalResult {
         // BINOM.INV(trials, probability_s, alpha)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let p = match self.evaluate(&args[1]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, _ => return EvalResult::Error(CellError::Value) };
-        let alpha = match self.evaluate(&args[2]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[1]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[2]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mut cum = 0.0;
         for k in 0..=n {
             cum += binom_pmf(k, n, p);
@@ -9726,13 +9894,13 @@ impl<'a> Evaluator<'a> {
     fn fn_binom_dist_range(&self, args: &[Expression]) -> EvalResult {
         // BINOM.DIST.RANGE(trials, probability_s, number_s, [number_s2])
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
-        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let p = match self.evaluate(&args[1]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, _ => return EvalResult::Error(CellError::Value) };
-        let s1 = match self.evaluate(&args[2]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[1]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let s1 = match self.evaluate(&args[2]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let s2 = if args.len() == 4 {
-            match self.evaluate(&args[3]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) }
+            match self.evaluate(&args[3]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) }
         } else { s1 };
-        if s1 > s2 || s2 > n { return EvalResult::Error(CellError::Value); }
+        if s1 > s2 || s2 > n { return EvalResult::Error(CellError::Num); }
         let mut sum = 0.0;
         for k in s1..=s2 { sum += binom_pmf(k, n, p); }
         EvalResult::Number(sum)
@@ -9742,14 +9910,14 @@ impl<'a> Evaluator<'a> {
         // BETA.DIST(x, alpha, beta, cumulative, [A], [B])
         if args.len() < 4 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         let a_bound = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
         let b_bound = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(1.0) } else { 1.0 };
         if a_bound >= b_bound { return EvalResult::Error(CellError::Value); }
         let z = (x - a_bound) / (b_bound - a_bound);
-        if z < 0.0 || z > 1.0 { return EvalResult::Error(CellError::Value); }
+        if z < 0.0 || z > 1.0 { return EvalResult::Error(CellError::Num); }
         if cumulative {
             EvalResult::Number(regularized_beta(alpha, beta, z))
         } else {
@@ -9761,9 +9929,9 @@ impl<'a> Evaluator<'a> {
     fn fn_beta_inv(&self, args: &[Expression]) -> EvalResult {
         // BETA.INV(probability, alpha, beta, [A], [B])
         if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n <= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n <= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let a_bound = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
         let b_bound = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(1.0) } else { 1.0 };
         // Bisection on regularized_beta
@@ -9779,14 +9947,14 @@ impl<'a> Evaluator<'a> {
     fn fn_gamma_dist(&self, args: &[Expression]) -> EvalResult {
         // GAMMA.DIST(x, alpha, beta, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             EvalResult::Number(lower_gamma_regularized(alpha, x / beta))
         } else {
-            if x == 0.0 && alpha < 1.0 { return EvalResult::Error(CellError::Value); }
+            if x == 0.0 && alpha < 1.0 { return EvalResult::Error(CellError::Num); }
             if x == 0.0 { return EvalResult::Number(0.0); }
             let ln_pdf = (alpha - 1.0) * x.ln() - x / beta - alpha * beta.ln() - gamma_ln(alpha);
             EvalResult::Number(ln_pdf.exp())
@@ -9796,9 +9964,9 @@ impl<'a> Evaluator<'a> {
     fn fn_gamma_inv(&self, args: &[Expression]) -> EvalResult {
         // GAMMA.INV(probability, alpha, beta)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 0.0 { return EvalResult::Number(0.0); }
         // Bisection on gamma CDF
         let mut lo = 0.0_f64;
@@ -9814,28 +9982,28 @@ impl<'a> Evaluator<'a> {
         // GAMMA(number)
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        if x <= 0.0 && x == x.floor() { return EvalResult::Error(CellError::Value); }
+        if x <= 0.0 && x == x.floor() { return EvalResult::Error(CellError::Num); }
         EvalResult::Number(gamma_ln(x).exp())
     }
 
     fn fn_gammaln(&self, args: &[Expression]) -> EvalResult {
         // GAMMALN(x)
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(gamma_ln(x))
     }
 
     fn fn_weibull_dist(&self, args: &[Expression]) -> EvalResult {
         // WEIBULL.DIST(x, alpha, beta, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             EvalResult::Number(1.0 - (-(x / beta).powf(alpha)).exp())
         } else {
-            if x == 0.0 && alpha < 1.0 { return EvalResult::Error(CellError::Value); }
+            if x == 0.0 && alpha < 1.0 { return EvalResult::Error(CellError::Num); }
             if x == 0.0 { return EvalResult::Number(0.0); }
             let pdf = (alpha / beta) * (x / beta).powf(alpha - 1.0) * (-(x / beta).powf(alpha)).exp();
             EvalResult::Number(pdf)
@@ -9845,8 +10013,8 @@ impl<'a> Evaluator<'a> {
     fn fn_expon_dist(&self, args: &[Expression]) -> EvalResult {
         // EXPON.DIST(x, lambda, cumulative)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let lambda = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let lambda = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             EvalResult::Number(1.0 - (-lambda * x).exp())
@@ -9858,9 +10026,9 @@ impl<'a> Evaluator<'a> {
     fn fn_lognorm_dist(&self, args: &[Expression]) -> EvalResult {
         // LOGNORM.DIST(x, mean, standard_dev, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         let z = (x.ln() - mean) / std_dev;
         if cumulative {
@@ -9874,21 +10042,21 @@ impl<'a> Evaluator<'a> {
     fn fn_lognorm_inv(&self, args: &[Expression]) -> EvalResult {
         // LOGNORM.INV(probability, mean, standard_dev)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((norm_inv(p) * std_dev + mean).exp())
     }
 
     fn fn_hypgeom_dist(&self, args: &[Expression]) -> EvalResult {
         // HYPGEOM.DIST(sample_s, number_sample, population_s, number_pop, cumulative)
         if args.len() != 5 { return EvalResult::Error(CellError::Value); }
-        let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let n_samp = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let pop_s = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let pop = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let n_samp = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pop_s = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pop = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[4]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
-        if n_samp > pop || pop_s > pop { return EvalResult::Error(CellError::Value); }
+        if n_samp > pop || pop_s > pop { return EvalResult::Error(CellError::Num); }
         if cumulative {
             let mut sum = 0.0;
             let start = if n_samp > pop - pop_s { n_samp - (pop - pop_s) } else { 0 };
@@ -9904,9 +10072,9 @@ impl<'a> Evaluator<'a> {
     fn fn_negbinom_dist(&self, args: &[Expression]) -> EvalResult {
         // NEGBINOM.DIST(number_f, number_s, probability_s, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let f = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let s = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let f = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let s = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
         if cumulative {
             let mut sum = 0.0;
@@ -9927,7 +10095,7 @@ impl<'a> Evaluator<'a> {
         let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
         let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
         let n = nums1.len().min(nums2.len());
-        if n < 2 { return EvalResult::Error(CellError::Value); }
+        if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
         let mean2 = nums2[..n].iter().sum::<f64>() / n as f64;
         let mut sum_xy = 0.0;
@@ -9960,7 +10128,7 @@ impl<'a> Evaluator<'a> {
         let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
         let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
         let n = y_nums.len().min(x_nums.len());
-        if n < 2 { return EvalResult::Error(CellError::Value); }
+        if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
         let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
         let mut sum_xy = 0.0;
@@ -9982,7 +10150,7 @@ impl<'a> Evaluator<'a> {
         let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
         let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
         let n = y_nums.len().min(x_nums.len());
-        if n < 2 { return EvalResult::Error(CellError::Value); }
+        if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
         let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
         let mut sum_xy = 0.0;
@@ -10005,7 +10173,7 @@ impl<'a> Evaluator<'a> {
         let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
         let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
         let n = y_nums.len().min(x_nums.len());
-        if n < 3 { return EvalResult::Error(CellError::Value); }
+        if n < 3 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
         let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
         let mut sum_xy = 0.0;
@@ -10030,7 +10198,7 @@ impl<'a> Evaluator<'a> {
         let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
         let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
         let n = nums1.len().min(nums2.len());
-        if n < 1 { return EvalResult::Error(CellError::Value); }
+        if n < 1 { return EvalResult::Error(CellError::Div0); }
         let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
         let mean2 = nums2[..n].iter().sum::<f64>() / n as f64;
         let cov: f64 = (0..n).map(|i| (nums1[i] - mean1) * (nums2[i] - mean2)).sum::<f64>() / n as f64;
@@ -10044,7 +10212,7 @@ impl<'a> Evaluator<'a> {
         let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
         let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
         let n = nums1.len().min(nums2.len());
-        if n < 2 { return EvalResult::Error(CellError::Value); }
+        if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
         let mean2 = nums2[..n].iter().sum::<f64>() / n as f64;
         let cov: f64 = (0..n).map(|i| (nums1[i] - mean1) * (nums2[i] - mean2)).sum::<f64>() / (n as f64 - 1.0);
@@ -10054,7 +10222,7 @@ impl<'a> Evaluator<'a> {
     fn fn_kurt(&self, args: &[Expression]) -> EvalResult {
         let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         let n = numbers.len() as f64;
-        if n < 4.0 { return EvalResult::Error(CellError::Value); }
+        if n < 4.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let s2 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
         if s2 == 0.0 { return EvalResult::Error(CellError::Div0); }
@@ -10067,7 +10235,7 @@ impl<'a> Evaluator<'a> {
     fn fn_skew(&self, args: &[Expression]) -> EvalResult {
         let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         let n = numbers.len() as f64;
-        if n < 3.0 { return EvalResult::Error(CellError::Value); }
+        if n < 3.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let s2 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
         if s2 == 0.0 { return EvalResult::Error(CellError::Div0); }
@@ -10079,7 +10247,7 @@ impl<'a> Evaluator<'a> {
     fn fn_skew_p(&self, args: &[Expression]) -> EvalResult {
         let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         let n = numbers.len() as f64;
-        if n < 3.0 { return EvalResult::Error(CellError::Value); }
+        if n < 3.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let s2 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
         if s2 == 0.0 { return EvalResult::Error(CellError::Div0); }
@@ -10107,7 +10275,7 @@ impl<'a> Evaluator<'a> {
     fn fn_geomean(&self, args: &[Expression]) -> EvalResult {
         let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
-        if numbers.iter().any(|&x| x <= 0.0) { return EvalResult::Error(CellError::Value); }
+        if numbers.iter().any(|&x| x <= 0.0) { return EvalResult::Error(CellError::Num); }
         let log_sum: f64 = numbers.iter().map(|x| x.ln()).sum();
         EvalResult::Number((log_sum / numbers.len() as f64).exp())
     }
@@ -10115,7 +10283,7 @@ impl<'a> Evaluator<'a> {
     fn fn_harmean(&self, args: &[Expression]) -> EvalResult {
         let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
-        if numbers.iter().any(|&x| x <= 0.0) { return EvalResult::Error(CellError::Value); }
+        if numbers.iter().any(|&x| x <= 0.0) { return EvalResult::Error(CellError::Num); }
         let recip_sum: f64 = numbers.iter().map(|x| 1.0 / x).sum();
         EvalResult::Number(numbers.len() as f64 / recip_sum)
     }
@@ -10124,14 +10292,14 @@ impl<'a> Evaluator<'a> {
         // TRIMMEAN(array, percent)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr = self.eval_flat(&args[0]);
-        let percent = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let percent = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
         if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = numbers.len();
         let trim = ((n as f64 * percent) / 2.0).floor() as usize;
         let trimmed = &numbers[trim..n - trim];
-        if trimmed.is_empty() { return EvalResult::Error(CellError::Value); }
+        if trimmed.is_empty() { return EvalResult::Error(CellError::Num); }
         let sum: f64 = trimmed.iter().sum();
         EvalResult::Number(sum / trimmed.len() as f64)
     }
@@ -10141,7 +10309,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((x - mean) / std_dev)
     }
 
@@ -10152,7 +10320,7 @@ impl<'a> Evaluator<'a> {
         let k = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
         let n = numbers.len();
-        if n == 0 { return EvalResult::Error(CellError::Value); }
+        if n == 0 { return EvalResult::Error(CellError::Num); }
         if k <= 1.0 / (n as f64 + 1.0) || k >= n as f64 / (n as f64 + 1.0) { return EvalResult::Error(CellError::Value); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let rank = k * (n as f64 + 1.0) - 1.0;
@@ -10171,7 +10339,7 @@ impl<'a> Evaluator<'a> {
         let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = numbers.len();
-        if n == 0 { return EvalResult::Error(CellError::Value); }
+        if n == 0 { return EvalResult::Error(CellError::Num); }
         if x < numbers[0] || x > numbers[n - 1] { return EvalResult::Error(CellError::NA); }
         let count_less = numbers.iter().filter(|&&v| v < x).count() as f64;
         let count_equal = numbers.iter().filter(|&&v| v == x).count() as f64;
@@ -10183,13 +10351,13 @@ impl<'a> Evaluator<'a> {
     fn fn_quartile_exc(&self, args: &[Expression]) -> EvalResult {
         // QUARTILE.EXC(array, quart)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let quart = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        let quart = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n.floor() as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let k = quart as f64 / 4.0;
         // Reuse PERCENTILE.EXC logic
         let arr = self.eval_flat(&args[0]);
         let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
         let n = numbers.len();
-        if n < 2 { return EvalResult::Error(CellError::Value); }
+        if n < 2 { return EvalResult::Error(CellError::Num); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let rank = k * (n as f64 + 1.0) - 1.0;
         let lo = rank.floor() as usize;
@@ -10217,7 +10385,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_fisher(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > -1.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > -1.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(0.5 * ((1.0 + x) / (1.0 - x)).ln())
     }
 
@@ -10231,9 +10399,9 @@ impl<'a> Evaluator<'a> {
     fn fn_permut(&self, args: &[Expression]) -> EvalResult {
         // PERMUT(number, number_chosen)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        if k > n { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        if k > n { return EvalResult::Error(CellError::Num); }
         let result = (gamma_ln(n as f64 + 1.0) - gamma_ln((n - k) as f64 + 1.0)).exp();
         EvalResult::Number(result.round())
     }
@@ -10241,8 +10409,8 @@ impl<'a> Evaluator<'a> {
     fn fn_permutationa(&self, args: &[Expression]) -> EvalResult {
         // PERMUTATIONA(number, number_chosen)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
-        let k = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((n as f64).powf(k as f64))
     }
 
@@ -10271,7 +10439,7 @@ impl<'a> Evaluator<'a> {
         let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
         let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
         let n = y_nums.len().min(x_nums.len());
-        if n < 2 { return EvalResult::Error(CellError::Value); }
+        if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
         let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
         let mut sum_xy = 0.0;
@@ -10355,7 +10523,7 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        if count == 0.0 { return EvalResult::Error(CellError::Value); }
+        if count == 0.0 { return EvalResult::Error(CellError::Div0); }
         EvalResult::Number(sum / count)
     }
 
@@ -10418,7 +10586,7 @@ impl<'a> Evaluator<'a> {
     fn fn_stdeva(&self, args: &[Expression]) -> EvalResult {
         let numbers = self.collect_numbers_a(args);
         let n = numbers.len() as f64;
-        if n < 2.0 { return EvalResult::Error(CellError::Value); }
+        if n < 2.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
         EvalResult::Number(var.sqrt())
@@ -10427,7 +10595,7 @@ impl<'a> Evaluator<'a> {
     fn fn_stdevpa(&self, args: &[Expression]) -> EvalResult {
         let numbers = self.collect_numbers_a(args);
         let n = numbers.len() as f64;
-        if n < 1.0 { return EvalResult::Error(CellError::Value); }
+        if n < 1.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
         EvalResult::Number(var.sqrt())
@@ -10436,7 +10604,7 @@ impl<'a> Evaluator<'a> {
     fn fn_vara(&self, args: &[Expression]) -> EvalResult {
         let numbers = self.collect_numbers_a(args);
         let n = numbers.len() as f64;
-        if n < 2.0 { return EvalResult::Error(CellError::Value); }
+        if n < 2.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
         EvalResult::Number(var)
@@ -10445,7 +10613,7 @@ impl<'a> Evaluator<'a> {
     fn fn_varpa(&self, args: &[Expression]) -> EvalResult {
         let numbers = self.collect_numbers_a(args);
         let n = numbers.len() as f64;
-        if n < 1.0 { return EvalResult::Error(CellError::Value); }
+        if n < 1.0 { return EvalResult::Error(CellError::Div0); }
         let mean = numbers.iter().sum::<f64>() / n;
         let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
         EvalResult::Number(var)
@@ -10457,8 +10625,8 @@ impl<'a> Evaluator<'a> {
         // IPMT(rate, per, nper, pv, [fv], [type])
         if args.len() < 4 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
         let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let per = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pv = match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let fv = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
         let pmt_type = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
@@ -10483,8 +10651,8 @@ impl<'a> Evaluator<'a> {
         // PPMT(rate, per, nper, pv, [fv], [type])
         if args.len() < 4 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
         let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let per = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pv = match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let fv = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
         let pmt_type = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
@@ -10550,7 +10718,7 @@ impl<'a> Evaluator<'a> {
                 f += values[i] / denom;
                 df -= years * values[i] / ((1.0 + rate) * denom);
             }
-            if df.abs() < 1e-15 { return EvalResult::Error(CellError::Value); }
+            if df.abs() < 1e-15 { return EvalResult::Error(CellError::Num); }
             let new_rate = rate - f / df;
             if (new_rate - rate).abs() < 1e-10 { return EvalResult::Number(new_rate); }
             rate = new_rate;
@@ -10585,9 +10753,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
         let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        if per > life { return EvalResult::Error(CellError::Value); }
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        if per > life { return EvalResult::Error(CellError::Num); }
         let syd = (cost - salvage) * (life - per + 1.0) * 2.0 / (life * (life + 1.0));
         EvalResult::Number(syd)
     }
@@ -10597,9 +10765,9 @@ impl<'a> Evaluator<'a> {
         if args.len() < 5 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
         let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= start_per => n, _ => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= start_per => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let factor = if args.len() >= 6 { self.evaluate(&args[5]).as_number().unwrap_or(2.0) } else { 2.0 };
         let no_switch = if args.len() == 7 { { let _v = self.evaluate(&args[6]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
         let mut total_dep = 0.0;
@@ -10624,11 +10792,11 @@ impl<'a> Evaluator<'a> {
     fn fn_cumipmt(&self, args: &[Expression]) -> EvalResult {
         // CUMIPMT(rate, nper, pv, start_period, end_period, type)
         if args.len() != 6 { return EvalResult::Error(CellError::Value); }
-        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let nper = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let pv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
-        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 1.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pmt_type = match self.evaluate(&args[5]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
         if start_per > end_per { return EvalResult::Error(CellError::Value); }
         let pmt = calc_pmt(rate, nper, pv, 0.0, pmt_type);
@@ -10646,11 +10814,11 @@ impl<'a> Evaluator<'a> {
     fn fn_cumprinc(&self, args: &[Expression]) -> EvalResult {
         // CUMPRINC(rate, nper, pv, start_period, end_period, type)
         if args.len() != 6 { return EvalResult::Error(CellError::Value); }
-        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let nper = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let pv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
-        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 1.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pmt_type = match self.evaluate(&args[5]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
         if start_per > end_per { return EvalResult::Error(CellError::Value); }
         let pmt = calc_pmt(rate, nper, pv, 0.0, pmt_type);
@@ -10668,16 +10836,16 @@ impl<'a> Evaluator<'a> {
     fn fn_effect(&self, args: &[Expression]) -> EvalResult {
         // EFFECT(nominal_rate, npery)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let nominal = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let nominal = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((1.0 + nominal / npery).powf(npery) - 1.0)
     }
 
     fn fn_nominal(&self, args: &[Expression]) -> EvalResult {
         // NOMINAL(effect_rate, npery)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let effect = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let effect = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(npery * ((1.0 + effect).powf(1.0 / npery) - 1.0))
     }
 
@@ -10689,13 +10857,13 @@ impl<'a> Evaluator<'a> {
         let issue = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _first = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let settle = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let par = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let _freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let par = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let _freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 7 { self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let days = settle - issue;
         let year_days = year_basis_days(basis);
-        if days <= 0.0 || year_days <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if days <= 0.0 || year_days <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number(par * rate * days / year_days)
     }
 
@@ -10704,12 +10872,12 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let issue = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let settle = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let par = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let par = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let days = settle - issue;
         let year_days = year_basis_days(basis);
-        if days <= 0.0 || year_days <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if days <= 0.0 || year_days <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number(par * rate * days / year_days)
     }
 
@@ -10718,10 +10886,10 @@ impl<'a> Evaluator<'a> {
         if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let yld = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let redemption = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let yld = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 7 { self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         if settle >= maturity { return EvalResult::Error(CellError::Value); }
         let years = (maturity - settle) / year_basis_days(basis);
@@ -10740,12 +10908,12 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let dsm = maturity - settle;
         let year_days = year_basis_days(basis);
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number(redemption - disc * redemption * dsm / year_days)
     }
 
@@ -10755,8 +10923,8 @@ impl<'a> Evaluator<'a> {
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let issue = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let yld = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let yld = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let year_days = year_basis_days(basis);
         let dim = (maturity - issue) / year_days;
@@ -10772,10 +10940,10 @@ impl<'a> Evaluator<'a> {
         if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let pr = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let redemption = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 7 { self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         // Bisection to find yield that gives the target price
         let year_days = year_basis_days(basis);
@@ -10799,12 +10967,12 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let dsm = maturity - settle;
         let year_days = year_basis_days(basis);
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number((redemption - pr) / pr * year_days / dsm)
     }
 
@@ -10814,8 +10982,8 @@ impl<'a> Evaluator<'a> {
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let issue = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let pr = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let year_days = year_basis_days(basis);
         let dim = (maturity - issue) / year_days;
@@ -10831,9 +10999,9 @@ impl<'a> Evaluator<'a> {
         if args.len() < 5 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let coupon_rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let yld = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[4]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let coupon_rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let yld = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[4]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let year_days = year_basis_days(basis);
         let years = (maturity - settle) / year_days;
@@ -10872,12 +11040,12 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let dsm = maturity - settle;
         let year_days = year_basis_days(basis);
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number((redemption - pr) / redemption * year_days / dsm)
     }
 
@@ -10886,12 +11054,12 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let investment = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let investment = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let dsm = maturity - settle;
         let year_days = year_basis_days(basis);
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number((redemption - investment) / investment * year_days / dsm)
     }
 
@@ -10900,8 +11068,8 @@ impl<'a> Evaluator<'a> {
         if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let investment = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let disc = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let investment = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let dsm = maturity - settle;
         let year_days = year_basis_days(basis);
@@ -10915,7 +11083,7 @@ impl<'a> Evaluator<'a> {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let period_days = year_basis_days(basis) / freq;
         let days_in = settle % period_days;
@@ -10927,7 +11095,7 @@ impl<'a> Evaluator<'a> {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
         let _settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         EvalResult::Number(year_basis_days(basis) / freq)
     }
@@ -10937,7 +11105,7 @@ impl<'a> Evaluator<'a> {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let period_days = year_basis_days(basis) / freq;
         let days_in = settle % period_days;
@@ -10949,7 +11117,7 @@ impl<'a> Evaluator<'a> {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let period_days = year_basis_days(basis) / freq;
         let days_in = settle % period_days;
@@ -10961,7 +11129,7 @@ impl<'a> Evaluator<'a> {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let year_days = year_basis_days(basis);
         let years = (maturity - settle) / year_days;
@@ -10973,7 +11141,7 @@ impl<'a> Evaluator<'a> {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
         let period_days = year_basis_days(basis) / freq;
         let days_in = settle % period_days;
@@ -10985,9 +11153,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let dsm = maturity - settle;
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         let price = 100.0 * (1.0 - disc * dsm / 360.0);
         EvalResult::Number((100.0 - price) / price * 365.0 / dsm)
     }
@@ -10997,9 +11165,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let dsm = maturity - settle;
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number(100.0 * (1.0 - disc * dsm / 360.0))
     }
 
@@ -11008,9 +11176,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let dsm = maturity - settle;
-        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Number((100.0 - pr) / pr * 360.0 / dsm)
     }
 
@@ -11018,7 +11186,7 @@ impl<'a> Evaluator<'a> {
         // DOLLARDE(fractional_dollar, fraction)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let dollar = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let frac = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let frac = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let int_part = dollar.trunc();
         let frac_part = dollar - int_part;
         EvalResult::Number(int_part + frac_part * 10.0_f64.powf((frac_part.abs() * frac).log10().ceil()) / frac)
@@ -11028,7 +11196,7 @@ impl<'a> Evaluator<'a> {
         // DOLLARFR(decimal_dollar, fraction)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let dollar = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let frac = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let frac = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let int_part = dollar.trunc();
         let dec_part = dollar - int_part;
         EvalResult::Number(int_part + dec_part * frac / 10.0_f64.powf((dec_part.abs() * frac).log10().ceil()))
@@ -11037,18 +11205,18 @@ impl<'a> Evaluator<'a> {
     fn fn_pduration(&self, args: &[Expression]) -> EvalResult {
         // PDURATION(rate, pv, fv)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let pv = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let fv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let fv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((fv.ln() - pv.ln()) / (1.0 + rate).ln())
     }
 
     fn fn_rri(&self, args: &[Expression]) -> EvalResult {
         // RRI(nper, pv, fv)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let nper = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let pv = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let fv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let fv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((fv / pv).powf(1.0 / nper) - 1.0)
     }
 
@@ -11057,7 +11225,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
         let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let per = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n != 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n != 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pv = match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(pv * rate * (per / nper - 1.0))
     }
@@ -11065,12 +11233,12 @@ impl<'a> Evaluator<'a> {
     fn fn_amordegrc(&self, args: &[Expression]) -> EvalResult {
         // AMORDEGRC(cost, date_purchased, first_period, salvage, period, rate, [basis])
         if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
-        let cost = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let _date = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _first = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let salvage = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let period = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[5]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[5]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         // French declining balance coefficient
         let coeff = if rate < 0.04 { 1.0 } else if rate < 0.08 { 1.5 } else if rate < 0.2 { 2.0 } else { 2.5 };
         let adj_rate = rate * coeff;
@@ -11087,12 +11255,12 @@ impl<'a> Evaluator<'a> {
     fn fn_amorlinc(&self, args: &[Expression]) -> EvalResult {
         // AMORLINC(cost, date_purchased, first_period, salvage, period, rate, [basis])
         if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
-        let cost = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let _date = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let _first = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let salvage = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let period = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
-        let rate = match self.evaluate(&args[5]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[5]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let dep = cost * rate;
         let mut value = cost;
         for i in 0..=(period as i32) {
@@ -11131,7 +11299,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Num); }
         if s.len() == 10 && s.starts_with('1') {
             // Two's complement for negative
             let val = i64::from_str_radix(s, 2).unwrap_or(0) - 1024;
@@ -11139,7 +11307,7 @@ impl<'a> Evaluator<'a> {
         } else {
             match i64::from_str_radix(s, 2) {
                 Ok(v) => EvalResult::Number(v as f64),
-                Err(_) => EvalResult::Error(CellError::Value),
+                Err(_) => EvalResult::Error(CellError::Num),
             }
         }
     }
@@ -11148,15 +11316,15 @@ impl<'a> Evaluator<'a> {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Num); }
         let val = if s.len() == 10 && s.starts_with('1') {
             i64::from_str_radix(s, 2).unwrap_or(0) - 1024
         } else {
             i64::from_str_radix(s, 2).unwrap_or(0)
         };
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let hex = if val < 0 { format!("{:010X}", (val + 0x10000000000_i64) as u64) } else { format!("{:X}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", hex, width = p) } else { hex };
+        let result = match pad_to_places(hex, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
@@ -11164,45 +11332,45 @@ impl<'a> Evaluator<'a> {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Num); }
         let val = if s.len() == 10 && s.starts_with('1') {
             i64::from_str_radix(s, 2).unwrap_or(0) - 1024
         } else {
             i64::from_str_radix(s, 2).unwrap_or(0)
         };
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let oct = if val < 0 { format!("{:010o}", (val + 0o10000000000_i64) as u64) } else { format!("{:o}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", oct, width = p) } else { oct };
+        let result = match pad_to_places(oct, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
     fn fn_dec2bin(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let val = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
-        if val < -512 || val > 511 { return EvalResult::Error(CellError::Value); }
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        if val < -512 || val > 511 { return EvalResult::Error(CellError::Num); }
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let bin = if val < 0 { format!("{:010b}", (val + 1024) as u64) } else { format!("{:b}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", bin, width = p) } else { bin };
+        let result = match pad_to_places(bin, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
     fn fn_dec2hex(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let val = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
-        if val < -549755813888_i64 || val > 549755813887_i64 { return EvalResult::Error(CellError::Value); }
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        if val < -549755813888_i64 || val > 549755813887_i64 { return EvalResult::Error(CellError::Num); }
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let hex = if val < 0 { format!("{:010X}", (val + 0x10000000000_i64) as u64) } else { format!("{:X}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", hex, width = p) } else { hex };
+        let result = match pad_to_places(hex, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
     fn fn_dec2oct(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let val = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
-        if val < -536870912 || val > 536870911 { return EvalResult::Error(CellError::Value); }
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        if val < -536870912 || val > 536870911 { return EvalResult::Error(CellError::Num); }
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let oct = if val < 0 { format!("{:010o}", (val + 0o10000000000_i64) as u64) } else { format!("{:o}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", oct, width = p) } else { oct };
+        let result = match pad_to_places(oct, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
@@ -11210,15 +11378,15 @@ impl<'a> Evaluator<'a> {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 16) {
             Ok(v) => if s.len() == 10 && v >= 0x8000000000_i64 { v - 0x10000000000_i64 } else { v },
-            Err(_) => return EvalResult::Error(CellError::Value),
+            Err(_) => return EvalResult::Error(CellError::Num),
         };
-        if val < -512 || val > 511 { return EvalResult::Error(CellError::Value); }
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        if val < -512 || val > 511 { return EvalResult::Error(CellError::Num); }
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let bin = if val < 0 { format!("{:010b}", (val + 1024) as u64) } else { format!("{:b}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", bin, width = p) } else { bin };
+        let result = match pad_to_places(bin, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
@@ -11226,13 +11394,13 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         match i64::from_str_radix(s, 16) {
             Ok(v) => {
                 let val = if s.len() == 10 && v >= 0x8000000000_i64 { v - 0x10000000000_i64 } else { v };
                 EvalResult::Number(val as f64)
             }
-            Err(_) => EvalResult::Error(CellError::Value),
+            Err(_) => EvalResult::Error(CellError::Num),
         }
     }
 
@@ -11240,15 +11408,15 @@ impl<'a> Evaluator<'a> {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 16) {
             Ok(v) => if s.len() == 10 && v >= 0x8000000000_i64 { v - 0x10000000000_i64 } else { v },
-            Err(_) => return EvalResult::Error(CellError::Value),
+            Err(_) => return EvalResult::Error(CellError::Num),
         };
-        if val < -536870912 || val > 536870911 { return EvalResult::Error(CellError::Value); }
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        if val < -536870912 || val > 536870911 { return EvalResult::Error(CellError::Num); }
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let oct = if val < 0 { format!("{:010o}", (val + 0o10000000000_i64) as u64) } else { format!("{:o}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", oct, width = p) } else { oct };
+        let result = match pad_to_places(oct, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
@@ -11256,15 +11424,15 @@ impl<'a> Evaluator<'a> {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 8) {
             Ok(v) => if s.len() == 10 && v >= 0o4000000000_i64 { v - 0o10000000000_i64 } else { v },
-            Err(_) => return EvalResult::Error(CellError::Value),
+            Err(_) => return EvalResult::Error(CellError::Num),
         };
-        if val < -512 || val > 511 { return EvalResult::Error(CellError::Value); }
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        if val < -512 || val > 511 { return EvalResult::Error(CellError::Num); }
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let bin = if val < 0 { format!("{:010b}", (val + 1024) as u64) } else { format!("{:b}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", bin, width = p) } else { bin };
+        let result = match pad_to_places(bin, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
@@ -11272,13 +11440,13 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         match i64::from_str_radix(s, 8) {
             Ok(v) => {
                 let val = if s.len() == 10 && v >= 0o4000000000_i64 { v - 0o10000000000_i64 } else { v };
                 EvalResult::Number(val as f64)
             }
-            Err(_) => EvalResult::Error(CellError::Value),
+            Err(_) => EvalResult::Error(CellError::Num),
         }
     }
 
@@ -11286,42 +11454,42 @@ impl<'a> Evaluator<'a> {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let s = self.evaluate(&args[0]).as_text();
         let s = s.trim();
-        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 8) {
             Ok(v) => if s.len() == 10 && v >= 0o4000000000_i64 { v - 0o10000000000_i64 } else { v },
-            Err(_) => return EvalResult::Error(CellError::Value),
+            Err(_) => return EvalResult::Error(CellError::Num),
         };
-        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let places = match places_arg(self, args, 1) { Ok(p) => p, Err(e) => return EvalResult::Error(e) };
         let hex = if val < 0 { format!("{:010X}", (val + 0x10000000000_i64) as u64) } else { format!("{:X}", val) };
-        let result = if let Some(p) = places { format!("{:0>width$}", hex, width = p) } else { hex };
+        let result = match pad_to_places(hex, places) { Ok(s) => s, Err(e) => return EvalResult::Error(e) };
         EvalResult::Text(result)
     }
 
     // Bit operations
     fn fn_bitand(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
-        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((a & b) as f64)
     }
 
     fn fn_bitor(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
-        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((a | b) as f64)
     }
 
     fn fn_bitxor(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
-        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number((a ^ b) as f64)
     }
 
     fn fn_bitlshift(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let num = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let num = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let shift = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
         if shift < 0 { EvalResult::Number((num >> (-shift) as u32) as f64) }
         else { EvalResult::Number((num << shift as u32) as f64) }
@@ -11329,7 +11497,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_bitrshift(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let num = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let num = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let shift = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
         if shift < 0 { EvalResult::Number((num << (-shift) as u32) as f64) }
         else { EvalResult::Number((num >> shift as u32) as f64) }
@@ -11431,7 +11599,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
         let mag = (r * r + i * i).sqrt();
-        if mag == 0.0 { return EvalResult::Error(CellError::Value); }
+        if mag == 0.0 { return EvalResult::Error(CellError::Num); }
         EvalResult::Text(format_complex(mag.ln(), i.atan2(r), "i"))
     }
 
@@ -11439,7 +11607,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
         let mag = (r * r + i * i).sqrt();
-        if mag == 0.0 { return EvalResult::Error(CellError::Value); }
+        if mag == 0.0 { return EvalResult::Error(CellError::Num); }
         let ln10 = 10.0_f64.ln();
         EvalResult::Text(format_complex(mag.ln() / ln10, i.atan2(r) / ln10, "i"))
     }
@@ -11448,7 +11616,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
         let mag = (r * r + i * i).sqrt();
-        if mag == 0.0 { return EvalResult::Error(CellError::Value); }
+        if mag == 0.0 { return EvalResult::Error(CellError::Num); }
         let ln2 = 2.0_f64.ln();
         EvalResult::Text(format_complex(mag.ln() / ln2, i.atan2(r) / ln2, "i"))
     }
@@ -11547,21 +11715,21 @@ impl<'a> Evaluator<'a> {
     fn fn_besseli(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(bessel_i(x, n))
     }
 
     fn fn_besselj(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(bessel_j(x, n))
     }
 
     fn fn_besselk(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         // The order recurrence below runs `n` times; `n` is an argument.
         charge_arith!(self, n as u64);
         EvalResult::Number(bessel_k(x, n))
@@ -11569,8 +11737,8 @@ impl<'a> Evaluator<'a> {
 
     fn fn_bessely(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
-        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         // The order recurrence below runs `n` times; `n` is an argument.
         charge_arith!(self, n as u64);
         EvalResult::Number(bessel_y(x, n))
@@ -13495,8 +13663,10 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Number(0.0);
         }
         // Number and multiple must have the same sign
+        // Excel: "If number and multiple have different signs, MROUND
+        // returns the #NUM! error value."
         if number > 0.0 && multiple < 0.0 || number < 0.0 && multiple > 0.0 {
-            return EvalResult::Error(CellError::Value);
+            return EvalResult::Error(CellError::Num);
         }
         EvalResult::Number((number / multiple).round() * multiple)
     }
@@ -13593,17 +13763,22 @@ impl<'a> Evaluator<'a> {
         // BASE(number, radix, [min_length])
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
         let number = match self.evaluate(&args[0]).as_number() {
-            Some(n) if n >= 0.0 => n as u64,
-            _ => return EvalResult::Error(CellError::Value),
+            // Excel: number must be an integer in 0 .. 2^53 - 1; outside that,
+            // or negative, the answer is #NUM!.
+            Some(n) if (0.0..=9007199254740991.0).contains(&n) => n as u64,
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
         };
         let radix = match self.evaluate(&args[1]).as_number() {
             Some(r) if r >= 2.0 && r <= 36.0 => r as u32,
-            _ => return EvalResult::Error(CellError::Value),
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
         };
         let min_length = if args.len() == 3 {
             match self.evaluate(&args[2]).as_number() {
-                Some(n) if n >= 0.0 => n as usize,
-                _ => return EvalResult::Error(CellError::Value),
+                Some(n) if n >= 0.0 && n <= 255.0 => n as usize,
+                Some(_) => return EvalResult::Error(CellError::Num),
+                None => return EvalResult::Error(CellError::Value),
             }
         } else {
             0
@@ -13629,10 +13804,10 @@ impl<'a> Evaluator<'a> {
 
         // `min_length` is an argument and `insert(0, _)` shifts the whole
         // string every iteration, so this is O(min_length^2) on a number the
-        // user typed. Cap it before the first shift.
-        if min_length as u64 > MAX_TEXT_LEN as u64 {
-            return EvalResult::Error(CellError::Limit);
-        }
+        // user typed. Excel's own ceiling of 255 (enforced above as #NUM!, its
+        // answer) now fences this long before the fuel counter could, so the
+        // `MAX_TEXT_LEN` check that used to stand here is unreachable and gone.
+        // The charge stays: it is what makes the cost VISIBLE to the budget.
         charge!(self, min_length as u64);
         while result.len() < min_length {
             result.insert(0, '0');
@@ -13647,12 +13822,13 @@ impl<'a> Evaluator<'a> {
         let text = self.evaluate(&args[0]).as_text().trim().to_uppercase();
         let radix = match self.evaluate(&args[1]).as_number() {
             Some(r) if r >= 2.0 && r <= 36.0 => r as u32,
-            _ => return EvalResult::Error(CellError::Value),
+            Some(_) => return EvalResult::Error(CellError::Num),
+            None => return EvalResult::Error(CellError::Value),
         };
 
         match u64::from_str_radix(&text, radix) {
             Ok(n) => EvalResult::Number(n as f64),
-            Err(_) => EvalResult::Error(CellError::Value),
+            Err(_) => EvalResult::Error(CellError::Num),
         }
     }
 
@@ -13833,8 +14009,10 @@ impl<'a> Evaluator<'a> {
             None => return EvalResult::Error(CellError::Value),
         };
         let total_seconds = hour * 3600 + minute * 60 + second;
+        // Excel answers #NUM! for a negative time: the arguments are numbers,
+        // the instant they name does not exist.
         if total_seconds < 0 {
-            return EvalResult::Error(CellError::Value);
+            return EvalResult::Error(CellError::Num);
         }
         // Time is a fraction of a day (86400 seconds)
         let fraction = (total_seconds as f64) / 86400.0;
@@ -19106,10 +19284,18 @@ mod budget_tests {
             EvalResult::Error(CellError::Limit),
             "MAKEARRAY caps its axes INDEPENDENTLY; the product is 1.7e10"
         );
+        // BASE USED TO BE IN THIS LIST, and is deliberately not any more.
+        // Its padding is still O(min_length^2), but Excel caps `min_length` at
+        // 255 and answers #NUM! above that (S6), so the enormous allocation is
+        // now impossible BY CONSTRUCTION rather than interrupted after the
+        // fact. A cap the argument can never clear is a better guard than a
+        // counter that has to notice. Asserted here so the two guards stay
+        // aware of each other: if the #NUM! ever regresses to a pass-through,
+        // this fails rather than silently handing BASE back to the budget.
         assert_eq!(
             eval_default("=BASE(1, 2, 900000000)"),
-            EvalResult::Error(CellError::Limit),
-            "BASE pads with insert(0,_), i.e. O(min_length^2)"
+            EvalResult::Error(CellError::Num),
+            "Excel caps min_length at 255; #NUM! fences the O(n^2) pad"
         );
     }
 
@@ -19590,5 +19776,348 @@ mod budget_tests {
             Evaluator::new(&small).evaluate(&ok),
             EvalResult::Text("ab-ab-ab".to_string())
         );
+    }
+}
+
+/// EXCEL'S ERROR TAXONOMY FOR DOMAIN FAILURES (register S6).
+///
+/// Excel divides a failing argument three ways, and the division is not
+/// cosmetic -- each error sends the user somewhere different:
+///
+///   `#VALUE!`  the argument is the wrong KIND of thing        -> fix the type
+///   `#NUM!`    the argument is a number the function cannot   -> fix the value
+///              use, or the result cannot be represented
+///   `#DIV/0!`  the statistic divides by zero (no data points, -> add data
+///              a zero standard deviation, a base-1 logarithm)
+///
+/// Before this table the engine collapsed all three into `#VALUE!` for every
+/// domain failure it had, so `=SQRT(-1)` -- Excel's textbook `#NUM!` -- was
+/// indistinguishable from `=SQRT("x")`.
+///
+/// THE TABLE IS THE POINT. A by-name list of two functions was the shape that
+/// let this survive; the entries below were produced by sweeping every
+/// `CellError::Value` site in this file mechanically and classifying the ones
+/// that sit behind a NUMERIC guard, so a function reclassified without an
+/// entry here is a hole in the sweep, not a missing nicety.
+///
+/// Every row is a documented Microsoft behaviour. Where the docs are silent
+/// (LN, LOG, TIME, AVERAGEA, the `A`-suffixed statistics) the row follows the
+/// rule the documented siblings establish, and the report for this change says
+/// which rows those are.
+#[cfg(test)]
+mod error_value_parity_tests {
+    use super::*;
+    use crate::cell::Cell;
+
+    /// Evaluate against a fixed scratch grid.
+    ///
+    /// Ranges, not array literals: `{1;2;3}` is EXCEL's column-array syntax and
+    /// this parser does not accept it -- `{...}` here is the Python-style list
+    /// literal, whose separator is a comma and which has no row separator at
+    /// all. That is its own parity gap and is filed, not papered over; these
+    /// tests read from cells so that they test error values and nothing else.
+    ///
+    ///   A1:A5 = 1 2 3 4 5     B1:B5 = 1 1 1 1 1     C1 = 1 (a single cell)
+    ///   D1:D2 = 1 2           E1 = "x" (text: the wrong-TYPE half, and the
+    ///   F1:F3 = 1 0 3               only cell that reads as NO number at all)
+    fn err(formula: &str) -> EvalResult {
+        let mut grid = Grid::new();
+        for r in 0..5u32 {
+            grid.set_cell(r, 0, Cell::new_number((r + 1) as f64));
+            grid.set_cell(r, 1, Cell::new_number(1.0));
+        }
+        grid.set_cell(0, 2, Cell::new_number(1.0));
+        grid.set_cell(0, 3, Cell::new_number(1.0));
+        grid.set_cell(1, 3, Cell::new_number(2.0));
+        grid.set_cell(0, 4, Cell::new_text("x".to_string()));
+        grid.set_cell(0, 5, Cell::new_number(1.0));
+        grid.set_cell(1, 5, Cell::new_number(0.0));
+        grid.set_cell(2, 5, Cell::new_number(3.0));
+        let ast = parser::parse(formula).expect("formula parses");
+        Evaluator::new(&grid).evaluate(&ast)
+    }
+
+    fn assert_table(rows: &[(&str, CellError)]) {
+        let mut wrong = Vec::new();
+        for (formula, expected) in rows {
+            let got = err(formula);
+            let matches = matches!(&got, EvalResult::Error(e) if e == expected);
+            if !matches {
+                wrong.push(format!(
+                    "  {} -> {:?}, expected {}",
+                    formula,
+                    got,
+                    expected.as_literal()
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "error-value parity broke for {} of {} cases:\n{}",
+            wrong.len(),
+            rows.len(),
+            wrong.join("\n")
+        );
+    }
+
+    /// The two cases the register names, kept apart from the bulk table so a
+    /// regression in either is unmissable in the failure output.
+    #[test]
+    fn sqrt_of_a_negative_and_log_of_zero_are_num_not_value() {
+        assert_eq!(err("=SQRT(-1)"), EvalResult::Error(CellError::Num));
+        assert_eq!(err("=LOG(0)"), EvalResult::Error(CellError::Num));
+        // ... and the counterweight: the WRONG TYPE is still #VALUE!.
+        assert_eq!(err("=SQRT(\"x\")"), EvalResult::Error(CellError::Value));
+        assert_eq!(err("=LOG(\"x\")"), EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn math_domain_failures_are_num() {
+        assert_table(&[
+            ("=SQRT(-1)", CellError::Num),
+            ("=SQRTPI(-1)", CellError::Num),
+            ("=LN(0)", CellError::Num),
+            ("=LN(-1)", CellError::Num),
+            ("=LOG(0)", CellError::Num),
+            ("=LOG(-1)", CellError::Num),
+            ("=LOG(10,0)", CellError::Num),
+            ("=LOG(10,-2)", CellError::Num),
+            ("=LOG10(0)", CellError::Num),
+            ("=ASIN(2)", CellError::Num),
+            ("=ACOS(-2)", CellError::Num),
+            ("=FACT(-1)", CellError::Num),
+            ("=FACTDOUBLE(-2)", CellError::Num),
+            ("=COMBIN(-1,2)", CellError::Num),
+            ("=COMBIN(2,-1)", CellError::Num),
+            ("=COMBIN(2,5)", CellError::Num),
+            ("=COMBINA(-1,2)", CellError::Num),
+            ("=PERMUT(2,5)", CellError::Num),
+            ("=PERMUT(-1,1)", CellError::Num),
+            ("=PERMUTATIONA(-1,1)", CellError::Num),
+            ("=MULTINOMIAL(-1)", CellError::Num),
+            ("=GCD(-1)", CellError::Num),
+            ("=LCM(-1)", CellError::Num),
+            ("=MROUND(5,-2)", CellError::Num),
+            ("=CEILING(5,-2)", CellError::Num),
+            ("=FLOOR(5,-2)", CellError::Num),
+            ("=RANDBETWEEN(5,1)", CellError::Num),
+            ("=EXP(1000)", CellError::Num),
+        ]);
+    }
+
+    #[test]
+    fn statistical_domain_failures_are_num() {
+        assert_table(&[
+            ("=LARGE(A1:A5,0)", CellError::Num),
+            ("=SMALL(A1:A5,0)", CellError::Num),
+            ("=PERCENTILE(A1:A5,2)", CellError::Num),
+            ("=TRIMMEAN(A1:A5,-0.1)", CellError::Num),
+            ("=GEOMEAN(F1:F3)", CellError::Num),
+            ("=HARMEAN(F1:F3)", CellError::Num),
+            ("=FISHER(1)", CellError::Num),
+            ("=GAMMALN(0)", CellError::Num),
+            ("=STANDARDIZE(1,0,0)", CellError::Num),
+            ("=NORM.DIST(1,0,0,TRUE)", CellError::Num),
+            ("=NORM.INV(0,0,1)", CellError::Num),
+            ("=NORM.S.INV(1)", CellError::Num),
+            ("=LOGNORM.DIST(0,0,1,TRUE)", CellError::Num),
+            ("=BINOM.DIST(1,2,5,TRUE)", CellError::Num),
+            ("=BINOM.DIST(5,2,0.5,TRUE)", CellError::Num),
+            ("=POISSON.DIST(-1,1,TRUE)", CellError::Num),
+            ("=EXPON.DIST(-1,1,TRUE)", CellError::Num),
+            ("=CHISQ.DIST(-1,1,TRUE)", CellError::Num),
+            ("=CHISQ.DIST.RT(-1,1)", CellError::Num),
+            ("=T.DIST(1,0,TRUE)", CellError::Num),
+            ("=T.INV(0,1)", CellError::Num),
+            ("=F.DIST(-1,1,1,TRUE)", CellError::Num),
+            ("=F.INV(-1,1,1)", CellError::Num),
+            ("=GAMMA.DIST(-1,1,1,TRUE)", CellError::Num),
+            ("=BETA.DIST(0.5,0,1,TRUE)", CellError::Num),
+            ("=WEIBULL.DIST(-1,1,1,TRUE)", CellError::Num),
+            ("=HYPGEOM.DIST(1,2,1,0,TRUE)", CellError::Num),
+            ("=NEGBINOM.DIST(1,0,0.5,TRUE)", CellError::Num),
+            ("=CONFIDENCE.NORM(0,1,10)", CellError::Num),
+            ("=CONFIDENCE.T(0,1,10)", CellError::Num),
+        ]);
+    }
+
+    #[test]
+    fn financial_domain_failures_are_num() {
+        assert_table(&[
+            ("=SLN(100,10,0)", CellError::Num),
+            ("=SYD(100,10,5,6)", CellError::Num),
+            ("=DB(100,10,0,1)", CellError::Num),
+            ("=DDB(100,10,0,1)", CellError::Num),
+            ("=IPMT(0.1,0,10,1000)", CellError::Num),
+            ("=PPMT(0.1,0,10,1000)", CellError::Num),
+            ("=EFFECT(0.1,0)", CellError::Num),
+            ("=NOMINAL(0.1,0)", CellError::Num),
+            ("=CUMIPMT(0,10,1000,1,2,0)", CellError::Num),
+            ("=CUMPRINC(0,10,1000,1,2,0)", CellError::Num),
+            ("=DOLLARDE(1.02,0)", CellError::Num),
+            ("=DOLLARFR(1.02,0)", CellError::Num),
+            ("=RRI(0,100,200)", CellError::Num),
+            ("=PDURATION(0,100,200)", CellError::Num),
+            ("=PMT(0.1,0,1000)", CellError::Num),
+        ]);
+    }
+
+    #[test]
+    fn engineering_domain_failures_are_num_but_type_failures_stay_value() {
+        assert_table(&[
+            // Microsoft states this split for the base-conversion family
+            // EXPLICITLY, and it reads backwards at first: a `number` that is
+            // not numeric is #VALUE!, but TEXT that is not a numeral in the
+            // source base is #NUM! -- it is the right kind of thing and the
+            // wrong value, which is exactly what #NUM! means.
+            ("=DEC2BIN(600)", CellError::Num),
+            ("=DEC2BIN(\"x\")", CellError::Value),
+            ("=DEC2BIN(5,0)", CellError::Num),
+            ("=DEC2BIN(255,2)", CellError::Num), // needs 8 places, given 2
+            ("=DEC2OCT(600000000)", CellError::Num),
+            ("=DEC2HEX(600000000000)", CellError::Num),
+            ("=BIN2DEC(\"2\")", CellError::Num),
+            ("=BIN2DEC(\"11111111111\")", CellError::Num),
+            ("=HEX2DEC(\"XYZ\")", CellError::Num),
+            ("=OCT2DEC(\"9\")", CellError::Num),
+            ("=BASE(-1,2)", CellError::Num),
+            ("=BASE(1,1)", CellError::Num),
+            ("=BASE(1,2,256)", CellError::Num),
+            ("=DECIMAL(\"ZZ\",2)", CellError::Num),
+            ("=DECIMAL(\"11\",1)", CellError::Num),
+            ("=BITAND(-1,1)", CellError::Num),
+            ("=BITLSHIFT(-1,1)", CellError::Num),
+            ("=BESSELK(0,1)", CellError::Num),
+            ("=IMLN(\"0\")", CellError::Num),
+            ("=IMLOG10(\"0\")", CellError::Num),
+            ("=IMLOG2(\"0\")", CellError::Num),
+        ]);
+    }
+
+    #[test]
+    fn date_domain_failures_are_num() {
+        assert_table(&[
+            ("=DATE(-1,1,1)", CellError::Num),
+            ("=DATE(10000,1,1)", CellError::Num),
+            ("=DATE(1900,-500,1)", CellError::Num),
+            ("=TIME(-1,0,0)", CellError::Num),
+            ("=YEARFRAC(1,2,5)", CellError::Num),
+            ("=YEARFRAC(1,2,-1)", CellError::Num),
+        ]);
+    }
+
+    /// Excel's `#DIV/0!` cases: the statistic really does divide by zero, so
+    /// the remedy is "supply more data", not "fix an argument".
+    #[test]
+    fn too_few_data_points_is_div0_not_value() {
+        assert_table(&[
+            ("=CORREL(C1:C1,C1:C1)", CellError::Div0),
+            ("=COVARIANCE.P(E1:E1,E1:E1)", CellError::Div0),
+            ("=COVARIANCE.S(C1:C1,C1:C1)", CellError::Div0),
+            ("=SLOPE(C1:C1,C1:C1)", CellError::Div0),
+            ("=INTERCEPT(C1:C1,C1:C1)", CellError::Div0),
+            ("=STEYX(D1:D2,D1:D2)", CellError::Div0),
+            ("=SKEW(D1:D2)", CellError::Div0),
+            ("=SKEW.P(D1:D2)", CellError::Div0),
+            ("=KURT(A1:A3)", CellError::Div0),
+            ("=FORECAST.LINEAR(1,C1:C1,C1:C1)", CellError::Div0),
+            ("=STDEVA(C1:C1)", CellError::Div0),
+            ("=VARA(C1:C1)", CellError::Div0),
+            ("=AVERAGEA()", CellError::Div0),
+            // A base-1 logarithm is a division by ln(1) = 0, and Excel says so.
+            ("=LOG(10,1)", CellError::Div0),
+            // x^-n is 1/x^n, so 0 to a negative power is a division by zero.
+            ("=POWER(0,-1)", CellError::Div0),
+            ("=0^-1", CellError::Div0),
+        ]);
+    }
+
+    /// The counterweight table. Every one of these is a domain failure that
+    /// Excel deliberately answers `#VALUE!`, which is why the sweep could not
+    /// be "change every guard to #NUM!". The text functions are the big
+    /// family; ROMAN is the famous oddity (a negative number is `#VALUE!`,
+    /// not `#NUM!`, in Excel's own remarks).
+    #[test]
+    fn the_functions_excel_keeps_at_value_are_untouched() {
+        assert_table(&[
+            ("=MID(\"abc\",0,1)", CellError::Value),
+            ("=MID(\"abc\",1,-1)", CellError::Value),
+            ("=LEFT(\"abc\",-1)", CellError::Value),
+            ("=RIGHT(\"abc\",-1)", CellError::Value),
+            ("=REPT(\"a\",-1)", CellError::Value),
+            ("=REPLACE(\"abc\",0,1,\"x\")", CellError::Value),
+            ("=SUBSTITUTE(\"abc\",\"a\",\"x\",0)", CellError::Value),
+            ("=FIND(\"a\",\"abc\",0)", CellError::Value),
+            ("=SEARCH(\"a\",\"abc\",0)", CellError::Value),
+            ("=ROMAN(-1)", CellError::Value),
+            ("=ADDRESS(0,1)", CellError::Value),
+            ("=MUNIT(0)", CellError::Value),
+            ("=CHOOSEROWS(D1:D2,5)", CellError::Value),
+            ("=CHOOSECOLS(A1:B1,5)", CellError::Value),
+            ("=WRAPROWS(D1:D2,0)", CellError::Value),
+            ("=WRAPCOLS(D1:D2,0)", CellError::Value),
+            // Non-numeric arguments everywhere stay #VALUE!, which is the
+            // half of the split that must NOT move.
+            ("=SQRT(\"x\")", CellError::Value),
+            ("=LARGE(A1:A5,E1)", CellError::Value),
+            ("=DATE(\"x\",1,1)", CellError::Value),
+            ("=CEILING(\"x\",2)", CellError::Value),
+        ]);
+    }
+
+    /// Numeric OVERFLOW. Excel's ceiling is 1.7976931348623158E+308 and a
+    /// calculation past it answers `#NUM!`. This engine used to keep the IEEE
+    /// infinity and PAINT it: `=1E308*10` displayed `inf`, which is not a
+    /// number, not an error, and not anything a user can act on.
+    #[test]
+    fn arithmetic_overflow_is_num_not_infinity() {
+        assert_table(&[
+            ("=1E308*10", CellError::Num),
+            ("=1E308+1E308", CellError::Num),
+            ("=-1E308-1E308", CellError::Num),
+            ("=1E308/1E-308", CellError::Num),
+            ("=10^1000", CellError::Num),
+            ("=POWER(10,1000)", CellError::Num),
+            // Leaving the reals is the same answer.
+            ("=POWER(-8,1/3)", CellError::Num),
+            ("=(-8)^(1/3)", CellError::Num),
+        ]);
+        // ... and the counterweight: ordinary arithmetic is untouched.
+        assert_eq!(err("=1E308"), EvalResult::Number(1e308));
+        assert_eq!(err("=2^10"), EvalResult::Number(1024.0));
+        assert_eq!(err("=1/4"), EvalResult::Number(0.25));
+    }
+
+    /// `=COMBINA(0,1)` PANICKED before this change: `n + k - 1` is 0, and
+    /// `nn - k` underflowed a u64 inside the symmetry shortcut, taking the
+    /// whole recalculation down in a debug build. Found while reclassifying
+    /// the function's error, not by looking for crashes.
+    #[test]
+    fn combina_with_zero_population_does_not_underflow() {
+        assert_eq!(err("=COMBINA(0,1)"), EvalResult::Number(0.0));
+        assert_eq!(err("=COMBINA(0,9)"), EvalResult::Number(0.0));
+        assert_eq!(err("=COMBINA(0,0)"), EvalResult::Number(1.0));
+        assert_eq!(err("=COMBINA(4,3)"), EvalResult::Number(20.0));
+    }
+
+    /// Excel interprets a `year` of 0..1899 as 1900 + year. Calcula took it
+    /// literally, so `=DATE(99,1,1)` landed 1900 years early.
+    #[test]
+    fn date_maps_two_digit_years_onto_the_1900s() {
+        assert_eq!(err("=DATE(99,12,31)"), err("=DATE(1999,12,31)"));
+        assert_eq!(err("=DATE(0,1,1)"), err("=DATE(1900,1,1)"));
+        assert_eq!(err("=DATE(1899,1,1)"), err("=DATE(3799,1,1)"));
+    }
+
+    /// The `places` argument of the base-conversion family reaches
+    /// `format!("{:0>width$}")` as a WIDTH. Excel caps it at 10 and answers
+    /// `#NUM!` past that; before the cap `=DEC2BIN(5,1000000000)` asked the
+    /// formatter for a one-gigabyte string on a single keystroke.
+    #[test]
+    fn base_conversion_places_is_bounded() {
+        assert_eq!(err("=DEC2BIN(5,1000000000)"), EvalResult::Error(CellError::Num));
+        assert_eq!(err("=DEC2HEX(5,-1)"), EvalResult::Error(CellError::Num));
+        assert_eq!(err("=DEC2BIN(5,4)"), EvalResult::Text("0101".to_string()));
+        assert_eq!(err("=DEC2BIN(5)"), EvalResult::Text("101".to_string()));
     }
 }

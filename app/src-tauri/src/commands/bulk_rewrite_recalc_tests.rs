@@ -344,7 +344,20 @@ fn an_acyclic_cross_sheet_chain_stays_numeric() {
 fn workbook_cycle_members(wb: &Workbook) -> std::collections::HashSet<(usize, u32, u32)> {
     let grids = wb.state.grids.read().unwrap();
     let names = wb.state.sheet_names.read().unwrap().clone();
-    crate::calculation::workbook_circular_cells(&grids, &names)
+    let named_ranges = wb.state.named_ranges.read().unwrap();
+    let tables = wb.state.tables.read().unwrap();
+    let table_names = wb.state.table_names.read().unwrap();
+    crate::calculation::workbook_circular_cells(
+        &grids,
+        &names,
+        crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+            sheet_names: &names,
+            spill_ranges: &wb.state.spill_ranges,
+        },
+    )
 }
 
 /// Do to the grids exactly what the SHEET-scoped pass does after its merge.
@@ -567,7 +580,20 @@ fn the_workbook_walk_returns_immediately_without_cross_sheet_references() {
 
     let grids = wb.state.grids.read().unwrap();
     let names = wb.state.sheet_names.read().unwrap().clone();
-    let circular = crate::calculation::workbook_circular_cells(&grids, &names);
+    let named_ranges = wb.state.named_ranges.read().unwrap();
+    let tables = wb.state.tables.read().unwrap();
+    let table_names = wb.state.table_names.read().unwrap();
+    let circular = crate::calculation::workbook_circular_cells(
+        &grids,
+        &names,
+        crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+            sheet_names: &names,
+            spill_ranges: &wb.state.spill_ranges,
+        },
+    );
 
     assert!(
         circular.is_empty(),
@@ -586,7 +612,20 @@ fn the_workbook_walk_finds_both_members_of_a_cross_sheet_cycle() {
 
     let grids = wb.state.grids.read().unwrap();
     let names = wb.state.sheet_names.read().unwrap().clone();
-    let circular = crate::calculation::workbook_circular_cells(&grids, &names);
+    let named_ranges = wb.state.named_ranges.read().unwrap();
+    let tables = wb.state.tables.read().unwrap();
+    let table_names = wb.state.table_names.read().unwrap();
+    let circular = crate::calculation::workbook_circular_cells(
+        &grids,
+        &names,
+        crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+            sheet_names: &names,
+            spill_ranges: &wb.state.spill_ranges,
+        },
+    );
 
     assert!(circular.contains(&(0, 0, 0)), "Sheet1!A1 is a cycle member");
     assert!(circular.contains(&(1, 0, 0)), "Sheet2!A1 is a cycle member");
@@ -773,6 +812,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("commands/structure.rs", "shift_per_sheet_cell_stores", "helper of the four structural edits; wraps shift_per_sheet_cell_map over every per-sheet store"),
         ("lib.rs", "repair_all_formulas", "helper: rewrites formula ASTs across every sheet for a caller-supplied repair; `delete_sheet` recalculates the workbook after it and `rename_sheet` is exempt because a rename moves no value"),
         ("commands/data.rs", "erase_released_spill_cells", "helper: erases the cells a released spill owned; every caller is inside, or immediately followed by, the shared cascade"),
+        ("commands/data.rs", "apply_spill_decision", "THE ONE SPILL DECISION (§3bm): the inner step every per-cell evaluator ends in — the three edit paths, the cross-sheet walk and both recalculation passes. It decides what ONE already-evaluated result does to the grid; it never chooses which cells to evaluate, so it cannot seed anything"),
+        ("commands/data.rs", "release_origin_spill", "helper: the tear-down half of apply_spill_decision, called directly only where a value is written WITHOUT an EvalResult to hand it (the #CIRCULAR! stamps)"),
         ("undo_commands.rs", "apply_changes", "drives the cascade for every restore kind"),
         ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes recalculates"),
         ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes recalculates"),
@@ -785,6 +826,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("pivot/commands.rs", "drill_through_to_sheet", "writes a freshly created sheet: no formula can reference a sheet that did not exist a moment ago, so there is nothing to cascade to"),
         // -- Rewrites formula REFERENCES, not values ------------------------
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; no value moves"),
+        ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; no value moves, and both callers recalculate anyway"),
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; no value moves"),
     ];
     //
@@ -966,6 +1008,53 @@ pub fn touches_nothing(grid: &mut Grid) {
         "the census reported a function that writes no cell at all"
     );
 
+    // 3b. A BRACE-LESS `#[cfg(test)] mod x;` MUST NOT SWALLOW THE REST OF THE
+    //     FILE.
+    //
+    // THE HOLE THIS CASE WAS WRITTEN FOR, and it was live. `strip_test_modules`
+    // skipped a test module by scanning forward to a `}` at column 0. A module
+    // DECLARATION has no body and no such brace, so the scan ran to EOF and
+    // blanked everything after it. `commands/data.rs` ends with ten of those
+    // declarations, so the census's view of the crate's biggest command file
+    // stopped there.
+    //
+    // Measured, not imagined: appending a cell writer that recalculates nothing
+    // to the end of `data.rs` left THIS census green while the spill census —
+    // whose stripper never had the bug — named the function immediately.
+    const AFTER_TEST_MOD_DECL: &str = "\
+#[cfg(test)]
+#[path = \"some_tests.rs\"]
+mod some_tests;
+
+pub fn writes_after_the_declaration(grid: &mut Grid) {
+    grid.set_cell(0, 0, cell);
+}
+";
+    assert_eq!(
+        cell_writing_functions(AFTER_TEST_MOD_DECL),
+        vec![("writes_after_the_declaration".to_string(), false)],
+        "a cell writer declared AFTER a brace-less `#[cfg(test)] mod x;` was \
+         not enumerated — the test-module stripper is consuming the rest of \
+         the file, so any function below the test declarations is exempt from \
+         this census without anybody saying so"
+    );
+
+    // ...and a real test module WITH a body is still removed, or the census
+    // would start enumerating test fixtures as product cell writers.
+    const REAL_TEST_MOD: &str = "\
+#[cfg(test)]
+mod tests {
+    pub fn seeds_a_fixture(grid: &mut Grid) {
+        grid.set_cell(0, 0, cell);
+    }
+}
+";
+    assert!(
+        cell_writing_functions(REAL_TEST_MOD).is_empty(),
+        "a `#[cfg(test)]` module WITH a body was not stripped — test fixtures \
+         would be enumerated as product writes and the census would drown"
+    );
+
     // 4. THE HOLE FOUND BY SABOTAGE. A caller that reaches the grid only
     //    through a delegating helper is still a cell writer. Before this,
     //    deleting the recalc call from `set_totals_row_function` — whose whole
@@ -1137,6 +1226,15 @@ const DELEGATING_HELPERS: &[&str] = &[
     // writer. `erase_released_spill_cells` is the spill tear-down's write.
     "repair_all_formulas",
     "erase_released_spill_cells",
+    // §3bm. THE ONE SPILL DECISION and its tear-down half: both write cells on
+    // behalf of whoever called them, so the caller still owns the
+    // recalculation decision, exactly like a direct writer.
+    "apply_spill_decision",
+    "release_origin_spill",
+    // §2aj. `rename_table_column_in_formulas` is the column rename's write, the
+    // way `rename_table_refs_in_formulas` is the table rename's; its two callers
+    // (`rename_table_column`, `enforce_table_header`) own the decision.
+    "rename_table_column_in_formulas",
 ];
 
 /// The direct-map mutations of a `Grid`: `grid.cells.insert(...)`,
@@ -1189,12 +1287,23 @@ fn receiver_is_a_grid(before: &str) -> bool {
 }
 
 fn cell_writing_functions_with_helpers(text: &str, helpers: &[&str]) -> Vec<(String, bool)> {
-    const RECALC: [&str; 5] = [
+    const RECALC: [&str; 6] = [
         "recalc_after_active_sheet_bulk_rewrite(",
         "recalc_after_off_sheet_write(",
         "recalculate_sheet_values(",
         "cascade_cross_sheet_dependents(",
         "recalc_order_from_seeds(",
+        // §2aj. `recalc_after_table_change` is not a SIXTH cascade: it seeds the
+        // first two and nothing else, the way `recalc_after_name_change` does
+        // for a repointed defined name. Naming it here is what lets a table
+        // command satisfy this census by calling the ONE entry point that also
+        // rebuilds the readers' cell edges — which a bare
+        // `recalc_after_active_sheet_bulk_rewrite` does not do, and which a
+        // table resize needs. `the_table_recalculation_reaches_the_shared_cascade`
+        // in `structured_ref_tests` pins that it really does seed them, so this
+        // vocabulary entry cannot become a way to satisfy the census with
+        // nothing behind it.
+        "recalc_after_table_change(",
     ];
     let lines: Vec<String> = strip_test_modules(text);
 
@@ -1307,6 +1416,25 @@ fn strip_test_modules(text: &str) -> Vec<String> {
                 t.starts_with("mod ") || t.starts_with("pub mod ")
             };
             if is_mod {
+                // A DECLARATION (`mod foo;`) HAS NO BODY TO SKIP, and treating
+                // it as though it did blanked the whole rest of the file.
+                //
+                // THE HOLE, found by sabotage: `commands/data.rs` ends with ten
+                // `#[cfg(test)] #[path = "..."] mod x;` declarations. None is
+                // followed by a `}` at column 0, so the brace scan below ran to
+                // EOF and cleared every line from the first declaration onward.
+                // A product function added anywhere after them was invisible to
+                // this census — a cell writer that recalculates nothing would
+                // have been enumerated as not existing. The spill census's own
+                // stripper never had this bug, so the two disagreed and only
+                // one of them was right.
+                if lines[j].trim_end().ends_with(';') {
+                    for line in lines.iter_mut().take(j + 1).skip(i) {
+                        line.clear();
+                    }
+                    i = j + 1;
+                    continue;
+                }
                 let mut k = j;
                 while k < lines.len() && lines[k] != "}" {
                     k += 1;
@@ -1339,11 +1467,20 @@ fn strip_test_modules(text: &str) -> Vec<String> {
 fn every_direct_cells_map_receiver_is_a_recognised_spelling() {
     /// Receivers known NOT to be grids. Anything else must be a grid, or be
     /// added here with the reason it is not.
-    const NOT_A_GRID: &[(&str, &str)] = &[(
-        "refs",
-        "ExtractedRefs: `cells` is the SET of coordinates a formula references, \
-         not a sheet's contents",
-    )];
+    const NOT_A_GRID: &[(&str, &str)] = &[
+        (
+            "refs",
+            "ExtractedRefs: `cells` is the SET of coordinates a formula references, \
+             not a sheet's contents",
+        ),
+        (
+            "sheet",
+            "`persistence::Sheet`: the SAVE-side snapshot of a sheet, not a live \
+             `engine::Grid`. `apply_spill_extents_to_sheet` stamps the dynamic-array \
+             extent onto cells `Sheet::from_grid` has already produced -- it writes \
+             no document cell, so there is nothing to recalculate",
+        ),
+    ];
 
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files: Vec<std::path::PathBuf> = Vec::new();

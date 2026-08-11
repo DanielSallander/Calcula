@@ -10,6 +10,29 @@ use rust_xlsxwriter::{
 };
 use std::path::Path;
 
+/// The literal a reader that does NOT recalculate should see for a cached cell
+/// value — the `<v>` an array origin carries alongside its formula.
+///
+/// `rust_xlsxwriter` defaults an array formula's result to `"0"`, which would
+/// hand a non-calculating viewer a zero where the workbook shows the array's
+/// first value. Excel writes the real cached result; so does this.
+fn cached_result_literal(value: &SavedCellValue) -> String {
+    match value {
+        SavedCellValue::Number(n) => n.to_string(),
+        SavedCellValue::Text(s) => s.clone(),
+        SavedCellValue::Boolean(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        // An error or a structured value has no meaningful `<v>` literal; the
+        // library's default is as good an answer as any, and Excel recalculates.
+        _ => "0".to_string(),
+    }
+}
+
 pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceError> {
     let mut xlsx = XlsxWorkbook::new();
     // Chart ids that were successfully emitted as native OOXML charts — the
@@ -50,7 +73,22 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
     // ========================================================================
     for sheet in &workbook.sheets {
         let worksheet = xlsx.add_worksheet();
-        worksheet.set_name(&sheet.name)?;
+        // Excel's sheet-name rule is stricter than Calcula's LOAD path, which
+        // deliberately accepts and carries whatever a legacy or imported file
+        // held (`app/src-tauri/src/sheet_names.rs` enforces the rule at ENTRY,
+        // not on open). So this call CAN fail on a real workbook -- and it used
+        // to fail with a raw rust_xlsxwriter message, aborting the entire
+        // "Save As .xlsx" with nothing the user could act on and no clue which
+        // of thirty sheets was at fault.
+        worksheet.set_name(&sheet.name).map_err(|e| {
+            PersistenceError::InvalidFormat(format!(
+                "The sheet name {:?} cannot be written to an .xlsx file: {}. \
+                 Excel allows 1-31 characters and forbids : \\ / ? * [ ] and a \
+                 leading or trailing apostrophe. Rename the sheet and save \
+                 again, or save as .cala, which keeps the name as it is.",
+                sheet.name, e
+            ))
+        })?;
 
         // ---- Gridlines visibility ----
         if !sheet.show_gridlines {
@@ -169,8 +207,96 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
             )?;
         }
 
+        // ---- Dynamic-array footprints ----
+        //
+        // A spill ORIGIN must be exported as an ARRAY formula
+        // (`<f t="array" ref="A1:A4">` plus the `cm="1"` dynamic marker), which
+        // is how Excel itself stores one (ECMA-376 Part 1 18.3.1.40: `ref` =
+        // "range of cells which the formula applies to").
+        //
+        // WHAT THIS FIXES, and it is a corruption rather than a nicety. Before
+        // this the writer had no notion of a spill, so `=SEQUENCE(4)` in A1
+        // exported as an ORDINARY formula in A1 with three loose literals in
+        // A2:A4. Excel recalculates on open (the writer sets `fullCalcOnLoad`),
+        // the array tries to spill onto the very literals this writer put
+        // there, and it is blocked by its own output: the exported file shows
+        // `#SPILL!` where the workbook showed 1 2 3 4. The `ref` is what tells
+        // Excel those cells BELONG to the array, and nothing else can.
+        //
+        // ORDER MATTERS, twice.
+        //   * This runs BEFORE the cell loop, because the origin may be visited
+        //     after the cells it covers and `write_dynamic_array_formula` pads
+        //     the whole range with `0` placeholders (rust_xlsxwriter's
+        //     documented behaviour) — writing it second would erase the real
+        //     cached values.
+        //   * The cell loop then writes those covered cells normally, which
+        //     REPLACES the placeholders with the values the workbook actually
+        //     holds while leaving the `ref` on the origin untouched. The result
+        //     is byte-shaped exactly like Excel's own output: formula + extent
+        //     on the origin, value-only cells under it.
+        //
+        // A cell inside the footprint that carries its OWN formula is left to
+        // the cell loop and lands as a formula, so Excel's `#SPILL!` is still
+        // available for the case where it is the right answer.
+        let mut array_origins: Vec<(u32, u32)> = sheet
+            .cells
+            .iter()
+            .filter_map(|(&(row, col), cell)| {
+                let (end_row, end_col) = cell.spill?;
+                cell.formula.as_ref()?;
+                if end_row < row || end_col < col || (end_row == row && end_col == col) {
+                    return None;
+                }
+                Some((row, col))
+            })
+            .collect();
+        // Deterministic output: the sheet's cells live in a HashMap.
+        array_origins.sort_unstable();
+
+        for (row, col) in &array_origins {
+            let cell = &sheet.cells[&(*row, *col)];
+            let (end_row, end_col) = cell.spill.expect("filtered above");
+            let formula_text = cell.formula.as_ref().expect("filtered above");
+            let clean_formula = formula_text.strip_prefix('=').unwrap_or(formula_text);
+            // The origin's own cached result, so a reader that does NOT
+            // recalculate still shows the array's first value rather than the
+            // library's `0` placeholder.
+            let formula = rust_xlsxwriter::Formula::new(clean_formula)
+                .set_result(cached_result_literal(&cell.value));
+            let format = if cell.style_index > 0 && cell.style_index < sheet.styles.len() {
+                Some(convert_style_to_format(&sheet.styles[cell.style_index]))
+            } else {
+                None
+            };
+            match format {
+                Some(fmt) => worksheet.write_dynamic_array_formula_with_format(
+                    *row,
+                    *col as u16,
+                    end_row,
+                    end_col as u16,
+                    formula,
+                    &fmt,
+                )?,
+                None => worksheet.write_dynamic_array_formula(
+                    *row,
+                    *col as u16,
+                    end_row,
+                    end_col as u16,
+                    formula,
+                )?,
+            };
+        }
+        let array_origin_set: std::collections::HashSet<(u32, u32)> =
+            array_origins.into_iter().collect();
+
         // ---- Write cells ----
         for ((row, col), cell) in &sheet.cells {
+            // Already written above, with its extent. Writing it again as an
+            // ordinary formula would drop the `ref` and re-create the defect.
+            if array_origin_set.contains(&(*row, *col)) {
+                continue;
+            }
+
             let format = if cell.style_index > 0 && cell.style_index < sheet.styles.len() {
                 Some(convert_style_to_format(&sheet.styles[cell.style_index]))
             } else {
@@ -1098,6 +1224,7 @@ mod tests {
                     formula: None,
                     style_index: 0,
                     rich_text: None,
+                    spill: None,
                 },
             );
             sheet.cells.insert(
@@ -1107,6 +1234,7 @@ mod tests {
                     formula: None,
                     style_index: 0,
                     rich_text: None,
+                    spill: None,
                 },
             );
         }
@@ -1131,4 +1259,633 @@ mod tests {
         let cols: Vec<u32> = s.user_hidden_cols.iter().copied().collect();
         assert_eq!(cols, vec![1], "hidden column must survive export+import");
     }
+
+    /// A DYNAMIC ARRAY must export as one array formula, not as a formula plus
+    /// the literals it produced.
+    ///
+    /// THE DEFECT THIS CLOSES was a corruption, not a nicety. The writer had no
+    /// notion of a spill, so `=SEQUENCE(4)` in A1 exported as an ordinary
+    /// formula in A1 and three literal numbers in A2:A4. Excel recalculates on
+    /// open, the array tries to spill onto the very literals this writer put
+    /// there, and it is blocked by its own output: the exported file shows
+    /// `#SPILL!` where the workbook showed 1 2 3 4.
+    ///
+    /// The bytes are checked directly, because that is the whole claim.
+    /// ECMA-376 Part 1 18.3.1.40: `t="array"` with `ref` = the range the
+    /// formula applies to; `cm="1"` marks it DYNAMIC rather than a legacy CSE
+    /// array.
+    #[test]
+    fn a_dynamic_array_exports_as_one_array_formula_not_as_literals() {
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        let mut sheet = Sheet::new("Data".to_string());
+        sheet.cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Number(1.0),
+                formula: Some("SEQUENCE(4)".to_string()),
+                style_index: 0,
+                rich_text: None,
+                spill: Some((3, 0)),
+            },
+        );
+        for r in 1..4u32 {
+            sheet.cells.insert(
+                (r, 0),
+                SavedCell {
+                    value: SavedCellValue::Number(f64::from(r + 1)),
+                    formula: None,
+                    style_index: 0,
+                    rich_text: None,
+                    spill: None,
+                },
+            );
+        }
+        // A neighbour that is NOT part of the array must still be written.
+        sheet.cells.insert(
+            (0, 1),
+            SavedCell {
+                value: SavedCellValue::Text("keep me".to_string()),
+                formula: None,
+                style_index: 0,
+                rich_text: None,
+                spill: None,
+            },
+        );
+        workbook.sheets.push(sheet);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("array.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        {
+            use std::io::Read;
+            zip.by_name("xl/worksheets/sheet1.xml")
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+        }
+
+        // THE WHOLE CLAIM, and it is Excel's own shape: formula + extent on the
+        // origin, value-only cells under it. `_xlfn.` is rust_xlsxwriter's
+        // required prefix for a post-2007 function, not a Calcula artefact.
+        assert!(
+            xml.contains(r#"<c r="A1" cm="1"><f t="array" ref="A1:A4">_xlfn.SEQUENCE(4)</f><v>1</v></c>"#),
+            "the origin must carry the array formula, its EXTENT (`ref`), the              DYNAMIC marker (`cm=\"1\"`) and its real cached value. Without              `ref`, Excel recalculates the origin on open, finds A2:A4 occupied              by the literals this writer emitted, and shows #SPILL! where the              workbook showed 1 2 3 4. sheet1.xml was:
+{}",
+            xml
+        );
+        for covered in [r#"<c r="A2"><v>2</v></c>"#, r#"<c r="A3"><v>3</v></c>"#, r#"<c r="A4"><v>4</v></c>"#] {
+            assert!(
+                xml.contains(covered),
+                "{} must be exported as a VALUE-ONLY cell inside the array's                  `ref` — carrying the real cached value, not the library's `0`                  placeholder, and carrying no formula of its own. sheet1.xml                  was:
+{}",
+                covered,
+                xml
+            );
+        }
+        assert!(
+            xml.contains(r#"<c r="B1""#),
+            "a cell outside the array must still be exported"
+        );
+    }
+
+    /// ...and a cell that is GENUINELY in the way is still written, so Excel's
+    /// `#SPILL!` remains available for the case it is the right answer.
+    #[test]
+    fn a_real_blocker_inside_a_footprint_is_still_exported() {
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        let mut sheet = Sheet::new("Data".to_string());
+        sheet.cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Number(1.0),
+                formula: Some("SEQUENCE(3)".to_string()),
+                style_index: 0,
+                rich_text: None,
+                spill: Some((2, 0)),
+            },
+        );
+        // A2 carries its own FORMULA, so it is not one of the array's cells
+        // whatever the extent says.
+        sheet.cells.insert(
+            (1, 0),
+            SavedCell {
+                value: SavedCellValue::Number(99.0),
+                formula: Some("11*9".to_string()),
+                style_index: 0,
+                rich_text: None,
+                spill: None,
+            },
+        );
+        workbook.sheets.push(sheet);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        {
+            use std::io::Read;
+            zip.by_name("xl/worksheets/sheet1.xml")
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+        }
+        assert!(
+            xml.contains("11*9"),
+            "a cell with its own formula inside the footprint must not be              swallowed by the array; sheet1.xml was:
+{}",
+            xml
+        );
+    }
+
+    // ========================================================================
+    // FORMULA / ERROR ROUND-TRIP THROUGH A REAL .xlsx FILE
+    // ========================================================================
+    //
+    // Between them the xlsx reader and writer had exactly ONE test before these
+    // (hidden rows/cols, above). No formula round-trip, no error round-trip.
+    // That absence is precisely why three wrong-answer defects lived here:
+    // every static error imported as #VALUE!, every post-2007 Excel function
+    // imported as #NAME?, and a formula whose cell carried no cached value was
+    // dropped outright. Each is pinned below on a REAL file written by the
+    // writer and read by the reader.
+
+    fn one_sheet(cells: Vec<((u32, u32), SavedCell)>) -> Workbook {
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        let mut sheet = Sheet::new("Data".to_string());
+        for (rc, cell) in cells {
+            sheet.cells.insert(rc, cell);
+        }
+        workbook.sheets.push(sheet);
+        workbook
+    }
+
+    fn formula_cell(f: &str) -> SavedCell {
+        SavedCell {
+            value: SavedCellValue::Number(0.0),
+            formula: Some(f.to_string()),
+            style_index: 0,
+            rich_text: None,
+            spill: None,
+        }
+    }
+
+    /// A GROUPED expression and a DOTTED function name must survive a real
+    /// .xlsx round-trip.
+    ///
+    /// This is the end-to-end check on the renderer work: `=(A1+B1)*C1` has no
+    /// parenthesis node in the AST, so only the renderer's precedence guard puts
+    /// the brackets back, and `STDEV.S` is one of the 248 built-ins that a
+    /// Debug-format catch-all used to print as `StdevS`. Both now go out through
+    /// the ONE canonical renderer -- and .xlsx is the format other applications
+    /// read, so a defect here is a defect in someone else's spreadsheet.
+    #[test]
+    fn a_grouped_expression_and_a_dotted_function_survive_a_real_xlsx_file() {
+        let workbook = one_sheet(vec![
+            ((0, 0), formula_cell("=(A1+B1)*C1")),
+            ((1, 0), formula_cell("=A1+B1*C1")),
+            ((2, 0), formula_cell("=STDEV.S(D1:D9)")),
+            ((3, 0), formula_cell("=NORM.DIST(1,0,1,TRUE)")),
+            ((4, 0), formula_cell("=(A1&B1)&C1")),
+            ((5, 0), formula_cell("=-(A1+B1)")),
+            ((6, 0), formula_cell("=A1^(B1^C1)")),
+            ((7, 0), formula_cell("=(A1^B1)^C1")),
+        ]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("formulas.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        let s = &loaded.sheets[0];
+
+        for (row, expected) in [
+            (0u32, "=(A1+B1)*C1"),
+            (1, "=A1+B1*C1"),
+            (2, "=STDEV.S(D1:D9)"),
+            (3, "=NORM.DIST(1,0,1,TRUE)"),
+            (4, "=(A1&B1)&C1"),
+            (5, "=-(A1+B1)"),
+            (6, "=A1^(B1^C1)"),
+            (7, "=(A1^B1)^C1"),
+        ] {
+            let got = s
+                .cells
+                .get(&(row, 0))
+                .unwrap_or_else(|| panic!("cell at row {} was dropped by the xlsx round-trip", row))
+                .formula
+                .as_deref()
+                .unwrap_or_else(|| panic!("cell at row {} lost its formula", row));
+            assert_eq!(
+                got, expected,
+                "formula at row {} changed meaning across a real .xlsx file",
+                row
+            );
+        }
+    }
+
+    /// `_xlfn.`-prefixed "future functions" must import as the plain function.
+    ///
+    /// Excel stores every function added after 2007 with a namespace prefix
+    /// (`_xlfn.STDEV.S`, `_xlfn._xlws.FILTER`, `_xlpm.` for LAMBDA parameters).
+    /// Calcula IMPLEMENTS all of them, but the lexer accepts `_` and `.` inside
+    /// an identifier, so the prefixed name lexed as one unknown identifier and
+    /// every modern Excel workbook opened with `#NAME?` down the sheet.
+    ///
+    /// The last case is the one that makes the strip non-trivial: a prefix
+    /// inside a STRING LITERAL is the user's data and must not be touched.
+    #[test]
+    fn future_function_prefixes_are_stripped_on_import_but_not_inside_strings() {
+        use crate::xlsx_reader::strip_future_function_prefixes;
+
+        for (stored, expected) in [
+            ("_xlfn.STDEV.S(A1:A9)", "STDEV.S(A1:A9)"),
+            ("_xlfn.XLOOKUP(A1,B:B,C:C)", "XLOOKUP(A1,B:B,C:C)"),
+            ("_xlfn._xlws.FILTER(A1:A9,B1:B9)", "FILTER(A1:A9,B1:B9)"),
+            ("_xlfn._xlws.SORT(A1:A9)", "SORT(A1:A9)"),
+            ("_xlfn.LET(_xlpm.x,1,_xlpm.x+1)", "LET(x,1,x+1)"),
+            (
+                "_xlfn.LAMBDA(_xlpm.a,_xlpm.b,_xlpm.a+_xlpm.b)",
+                "LAMBDA(a,b,a+b)",
+            ),
+            ("SUM(A1:A9)", "SUM(A1:A9)"),
+            // A string literal that happens to contain the prefix is DATA.
+            (
+                "CONCAT(\"_xlfn.NOT_A_FUNC\",A1)",
+                "CONCAT(\"_xlfn.NOT_A_FUNC\",A1)",
+            ),
+            // Doubled quotes keep us inside the literal.
+            (
+                "CONCAT(\"say \"\"_xlfn.X\"\" now\",A1)",
+                "CONCAT(\"say \"\"_xlfn.X\"\" now\",A1)",
+            ),
+            // Not at an identifier boundary: this is somebody's defined name.
+            ("MY_xlfn.THING+1", "MY_xlfn.THING+1"),
+        ] {
+            assert_eq!(
+                strip_future_function_prefixes(stored),
+                expected,
+                "stripping {:?}",
+                stored
+            );
+        }
+    }
+
+    /// Every Excel error literal must survive an .xlsx import as ITSELF.
+    ///
+    /// The reader wrote `format!("{:?}", e)` -- calamine's DEBUG names, `Div0`
+    /// / `NA` / `Ref` / `Name` / `Null` / `Num` -- and nothing reads those back,
+    /// so `CellError::from_literal` fell through to `Value` and EVERY imported
+    /// error became `#VALUE!`. `ERROR.TYPE` reported the wrong number and
+    /// `IFERROR` took a branch on an error the file never contained.
+    #[test]
+    fn every_excel_error_literal_survives_an_xlsx_import() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("errors.xlsx");
+        {
+            let mut zw = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let o = zip::write::SimpleFileOptions::default();
+            zw.start_file("[Content_Types].xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#).unwrap();
+            zw.start_file("_rels/.rels", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#).unwrap();
+            zw.start_file("xl/workbook.xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#).unwrap();
+            zw.start_file("xl/_rels/workbook.xml.rels", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#).unwrap();
+            zw.start_file("xl/worksheets/sheet1.xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">
+<c r="A1" t="e"><v>#DIV/0!</v></c>
+<c r="B1" t="e"><v>#N/A</v></c>
+<c r="C1" t="e"><v>#REF!</v></c>
+<c r="D1" t="e"><v>#NAME?</v></c>
+<c r="E1" t="e"><v>#NULL!</v></c>
+<c r="F1" t="e"><v>#NUM!</v></c>
+<c r="G1" t="e"><v>#VALUE!</v></c>
+</row></sheetData></worksheet>"#).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        let s = &loaded.sheets[0];
+        for (col, expected) in [
+            (0u32, "#DIV/0!"),
+            (1, "#N/A"),
+            (2, "#REF!"),
+            (3, "#NAME?"),
+            (4, "#NULL!"),
+            (5, "#NUM!"),
+            (6, "#VALUE!"),
+        ] {
+            match &s.cells.get(&(0, col)).expect("error cell missing").value {
+                SavedCellValue::Error(got) => assert_eq!(
+                    got, expected,
+                    "error cell at column {} imported as the wrong error",
+                    col
+                ),
+                other => panic!("column {} imported as {:?}, not an error", col, other),
+            }
+        }
+
+        // And each one must survive the trip into the engine's own type, which
+        // is where the collapse to #VALUE! actually happened.
+        for literal in ["#DIV/0!", "#N/A", "#REF!", "#NAME?", "#NULL!", "#NUM!", "#VALUE!"] {
+            assert_eq!(
+                engine::CellError::from_literal(literal).as_literal(),
+                literal,
+                "{} does not round-trip through CellError",
+                literal
+            );
+        }
+    }
+
+    /// A formula cell with no cached `<v>` must keep its formula.
+    ///
+    /// The reader skipped "empty" cells BEFORE looking for a formula, so
+    /// `<c r="A1"><f>A1*2</f></c>` -- what LibreOffice and several generators
+    /// emit whenever the sheet recalculates on load -- was dropped whole.
+    #[test]
+    fn a_formula_with_no_cached_value_is_not_dropped_on_import() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("novalue.xlsx");
+        {
+            let mut zw = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let o = zip::write::SimpleFileOptions::default();
+            zw.start_file("[Content_Types].xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#).unwrap();
+            zw.start_file("_rels/.rels", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#).unwrap();
+            zw.start_file("xl/workbook.xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#).unwrap();
+            zw.start_file("xl/_rels/workbook.xml.rels", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#).unwrap();
+            zw.start_file("xl/worksheets/sheet1.xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">
+<c r="A1"><v>5</v></c>
+<c r="B1"><f>A1*2</f></c>
+<c r="C1"><f>A1*3</f><v>15</v></c>
+</row></sheetData></worksheet>"#).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        let s = &loaded.sheets[0];
+        let b1 = s
+            .cells
+            .get(&(0, 1))
+            .expect("the formula cell with no cached value was dropped entirely");
+        assert_eq!(b1.formula.as_deref(), Some("=A1*2"));
+        assert_eq!(s.cells.get(&(0, 2)).unwrap().formula.as_deref(), Some("=A1*3"));
+    }
+
+    /// An illegal sheet name must produce an ACTIONABLE refusal, not a raw
+    /// library message, and it must name the sheet.
+    ///
+    /// The load path deliberately accepts names that Excel forbids (a legacy or
+    /// imported workbook keeps whatever it had), so this is reachable on a real
+    /// document -- and it used to abort the whole "Save As .xlsx" with
+    /// rust_xlsxwriter's own wording and no indication which sheet was at fault.
+    #[test]
+    fn an_illegal_sheet_name_refuses_the_xlsx_save_by_name() {
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        workbook.sheets.push(Sheet::new("Budget[2026]".to_string()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-name.xlsx");
+        let err = save_xlsx(&workbook, &path)
+            .expect_err("a sheet name Excel forbids must not save silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Budget[2026]"),
+            "the refusal must name the offending sheet; got: {}",
+            msg
+        );
+        assert!(
+            msg.contains(".cala"),
+            "the refusal must offer the lossless alternative; got: {}",
+            msg
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S10 — the 1904 date system
+    // -----------------------------------------------------------------------
+
+    /// Build a one-sheet .xlsx with the given `<workbookPr>` attributes and a
+    /// styles part that assigns built-in number formats to columns A..E.
+    ///
+    /// Built-ins used, and why each one is in the fixture:
+    ///   xf 1 -> numFmtId 14  (`mm-dd-yy`)      a DATE: must shift
+    ///   xf 2 -> numFmtId 0   (`General`)       a plain number: must NOT shift
+    ///   xf 3 -> numFmtId 20  (`HH:mm`)         a TIME
+    ///   xf 4 -> numFmtId 46  (`[h]:mm:ss`)     ELAPSED time: a duration
+    fn write_dated_xlsx(path: &std::path::Path, workbook_pr: &str) {
+        use std::io::Write;
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        zw.start_file("[Content_Types].xml", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#).unwrap();
+        zw.start_file("_rels/.rels", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#).unwrap();
+        zw.start_file("xl/workbook.xml", o).unwrap();
+        zw.write_all(
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+{}<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+                workbook_pr
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/_rels/workbook.xml.rels", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"#).unwrap();
+        zw.start_file("xl/styles.xml", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+<borders count="1"><border/></borders>
+<cellXfs count="5">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+<xf numFmtId="14" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>
+<xf numFmtId="20" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>
+<xf numFmtId="46" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>
+</cellXfs>
+</styleSheet>"#).unwrap();
+        zw.start_file("xl/worksheets/sheet1.xml", o).unwrap();
+        // A1 = 1904-serial 0 (the 1904 epoch itself), date-formatted.
+        // B1 = 1904-serial 36892 (2004-12-31), date-formatted.
+        // C1 = 36892 as a PLAIN NUMBER -- the control.
+        // D1 = 0.5, time-formatted: noon, identical in both systems.
+        // E1 = 1.25, elapsed-time-formatted: thirty hours, a DURATION.
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">
+<c r="A1" s="1"><v>0</v></c>
+<c r="B1" s="1"><v>36892</v></c>
+<c r="C1" s="2"><v>36892</v></c>
+<c r="D1" s="3"><v>0.5</v></c>
+<c r="E1" s="4"><v>1.25</v></c>
+</row></sheetData></worksheet>"#).unwrap();
+        zw.finish().unwrap();
+    }
+
+    fn number_at(sheet: &Sheet, row: u32, col: u32) -> f64 {
+        match &sheet.cells.get(&(row, col)).expect("cell missing").value {
+            SavedCellValue::Number(n) => *n,
+            other => panic!("cell ({},{}) is {:?}, not a number", row, col, other),
+        }
+    }
+
+    /// A Mac-authored workbook declares `date1904="1"`, and every date serial
+    /// in it counts from 1904-01-01. This reader ignored the flag entirely, so
+    /// every date came in FOUR YEARS AND A DAY early -- and silently, because
+    /// 1462 days off is still a perfectly valid date.
+    #[test]
+    fn the_1904_date_system_is_honoured_on_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mac1904.xlsx");
+        write_dated_xlsx(&path, r#"<workbookPr date1904="1"/>"#);
+
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        let s = &loaded.sheets[0];
+
+        // The 1904 epoch itself. Serial 0 there is 1904-01-01, which is serial
+        // 1462 in the 1900 system Calcula stores.
+        assert_eq!(
+            number_at(s, 0, 0),
+            1462.0,
+            "the 1904 epoch must land on 1904-01-01, not on 1900-01-00"
+        );
+        // A real date: 1904-serial 36892 is 2004-12-31.
+        assert_eq!(number_at(s, 0, 1), 36892.0 + 1462.0);
+
+        // THE CONTROL, and it is the reason the shift is format-driven rather
+        // than blanket: the same number with a GENERAL format is not a date and
+        // must come through untouched. A blanket +1462 would corrupt every
+        // quantity, price and count in a Mac workbook.
+        assert_eq!(
+            number_at(s, 0, 2),
+            36892.0,
+            "a plain number must not be shifted by the date system"
+        );
+
+        // A bare time of day is the same number in both systems.
+        assert_eq!(
+            number_at(s, 0, 3),
+            0.5,
+            "0.5 is noon in both date systems -- shifting it invents a date"
+        );
+
+        // An ELAPSED-time format is a duration and has no epoch at all.
+        assert_eq!(
+            number_at(s, 0, 4),
+            1.25,
+            "[h]:mm:ss is thirty hours, not an instant in 1904"
+        );
+    }
+
+    /// The default, and the half that must not regress: an ordinary 1900-system
+    /// workbook -- with the attribute absent, or present and false -- is
+    /// imported unchanged.
+    #[test]
+    fn a_1900_workbook_is_not_shifted() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, pr) in [
+            ("absent.xlsx", ""),
+            ("zero.xlsx", r#"<workbookPr date1904="0"/>"#),
+            ("false.xlsx", r#"<workbookPr date1904="false"/>"#),
+        ] {
+            let path = dir.path().join(name);
+            write_dated_xlsx(&path, pr);
+            let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+            let s = &loaded.sheets[0];
+            assert_eq!(number_at(s, 0, 0), 0.0, "{}", name);
+            assert_eq!(number_at(s, 0, 1), 36892.0, "{}", name);
+            assert_eq!(number_at(s, 0, 2), 36892.0, "{}", name);
+        }
+    }
+
+    /// `date1904` is an OOXML boolean, so `"true"` means the same as `"1"`.
+    /// LibreOffice writes the word; reading only `"1"` would take the 1900
+    /// branch on every file it produces, which is the silent-wrong-answer shape
+    /// this whole register keeps cataloguing.
+    #[test]
+    fn date1904_accepts_every_ooxml_boolean_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, pr) in [
+            ("one.xlsx", r#"<workbookPr date1904="1"/>"#),
+            ("true.xlsx", r#"<workbookPr date1904="true"/>"#),
+            ("True.xlsx", r#"<workbookPr date1904="True"/>"#),
+        ] {
+            let path = dir.path().join(name);
+            write_dated_xlsx(&path, pr);
+            let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+            assert_eq!(
+                number_at(&loaded.sheets[0], 0, 1),
+                36892.0 + 1462.0,
+                "{} was read as a 1900-system workbook",
+                name
+            );
+        }
+    }
+
 }

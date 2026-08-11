@@ -63,6 +63,46 @@ pub enum CellError {
     /// fuel exhaustion, the depth ceiling, and the size caps all mean "this
     /// formula exceeded a calculation limit".
     Limit,
+    /// Excel's `#NULL!`: the intersection operator (a space between two ranges)
+    /// found no overlapping cells.
+    ///
+    /// WHY IT EXISTS NOW, having been "deliberately absent" before: absence was
+    /// only defensible while nothing could ever HOLD one. That was never true --
+    /// `.xlsx` files store static `#NULL!` cells -- and the reader meant to
+    /// carry them mangled every error through `format!("{:?}")` first, so the
+    /// claim looked true because a second bug destroyed the evidence. With that
+    /// reader fixed an imported `#NULL!` had exactly two possible fates: a
+    /// variant of its own, or silent rewriting to `#VALUE!` on the way in.
+    /// Excel parity settles it -- they are two different errors that send a
+    /// user to two different places.
+    Null,
+    /// Excel's `#NUM!`: a numeric argument is outside the function's domain
+    /// (`SQRT(-1)`, `LOG(0)`) or the result is too large to represent.
+    ///
+    /// Same history as [`CellError::Null`]. The evaluator PRODUCES this now:
+    /// register S6 swept every numeric-domain guard in `evaluator.rs` and split
+    /// the ones where Excel distinguishes "wrong TYPE of argument" (`#VALUE!`)
+    /// from "a number this function cannot use, or a result too large to
+    /// represent" (`#NUM!`). See `error_value_parity_tests`.
+    Num,
+    /// Excel's `#SPILL!`: a dynamic array cannot write its result because
+    /// something occupies the cells it needs.
+    ///
+    /// WHY IT IS NOT `#VALUE!`, which is what a blocked array used to answer:
+    /// the remedy has nothing to do with the formula. `#VALUE!` sends a user to
+    /// inspect their arguments; every argument here is fine. The fix is to
+    /// CLEAR THE CELLS IN THE WAY, and the user cannot be told to do that by an
+    /// error that does not distinguish the case. It also has to be COUNTABLE --
+    /// error checking and the audit trail want to say "4 arrays are blocked",
+    /// which needs a value of its own, and Excel's own error-checking pane
+    /// treats `#SPILL!` as its own class with a "Select Obstructing Cells"
+    /// action.
+    ///
+    /// The cell value carries no message, so the OBSTRUCTION's address is
+    /// reported alongside it: see `SpillBlock` in `commands/data.rs`, which
+    /// records the first blocking cell and is what the error-checking
+    /// explanation names.
+    Spill,
 }
 
 impl CellError {
@@ -109,15 +149,21 @@ impl CellError {
             // is the tiebreaker for anything this table does not settle on its
             // own: #DIV/0! and #VALUE! and #REF! and #NULL! and #NUM! end in
             // "!", #NAME? ends in "?", and #N/A has no trailing punctuation at
-            // all. (#NULL! and #NUM! have no engine variant and are therefore
-            // deliberately absent rather than aliased onto one that exists —
-            // see CELL_ERROR_LITERALS in cellFormatting.ts, which still
-            // recognises them because they can arrive by xlsx import.)
+            // all. #NULL! and #NUM! now have variants of their own: the old note
+            // here said they were "deliberately absent" because nothing could
+            // hold one, and cited the xlsx importer as the surface that
+            // recognised them anyway. That was circular -- the importer mangled
+            // every error through format!("{:?}") before anything could see it,
+            // so the absence justified itself with a bug. Both directions are
+            // now real; see the variants.
             CellError::Div0 => "#DIV/0!",
             CellError::Ref => "#REF!",
             CellError::Name => "#NAME?",
             CellError::Value => "#VALUE!",
             CellError::NA => "#N/A",
+            CellError::Null => "#NULL!",
+            CellError::Num => "#NUM!",
+            CellError::Spill => "#SPILL!",
             // ---- Calcula-only states, following Excel's punctuation ---------
             // None of these three has an Excel counterpart, so Excel cannot
             // settle their spelling — but it does settle their SHAPE: an error
@@ -140,6 +186,9 @@ impl CellError {
             "#NAME?" => CellError::Name,
             "#VALUE!" => CellError::Value,
             "#N/A" => CellError::NA,
+            "#NULL!" => CellError::Null,
+            "#NUM!" => CellError::Num,
+            "#SPILL!" => CellError::Spill,
             "#CIRCULAR!" => CellError::Circular,
             "#CONFLICT!" => CellError::Conflict,
             "#BLOCKED!" => CellError::Blocked,

@@ -166,10 +166,10 @@ pub fn get_sheet_summary(
     max_chars: u32,
 ) -> Result<String, String> {
     let state = handle.state::<AppState>();
+    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
-    let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
     let options = AiSerializeOptions {
@@ -842,7 +842,15 @@ pub fn create_table(
         style_options: None,
         style_name: None,
     };
-    let result = crate::tables::create_table(handle.state::<crate::persistence::FileState>(), handle.state::<AppState>(), params);
+    let result = crate::tables::create_table(
+        handle.state::<crate::persistence::FileState>(),
+        handle.state::<AppState>(),
+        handle.state::<crate::persistence::UserFilesState>(),
+        handle.state::<crate::pivot::PivotState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
+        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        params,
+    );
     if !result.success {
         return Err(result
             .error

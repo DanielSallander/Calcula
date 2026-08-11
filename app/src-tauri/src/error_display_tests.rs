@@ -37,6 +37,9 @@ const SPELLINGS: &[(CellError, &str)] = &[
     (CellError::Name, "#NAME?"),
     (CellError::Value, "#VALUE!"),
     (CellError::NA, "#N/A"),
+    (CellError::Null, "#NULL!"),
+    (CellError::Num, "#NUM!"),
+    (CellError::Spill, "#SPILL!"),
     // -- Calcula-only states, following Excel's punctuation ----------------
     (CellError::Circular, "#CIRCULAR!"),
     (CellError::Conflict, "#CONFLICT!"),
@@ -123,6 +126,9 @@ fn the_four_the_frontend_would_collapse_keep_their_exact_literal() {
         (CellError::Blocked, "#BLOCKED!"),
         (CellError::NA, "#N/A"),
         (CellError::Conflict, "#CONFLICT!"),
+        (CellError::Num, "#NUM!"),
+        (CellError::Null, "#NULL!"),
+        (CellError::Spill, "#SPILL!"),
     ] {
         assert_eq!(
             crate::cell_error_display(&variant),
@@ -137,30 +143,70 @@ fn the_four_the_frontend_would_collapse_keep_their_exact_literal() {
 
 #[test]
 fn every_variant_is_accounted_for() {
-    // A new `CellError` that nobody adds here is a new spelling nobody checked.
-    let all = [
-        CellError::Div0,
-        CellError::Ref,
-        CellError::Name,
-        CellError::Value,
-        CellError::NA,
-        CellError::Circular,
-        CellError::Conflict,
-        CellError::Blocked,
-        CellError::Limit,
-    ];
-    for variant in &all {
-        assert!(
-            SPELLINGS.iter().any(|(v, _)| v == variant),
-            "{:?} is not in SPELLINGS — decide its literal (Excel's if Excel \
-             has one) and add a row",
-            variant
-        );
+    // THIS TEST USED TO LIE, and it is worth saying how, because the shape is
+    // the reusable mistake. It compared SPELLINGS against a HAND-WRITTEN `all`
+    // array in this same file, so "a new CellError that nobody adds here is a
+    // new spelling nobody checked" held only for someone who added the variant
+    // to `all`. `CellError::Null` and `CellError::Num` were added to the engine
+    // for the .xlsx reader and appeared in NEITHER list, so both stayed the
+    // same size and the assertion passed while two variants went unchecked --
+    // a census that enumerates a copy of the thing rather than the thing.
+    //
+    // It now reads `cell.rs` at test time, exactly as the frontend's
+    // `type-guards-exhaustive` drift guard does, so a variant can only escape
+    // it by not existing.
+    let cell_rs = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../core/engine/src/cell.rs"),
+    )
+    .expect("core/engine/src/cell.rs is readable from the app crate");
+    let start = cell_rs
+        .find("pub fn as_literal")
+        .expect("as_literal not found in core/engine/src/cell.rs");
+    let body = &cell_rs[start..cell_rs[start..].find("
+    }").unwrap() + start];
+
+    let mut variants: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("CellError::") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once(" =>") else {
+            continue;
+        };
+        if !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        variants.push(name.to_string());
     }
+    variants.sort();
+    variants.dedup();
+    assert!(
+        variants.len() > 5,
+        "parsed {} variants out of CellError::as_literal -- the Rust shape          changed and this census is reading nothing",
+        variants.len()
+    );
+
+    let covered: Vec<String> = SPELLINGS
+        .iter()
+        .map(|(v, _)| format!("{:?}", v))
+        .collect();
+    let missing: Vec<&String> = variants.iter().filter(|v| !covered.contains(v)).collect();
+    assert!(
+        missing.is_empty(),
+        "core/engine/src/cell.rs can put these errors in a cell and SPELLINGS          does not cover them: {:?}. Decide each one's literal (Excel's, if          Excel has one) and add a row",
+        missing
+    );
     assert_eq!(
         SPELLINGS.len(),
-        all.len(),
-        "SPELLINGS and the variant list disagree in size"
+        variants.len(),
+        "SPELLINGS has {} rows for {} CellError variants -- a row names a          variant that no longer exists",
+        SPELLINGS.len(),
+        variants.len()
     );
 }
 

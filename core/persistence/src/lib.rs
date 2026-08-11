@@ -202,6 +202,20 @@ pub struct Workbook {
     /// Persisting the remainder closes the laundering path and lets the reopened
     /// session resume exactly where the cancel stopped.
     pub pending_recalc: Option<SavedPendingRecalc>,
+    /// INBOUND ONLY: the `format_version` the archive this workbook was READ
+    /// from carried, or `0` when it did not come from a versioned `.cala`
+    /// (constructed in memory, or read from `.xlsx`, which has no such stamp).
+    ///
+    /// The writer NEVER reads this — `write_calcula_bytes` re-derives the
+    /// stamp from the content it is about to write, so a workbook that lost a
+    /// feature since it was opened is not stamped for one it no longer has.
+    /// It exists so the LOAD path can ask "was this written before feature X
+    /// existed?" and run a one-time recovery instead of guessing from the
+    /// data. `SPILL_EXTENT_MIN_FORMAT_VERSION` is the first such gate: a file
+    /// below it carries a dynamic array's spilled cells with no record of
+    /// which origin owns them, and the host rebuilds that record by
+    /// re-evaluating rather than leaving the array unprotected.
+    pub format_version: u32,
 }
 
 /// The un-recalculated remainder of a cancelled recalculation, as persisted.
@@ -599,6 +613,8 @@ impl Workbook {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            // Not read from an archive. See the field doc.
+            format_version: 0,
         }
     }
 
@@ -640,6 +656,8 @@ impl Workbook {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            // Not read from an archive. See the field doc.
+            format_version: 0,
         }
     }
 }
@@ -872,6 +890,34 @@ pub struct SavedCell {
     pub style_index: usize,
     /// Rich text runs for partial formatting within the cell.
     pub rich_text: Option<Vec<RichTextRun>>,
+    /// THE SPILL EXTENT, on a dynamic-array ORIGIN only: the BOTTOM-RIGHT
+    /// corner `(end_row, end_col)`, absolute, of the rectangle this cell's
+    /// array occupies. The origin itself is the top-left corner, so a
+    /// one-cell result is never recorded — `None` on every ordinary cell.
+    ///
+    /// WHY THIS IS PERSISTED AT ALL, since the spilled VALUES already are.
+    /// The values are a cache and can be recomputed; the OWNERSHIP cannot.
+    /// Which cells belong to which origin is not derivable from the grid --
+    /// a spilled `2` and a typed `2` are the same bytes -- so without this a
+    /// reopened workbook has an array that nothing protects, and the first
+    /// re-evaluation of the origin finds its own cells occupied by values it
+    /// no longer owns and collapses to an error (register §2ab).
+    ///
+    /// EXCEL PARITY, and this is Excel's own design rather than an invention:
+    /// xlsx stores the array formula on the origin as
+    /// `<f t="array" ref="A1:A4">SEQUENCE(4)</f>`, where `ref` IS this
+    /// rectangle, and writes the spilled cells as value-only `<c>` elements
+    /// with no `<f>`. Excel persists BOTH halves and recomputes neither on
+    /// open. `SavedCell` mirrors that split exactly: `formula` + `spill` on
+    /// the origin, `value` alone on the cells it covers.
+    ///
+    /// A RECTANGLE, not a cell list, for the same reason `ref` is: it is two
+    /// numbers for an array of any size, and it also records ownership of
+    /// spilled cells whose value is EMPTY — those are dropped from `data.json`
+    /// by the sparse writer, so a cell list built from the file would not
+    /// mention them and they would come back editable in the middle of a
+    /// protected block.
+    pub spill: Option<(u32, u32)>,
 }
 
 impl SavedCell {
@@ -885,6 +931,10 @@ impl SavedCell {
             formula: cell.formula_string_raw(),
             style_index: cell.style_index,
             rich_text: cell.rich_text.clone(),
+            // The grid does not know about spills; the extent is stamped by
+            // the save path from the host's spill map, which is the only
+            // authority for it. See `apply_spill_extents_to_sheet`.
+            spill: None,
         }
     }
 

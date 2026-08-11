@@ -13,7 +13,11 @@ import * as path from "node:path";
 import type { Page } from "@playwright/test";
 import type { GridHelper } from "../helpers/grid";
 import type { Invariant, InvariantViolation } from "../invariants/invariants";
-import { captureSnapshot, installErrorTracking } from "../invariants/stateSnapshot";
+import {
+  captureSnapshot,
+  installErrorTracking,
+  setWalkStep,
+} from "../invariants/stateSnapshot";
 import type { StateSnapshot } from "../invariants/stateSnapshot";
 import type { OracleBattery } from "../oracles";
 import type { OracleBaseline } from "../oracles/types";
@@ -49,6 +53,32 @@ export interface WalkOptions {
   verbose?: boolean;
 }
 
+/**
+ * How long one action actually took.
+ *
+ * S13's bundle could not distinguish "the script mount sat on its ten-second
+ * deadline and then failed" from "something failed instantly": nothing timed
+ * anything. A deadline is a DURATION, so a bundle that cannot report durations
+ * cannot report deadlines, and the only failure mode this walker has that is
+ * defined in seconds was the one it could say least about.
+ */
+export interface ActionTiming {
+  step: number;
+  id: string;
+  params: Record<string, unknown>;
+  /** Milliseconds from the start of the walk to the start of this action. */
+  startedAtMs: number;
+  /** Milliseconds `execute()` took (excludes the settle wait). */
+  durationMs: number;
+  /** Set when `execute()` threw and the walk tolerated it. */
+  error?: string;
+}
+
+export interface CheckpointTiming {
+  step: number;
+  durationMs: number;
+}
+
 export interface WalkResult {
   passed: boolean;
   seed: number | null;
@@ -59,8 +89,10 @@ export interface WalkResult {
   violation: InvariantViolation | null;
   allViolations: InvariantViolation[];
   failingSnapshot: StateSnapshot | null;
-  /** Oracle checkpoints that ran (step numbers). */
-  checkpoints: number[];
+  /** Oracle checkpoints that ran, with how long each took. */
+  checkpoints: CheckpointTiming[];
+  /** Per-action timings, in execution order. */
+  timings: ActionTiming[];
   elapsedMs: number;
 }
 
@@ -96,7 +128,8 @@ export class WalkRunner {
     const startedAt = Date.now();
     const trace = createTrace(source.seed);
     const tracePath = resultsDir ? path.join(resultsDir, "trace.json") : null;
-    const checkpoints: number[] = [];
+    const checkpoints: CheckpointTiming[] = [];
+    const timings: ActionTiming[] = [];
 
     const fail = (
       step: number,
@@ -113,6 +146,7 @@ export class WalkRunner {
       allViolations: all,
       failingSnapshot: snapshot,
       checkpoints,
+      timings,
       elapsedMs: Date.now() - startedAt,
     });
 
@@ -142,11 +176,27 @@ export class WalkRunner {
         console.log(`  [step ${step}/${maxActions}] ${instance.id}`);
       }
 
+      // Every console line from here on belongs to this step.
+      setWalkStep(step);
+
       // Execute
+      const actionStartedAtMs = Date.now() - startedAt;
+      const actionStartedAt = Date.now();
+      const timing: ActionTiming = {
+        step,
+        id: instance.id,
+        params: instance.params,
+        startedAtMs: actionStartedAtMs,
+        durationMs: 0,
+      };
+      timings.push(timing);
       try {
         await executeInstance(this.page, this.grid, instance, catalog);
+        timing.durationMs = Date.now() - actionStartedAt;
       } catch (err) {
+        timing.durationMs = Date.now() - actionStartedAt;
         const msg = (err as Error).message ?? "";
+        timing.error = msg;
         if (
           msg.includes("Target page, context or browser has been closed") ||
           msg.includes("Target closed") ||
@@ -217,14 +267,18 @@ export class WalkRunner {
         (step % oracleEveryNActions === 0 || isLastStep || budgetExhausted)
       ) {
         if (verbose) console.log(`  [oracle checkpoint] after step ${step}`);
-        checkpoints.push(step);
+        const checkpointTiming: CheckpointTiming = { step, durationMs: 0 };
+        checkpoints.push(checkpointTiming);
+        const checkpointStartedAt = Date.now();
         try {
           const result = await oracleBattery.checkpoint(this.page, oracleBaseline);
+          checkpointTiming.durationMs = Date.now() - checkpointStartedAt;
           oracleBaseline = result.nextBaseline;
           if (result.violations.length > 0) {
             return fail(step, result.violations[0], result.violations, snapshot);
           }
         } catch (err) {
+          checkpointTiming.durationMs = Date.now() - checkpointStartedAt;
           const msg = (err as Error).message ?? String(err);
           return fail(
             step,
@@ -248,13 +302,17 @@ export class WalkRunner {
       step % (this.opts.oracleEveryNActions ?? 25) !== 0
     ) {
       if (verbose) console.log(`  [oracle checkpoint] final after step ${step}`);
-      checkpoints.push(step);
+      const finalTiming: CheckpointTiming = { step, durationMs: 0 };
+      checkpoints.push(finalTiming);
+      const finalStartedAt = Date.now();
       try {
         const result = await oracleBattery.checkpoint(this.page, oracleBaseline);
+        finalTiming.durationMs = Date.now() - finalStartedAt;
         if (result.violations.length > 0) {
           return fail(step, result.violations[0], result.violations, snapshot);
         }
       } catch (err) {
+        finalTiming.durationMs = Date.now() - finalStartedAt;
         const msg = (err as Error).message ?? String(err);
         return fail(
           step,
@@ -279,6 +337,7 @@ export class WalkRunner {
       allViolations: [],
       failingSnapshot: null,
       checkpoints,
+      timings,
       elapsedMs: Date.now() - startedAt,
     };
   }
@@ -333,6 +392,23 @@ export function formatWalkReport(result: WalkResult): string {
   for (let i = startIdx; i < actions.length; i++) {
     const marker = i === actions.length - 1 ? " <-- FAILED HERE" : "";
     lines.push(`  ${i + 1}. ${actions[i].id} ${JSON.stringify(actions[i].params)}${marker}`);
+  }
+
+  // The slowest actions, because the walker's only second-defined failure mode
+  // (the 10s script-mount deadline) is invisible in an untimed trace. An action
+  // sitting on ~10000ms IS the deadline; one at 120ms is not.
+  const slowest = [...result.timings]
+    .sort((a, b) => b.durationMs - a.durationMs)
+    .slice(0, 5);
+  if (slowest.length > 0 && slowest[0].durationMs > 0) {
+    lines.push(``);
+    lines.push(`  --- Slowest actions ---`);
+    for (const t of slowest) {
+      lines.push(
+        `  step ${t.step}: ${t.id} ${t.durationMs}ms` +
+          (t.error ? ` (threw: ${t.error.slice(0, 120)})` : "")
+      );
+    }
   }
 
   return lines.join("\n");

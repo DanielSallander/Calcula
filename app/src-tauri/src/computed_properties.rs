@@ -691,10 +691,22 @@ fn update_prop_dependencies(
 }
 
 /// Remove all dependencies for a given prop_id.
-fn clear_prop_dependencies(
-    prop_id: u64,
-    deps: &mut ComputedPropDependencies,
-    rev_deps: &mut ComputedPropDependents,
+///
+/// GENERIC OVER THE ID TYPE because there are two computed-property worlds with
+/// the same shape and different keys: grid properties key on `u64`, slicer
+/// properties on `identity::EntityId`. `remove_slicer_computed_property` used to
+/// carry a hand-inlined SECOND COPY of this loop — correct at the time, and the
+/// exact drift shape §3bm spent a whole section deleting (three copies of one
+/// spill decision, two of them already wrong). The object-dependency census
+/// found it the moment that census started asking per COMMAND instead of per
+/// object kind: the row names this symbol, and the slicer path called nothing.
+///
+/// One loop, two callers. A future fix to the rev-map bookkeeping now lands on
+/// both.
+pub(crate) fn clear_prop_dependencies<K: Copy + Eq + std::hash::Hash>(
+    prop_id: K,
+    deps: &mut HashMap<K, HashSet<(usize, u32, u32)>>,
+    rev_deps: &mut HashMap<(usize, u32, u32), HashSet<K>>,
 ) {
     if let Some(old_cells) = deps.remove(&prop_id) {
         for cell_key in &old_cells {
@@ -777,8 +789,8 @@ pub fn add_computed_property(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.read().unwrap();
-    let grids = state.grids.read().unwrap();
     let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let row_heights_snapshot = state.row_heights.read().unwrap().clone();
@@ -916,8 +928,8 @@ pub fn update_computed_property(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.read().unwrap();
-    let grids = state.grids.read().unwrap();
     let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let row_heights_snapshot = state.row_heights.read().unwrap().clone();

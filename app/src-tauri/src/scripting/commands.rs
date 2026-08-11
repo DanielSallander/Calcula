@@ -731,9 +731,10 @@ pub(crate) fn apply_script_modified_grids_core(
         for w in non_active_writes.iter_mut() {
             app_grids[w.sheet_index] = w.prepared.take().expect("planned grid");
             // SPILL CLAIMS ON THE INSTALLED SHEET (§2y). A wholesale install can
-            // replace the FORMULA that owns a dynamic array, and this path has
-            // no cascade seeds and recalculates through the whole-sheet
-            // `recalculate_sheet_values`, which is not spill-aware. Any origin
+            // replace the FORMULA that owns a dynamic array, this path has no
+            // cascade seeds, and `recalculate_sheet_values` (spill-aware since
+            // §3bm) only visits cells that still hold a formula — so the
+            // replaced origin is never reached. Any origin
             // that no longer holds a formula in the grid just installed has its
             // claim dropped, or the cells it covered stay uneditable AND
             // undeletable for the session, naming a source cell the script
@@ -1469,10 +1470,27 @@ pub fn save_script(
 /// Custom Functions library) are REFUSED: they reuse the module map for storage
 /// but are not user code, they are hidden from `list_scripts`, and deleting one
 /// would silently destroy the owning feature's state.
+///
+/// TWO CASCADES, both security-shaped (§3bn):
+///
+/// * **Scheduled jobs.** A job records its owning `script_id` and nothing else.
+///   Deleting the module left the job in the scheduler, waking on its timer
+///   forever and failing to resolve, every time, for the life of the session.
+/// * **Capability grants.** Backend grants (net origins and capabilities) are
+///   keyed by script id too. A grant outliving its script is a standing
+///   authorisation with no code attached — and script ids are AUTHOR-CHOSEN, so
+///   a new script created with the same id would silently inherit consent the
+///   user gave to different code. That is the one cascade here that is not
+///   merely tidiness.
+///
+/// The BUTTONS that link this script are deliberately NOT cascaded: the link
+/// model lets the user re-point them, and `list_controls_referencing_macro`
+/// names every one of them in the confirm, so the orphan is never silent.
 #[tauri::command]
 pub fn delete_script(
     file_state: State<'_, crate::persistence::FileState>,
     script_state: State<ScriptState>,
+    cap_store: State<'_, crate::scripting::CapabilityStore>,
     id: String,
 ) -> Result<(), String> {
     if is_reserved_script_id(&id) {
@@ -1484,12 +1502,22 @@ pub fn delete_script(
 
     // Scripts/notebooks are persisted in the .cala; this is a document change.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut scripts = script_state.workbook_scripts.write(&effect)
-        .map_err(|e| e.to_string())?;
+    {
+        let mut scripts = script_state.workbook_scripts.write(&effect)
+            .map_err(|e| e.to_string())?;
 
-    if scripts.remove(&id).is_none() {
-        return Err(format!("Script '{}' not found", id));
+        if scripts.remove(&id).is_none() {
+            return Err(format!("Script '{}' not found", id));
+        }
     }
+
+    crate::scripting::scheduler::remove_script_jobs(&id);
+    cap_store.revoke_script(&id);
+    crate::log_info!(
+        "SCRIPT",
+        "delete_script {}: scheduled jobs dropped, capability grants revoked",
+        id
+    );
     Ok(())
 }
 

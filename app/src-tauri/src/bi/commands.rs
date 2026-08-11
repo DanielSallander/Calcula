@@ -2941,10 +2941,14 @@ pub async fn bi_insert_result(
     {
         let active_sheet = *state.active_sheet.read().unwrap();
         if request.sheet_index == active_sheet {
+            // CANONICAL GRID LOCK ORDER: `grid` before `grids`. The effect moves
+            // up with the lock it authorises; the branch condition is what
+            // decides that something is written, and the sheet it names is the
+            // ACTIVE one, so `grids.get` below cannot be the gate that refuses.
+            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+            let mut active_grid = state.grid.write(&effect).unwrap();
             let grids = state.grids.read().unwrap();
             if let Some(src_grid) = grids.get(request.sheet_index) {
-                let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-                let mut active_grid = state.grid.write(&effect).unwrap();
                 for ((r, c), cell) in src_grid.cells.iter() {
                     if *r >= start_row && *r <= end_row && *c >= start_col && *c <= end_col {
                         active_grid.set_cell(*r, *c, cell.clone());
@@ -3228,10 +3232,11 @@ pub async fn bi_refresh_connection(
         {
             let active_sheet = *state.active_sheet.read().unwrap();
             if active_query.sheet_index == active_sheet {
+                // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+                let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+                let mut active_grid = state.grid.write(&effect).unwrap();
                 let grids = state.grids.read().unwrap();
                 if let Some(src_grid) = grids.get(active_query.sheet_index) {
-                    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-                    let mut active_grid = state.grid.write(&effect).unwrap();
                     for r in active_query.start_row..=active_query.end_row {
                         for c in active_query.start_col..=active_query.end_col {
                             active_grid.set_cell(r, c, Cell::new());

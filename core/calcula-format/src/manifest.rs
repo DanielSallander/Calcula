@@ -47,7 +47,10 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 /// a build that stamps v5 today knows nothing about the four new fields, so it would
 /// drop them on its next save, which is precisely the mishandling a version link exists
 /// to prevent.
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 6;
+///
+/// v7 adds the DYNAMIC-ARRAY SPILL EXTENT on each array origin
+/// (`SPILL_EXTENT_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 7;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -106,6 +109,28 @@ pub const SHEET_VIEW_MIN_FORMAT_VERSION: u32 = 5;
 /// Stamped ONLY when some sheet actually carries a non-default flag, so an ordinary
 /// workbook still writes v1-v5 and stays openable by older builds.
 pub const SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION: u32 = 6;
+
+/// Minimum `.cala` format version a reader must be to handle the DYNAMIC-ARRAY
+/// SPILL EXTENT — the `sp` field on an array origin's cell entry, which records
+/// which rectangle that origin's array owns (`SavedCell::spill`).
+///
+/// SAME TEST AS THE SETS ABOVE, and it passes harder than any of them: an older
+/// reader does not merely ignore `sp`, it drops it and then re-saves the
+/// workbook without it. The spilled VALUES are still written -- they are
+/// ordinary cells -- so the file comes back looking correct and is not. The
+/// array is no longer owned by anything; its cells are individually editable
+/// with nothing on screen to say they were ever part of an array; and the first
+/// re-evaluation of the origin finds its own footprint occupied by values it
+/// does not own and collapses the whole array to an error. Register §2ab has
+/// the measured sequence: open, touch any precedent, `#VALUE!`, press F9, looks
+/// repaired, touch anything, `#VALUE!`, indefinitely -- and when the array's
+/// LENGTH has changed, F9 leaves stale literals under a live origin presented
+/// as its output, which is a wrong answer carrying no error at all. That is the
+/// silent-corruption class this chain exists for.
+///
+/// Stamped ONLY when some cell actually carries an extent, so a workbook with
+/// no dynamic array still writes v1-v6 and stays openable by older builds.
+pub const SPILL_EXTENT_MIN_FORMAT_VERSION: u32 = 7;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

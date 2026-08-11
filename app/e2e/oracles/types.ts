@@ -23,7 +23,17 @@ export interface OracleContext {
 /** Baseline captured at the START of a checkpoint window. */
 export interface OracleBaseline {
   digest: Digest;
+  /** Reported for diagnostics only. Depth is a SIZE, not a position: history
+   *  is capped, so two depths cannot be subtracted to get a distance. The
+   *  round-trip oracle navigates by `undoTopSeq`. */
   undoDepth: number;
+  /** History id of the entry on TOP of the undo stack at this moment, or null
+   *  when the stack was empty. Undoing back to the baseline means popping
+   *  every entry that now sits above this id. */
+  undoTopSeq: number | null;
+  /** Transactions the size cap had dropped when the baseline was taken. A
+   *  change since then means history older than the cap is gone. */
+  evictedTotal: number;
 }
 
 export interface OracleCheckpointResult {

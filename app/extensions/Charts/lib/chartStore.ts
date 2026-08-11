@@ -17,6 +17,7 @@ import {
   normalizeChartSpec,
 } from "./chartSpecNormalize";
 import { chartsBackend } from "./chartsBackend";
+import { emitAppEvent, AppEvents } from "@api/events";
 
 // ============================================================================
 // Backend Types
@@ -342,7 +343,19 @@ export function deleteChart(chartId: string): void {
   }
   charts = charts.filter((c) => c.chartId !== chartId);
   // Persist to backend
-  chartsBackend.invoke("delete_chart", { id: chartId }).catch(() => {});
+  chartsBackend
+    .invoke("delete_chart", { id: chartId })
+    .then(() => {
+      // §3bn: the backend cleared the chart-parameter binding of every pane
+      // control that drove this chart. The control SURVIVES -- only the dead
+      // binding goes -- but the Controls pane caches its config, so a stale
+      // card would still offer to drive a chart that no longer exists.
+      emitAppEvent(AppEvents.MUTATION_REFRESH, {
+        domains: ["paneControl"],
+        source: "commit",
+      });
+    })
+    .catch(() => {});
 }
 
 /**

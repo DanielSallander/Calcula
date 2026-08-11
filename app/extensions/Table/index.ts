@@ -26,6 +26,7 @@ import {
   handleSelectionChange,
   resetSelectionHandlerState,
   ensureDesignTabRegistered,
+  syncDesignTabToTables,
   initRequestStateListener,
   initClickInterceptor,
 } from "./handlers/selectionHandler";
@@ -88,7 +89,13 @@ function activate(context: ExtensionContext): void {
 
   // Sync table regions to grid overlay system when tables change
   const handleTableChanged = () => {
-    refreshCache().catch(console.error);
+    refreshCache()
+      // The contextual Table Design tab is a function of the CURRENT table list
+      // and the current selection, and the table list has just changed. Without
+      // this the tab survives the deletion of the last table (soak seed
+      // 20260810, `contextual-ribbon-tabs`).
+      .then(() => syncDesignTabToTables())
+      .catch(console.error);
   };
 
   window.addEventListener(TableEvents.TABLE_CREATED, handleTableChanged);

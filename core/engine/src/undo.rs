@@ -86,6 +86,20 @@ pub struct Transaction {
     pub description: String,
     /// The individual changes in this transaction (in order applied)
     pub changes: Vec<CellChange>,
+    /// Identity of this entry in the history, assigned the first time it is
+    /// pushed onto the undo stack. `0` means "never pushed".
+    ///
+    /// It exists because DEPTH IS NOT POSITION. History is capped
+    /// (`MAX_HISTORY_SIZE`), so once the cap is reached every further push
+    /// silently drops the oldest entry and `undo_depth()` stops growing --
+    /// which makes "undo (depth_now - depth_then) times" walk back a
+    /// different distance than the caller believes. A caller that wants to
+    /// return to a remembered point has to remember an ID, not a count.
+    ///
+    /// Preserved across undo/redo: the inverse transaction a restore builds
+    /// inherits this seq, so undo-then-redo puts the SAME id back on the
+    /// stack rather than a fresh one.
+    pub seq: u64,
 }
 
 impl Transaction {
@@ -93,6 +107,7 @@ impl Transaction {
         Transaction {
             description: description.into(),
             changes: Vec::new(),
+            seq: 0,
         }
     }
 
@@ -116,6 +131,15 @@ pub struct UndoStack {
     current_transaction: Option<Transaction>,
     /// Maximum size of undo history
     max_size: usize,
+    /// Id to assign to the next transaction pushed. Never reset and never
+    /// reused -- not even by `clear()` -- so a remembered id can never be
+    /// matched by a LATER transaction that happened to land in the same slot.
+    next_seq: u64,
+    /// How many transactions the size cap has silently dropped, ever. The
+    /// only signal that history older than the cap is gone; without it a
+    /// caller cannot tell "nothing was pushed" from "what you remembered has
+    /// been evicted".
+    evicted_total: u64,
 }
 
 impl UndoStack {
@@ -125,6 +149,8 @@ impl UndoStack {
             redo_stack: VecDeque::with_capacity(MAX_HISTORY_SIZE),
             current_transaction: None,
             max_size: MAX_HISTORY_SIZE,
+            next_seq: 1,
+            evicted_total: 0,
         }
     }
 
@@ -134,6 +160,8 @@ impl UndoStack {
             redo_stack: VecDeque::with_capacity(max_size),
             current_transaction: None,
             max_size,
+            next_seq: 1,
+            evicted_total: 0,
         }
     }
 
@@ -275,20 +303,28 @@ impl UndoStack {
     fn push_transaction(&mut self, transaction: Transaction) {
         // Clear redo stack when new action is performed
         self.redo_stack.clear();
-        
-        // Enforce max size
-        while self.undo_stack.len() >= self.max_size {
-            self.undo_stack.pop_front();
-        }
-        
-        self.undo_stack.push_back(transaction);
+        self.push_back_capped(transaction);
     }
 
     /// Push a transaction to undo stack without clearing redo.
     /// Used internally by redo operation.
     pub fn push_undo_for_redo(&mut self, transaction: Transaction) {
+        self.push_back_capped(transaction);
+    }
+
+    /// Stamp an id (first push only) and push, dropping the oldest entries
+    /// once the cap is reached -- and COUNTING what was dropped, which is the
+    /// only trace an eviction leaves.
+    fn push_back_capped(&mut self, mut transaction: Transaction) {
+        if transaction.seq == 0 {
+            transaction.seq = self.next_seq;
+            self.next_seq += 1;
+        }
         while self.undo_stack.len() >= self.max_size {
-            self.undo_stack.pop_front();
+            if self.undo_stack.pop_front().is_none() {
+                break;
+            }
+            self.evicted_total += 1;
         }
         self.undo_stack.push_back(transaction);
     }
@@ -319,8 +355,35 @@ impl UndoStack {
     }
 
     /// Number of transactions available to undo.
+    ///
+    /// NOT a position. Two depths read at different times must not be
+    /// subtracted to get "how many steps back is then from now": the cap
+    /// makes depth saturate, and an undo performed between the readings
+    /// removes an entry the difference never sees. Use `undo_seqs()`.
     pub fn undo_depth(&self) -> usize {
         self.undo_stack.len()
+    }
+
+    /// The ids of the undo stack's entries, oldest first -- the history's
+    /// actual shape, which `undo_depth()` can only summarize.
+    ///
+    /// A caller that remembered the id on top at some earlier point can find
+    /// it here and count what sits above it; if it is absent, that point is
+    /// unreachable (evicted by the cap, or already undone past) and NO number
+    /// of undo steps restores the state it named.
+    pub fn undo_seqs(&self) -> Vec<u64> {
+        self.undo_stack.iter().map(|t| t.seq).collect()
+    }
+
+    /// How many transactions the cap has dropped over this stack's lifetime.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total
+    }
+
+    /// The history cap -- how many transactions are kept before the oldest
+    /// starts being dropped.
+    pub fn max_size(&self) -> usize {
+        self.max_size
     }
 
     /// Number of transactions available to redo.
@@ -542,5 +605,163 @@ mod visit_custom_restores_tests {
             rewritten += 1;
         });
         assert_eq!(rewritten, 2);
+    }
+}
+
+/// The history HORIZON: what `undo_depth()` cannot say, and what `undo_seqs()`
+/// can.
+///
+/// Every one of these is the arithmetic that the undo-round-trip oracle used
+/// to do -- "remember the depth, act, then undo (depth_now - depth_then)
+/// times to get back" -- run against a stack that is allowed to forget. The
+/// arithmetic is sound only while the cap is not reached and nothing else
+/// undoes in between, and the soak walk satisfied neither.
+#[cfg(test)]
+mod history_horizon_tests {
+    use super::*;
+
+    fn push(stack: &mut UndoStack, n: usize) {
+        for i in 0..n {
+            stack.record_cell_change(0, i as u32, 0, None);
+        }
+    }
+
+    #[test]
+    fn depth_saturates_at_the_cap_so_the_difference_undercounts() {
+        // 10-deep history. Remember the depth after 7 pushes, then push 6
+        // more: 3 of the remembered entries are silently dropped, depth grows
+        // by 3 instead of 6, and "undo the difference" walks back HALF the
+        // distance the caller asked for.
+        let mut stack = UndoStack::with_max_size(10);
+        push(&mut stack, 7);
+        let remembered_depth = stack.undo_depth();
+        assert_eq!(remembered_depth, 7);
+
+        push(&mut stack, 6);
+
+        assert_eq!(stack.undo_depth(), 10, "capped");
+        assert_eq!(
+            stack.undo_depth() - remembered_depth,
+            3,
+            "the difference says 3 steps; SIX transactions were pushed"
+        );
+        assert_eq!(stack.evicted_total(), 3, "and three were dropped");
+    }
+
+    #[test]
+    fn seqs_count_the_distance_the_difference_gets_wrong() {
+        // Same walk, with an id remembered instead of a count. The id is the
+        // top of the stack at the remembered moment; the number of entries
+        // ABOVE it is the true number of undo steps back to that state.
+        let mut stack = UndoStack::with_max_size(10);
+        push(&mut stack, 7);
+        let marker = *stack.undo_seqs().last().unwrap();
+
+        push(&mut stack, 6);
+
+        let seqs = stack.undo_seqs();
+        let position = seqs.iter().position(|s| *s == marker).expect("still held");
+        assert_eq!(
+            seqs.len() - 1 - position,
+            6,
+            "six transactions sit above the remembered point -- the true distance"
+        );
+    }
+
+    #[test]
+    fn an_evicted_marker_is_unreachable_and_says_so() {
+        // Push past the cap far enough that the remembered entry is gone.
+        // There is no number of undo steps that restores that state, and the
+        // stack reports the fact rather than letting a count pretend.
+        let mut stack = UndoStack::with_max_size(10);
+        push(&mut stack, 3);
+        let marker = *stack.undo_seqs().last().unwrap();
+
+        push(&mut stack, 12);
+
+        assert!(
+            !stack.undo_seqs().contains(&marker),
+            "the remembered entry has been dropped by the cap"
+        );
+        assert!(stack.evicted_total() >= 1);
+    }
+
+    #[test]
+    fn an_undo_inside_the_window_does_not_break_the_count() {
+        // Remember a point, push three, undo one of them, push one more.
+        // Depth arithmetic gives 3 (4 pushes minus 1 undo) and happens to be
+        // right here; the id-based count agrees, which is the point -- the
+        // exact instrument must not be MORE conservative than the sloppy one
+        // in the cases the sloppy one gets right.
+        let mut stack = UndoStack::with_max_size(100);
+        push(&mut stack, 2);
+        let marker = *stack.undo_seqs().last().unwrap();
+        let remembered_depth = stack.undo_depth();
+
+        push(&mut stack, 3);
+        let undone = stack.pop_undo().expect("something to undo");
+        stack.push_redo(undone);
+        push(&mut stack, 1);
+
+        let seqs = stack.undo_seqs();
+        let position = seqs.iter().position(|s| *s == marker).expect("still held");
+        assert_eq!(seqs.len() - 1 - position, 3);
+        assert_eq!(stack.undo_depth() - remembered_depth, 3, "agrees here");
+    }
+
+    #[test]
+    fn undoing_past_the_marker_makes_it_unreachable() {
+        // The case the difference gets silently WRONG in the other direction:
+        // an undo that reaches back before the remembered point removes it,
+        // and the entry it reverted can never be redone once a later push
+        // clears the redo stack. The marker is simply absent -- which a count
+        // has no way of noticing.
+        let mut stack = UndoStack::with_max_size(100);
+        push(&mut stack, 2);
+        let marker = *stack.undo_seqs().last().unwrap();
+
+        let undone = stack.pop_undo().expect("the marker transaction");
+        assert_eq!(undone.seq, marker);
+        stack.push_redo(undone);
+        push(&mut stack, 1);
+
+        assert!(!stack.undo_seqs().contains(&marker));
+        assert!(!stack.can_redo(), "a push clears redo; that state is gone");
+    }
+
+    #[test]
+    fn undo_then_redo_puts_the_same_id_back() {
+        // Ids survive the round trip, so a walk that undoes and redoes inside
+        // a window leaves the remembered point exactly where it was. Without
+        // this the redone entry would arrive with a fresh id and every later
+        // check would report the window as unreachable.
+        let mut stack = UndoStack::with_max_size(100);
+        push(&mut stack, 3);
+        let before = stack.undo_seqs();
+
+        let undone = stack.pop_undo().unwrap();
+        let seq = undone.seq;
+        stack.push_redo(undone);
+        let redone = stack.pop_redo().unwrap();
+        assert_eq!(redone.seq, seq, "the id travels with the transaction");
+        stack.push_undo_for_redo(redone);
+
+        assert_eq!(stack.undo_seqs(), before);
+    }
+
+    #[test]
+    fn ids_are_never_reused_even_after_clear() {
+        // `clear()` drops the history; it must not reset the counter, or a
+        // brand-new transaction would answer to an id someone remembered from
+        // the previous document and a stale marker would look reachable.
+        let mut stack = UndoStack::with_max_size(10);
+        push(&mut stack, 3);
+        let stale = *stack.undo_seqs().last().unwrap();
+
+        stack.clear();
+        push(&mut stack, 3);
+
+        assert!(!stack.undo_seqs().contains(&stale));
+        assert!(stack.undo_seqs().iter().all(|s| *s > stale));
     }
 }

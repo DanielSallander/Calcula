@@ -550,6 +550,207 @@ fn is_valid_table_name(name: &str) -> bool {
 }
 
 // ============================================================================
+// A TABLE CHANGE IS A VALUE CHANGE  (§2aj — Excel parity)
+// ============================================================================
+
+/// Recalculate everything that reads the tables in `changed`.
+///
+/// A formula now STORES its structured references and resolves them while
+/// calculating (see `table_deps`), which is what makes `Sales[Amount]` a live
+/// reference rather than a one-shot typing macro — and which makes creating,
+/// growing, shrinking, resizing, renaming, re-columning or deleting a table
+/// **a value change for every formula that reads it**. A table is not a cell,
+/// so no cell seed can describe that; `table_dependents` is the edge that can.
+///
+/// THREE STEPS, and the first one is the half the name case does not need.
+///
+/// 1. **The cell-level edges are rebuilt first.** Repointing a defined name
+///    changes which cells a formula reads, and so does moving a table's
+///    boundary — `=SUM(Sales[Amount])` covered `A2:A4` a moment ago and covers
+///    `A2:A5` now. `rebuild_all_dependencies` re-extracts every active-sheet
+///    formula's references THROUGH `eval_ast`, so the new row becomes a
+///    precedent. Without it the total would pick the new row up once and then
+///    never notice an edit to it, which is a worse bug than the one being
+///    fixed: silently right, then silently wrong.
+/// 2. **The OFF-SHEET readers** are found by asking each grid whether any of
+///    its formulas mentions a changed table, and only those sheets go through
+///    `recalc_after_off_sheet_write`. The per-sheet dependency maps are
+///    active-sheet-only, so there is no seed vocabulary for them.
+/// 3. **The ACTIVE sheet's readers** seed `recalc_after_active_sheet_bulk_rewrite`,
+///    which orders them topologically among themselves and continues into their
+///    own dependents and across sheet boundaries.
+///
+/// [`crate::table_deps::BARE_TABLE_KEY`] is always in the seed set: a bare
+/// `[@Amount]` names no table, so it is registered under that bucket and any
+/// table change may be its table's.
+///
+/// CALLERS MUST HOLD NO `AppState` LOCKS: all three steps take their own. This
+/// is the second lock phase, exactly as in `recalc_after_name_change`.
+pub(crate) fn recalc_after_table_change(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    changed: &[String],
+    extra_seeds: &[(u32, u32)],
+) {
+    if changed.is_empty() && extra_seeds.is_empty() {
+        return;
+    }
+    // MANUAL CALCULATION: the user asked for stale values until F9, and a table
+    // change is a value change like any other. Gated HERE for the reason
+    // `recalc_after_name_change` gives — only one of the two helpers honours the
+    // mode, and half a recalculation is worse than none.
+    //
+    // The EDGE REBUILD still runs: an edge is not a value, and leaving the
+    // dependency maps describing a table extent the document no longer has
+    // would make the eventual F9 wrong as well.
+    let automatic = state
+        .calculation_mode
+        .lock()
+        .map(|m| *m == "automatic")
+        .unwrap_or(true);
+
+    let mut changed_keys: std::collections::HashSet<String> =
+        changed.iter().map(|n| n.to_uppercase()).collect();
+    if !changed.is_empty() {
+        changed_keys.insert(crate::table_deps::BARE_TABLE_KEY.to_string());
+    }
+
+    // NAMES THAT MEDIATE. A formula can reach a table through a DEFINED NAME —
+    // `MyRange` = `=Table1[Amount]`, then `=SUM(MyRange)` — and that cell's own
+    // AST says only `MyRange`, so it is in no table bucket and
+    // `cell_reads_any_table` answers false for it. Both halves below would miss
+    // it. The name table is small and its `refers_to` strings are short, so the
+    // honest answer is cheap: parse each definition and ask whether IT reads a
+    // changed table.
+    let mediating_names: crate::name_resolution::NameSet = {
+        let mut out = crate::name_resolution::NameSet::default();
+        if let Ok(named_ranges) = state.named_ranges.read() {
+            for (key, nr) in named_ranges.iter() {
+                let text = nr.refers_to.trim_start_matches('=');
+                let Ok(ast) = parser::parse(text) else { continue };
+                let mut reads = crate::table_deps::TableSet::default();
+                crate::table_deps::collect_table_names(&ast, &mut reads);
+                if reads.iter().any(|t| changed_keys.contains(t)) {
+                    out.insert(key.clone());
+                }
+            }
+        }
+        out
+    };
+
+    // THE READERS, on the active sheet: whatever the command wrote itself (a
+    // totals row's SUBTOTAL, a generated header), every formula holding a
+    // structured reference to a changed table, and every formula reading one of
+    // those through a name.
+    let seeds: Vec<(u32, u32)> = {
+        let table_dependents = state.table_dependents.lock().unwrap();
+        let name_dependents = state.name_dependents.lock().unwrap();
+        let mut seen: crate::CoordSet = crate::CoordSet::default();
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        let push = |coord: (u32, u32), seen: &mut crate::CoordSet, out: &mut Vec<(u32, u32)>| {
+            if seen.insert(coord) {
+                out.push(coord);
+            }
+        };
+        for &coord in extra_seeds {
+            push(coord, &mut seen, &mut out);
+        }
+        for key in &changed_keys {
+            if let Some(cells) = table_dependents.get(key) {
+                for &coord in cells {
+                    push(coord, &mut seen, &mut out);
+                }
+            }
+        }
+        for key in &mediating_names {
+            if let Some(cells) = name_dependents.get(key) {
+                for &coord in cells {
+                    push(coord, &mut seen, &mut out);
+                }
+            }
+        }
+        // Deterministic: the maps are hash sets and seed ORDER reaches values
+        // through the topological pass.
+        out.sort_unstable();
+        out
+    };
+
+    // THE EDGE REFRESH, and it is the half the defined-name case does not need.
+    //
+    // Repointing a name changes which cells a formula reads, and so does moving
+    // a table's boundary: `=SUM(Sales[Amount])` covered `A2:A4` a moment ago and
+    // covers `A2:A5` now. The reader's CELL-level edges are stale the instant
+    // the extent moves, so re-deriving them is not optional — without it the
+    // total would follow the resize once and then never notice an edit to the
+    // row it gained, which is silently-right-then-silently-wrong.
+    //
+    // TARGETED, not a whole-sheet `rebuild_all_dependencies`. The readers ARE
+    // the population whose edges can have moved, and this runs on a gesture as
+    // ordinary as typing one row under a table (`check_table_auto_expand`); a
+    // full rebuild there would re-extract every formula on the sheet on every
+    // typed row. It runs even in MANUAL calculation mode, because an edge is not
+    // a value: leaving the maps describing an extent the document no longer has
+    // would make the eventual F9 wrong too.
+    crate::table_deps::refresh_reader_edges(state, &seeds);
+
+    if !automatic {
+        return;
+    }
+
+    // OFF-SHEET half first, mirroring `recalc_after_name_change`: the
+    // active-sheet cascade below then reads values the other sheets have
+    // already settled on.
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let off_sheet: Vec<usize> = {
+        let grids = state.grids.read().unwrap();
+        grids
+            .iter()
+            .enumerate()
+            .filter(|(idx, grid)| {
+                *idx != active_sheet
+                    && grid.cells.values().any(|cell| {
+                        crate::table_deps::cell_reads_any_table(cell, &changed_keys)
+                            || crate::name_resolution::cell_reads_any_name(cell, &mediating_names)
+                    })
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    };
+    if !off_sheet.is_empty() {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &off_sheet,
+        );
+    }
+
+    // ACTIVE-sheet half. ONE cascade over the union of the seed populations, not
+    // two in sequence: they feed each other — a formula may read the totals cell
+    // the same command just wrote — and two passes would order that by luck.
+    if seeds.is_empty() {
+        return;
+    }
+    let mut updated_cells: Vec<crate::api_types::CellData> = Vec::new();
+    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+        state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &seeds,
+        &mut updated_cells,
+    );
+    // The cells are not returned: every table command returns a `TableResult`,
+    // and the Table extension repaints the grid from the backend afterwards —
+    // the same reason `recalc_after_name_change` discards its own.
+}
+
+// ============================================================================
 // COMMANDS
 // ============================================================================
 
@@ -558,6 +759,10 @@ fn is_valid_table_name(name: &str) -> bool {
 pub fn create_table(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: CreateTableParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -693,6 +898,21 @@ pub fn create_table(
         undo_stack.commit_transaction();
     }
 
+    // PHASE B -- every guard above is released. CREATING a table is a value
+    // change: `=SUM(Sales[Amount])` typed before `Sales` existed is a `#NAME?`
+    // cell, and Excel turns it into a number the moment the table appears.
+    // `collect_table_names` records edges for tables that do not exist yet
+    // precisely so this works (§2aj).
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[table.name.clone()],
+        &[],
+    );
+
     TableResult::ok(table)
 }
 
@@ -704,10 +924,23 @@ pub fn create_table(
 /// is removed. Previously neither happened: structured references were left as
 /// `_UNRESOLVED` NamedRef sentinels the evaluator rejects, and a sheet-level
 /// AutoFilter survived with no visible owner and rows still hidden by it.
+///
+/// AND ITS SLICERS GO WITH IT (§3bn). This was the third dependent, and the one
+/// that survived: a slicer kept its `cacheSourceId` pointing at the dead table,
+/// answered `"Table {id} not found"` on every item fetch, and went on claiming
+/// its rectangle so clicks landing there could never reach the grid. Excel
+/// removes a table's slicers with the table; a slicer with a live Report
+/// Connection left is repointed instead. Both are [`crate::object_deps`].
 #[tauri::command]
 pub fn delete_table(
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -722,8 +955,8 @@ pub fn delete_table(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
 
     // Clone before removal: the ref rewrite below needs the table still present
     // in the registry to resolve `Table1[Col]` into a concrete range.
@@ -739,12 +972,18 @@ pub fn delete_table(
     };
 
     let table_name_upper = table.name.to_uppercase();
+    // Cloned rather than held: `rewrite_table_refs_to_ranges` needs it only to
+    // qualify a reference to a table on another sheet, and holding the guard
+    // across the rewrite would add a fourth lock to a function that already
+    // holds three.
+    let delete_sheet_names = state.sheet_names.read().unwrap().clone();
     let rewritten_cells = rewrite_table_refs_to_ranges(
         &tables,
         &table_names,
         &mut grids,
         &mut grid,
         active_sheet,
+        &delete_sheet_names,
         &table_name_upper,
         &table,
     );
@@ -774,6 +1013,26 @@ pub fn delete_table(
     } else {
         None
     };
+
+    // §3bn: the table is out of its store, so anything BOUND to it is now
+    // pointing at nothing. Runs here, before the transaction opens, because it
+    // takes the slicer/timeline/filter locks and the undo lock must never be
+    // held across a store lock.
+    let cascade = crate::object_deps::cascade_deleted_sources(
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        &effect,
+        &[crate::object_deps::DeletedSource::table(table_id)],
+    );
+    if !cascade.is_empty() {
+        crate::log_info!(
+            "TABLE",
+            "delete_table {} cascaded: {}",
+            table.name,
+            cascade.describe()
+        );
+    }
 
     // ONE undo transaction covering EVERY side effect. Recording only the table
     // (BUG-0006) meant Ctrl+Z brought back a table whose AutoFilter was gone,
@@ -816,6 +1075,15 @@ pub fn delete_table(
                 "Restore table scripts",
             );
         }
+        // The cascade's restores go in BEFORE the table's, so the reverse
+        // replay puts the table back FIRST and the slicers back onto a table
+        // that exists. `record_source_cascade_undo` takes this same lock, so
+        // it is released across the call rather than passed the guard — the
+        // transaction stays open either way, which is what makes this one
+        // Ctrl+Z.
+        drop(undo_stack);
+        crate::object_deps::record_source_cascade_undo(&state, &cascade);
+        let mut undo_stack = state.undo_stack.lock().unwrap();
         undo_stack.record_custom_restore(
             "obj_table".to_string(),
             crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(table)),
@@ -823,6 +1091,22 @@ pub fn delete_table(
         );
         undo_stack.commit_transaction();
     }
+
+    // PHASE B. `rewrite_table_refs_to_ranges` above froze every dependent
+    // structured reference into the absolute rectangle the table covered at
+    // this moment -- which is what Excel does when a table stops being a table,
+    // and it means the VALUES do not move. The edges do: those cells held
+    // `Sales[Amount]` a moment ago, so their table edges must go and their
+    // cell edges must be re-derived from the ranges that replaced it.
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[table_name_upper.clone()],
+        &[],
+    );
 
     TableResult::ok_empty()
 }
@@ -832,6 +1116,10 @@ pub fn delete_table(
 pub fn rename_table(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     new_name: String,
 ) -> TableResult {
@@ -853,8 +1141,8 @@ pub fn rename_table(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
 
     // Check if new name already exists
     let upper_new = new_name.to_uppercase();
@@ -942,6 +1230,20 @@ pub fn rename_table(
         }
     }
 
+    // PHASE B. The VALUE cannot move -- the same table under a new name covers
+    // the same cells -- but `table_dependents` is keyed BY NAME, so every edge
+    // is filed under a name the workbook no longer has. Both spellings are
+    // named so the rebuild drops the old bucket and the new one is seeded.
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[upper_old.clone(), new_name.clone()],
+        &[],
+    );
+
     TableResult::ok(updated)
 }
 
@@ -968,7 +1270,11 @@ fn rename_table_refs_in_formulas(
             .cells
             .iter()
             .filter_map(|(&(row, col), cell)| {
-                cell.formula_string().and_then(|f| {
+                // RAW, not the display form: `formula_string()` collapses a
+                // named LAMBDA's `__INVOKE__` marker, and the rewrite below
+                // stores what this text re-parses to -- so renaming a table
+                // destroyed every named-function call that mentioned it.
+                cell.formula_string_raw().and_then(|f| {
                     if f.to_uppercase().contains(old_name_upper) {
                         Some((row, col, f))
                     } else {
@@ -1044,6 +1350,10 @@ pub fn update_table_style(
 pub fn add_table_column(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     column_name: String,
     position: Option<usize>,
@@ -1087,7 +1397,24 @@ pub fn add_table_column(
     // Expand table range
     table.end_col += 1;
 
-    TableResult::ok(table.clone())
+    let result = table.clone();
+    let table_name = result.name.clone();
+    drop(tables);
+
+    // PHASE B. A wider table moves `Sales[#All]` and `Sales[#Headers]`, and it
+    // moves nothing else -- but the cell edges of every reader still have to be
+    // re-derived, which is the rebuild's job (§2aj).
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[table_name],
+        &[],
+    );
+
+    TableResult::ok(result)
 }
 
 /// Remove a column from a table
@@ -1095,6 +1422,10 @@ pub fn add_table_column(
 pub fn remove_table_column(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     column_name: String,
 ) -> TableResult {
@@ -1125,7 +1456,24 @@ pub fn remove_table_column(
     table.columns.remove(idx);
     table.end_col -= 1;
 
-    TableResult::ok(table.clone())
+    let result = table.clone();
+    let table_name = result.name.clone();
+    drop(tables);
+
+    // PHASE B. A reference to the removed column no longer resolves, and in
+    // Excel it becomes `#REF!` immediately rather than at the next unrelated
+    // edit. Recalculating the readers is what makes that visible now.
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[table_name],
+        &[],
+    );
+
+    TableResult::ok(result)
 }
 
 /// Rename a table column
@@ -1133,6 +1481,10 @@ pub fn remove_table_column(
 pub fn rename_table_column(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     old_name: String,
     new_name: String,
@@ -1170,39 +1522,156 @@ pub fn rename_table_column(
 
     // Enforce non-empty and uniqueness
     let final_name = ensure_unique_header(&new_name, &existing);
-    table.columns[idx].name = final_name;
+    table.columns[idx].name = final_name.clone();
 
-    TableResult::ok(table.clone())
+    let result = table.clone();
+    let table_name_upper = result.name.to_uppercase();
+    let table_bounds = (
+        result.start_row,
+        result.start_col,
+        result.end_row,
+        result.end_col,
+    );
+    drop(tables);
+
+    // Carry every dependent structured reference over to the new COLUMN name.
+    //
+    // NEW, AND NOT OPTIONAL. While a specifier was flattened at entry, renaming
+    // a column could not break a formula -- the formula held `$A$2:$A$4` and had
+    // forgotten the column ever had a name. Now that the cell KEEPS
+    // `Sales[Amount]` (§2aj), retyping that header would leave every reader
+    // naming a column the table no longer has, and an unresolvable specifier
+    // degrades to a `NamedRef` the evaluator renders as `#NAME?`. Excel updates
+    // them; so does this. It is the exact argument `rename_table_refs_in_formulas`
+    // makes one level up, for the table's own name.
+    let renamed_cells = rename_table_column_in_formulas(
+        &state,
+        &effect,
+        &table_name_upper,
+        table_bounds,
+        &old_name,
+        &final_name,
+    );
+    record_table_ref_rewrite_undo(&state, renamed_cells, "Rename table column");
+
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[table_name_upper],
+        &[],
+    );
+
+    TableResult::ok(result)
+}
+
+/// Point every `Table[OldColumn]` specifier at `new_name`, across all sheets.
+/// Returns the PRE-mutation cells so the caller can make it undoable.
+///
+/// `table_bounds` decides which BARE `[@OldColumn]` references are rewritten:
+/// only a cell physically inside the table means "this table's column", so a
+/// bare reference in some other table's calculated column is left alone.
+///
+/// Operates on the AST directly rather than round-tripping through formula
+/// text, for the reason `rename_table_refs_in_formulas` gives: the stored form
+/// IS the AST, so there is no re-parse that could fail and silently demote a
+/// formula cell to a value cell.
+fn rename_table_column_in_formulas(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    table_name_upper: &str,
+    table_bounds: (u32, u32, u32, u32),
+    old_name: &str,
+    new_name: &str,
+) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut grid = state.grid.write(effect).unwrap();
+    let mut grids = state.grids.write(effect).unwrap();
+    let (t_start_row, t_start_col, t_end_row, t_end_col) = table_bounds;
+
+    let mut touched: Vec<(usize, u32, u32, Option<engine::Cell>)> = Vec::new();
+    for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
+        let candidates: Vec<(u32, u32)> = sheet_grid
+            .cells
+            .iter()
+            .filter(|(_, cell)| {
+                cell.get_ast().is_some_and(crate::ast_has_table_refs)
+            })
+            .map(|(&coord, _)| coord)
+            .collect();
+
+        for (row, col) in candidates {
+            // A bare `[@Col]` belongs to this table only when the cell is
+            // inside it -- and a table lives on exactly one sheet.
+            let inside = sheet_idx == active_sheet
+                && row >= t_start_row
+                && row <= t_end_row
+                && col >= t_start_col
+                && col <= t_end_col;
+            let Some(cell) = sheet_grid.get_cell(row, col) else { continue };
+            let Some(ast) = cell.get_ast() else { continue };
+            let (renamed, changed) = crate::table_deps::rename_table_column_in_ast(
+                ast,
+                table_name_upper,
+                old_name,
+                new_name,
+                inside,
+            );
+            if !changed {
+                continue;
+            }
+            let before = cell.clone();
+            let mut updated_cell = before.clone();
+            updated_cell.ast = Some(Box::new(renamed));
+            sheet_grid.set_cell(row, col, updated_cell.clone());
+            if sheet_idx == active_sheet {
+                grid.set_cell(row, col, updated_cell);
+            }
+            touched.push((sheet_idx, row, col, Some(before)));
+        }
+    }
+    touched
+}
+
+/// Record a structured-reference rewrite as ONE undo transaction, grouped by
+/// sheet. Shared by the table-name and table-column renames so both restore the
+/// same way: cells first (so they replay LAST, after the table object is back).
+fn record_table_ref_rewrite_undo(
+    state: &AppState,
+    cells: Vec<(usize, u32, u32, Option<engine::Cell>)>,
+    description: &str,
+) {
+    if cells.is_empty() {
+        return;
+    }
+    let mut by_sheet: HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> = HashMap::new();
+    for (sheet_idx, row, col, before) in cells {
+        by_sheet.entry(sheet_idx).or_default().push((row, col, before));
+    }
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let opened = !undo_stack.has_open_transaction();
+    if opened {
+        undo_stack.begin_transaction(description.to_string());
+    }
+    for (sheet_index, sheet_cells) in by_sheet {
+        undo_stack.record_custom_restore(
+            "script_grid_cells".to_string(),
+            crate::undo_commands::script_grid_cells_snapshot_bytes(sheet_index, sheet_cells),
+            "Restore table references",
+        );
+    }
+    if opened {
+        undo_stack.commit_transaction();
+    }
 }
 
 // ============================================================================
 // D3 — TABLE WRITES SEED THE ONE SHARED CASCADE
 // ============================================================================
 
-/// Resolve a generated table formula the way the ordinary edit path resolves a
-/// typed one: structured references (`Table1[Amount]`, `[@Price]`) expanded to
-/// the cells they name, against the row the formula will live on.
-fn resolve_table_formula(
-    tables: &TableStorage,
-    table_names: &TableNameRegistry,
-    active_sheet: usize,
-    row: u32,
-    formula: &str,
-) -> Option<engine::Expression> {
-    let parsed = parser::parse(formula).ok()?;
-    if !crate::ast_has_table_refs(&parsed) {
-        return Some(parsed);
-    }
-    let ctx = crate::TableRefContext {
-        tables,
-        table_names,
-        current_sheet_index: active_sheet,
-        current_row: row,
-    };
-    Some(crate::resolve_table_refs_in_ast(&parsed, &ctx))
-}
-
-/// Write (or clear) a totals-row cell, storing the RESOLVED AST, then record its
+/// Write (or clear) a totals-row cell, storing the STRUCTURED AST, then record its
 /// dependency edges.
 ///
 /// THE SECOND DEFECT D3 UNCOVERED, found live in `tables.spec.ts`.
@@ -1240,19 +1709,48 @@ fn write_table_formula_cell(
     col: u32,
     formula: Option<&str>,
 ) {
-    let resolved =
-        formula.and_then(|f| resolve_table_formula(tables, table_names, active_sheet, row, f));
+    // TWO forms, exactly as `split_entered_formula` produces for a typed one.
+    // `stored` keeps the specifier the totals row is written IN
+    // (`SUBTOTAL(109,Sales[Amount])`), re-spelled from the table's own
+    // capitalisation; `resolved` is the rectangle it names right now, and is
+    // only used to derive this cell's precedent edges.
+    let stored = formula.and_then(|f| {
+        parser::parse(f).ok().map(|mut ast| {
+            crate::table_deps::restamp_table_casing(&mut ast, tables, table_names);
+            ast
+        })
+    });
+    let resolved = stored.as_ref().map(|ast| {
+        if crate::ast_has_table_refs(ast) {
+            let ctx = crate::TableRefContext {
+                tables,
+                table_names,
+                sheet_names: sheet_names,
+                current_sheet_index: active_sheet,
+                current_row: row,
+                current_col: col,
+            };
+            crate::resolve_table_refs_in_ast(ast, &ctx)
+        } else {
+            ast.clone()
+        }
+    });
 
     match formula {
         Some(text) => {
             let mut cell = engine::Cell::new_formula(text.to_string());
-            // The RESOLVED form, per the contract above, when it parsed at all.
+            // THE STORED FORM KEEPS THE SPECIFIER (§2aj). It used to be the
+            // resolved rectangle, which froze the totals row to the extent the
+            // table had at the moment the function was chosen: adding a row
+            // under `Sales` left `SUBTOTAL(109,$A$2:$A$4)` summing four cells of
+            // five. `eval_ast` now resolves it on every evaluation instead.
+            //
             // `new_formula` already stores an UNPARSEABLE formula as TEXT, which
             // is what a bad CUSTOM totals formula did before and must keep doing
             // — overwriting that with a clear would silently discard the user's
             // input. The VALUE is left to the cascade this command seeds: it
             // re-evaluates its own seeds.
-            if let Some(ast) = &resolved {
+            if let Some(ast) = &stored {
                 cell.set_cached_ast(crate::convert_expr(ast));
             }
             grid.set_cell(row, col, cell.clone());
@@ -1276,6 +1774,7 @@ fn write_table_formula_cell(
         row,
         col,
         resolved.as_ref(),
+        stored.as_ref(),
     );
 }
 
@@ -1298,7 +1797,10 @@ fn write_table_formula_cell(
 ///
 /// `resolved` is `None` when the command CLEARED the cell (totals function set
 /// back to "None"), which must still run: it drops the stale outgoing edges the
-/// removed formula owned.
+/// removed formula owned. `stored` is the tree the CELL keeps, and it is a
+/// separate argument because the two answer different questions: the cell edges
+/// come from the coordinates in `resolved`, the TABLE edge (§2aj) from the
+/// specifier that only `stored` still has.
 ///
 /// LOCKING: the caller holds `tables` + `grid` + `grids`; this takes the
 /// dependency maps, which sit AFTER those in the canonical order.
@@ -1311,10 +1813,26 @@ fn register_table_formula_dependencies(
     row: u32,
     col: u32,
     resolved: Option<&engine::Expression>,
+    stored: Option<&engine::Expression>,
 ) {
     let refs = resolved
         .map(|ast| crate::extract_all_references(ast, grid))
         .unwrap_or_else(crate::ExtractedRefs::new);
+
+    {
+        let mut table_dependencies = state.table_dependencies.lock().unwrap();
+        let mut table_dependents = state.table_dependents.lock().unwrap();
+        let mut read_tables = crate::table_deps::TableSet::default();
+        if let Some(ast) = stored {
+            crate::table_deps::collect_table_names(ast, &mut read_tables);
+        }
+        crate::table_deps::update_table_dependencies(
+            (row, col),
+            read_tables,
+            &mut table_dependencies,
+            &mut table_dependents,
+        );
+    }
 
     {
         let mut dependencies = state.dependencies.lock().unwrap();
@@ -1372,6 +1890,7 @@ pub fn set_totals_row_function(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: SetTotalsRowFunctionParams,
@@ -1447,17 +1966,23 @@ pub fn set_totals_row_function(
     }
 
     // PHASE B — after every guard above is released.
+    //
+    // ONE cascade over the union of two seed populations, not two in sequence:
+    // the totals cells this command wrote, AND every formula that reads the
+    // table through a structured reference (§2aj). They feed each other — a
+    // formula may read the totals cell — so ordering them by luck is exactly
+    // what `recalc_after_table_change` exists to prevent.
     drop(grids);
     drop(grid);
     drop(tables);
-    let mut recalculated = Vec::new();
-    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+    recalc_after_table_change(
         &state,
         &user_files_state,
+        &pivot_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &[result.name.clone()],
         &seeds,
-        &mut recalculated,
     );
 
     TableResult::ok(result)
@@ -1476,6 +2001,7 @@ pub fn toggle_totals_row(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
@@ -1564,17 +2090,28 @@ pub fn toggle_totals_row(
     let seeds: Vec<(u32, u32)> = written.iter().map(|(r, c, _)| (*r, *c)).collect();
 
     // PHASE B — after every guard above is released.
+    //
+    // ONE cascade over the union of two seed populations, not two in sequence:
+    // the totals cells this command wrote, AND every formula that reads the
+    // table through a structured reference (§2aj). They feed each other — a
+    // formula may read the totals cell — so ordering them by luck is exactly
+    // what `recalc_after_table_change` exists to prevent.
+    //
+    // Showing or hiding a totals row also moves `data_end_row`, so every
+    // `Table[Column]` in the workbook covers a different number of rows than it
+    // did a moment ago. That is a value change for the readers, not only for the
+    // totals cells.
     drop(grids);
     drop(grid);
     drop(tables);
-    let mut recalculated = Vec::new();
-    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+    recalc_after_table_change(
         &state,
         &user_files_state,
+        &pivot_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &[result.name.clone()],
         &seeds,
-        &mut recalculated,
     );
 
     TableResult::ok(result)
@@ -1585,6 +2122,10 @@ pub fn toggle_totals_row(
 pub fn resize_table(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ResizeTableParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -1765,6 +2306,22 @@ pub fn resize_table(
         undo_stack.commit_transaction();
     }
 
+    // PHASE B. THE reason §2aj exists: a resize is what a structured reference
+    // is FOR. `=SUM(Sales[Amount])` covered `A2:A4` a moment ago and covers
+    // whatever the new boundary says now, so every reader is a value change --
+    // and every reader's CELL edges have to be re-derived too, or the total
+    // would follow the resize once and then stop noticing edits to the rows it
+    // gained. Both are `recalc_after_table_change`'s job.
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[updated.name.clone()],
+        &[],
+    );
+
     TableResult::ok(updated)
 }
 
@@ -1777,12 +2334,14 @@ pub fn resize_table(
 /// table's columns should keep working against the now-plain range. Skipping
 /// this on delete left `Table1[Amount]` as an `_UNRESOLVED` NamedRef sentinel
 /// that the evaluator rejects — a silent breakage of every dependent formula.
+#[allow(clippy::too_many_arguments)]
 fn rewrite_table_refs_to_ranges(
     tables: &TableStorage,
     table_names: &TableNameRegistry,
     grids: &mut [engine::Grid],
     grid: &mut engine::Grid,
     active_sheet: usize,
+    sheet_names: &[String],
     table_name_upper: &str,
     target: &Table,
 ) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
@@ -1811,7 +2370,9 @@ fn rewrite_table_refs_to_ranges(
             .cells
             .iter()
             .filter_map(|(&(row, col), cell)| {
-                cell.formula_string().and_then(|f| {
+                // RAW, for the same reason as the table RENAME above: this
+                // rewrite re-parses the text it reads and stores the result.
+                cell.formula_string_raw().and_then(|f| {
                     let f_upper = f.to_uppercase();
                     // A bare `[@Col]` resolves against the table CONTAINING the
                     // cell, so it is only ours when the cell is inside the
@@ -1847,8 +2408,10 @@ fn rewrite_table_refs_to_ranges(
             let ctx = crate::TableRefContext {
                 tables,
                 table_names,
+                sheet_names: sheet_names,
                 current_sheet_index: sheet_idx,
                 current_row: row,
+                current_col: col,
             };
             let resolved = crate::resolve_table_refs_in_ast(&parsed, &ctx);
             let new_formula = format!("={}", crate::expression_to_formula(&resolved));
@@ -1915,10 +2478,28 @@ fn clear_table_auto_filter(
 /// Convert table to range: rewrite all structured references that mention this
 /// table into absolute A1 references, then remove the table from the registry.
 /// Cell data and formatting are preserved.
+///
+/// THE TABLE OBJECT IS DESTROYED HERE, so this is a delete as far as every
+/// dependent is concerned and it carries the identical cascade to `delete_table`
+/// (§3bn): the slicers go, the AutoFilter goes, the object scripts go. Excel
+/// agrees — Convert to Range removes the table's slicers.
+///
+/// It also gained the undo transaction it never had. Before this, Convert to
+/// Range recorded NOTHING: it rewrote every dependent formula in the workbook,
+/// dropped the AutoFilter and removed the table, and Ctrl+Z did not bring back
+/// any of it. That is the same class of half-finished bookkeeping BUG-0006 was
+/// on `delete_table`, and it is recorded in the same order for the same reason
+/// (cells first so they restore last, onto a table that exists again).
 #[tauri::command]
 pub fn convert_to_range(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -1930,8 +2511,8 @@ pub fn convert_to_range(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
 
     // Find the table
     let table = match tables
@@ -1943,13 +2524,15 @@ pub fn convert_to_range(
     };
 
     let table_name_upper = table.name.to_uppercase();
+    let convert_sheet_names = state.sheet_names.read().unwrap().clone();
 
-    rewrite_table_refs_to_ranges(
+    let rewritten_cells = rewrite_table_refs_to_ranges(
         &tables,
         &table_names,
         &mut grids,
         &mut grid,
         active_sheet,
+        &convert_sheet_names,
         &table_name_upper,
         &table,
     );
@@ -1964,7 +2547,99 @@ pub fn convert_to_range(
     drop(table_names);
     drop(grids);
     drop(grid);
-    clear_table_auto_filter(&state, &effect, &table, active_sheet);
+    let removed_filter = clear_table_auto_filter(&state, &effect, &table, active_sheet);
+
+    // C10, same rule as `delete_table`: the table object is gone, so a script
+    // bound to its id has no host and must not be inherited by the next object
+    // minted at that id.
+    let table_id_str = table_id.to_string();
+    let scripts_before = if let Ok(mut scripts) = state.object_scripts.write(&effect) {
+        let before = scripts.clone();
+        scripts.retain(|s| {
+            !(s.object_type == persistence::ScriptableObjectType::Table
+                && s.instance_id.as_deref() == Some(table_id_str.as_str()))
+        });
+        if scripts.len() != before.len() { Some(before) } else { None }
+    } else {
+        None
+    };
+
+    // §3bn: slicers bound to a table that has stopped being a table.
+    let cascade = crate::object_deps::cascade_deleted_sources(
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        &effect,
+        &[crate::object_deps::DeletedSource::table(table_id)],
+    );
+    if !cascade.is_empty() {
+        crate::log_info!(
+            "TABLE",
+            "convert_to_range {} cascaded: {}",
+            table.name,
+            cascade.describe()
+        );
+    }
+
+    // ONE undo transaction covering every side effect, recorded in the same
+    // order `delete_table` uses: cells first (so they restore LAST, after the
+    // table exists again to resolve their structured references), then the
+    // filter, the scripts, the cascade, and the table itself.
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Convert to range".to_string());
+
+        let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
+            std::collections::HashMap::new();
+        for (sheet_idx, row, col, before) in rewritten_cells {
+            by_sheet.entry(sheet_idx).or_default().push((row, col, before));
+        }
+        for (sheet_index, cells) in by_sheet {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(sheet_index, cells),
+                "Restore table references",
+            );
+        }
+        if let Some(previous) = removed_filter {
+            undo_stack.record_custom_restore(
+                "obj_autofilter".to_string(),
+                crate::undo_commands::autofilter_snapshot_bytes(active_sheet, Some(previous)),
+                "Restore table filter",
+            );
+        }
+        if let Some(previous) = scripts_before {
+            undo_stack.record_custom_restore(
+                "obj_object_scripts".to_string(),
+                crate::undo_commands::object_scripts_snapshot_bytes(previous),
+                "Restore table scripts",
+            );
+        }
+        drop(undo_stack);
+        crate::object_deps::record_source_cascade_undo(&state, &cascade);
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_custom_restore(
+            "obj_table".to_string(),
+            crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(table)),
+            "Convert to range",
+        );
+        undo_stack.commit_transaction();
+    }
+
+    // PHASE B. The VALUES do not move -- `rewrite_table_refs_to_ranges` froze
+    // each specifier into the rectangle it named at this instant, which is what
+    // Excel's Convert to Range does. The EDGES do: those cells no longer read a
+    // table, so their table edges must go and their cell edges must come from
+    // the ranges that replaced the specifier.
+    recalc_after_table_change(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &[table_name_upper.clone()],
+        &[],
+    );
 
     TableResult::ok_empty()
 }
@@ -1981,6 +2656,7 @@ pub fn check_table_auto_expand(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     row: u32,
@@ -2104,17 +2780,23 @@ pub fn check_table_auto_expand(
     // PHASE B — after every guard above is released. A generated header is a
     // literal, so it owns no outgoing edges to record; it only needs to be a
     // seed for whatever already reads it.
+    //
+    // THE TABLE ITSELF JUST GREW, and that is the gesture §2aj is about: typing
+    // one row under `Sales` makes `=SUM(Sales[Amount])` cover it, exactly as in
+    // Excel. `recalc_after_table_change` rebuilds the readers' cell edges (so
+    // the NEXT edit to the new row reaches the total too) and seeds them
+    // alongside any header this command wrote.
     drop(grids);
     drop(grid);
     drop(tables);
-    let mut recalculated = Vec::new();
-    crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+    recalc_after_table_change(
         &state,
         &user_files_state,
+        &pivot_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &[result.name.clone()],
         &seeds,
-        &mut recalculated,
     );
 
     Some(result)
@@ -2128,6 +2810,10 @@ pub fn check_table_auto_expand(
 pub fn enforce_table_header(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     column_index: u32,
     new_value: String,
@@ -2163,9 +2849,45 @@ pub fn enforce_table_header(
         .collect();
 
     let final_name = ensure_unique_header(&new_value, &existing);
-    table.columns[col_relative].name = final_name;
+    let previous_name = std::mem::replace(&mut table.columns[col_relative].name, final_name.clone());
 
-    TableResult::ok(table.clone())
+    let result = table.clone();
+    let table_name_upper = result.name.to_uppercase();
+    let table_bounds = (
+        result.start_row,
+        result.start_col,
+        result.end_row,
+        result.end_col,
+    );
+    drop(tables);
+
+    // RETYPING A HEADER IS A COLUMN RENAME, and it is the route a user actually
+    // takes -- `rename_table_column` is the dialog, this is the grid. Now that a
+    // cell KEEPS `Sales[Amount]` (§2aj), a header edit that did not carry its
+    // readers over would turn every one of them into `#NAME?`. Excel renames
+    // them; so does this, through the same helper the dialog uses.
+    if previous_name != final_name {
+        let renamed_cells = rename_table_column_in_formulas(
+            &state,
+            &effect,
+            &table_name_upper,
+            table_bounds,
+            &previous_name,
+            &final_name,
+        );
+        record_table_ref_rewrite_undo(&state, renamed_cells, "Rename table column");
+        recalc_after_table_change(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &[table_name_upper],
+            &[],
+        );
+    }
+
+    TableResult::ok(result)
 }
 
 /// Get a table by ID
@@ -2206,6 +2928,10 @@ pub fn get_table_by_id(
 pub fn add_table_row(
     file_state: State<'_, crate::persistence::FileState>,
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
 ) -> Result<(), String> {
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -2228,6 +2954,19 @@ pub fn add_table_row(
                     }
                 }
             }
+            let table_name = table.name.clone();
+            drop(tables);
+            // PHASE B: one more data row is one more row inside every
+            // `Table[Column]` (§2aj).
+            recalc_after_table_change(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &[table_name],
+                &[],
+            );
             return Ok(());
         }
     }
@@ -2442,14 +3181,22 @@ pub fn set_calculated_column(
         let styles = state.style_registry.read().unwrap();
         let locale = state.locale.lock().unwrap();
 
+        // The form every row STORES: the parse, re-spelled from the table's own
+        // capitalisation (the lexer shouts both the table name and the column,
+        // so `[@Price]` would be kept as `[@PRICE]` -- §2t for tables).
+        let mut stored_ast = parsed.clone();
+        crate::table_deps::restamp_table_casing(&mut stored_ast, &tables, &table_names);
+
         for row in data_start..=data_end {
             // Resolve table references for this specific row
             let resolved = if crate::ast_has_table_refs(&parsed) {
                 let ctx = crate::TableRefContext {
                     tables: &tables,
                     table_names: &table_names,
+                    sheet_names: &sheet_names,
                     current_sheet_index: active_sheet,
                     current_row: row,
+                    current_col: abs_col,
                 };
                 crate::resolve_table_refs_in_ast(&parsed, &ctx)
             } else {
@@ -2477,10 +3224,20 @@ pub fn set_calculated_column(
                 &user_files,
             );
 
-            // Create cell with formula and evaluated value
+            // Create cell with formula and evaluated value.
+            //
+            // THE STORED AST KEEPS THE SPECIFIER (§2aj). It used to be the
+            // per-row FLATTENING (`$B$4*$C$4`), which is what
+            // `reevaluate_formula_cell` would then re-read forever -- so a
+            // calculated column stopped following its own table the moment it
+            // was written, and the formula bar showed coordinates for a formula
+            // the user wrote in column names. `eval_ast` resolves `[@Price]`
+            // against the evaluating cell's row on every evaluation, so the
+            // stored tree is the one the user typed and the VALUE below is
+            // still this row's.
             let mut cell = engine::Cell::new_formula(formula.clone());
             cell.value = result.to_cell_value();
-            cell.set_cached_ast(engine_ast);
+            cell.set_cached_ast(crate::convert_expr(&stored_ast));
 
             // Preserve existing style
             if let Some(existing) = grid.get_cell(row, abs_col) {
@@ -2507,7 +3264,9 @@ pub fn set_calculated_column(
 
             // Record this cell's own edges. Resolution is per-ROW ([@Price] is
             // a different cell on every row), so this cannot be hoisted out of
-            // the loop the way a plain shared formula could.
+            // the loop the way a plain shared formula could. The CELL edges come
+            // from the resolved tree (it is the one with coordinates in it); the
+            // TABLE edge comes from the stored one.
             register_table_formula_dependencies(
                 &state,
                 &grid,
@@ -2516,6 +3275,7 @@ pub fn set_calculated_column(
                 row,
                 abs_col,
                 Some(&resolved),
+                Some(&stored_ast),
             );
             seeds.push((row, abs_col));
         }
