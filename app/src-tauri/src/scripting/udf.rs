@@ -240,9 +240,10 @@ pub fn collect_udf_calls(
     // --- Lock the same READ state update_cell uses to evaluate. We take only
     // immutable locks and never write back. Undo / dependents maps are NOT
     // touched (this pass is discarded).
+    // CANONICAL LOCK ORDER: `grids` FIRST, then everything else.
+    let grids = state.grids.read().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
-    let grids = state.grids.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     // The edited cells are always on the ACTIVE sheet (update_cell(s_batch)
     // edit there), so mirror that rather than trusting a caller-supplied index.

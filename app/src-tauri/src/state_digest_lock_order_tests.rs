@@ -606,3 +606,702 @@ mod tests {
          defect) or the real test module was enumerated as product code",
     );
 }
+
+// ===========================================================================
+// THE SECOND DEADLOCK: `open_file` vs the gather-refresh worker (2026-08-11)
+// ===========================================================================
+//
+// The census above closed the `grid`/`grids` PAIR, and the app wedged again on
+// the very next run. Three passes had attributed that wedge to the digest, on
+// the strength of the digest's entry line being the last thing in the log; the
+// digest even grew a phase watchdog to report which lock it was stuck on, and
+// the watchdog could not report, because the logger is inside the wedge.
+//
+// It was finally MEASURED, from outside: every thread of the wedged process was
+// suspended and its stack walked (Windows ARM64, x29 frame-pointer chain, since
+// dbghelp's StackWalk64 does not support that machine). Two threads were
+// blocked, identical in two dumps five seconds apart:
+//
+//   main thread 44452
+//     std::sync::poison::mutex::Mutex<Vec<engine::grid::Grid>>::lock
+//     app_lib::document_effect::Persisted<Vec<Grid>>::read       <- WANTS grids
+//     app_lib::spill_restore::recover_spill_map_by_evaluation
+//     app_lib::spill_restore::restore_spill_map_on_load
+//     app_lib::persistence::open_file                            <- HOLDS sheet_names
+//
+//   worker 88412
+//     std::sync::poison::mutex::Mutex<Vec<String>>::lock
+//     app_lib::document_effect::Persisted<Vec<String>>::read     <- WANTS sheet_names
+//     app_lib::calculation::recalculate_sheet_values             <- HOLDS grid + grids
+//     app_lib::calp_commands::queue_gather_refresh::closure$0
+//
+// It is NOT the digest and it is NOT the `grid`/`grids` pair. It is the
+// (`sheet_names`, `grids`) pair, and the class is the one the census was built
+// for: a lock-order inversion against the recalculation pass, which is the
+// crate's longest lock chain that runs off the main thread.
+//
+// Two things follow, and both are guarded below.
+//
+// 1. THE PAIR WAS THE WRONG UNIT AGAIN. `state.grid`/`state.grids` are two of
+//    about forty locks. The rule that actually holds is
+//    **nothing else may be held when a grid lock is acquired** -- `grid` first,
+//    `grids` second, every other store after -- because the pass takes them in
+//    exactly that order and everything else has to agree with the pass.
+//    `no_lock_is_held_while_a_grid_lock_is_acquired` enforces it crate-wide. It
+//    found 49 functions on its first run.
+//
+// 2. "ONLY TWO COMMANDS RUN OFF THE MAIN THREAD" WAS FALSE. That claim counted
+//    `#[tauri::command(async)]` and missed `#[tauri::command] pub async fn`,
+//    which Tauri also runs on the async runtime -- 114 of them. And it missed
+//    the plain `std::thread::spawn` workers, one of which
+//    (`queue_gather_refresh`) is the thread in the dump above. There are many
+//    background holders, not two.
+
+/// Can something else acquire `sheet_names` within `ms`? The
+/// `probe_can_take_grids` pattern: a THREAD with a deadline, so a "no" is a
+/// timeout the test reports rather than a hang the test joins.
+fn probe_can_take_sheet_names(state: &Arc<AppState>, ms: u64) -> bool {
+    let got = Arc::new(AtomicBool::new(false));
+    {
+        let state = Arc::clone(state);
+        let got = Arc::clone(&got);
+        std::thread::spawn(move || {
+            let guard = state.sheet_names.read();
+            got.store(guard.is_ok(), Ordering::SeqCst);
+        });
+    }
+    wait_until(ms, || got.load(Ordering::SeqCst))
+}
+
+#[test]
+fn the_load_paths_spill_recovery_does_not_hold_sheet_names_while_it_waits_for_grids() {
+    // THE MEASURED DEADLOCK, as a test that FAILS rather than hangs.
+    //
+    // Shape: this thread plays the recalculation pass and holds `grids`. The
+    // function under test runs on another thread and blocks. The question is
+    // WHAT IT IS HOLDING while it blocks. With the inverted order it is holding
+    // `sheet_names` -- which the pass goes on to want -- and the app is dead.
+    // With the canonical order it holds nothing at all.
+    let state = shared_state();
+    let user_files = crate::persistence::UserFilesState::default();
+
+    let effect = DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::DerivedCache,
+    );
+    let grids_guard = state.grids.write(&effect).unwrap();
+
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let state = Arc::clone(&state);
+        let started = Arc::clone(&started);
+        let finished = Arc::clone(&finished);
+        std::thread::spawn(move || {
+            started.store(true, Ordering::SeqCst);
+            let report =
+                crate::spill_restore::recover_spill_map_by_evaluation(&state, &user_files);
+            finished.store(true, Ordering::SeqCst);
+            report.evaluated
+        })
+    };
+
+    assert!(
+        wait_until(2_000, || started.load(Ordering::SeqCst)),
+        "the spill-recovery thread never started",
+    );
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "PRECONDITION FAILED: the recovery completed while `grids` was \
+         write-locked, so this test is not measuring a blocked recovery at all",
+    );
+
+    assert!(
+        probe_can_take_sheet_names(&state, 1_500),
+        "DEADLOCK: the load path's spill recovery is holding `sheet_names` while \
+         it waits for `grids`. A recalculation pass holding both grid locks then \
+         waits for `sheet_names`, and neither can proceed -- and the recovery \
+         runs inside `open_file`, on the MAIN thread, so the WebView2 message \
+         pump stops with it and the window never answers again. Measured live on \
+         2026-08-11; both stacks are in the header above.",
+    );
+
+    drop(grids_guard);
+    let _evaluated = handle.join().expect("the recovery thread panicked");
+}
+
+#[test]
+fn the_sheet_names_probe_itself_can_fail_the_way_the_defect_did() {
+    // NON-VACUITY for the test above.
+    let state = shared_state();
+    let held = state.sheet_names.read().unwrap();
+    assert!(
+        !probe_can_take_sheet_names(&state, 400),
+        "the probe cannot detect a held `sheet_names` lock, so the deadlock \
+         assertion above proves nothing",
+    );
+    drop(held);
+    assert!(
+        probe_can_take_sheet_names(&state, 1_000),
+        "the probe reports a lock that is not held",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// THE CENSUS, generalised: nothing is held when a grid lock is taken
+// ---------------------------------------------------------------------------
+
+/// One function that acquires `state.grid` / `state.grids` while some OTHER
+/// state guard it took earlier is still alive.
+#[derive(Debug, PartialEq, Eq)]
+struct GridLockHolder {
+    file: String,
+    function: String,
+    acquiring: String,
+    holding: Vec<String>,
+    /// The SAME lock, acquired twice with the first guard still alive.
+    /// `Persisted<T>` is a `std::sync::Mutex`; it is not re-entrant, so this is
+    /// not an ordering problem at all but a one-thread hang.
+    reentrant: bool,
+}
+
+/// One lock acquisition found on a line.
+struct Acquisition {
+    field: String,
+    col: usize,
+    /// Does it BIND a guard that outlives the statement, or is it a temporary?
+    live: bool,
+    /// The name the guard is bound to, when there is one. Needed because
+    /// `drop(x)` releases ONE guard and the census has to know which.
+    binding: String,
+}
+
+/// `let mut grids = ...` -> "grids". Empty when the line binds nothing.
+fn binding_name(line: &str) -> String {
+    let Some(after) = line.split_once("let ") else {
+        return String::new();
+    };
+    let rest = after.1.trim_start();
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    rest.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// Receivers whose fields are the locks this census is about. A local named
+/// `pivot_state` / `user_files_state` counts too -- the pass locks several.
+fn is_state_receiver(name: &str) -> bool {
+    name == "state" || name.ends_with("_state")
+}
+
+/// Method calls that CONSUME the guard inside the same statement, leaving
+/// nothing alive afterwards (`state.grids.read().map(|g| g.len())`).
+const CONSUMING: &[&str] = &[
+    ".clone()",
+    ".iter()",
+    ".len()",
+    ".map(",
+    ".ok()",
+    ".is_empty()",
+    ".contains",
+    ".get(",
+    ".unwrap_or",
+    ".copied()",
+    ".cloned()",
+    ".to_vec()",
+    ".as_ref()",
+    ".and_then(",
+];
+
+fn trailing_ident(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    let mut start = text.len();
+    while start > 0 {
+        let c = bytes[start - 1];
+        if c.is_ascii_alphanumeric() || c == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    &text[start..]
+}
+
+/// Every lock acquisition on one line of code, in source order.
+///
+/// `tail` is the rest of the STATEMENT — this line plus the following ones up
+/// to the terminating `;`. It exists because the consuming call is very often
+/// on the next line:
+///
+/// ```text
+/// let old_decls = state.writeback_declarations.lock()
+///     .map(|d| d.clone()).unwrap_or_default();
+/// ```
+///
+/// which binds nothing at all. Judging that on the first line alone reads it as
+/// a live guard, and `calp_refresh_apply` — which does it twice — then looks
+/// like it takes the same lock twice while holding it.
+fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
+    let mut out = Vec::new();
+    for method in [".read(", ".write(", ".lock("] {
+        let mut from = 0usize;
+        while let Some(rel) = line[from..].find(method) {
+            let at = from + rel;
+            from = at + method.len();
+            let prefix = &line[..at];
+            let field = trailing_ident(prefix);
+            if field.is_empty() {
+                continue;
+            }
+            let before_field = &prefix[..prefix.len() - field.len()];
+            if !before_field.ends_with('.') {
+                continue;
+            }
+            let recv_text = &before_field[..before_field.len() - 1];
+            let recv = trailing_ident(recv_text);
+            if !is_state_receiver(recv) {
+                continue;
+            }
+            let recv_start = recv_text.len() - recv.len();
+            let head = line[..recv_start].trim_end();
+            // `*state.active_sheet.read()...` copies the value out; the guard
+            // is a temporary that dies at the `;`.
+            let deref_copied = head.ends_with('*');
+            let rest_of_line = &line[at + method.len()..];
+            let consumed = CONSUMING.iter().any(|c| rest_of_line.contains(c))
+                || (!rest_of_line.contains(';')
+                    && CONSUMING.iter().any(|c| tail.contains(c)));
+            // Bound to a name that outlives the statement?
+            let mut h = head;
+            loop {
+                let trimmed = h
+                    .trim_end()
+                    .trim_end_matches('(')
+                    .trim_end_matches("mut")
+                    .trim_end_matches('&')
+                    .trim_end_matches("match")
+                    .trim_end();
+                if trimmed.len() == h.trim_end().len() {
+                    h = trimmed;
+                    break;
+                }
+                h = trimmed;
+            }
+            let bound = h.ends_with('=') && line.contains("let ");
+            out.push(Acquisition {
+                field: field.to_string(),
+                col: at,
+                live: bound && !deref_copied && !consumed,
+                binding: binding_name(line),
+            });
+        }
+    }
+    out.sort_by_key(|a| a.col);
+    out
+}
+
+/// Every function in `text` that acquires a grid lock while holding another
+/// state guard.
+///
+/// Same over-approximating spirit as the pair census above, with two
+/// refinements it needs to be usable over forty locks rather than two:
+///
+///   * Rust drops TEMPORARIES at the end of the statement, so
+///     `let n = *state.active_sheet.read().unwrap();` holds nothing afterwards
+///     and must not be reported. Without this, the first run reported 130
+///     violations, 48 of them that shape.
+///   * `} else {` has a net brace delta of ZERO but it ends the scope of every
+///     guard the `if` arm bound. Closes are therefore applied BEFORE opens.
+///     Without this, `protection.rs`'s two-armed
+///     `if sheet_index == active_sheet { grid } else { grids }` reads as one
+///     arm holding the other arm's guards.
+fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder> {
+    const FN_STARTS: &[&str] = &[
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ];
+    let stripped = strip_cfg_test_items(text);
+    let lines: Vec<&str> = stripped.lines().collect();
+    // Code only: a census that reads comments accepts a commented-out call.
+    let code: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect();
+
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    let mut depth: i32 = 0;
+    let mut held: Vec<(String, i32)> = Vec::new();
+    // The SAME guards, tracked by binding name, for the re-entrancy question.
+    //
+    // Two lists rather than one, and the difference is the point. For the ORDER
+    // question `held` is cleared by ANY `drop(`: that under-approximates, which
+    // is the safe direction there (a missed report costs an argument). For the
+    // RE-ENTRANCY question the same rule is the UNSAFE direction — a function
+    // that drops four unrelated guards and then re-takes `grids` would go
+    // unreported, and `apply_override_value_to_grid` is exactly that shape. So
+    // this list releases only the guard `drop(name)` actually names.
+    let mut held_named: Vec<(String, String, i32)> = Vec::new();
+    // Depth at which a closure handed to `spawn` opened, while it is open.
+    let mut spawn_until: Option<i32> = None;
+
+    for (i, raw) in lines.iter().enumerate() {
+        if FN_STARTS.iter().any(|p| raw.starts_with(p)) {
+            current = raw
+                .split("fn ")
+                .nth(1)
+                .map(|r| r.split(['(', '<']).next().unwrap_or("").to_string());
+            depth = 0;
+            held.clear();
+            held_named.clear();
+            spawn_until = None;
+        }
+        let line = code[i];
+        // A closure handed to `thread::spawn` / `async_runtime::spawn` /
+        // `spawn_blocking` runs on ANOTHER thread: what the enclosing function
+        // holds is irrelevant to it, and its own acquisitions are not the
+        // enclosing function's. `mcp_start` is the live example — it holds
+        // `running` and hands a closure that clears `running` when the server
+        // exits, which is correct and reads as re-entrant to a naive scan.
+        let opens_here = line.matches('{').count() as i32;
+        let closes_here = line.matches('}').count() as i32;
+        if spawn_until.is_none() && line.contains("spawn(") && opens_here > closes_here {
+            spawn_until = Some(depth);
+        }
+        // The rest of the statement: the following lines up to the one that
+        // ends it. Capped, because an unterminated statement must not make the
+        // census quadratic on a 14,000-line file.
+        let mut tail = String::new();
+        for next in code.iter().skip(i + 1).take(4) {
+            tail.push_str(next);
+            if next.contains(';') {
+                break;
+            }
+        }
+        let acquisitions = if spawn_until.is_some() {
+            Vec::new()
+        } else {
+            acquisitions_in(line, &tail)
+        };
+        for acq in acquisitions {
+            if held_named.iter().any(|(f, _, _)| *f == acq.field) {
+                if let Some(name) = current.clone() {
+                    out.push(GridLockHolder {
+                        file: file.to_string(),
+                        function: name,
+                        acquiring: acq.field.clone(),
+                        holding: vec![acq.field.clone()],
+                        reentrant: true,
+                    });
+                }
+            }
+            if acq.field == "grid" || acq.field == "grids" {
+                // `grid` before `grids` is the canonical order, not a holding.
+                let blocking: Vec<String> = held
+                    .iter()
+                    .filter(|(f, _)| !(acq.field == "grids" && f == "grid"))
+                    .map(|(f, _)| f.clone())
+                    .collect();
+                if !blocking.is_empty() {
+                    if let Some(name) = current.clone() {
+                        out.push(GridLockHolder {
+                            file: file.to_string(),
+                            function: name,
+                            acquiring: acq.field.clone(),
+                            holding: blocking,
+                            reentrant: false,
+                        });
+                    }
+                }
+            }
+            if acq.live {
+                // A guard bound in an `if let` / `while let` HEADER lives inside
+                // the block that opens on the same line, not for the rest of the
+                // enclosing one.
+                //
+                // `let x = match state.y.read() { ... };` ALSO ends in `{` and
+                // it is the opposite case -- the binding outlives the match
+                // block entirely. Both shapes are in the crate and treating
+                // them alike is not cosmetic: with the match arm scoped to its
+                // block, this census read the MEASURED deadlock
+                // (`recover_spill_map_by_evaluation`, which binds every one of
+                // its six guards that way) as clean, and passed against a tree
+                // with the defect deliberately re-introduced. The statement
+                // being a `let` is what tells them apart.
+                let is_let_binding = line.trim_start().starts_with("let ");
+                let scope = if !is_let_binding && line.trim_end().ends_with('{') {
+                    depth + 1
+                } else {
+                    depth
+                };
+                held.push((acq.field.clone(), scope));
+                held_named.push((acq.field, acq.binding, scope));
+            }
+        }
+        if let Some(rest) = line.split_once("drop(") {
+            held.clear();
+            let dropped: String = rest
+                .1
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            held_named.retain(|(_, name, _)| *name != dropped);
+        }
+        depth -= closes_here;
+        held.retain(|(_, d)| depth >= *d);
+        held_named.retain(|(_, _, d)| depth >= *d);
+        depth += opens_here;
+        // AFTER the opens are counted, or the `spawn(` line clears its own
+        // marker: on that line `depth` is still the outer depth until the `{`
+        // has been counted.
+        if spawn_until.is_some_and(|d| depth <= d) {
+            spawn_until = None;
+        }
+    }
+    out
+}
+
+/// Walk the whole crate once; both census tests below filter this.
+fn census_over_the_crate() -> Vec<GridLockHolder> {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(
+        files.len() > 50,
+        "the census walked {} files — it is not finding the crate",
+        files.len()
+    );
+
+    let mut holders = Vec::new();
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // `*_tests.rs` are test modules reached through `#[cfg(test)] #[path]`.
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        holders.extend(grid_locks_taken_while_holding(&rel, &text));
+    }
+    holders
+}
+
+#[test]
+fn no_lock_is_held_while_a_grid_lock_is_acquired() {
+    let holders: Vec<GridLockHolder> = census_over_the_crate()
+        .into_iter()
+        .filter(|h| !h.reentrant)
+        .collect();
+
+    assert!(
+        holders.is_empty(),
+        "these functions acquire a grid lock while still holding another state \
+         lock. The recalculation pass takes `grid`, then `grids`, and only then \
+         everything else — and it runs on a background thread, so anything that \
+         holds one of those `everything else` locks and then waits for a grid \
+         lock closes a cycle. The app stops answering with no panic, no crash \
+         and nothing in the log (measured 2026-08-11: `open_file` held \
+         `sheet_names` and waited for `grids` while the gather-refresh worker \
+         held both grid locks and waited for `sheet_names`).\n{}",
+        holders
+            .iter()
+            .map(|h| format!(
+                "  {}::{} takes {} while holding [{}]",
+                h.file,
+                h.function,
+                h.acquiring,
+                h.holding.join(", ")
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn no_function_takes_the_same_lock_twice_while_it_still_holds_it() {
+    // A DIFFERENT CLASS from everything above, and it needs saying because the
+    // fix for the ordering defect is what creates it. Turning a function round
+    // usually means HOISTING a guard out of the branch that used it, which
+    // widens its scope — and if anything later in the function takes that same
+    // lock again, `Persisted<T>` being a `std::sync::Mutex` means the thread
+    // blocks on itself. Not a cycle between two threads: one thread, no
+    // partner, no timeout, forever.
+    //
+    // This is not hypothetical. Fixing the 49 in this pass created exactly two:
+    // `calp_commands::apply_override_value_to_grid`, whose tail re-reads `grids`
+    // for the orphaned-spill sweep, and `tables::set_calculated_column`, whose
+    // tail calls `recalc_after_active_sheet_bulk_rewrite` (which takes both grid
+    // locks itself). Both are now released with an explicit `drop` carrying the
+    // reason.
+    let reentrant: Vec<GridLockHolder> = census_over_the_crate()
+        .into_iter()
+        .filter(|h| h.reentrant)
+        .collect();
+
+    assert!(
+        reentrant.is_empty(),
+        "these functions take a lock they are already holding. `Persisted<T>` is \
+         a `std::sync::Mutex` and is NOT re-entrant, so the second acquisition \
+         blocks the calling thread forever — and if that thread is the main one, \
+         the whole window stops answering with no panic and nothing in the log.\n{}",
+        reentrant
+            .iter()
+            .map(|h| format!("  {}::{} takes {} twice", h.file, h.function, h.acquiring))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn the_reentrancy_detector_has_teeth_and_knows_what_a_spawned_closure_is() {
+    // FIRES on a genuine double acquisition.
+    let doubled = "pub fn f(state: &AppState) {\n    let g = state.grids.read().unwrap();\n    let again = state.grids.read().unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", doubled);
+    assert!(
+        found.iter().any(|h| h.reentrant),
+        "the detector cannot see a lock taken twice in one function: {:?}",
+        found
+    );
+
+    // QUIET on the `mcp_start` shape: the second acquisition is inside a
+    // closure handed to `thread::spawn`, so it runs on another thread and is
+    // not the enclosing function taking the lock twice at all.
+    let spawned = "pub fn f(state: &AppState) {\n    let mut running = state.running.lock().unwrap();\n    *running = true;\n    std::thread::spawn(move || {\n        if let Ok(mut r) = state.running.lock() {\n            *r = false;\n        }\n    });\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", spawned);
+    assert!(
+        found.is_empty(),
+        "the detector reported a spawned closure's own acquisition as the \
+         enclosing function's — that is a false positive, and a census with \
+         false positives gets exemptions written for it: {:?}",
+        found
+    );
+
+    // ...and the spawn suppression must END with the closure, or everything
+    // after a `spawn(` in the same function stops being checked.
+    let after_spawn = "pub fn f(state: &AppState) {\n    std::thread::spawn(move || {\n        let x = 1;\n    });\n    let n = state.sheet_names.read().unwrap();\n    let g = state.grids.read().unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", after_spawn);
+    assert_eq!(
+        found.len(),
+        1,
+        "the spawn suppression never turned off, so the rest of the function is \
+         invisible to the census: {:?}",
+        found
+    );
+}
+
+#[test]
+fn the_generalised_detector_fires_on_every_shape_that_deadlocked() {
+    // TEETH. Each of these is a shape the real tree actually had.
+    let cases: &[(&str, &str)] = &[
+        (
+            "adjacent",
+            "pub fn f(state: &AppState) {\n    let n = state.sheet_names.read().unwrap();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "the measured one: three guards, then grids",
+            "pub fn f(state: &AppState) {\n    let a = state.sheet_names.read().unwrap();\n    let b = state.tables.read().unwrap();\n    let c = state.named_ranges.read().unwrap();\n    let d = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "nested in a branch",
+            "pub fn f(state: &AppState) {\n    let t = state.tables.read().unwrap();\n    if cond {\n        let g = state.grid.write(&e).unwrap();\n    }\n}\n",
+        ),
+        (
+            "unbound temporary assignment",
+            "pub fn f(state: &AppState) {\n    let t = state.tables.read().unwrap();\n    *state.grid.write(&e)? = other;\n}\n",
+        ),
+        (
+            "a non-AppState state object counts too",
+            "pub fn f(state: &AppState) {\n    let p = pivot_state.pivot_tables.read().unwrap();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // THE EXACT SHAPE OF THE MEASURED DEADLOCK, and the one this census
+            // was blind to on its first draft: `let x = match ... { };` binds a
+            // guard that outlives the match block. With that mis-scoped, the
+            // census passed against a tree carrying the real defect.
+            "let-bound match arms",
+            "pub fn f(state: &AppState) {\n    let n = match state.sheet_names.read() {\n        Ok(g) => g,\n        Err(_) => return,\n    };\n    let g = match state.grids.read() {\n        Ok(g) => g,\n        Err(_) => return,\n    };\n}\n",
+        ),
+    ];
+    for (label, src) in cases {
+        let found = grid_locks_taken_while_holding("planted.rs", src);
+        assert_eq!(
+            found.len(),
+            1,
+            "the detector did NOT fire on the `{}` shape, so the census cannot \
+             see the defect it exists for: {:?}",
+            label,
+            found
+        );
+    }
+}
+
+#[test]
+fn the_generalised_detector_stays_quiet_on_the_shapes_that_are_correct() {
+    // The other half of the teeth: a census that fires on everything gets
+    // exemptions written for it until it reports nothing at all.
+    let cases: &[(&str, &str)] = &[
+        (
+            "canonical order",
+            "pub fn f(state: &AppState) {\n    let g = state.grid.read().unwrap();\n    let gs = state.grids.read().unwrap();\n    let n = state.sheet_names.read().unwrap();\n}\n",
+        ),
+        (
+            "a copied-out temporary holds nothing",
+            "pub fn f(state: &AppState) {\n    let n = *state.active_sheet.read().unwrap();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "a consumed guard holds nothing",
+            "pub fn f(state: &AppState) {\n    let n = state.sheet_names.read().map(|s| s.len()).unwrap_or(0);\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // `calp_refresh_apply`'s real shape: the consuming call is on the
+            // NEXT line. Judged on the first line alone this reads as a live
+            // guard and the function looks like a violator.
+            "a guard consumed on the following line holds nothing",
+            "pub fn f(state: &AppState) {\n    let n = state.sheet_names.lock()\n        .map(|d| d.clone()).unwrap_or_default();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "released by drop",
+            "pub fn f(state: &AppState) {\n    let n = state.sheet_names.read().unwrap();\n    drop(n);\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "released by scope",
+            "pub fn f(state: &AppState) {\n    {\n        let n = state.sheet_names.read().unwrap();\n    }\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "the two arms of an if/else are not one holder",
+            "pub fn f(state: &AppState) {\n    if active {\n        let g = state.grid.read().unwrap();\n        let s = state.style_registry.read().unwrap();\n    } else {\n        let gs = state.grids.read().unwrap();\n        let s2 = state.style_registry.read().unwrap();\n    }\n}\n",
+        ),
+        (
+            "a commented-out acquisition is not code",
+            "pub fn f(state: &AppState) {\n    let n = state.sheet_names.read().unwrap();\n    // let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // The counterpart to the `let-bound match arms` tooth: an `if let`
+            // HEADER really does scope its guard to the block, so the census
+            // must not carry it past the closing brace.
+            "an if-let header scopes its guard to the block",
+            "pub fn f(state: &AppState) {\n    if let Ok(mut p) = state.pending_recalc.lock() {\n        p.clear();\n    }\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+    ];
+    for (label, src) in cases {
+        let found = grid_locks_taken_while_holding("planted.rs", src);
+        assert!(
+            found.is_empty(),
+            "the detector fired on the `{}` shape, which is CORRECT code: {:?}",
+            label,
+            found
+        );
+    }
+}

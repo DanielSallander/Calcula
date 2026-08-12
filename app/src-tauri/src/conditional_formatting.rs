@@ -876,9 +876,10 @@ pub fn evaluate_conditional_formats(
     end_col: u32,
 ) -> EvaluateCFResult {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let cf_storage = state.conditional_formats.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` FIRST, then everything else.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
+    let cf_storage = state.conditional_formats.read().unwrap();
 
     let rules = match cf_storage.get(&active_sheet) {
         Some(r) => r,

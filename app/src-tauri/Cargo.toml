@@ -18,7 +18,15 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is NOT decoration. serde_json's DEFAULT parser is a fast
+# approximate one that can be a single ULP out, and every undo/redo snapshot in
+# this crate is a JSON payload (`record_custom_restore` takes `Vec<u8>`). So a
+# float written into a snapshot could come back CHANGED: measured live on
+# 2026-08-11, a pivot's auto-fitted column width of 92.60000000000001 was
+# restored by redo as 92.6 -- a different f64, from an exact round trip through
+# our own undo stack. Invisible for a width; not invisible for a cell value, a
+# chart axis bound or a control's numeric state, which travel the same way.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 gif = "0.13"
 engine = { path = "../../core/engine" }
 parser = { path = "../../core/parser" }

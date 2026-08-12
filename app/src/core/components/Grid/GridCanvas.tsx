@@ -14,6 +14,13 @@ import type { GridTheme } from "../../lib/gridRenderer";
 import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
 import { getColumnX, getRowY } from "../../lib/gridRenderer/layout/dimensions";
 import { setGridCapturer, setGridCanvas, type CaptureRange } from "../../lib/gridCapture";
+import {
+  markDataCommitted,
+  markFetchSettled,
+  markFetchStarted,
+  markPainted,
+  markRefetchQueued,
+} from "../../lib/renderSignal";
 import * as S from "./GridCanvas.styles";
 
 /**
@@ -365,11 +372,18 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     const fetchCells = useCallback(async (force: boolean = false): Promise<void> => {
       const fetchRange = calculateFetchRange();
       if (!fetchRange) {
+        markRefetchQueued(false);
         return;
       }
 
       // Check if we need to fetch
       if (!force && !needsFetch(fetchRange)) {
+        // Nothing owed: the cache already covers the viewport. Clearing the
+        // "a re-fetch is owed" flag here is what stops it latching forever when
+        // the deferred request turns out to be redundant — and it is safe
+        // BECAUSE the deferral path nulls `lastFetchRef`, so the re-issued call
+        // always finds `needsFetch` true and reaches the fetch below.
+        markRefetchQueued(false);
         return;
       }
 
@@ -381,10 +395,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       if (fetchingRef.current) {
         console.log(`[GridCanvas] fetchCells(force=${force}) deferred — fetch in progress, will retry after`);
         pendingRefreshRef.current = true;
+        markRefetchQueued(true);
         return;
       }
 
       fetchingRef.current = true;
+      // The re-fetch this call may have been scheduled BY is now under way, so
+      // the debt is discharged by the in-flight count from here on.
+      markRefetchQueued(false);
+      markFetchStarted();
       const perfT0 = performance.now();
 
       try {
@@ -432,6 +451,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           // Non-critical: silently ignore spill range fetch failures
         }
 
+        // Announce the commit AFTER the spill ranges, not after `setCells`:
+        // both feed the same paint, and a capture that resumed between them
+        // would photograph cells without their spill borders.
+        markDataCommitted();
+
         const perfT2Total = performance.now();
         console.log(
           `[PERF] fetchCells range=(${fetchRange.startRow},${fetchRange.startCol})-(${fetchRange.endRow},${fetchRange.endCol}) ` +
@@ -441,6 +465,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         console.error("Failed to fetch cells:", error);
       } finally {
         fetchingRef.current = false;
+        markFetchSettled();
 
         // If another fetch was requested while we were fetching (scroll or
         // forced refresh), invalidate the cache and bump the generation
@@ -451,6 +476,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           console.log('[GridCanvas] Fetch was deferred during in-flight request — scheduling re-fetch');
           pendingRefreshRef.current = false;
           lastFetchRef.current = null;
+          // `refetchQueued` deliberately stays SET across this gap: the state
+          // bump below reaches `fetchCells` in a later tick, and a capture that
+          // polled in between would otherwise see a quiescent grid that is
+          // about to change.
           setFetchGeneration(g => g + 1);
         }
       }
@@ -526,6 +555,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         displayHeadings,
         referenceStyle,
       );
+
+      // The frame is on the canvas. Stamp it, so a capture can tell "painted
+      // since the data last changed" from "merely idle" (see lib/renderSignal).
+      markPainted();
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {

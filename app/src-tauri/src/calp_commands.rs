@@ -504,6 +504,11 @@ fn compute_publish_report(
             })
             .sum(),
         "row/column outline groups (structure + collapsed state)");
+    item(&mut included, "cellBehaviors",
+        wb.cell_behaviors.iter()
+            .filter(|b| published_sheet_ids.contains(&b.sheet_id))
+            .count(),
+        "cell-behavior bindings on published sheets (the script itself ships as a consent-gated object script)");
     item(&mut included, "paneControls", wb.pane_controls.len(),
         "pane controls (config + current values); custom-control scripts ship as object scripts (consent-gated)");
     item(&mut included, "objectScripts",
@@ -545,6 +550,34 @@ fn compute_publish_report(
     item(&mut excluded, "protection", protected,
         "sheet protection policy is not carried (a governance feature, not yet distributed); \
          per-cell locked/hidden DO travel, as cell formatting");
+    // WORKBOOK STRUCTURE protection, which the "protection" line above does NOT
+    // cover: that one counts `state.sheet_protection`, a different store. A
+    // workbook whose author locked its structure published with no line at all
+    // saying the lock did not travel.
+    let workbook_protected = usize::from(wb.workbook_protection.is_some());
+    item(&mut excluded, "workbookProtection", workbook_protected,
+        "workbook structure protection is not carried (a governance feature, not yet distributed)");
+    // WORKBOOK-SCOPED GRID DEFAULTS. A package's sheets are APPENDED to the
+    // subscriber's existing workbook, and these two are one-per-workbook, so
+    // applying the publisher's values would silently re-size every sheet the
+    // subscriber already had. The published sheets' own explicit widths/heights
+    // DO travel (layout.json); only the fallback for columns and rows the author
+    // never touched reverts to the subscriber's default. Reported rather than
+    // dropped in silence, because an author who set a 30px default row is
+    // entitled to know their report will not open that way elsewhere.
+    let non_default_grid_defaults = usize::from(
+        (wb.default_row_height - ::persistence::DEFAULT_ROW_HEIGHT_PX).abs() > f64::EPSILON
+            || (wb.default_column_width - ::persistence::DEFAULT_COLUMN_WIDTH_PX).abs()
+                > f64::EPSILON,
+    );
+    item(&mut excluded, "gridDefaults", non_default_grid_defaults,
+        "your default row height / column width are workbook-wide, and the package's sheets are added to the subscriber's own workbook; explicitly sized rows and columns do travel");
+    // Per-connection "view as" RLS role selections. Deliberately not carried:
+    // the selection is the PUBLISHER's impersonation of a role on their own
+    // machine, and re-applying it on a subscriber would present that
+    // subscriber's data through a role their identity may not hold.
+    item(&mut excluded, "biRoleSelections", wb.bi_connection_roles.len(),
+        "your 'view as' role selections stay with you; a subscriber sees the model through their own identity");
     let doc_props = [
         &wb.properties.title,
         &wb.properties.author,
@@ -561,6 +594,20 @@ fn compute_publish_report(
 
     PublishReport { included, excluded }
 }
+
+// The `.calp` publish-coverage census table (`CALP_PUBLISH_COVERAGE`) lives at
+// the END of this file, not next to the report it describes.
+//
+// It has to, and the reason is worth the four lines.
+// `only_subscribe_and_install_may_create_a_calp_pin` isolates this file's
+// production code by splitting the source at the FIRST test-gate attribute and
+// keeping what comes before it. A test-gated item placed above the pinning call
+// sites therefore truncates that scan to a string that contains none of them,
+// and the guard passes over nothing at all while reporting success. (Writing
+// the attribute out in THIS comment does it too — the split is textual and does
+// not know a comment from code, which is how the first attempt at this note
+// silently disarmed the guard.)
+
 
 /// Publish selected sheets to a local registry.
 #[tauri::command]
@@ -2555,6 +2602,25 @@ pub fn calp_pull(
         }
     }
 
+    // Materialize pulled CELL BEHAVIOR bindings (granular bricks phase 2),
+    // remapping each package sheet id to the local index it landed on. Uses the
+    // same materializer as the .cala load path, so a pulled binding and a loaded
+    // one are the same object — and, like a loaded one, a binding naming a
+    // script that is not present stays inert until that script arrives.
+    //
+    // Until this existed the package carried no bindings at all: a subscriber
+    // pulled a report whose typed cells looked right and did nothing at all,
+    // with no line in the publish transparency report to say so.
+    if !result.cell_behaviors.is_empty() {
+        let mut store = state.cell_behaviors.write(&effect).map_err(|e| e.to_string())?;
+        let added = crate::cell_behaviors::materialize_saved_cell_behaviors(
+            &result.cell_behaviors,
+            &mut store,
+            |sid| pkg_to_index.get(&sid).copied(),
+        );
+        log::info!("[calp] pulled {} cell-behavior binding(s)", added);
+    }
+
     // On-grid name snapshot for the pane-control collision guard below —
     // taken BEFORE the package's own on-grid controls materialize, so the
     // guard sees only the SUBSCRIBER's pre-existing names. Taking it after
@@ -3747,6 +3813,22 @@ fn apply_override_value_to_grid(
 
     // NAMING AUTHORITIES BEFORE THE GRIDS, the lock order
     // `restamp_workbook_name_casing` already established.
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
+    // This function writes an override value into a sheet and then mirrors it
+    // into the active grid, so it takes BOTH -- and it used to take them after
+    // four name stores, which is the inverted order: the recalculation pass
+    // holds the grid locks and then takes `named_ranges` / `tables` /
+    // `table_names` / `sheet_names` on a background thread. The mirror is taken
+    // unconditionally rather than inside the `active == sheet_index` branch,
+    // which costs a slightly wider critical section and buys the one order.
+    let mut active_grid = match state.grid.write(effect) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let mut grids = match state.grids.write(effect) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
     let named_ranges = match state.named_ranges.read() {
         Ok(n) => n,
         Err(_) => return false,
@@ -3770,31 +3852,31 @@ fn apply_override_value_to_grid(
         sheet_names: &sheet_names,
     };
 
-    {
-        let mut grids = match state.grids.write(effect) {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        match grids.get_mut(sheet_index) {
-            Some(grid) => {
-                write_override_value(grid, position.0, position.1, value, &spellings)
-            }
-            None => return false,
+    // Both grid guards were acquired at the top -- see the lock-order note there.
+    match grids.get_mut(sheet_index) {
+        Some(grid) => {
+            write_override_value(grid, position.0, position.1, value, &spellings)
         }
+        None => return false,
     }
 
     // Keep the active-sheet mirror in sync.
     let active = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
     if active == sheet_index {
-        if let Ok(mut grid) = state.grid.write(effect) {
-            write_override_value(&mut grid, position.0, position.1, value, &spellings);
-        }
+        write_override_value(&mut active_grid, position.0, position.1, value, &spellings);
     }
     drop(spellings);
     drop(sheet_names);
     drop(table_names);
     drop(tables);
     drop(named_ranges);
+    // BOTH GRID GUARDS GO HERE, and this is a requirement rather than tidiness.
+    // They are function-scoped because the canonical lock order needs them taken
+    // before the four name stores above; the block below re-reads `grids`, and
+    // `Persisted<T>` is a `std::sync::Mutex`, which is NOT re-entrant. Holding
+    // them across it does not fail, it blocks the calling thread forever.
+    drop(grids);
+    drop(active_grid);
 
     // SPILL CLAIMS ON THE WRITTEN SHEET (§2y). An override lands a VALUE on a
     // cell chosen by id, which can be the ORIGIN of a dynamic array — and
@@ -4633,6 +4715,23 @@ pub fn calp_refresh_apply(
                         }
                     }
                 }
+            }
+        }
+        // Cell-behavior bindings: same RESET-then-apply semantics, so a binding
+        // the publisher REMOVED in v2 stops firing for subscribers instead of
+        // surviving for ever. Keyed by binding id, so the reset is by sheet.
+        {
+            let mut store = state
+                .cell_behaviors
+                .write(&effect)
+                .map_err(|e| e.to_string())?;
+            store.retain(|_, b| !refreshed_indices.contains(&b.sheet_index));
+            for payload in &payloads {
+                crate::cell_behaviors::materialize_saved_cell_behaviors(
+                    &payload.pull_result.cell_behaviors,
+                    &mut store,
+                    |sid| cfdv_pkg_to_index.get(&sid).copied(),
+                );
             }
         }
     }
@@ -14874,3 +14973,97 @@ mod tofu_pin_policy_guard_tests {
         }
     }
 }
+
+/// EVERY field of `persistence::Workbook`, and what a `.calp` publish does with it.
+///
+/// THE SAME PRODUCER THE XLSX LOSS REPORT NEEDED, for the other distribution
+/// path — and it was needed for the same reason. `compute_publish_report` is a
+/// hand-maintained list of what a package carries and what it leaves behind, and
+/// it had drifted exactly the way the xlsx one had: `cell_behaviors` was neither
+/// carried nor mentioned (a published report's typed cells arrived inert), and
+/// `workbook_protection`, `bi_connection_roles` and the two workbook-wide grid
+/// defaults were dropped with no line anywhere saying so.
+///
+/// That matters more here than for `.xlsx`. An `.xlsx` save loses things on the
+/// author's own machine, where they can see it. A `.calp` is by construction sent
+/// to somebody else, so a silent drop is discovered — if ever — by a subscriber
+/// who has no way to tell whether the report is incomplete or simply says that.
+/// Transparency is one of the three requirements every feature is held to, and a
+/// fidelity report that omits a category is not transparent, it is confident.
+///
+/// The field names come out of `core/persistence/src/lib.rs` at TEST TIME
+/// (`the_publish_report_covers_every_workbook_field`), so a new `Workbook` field
+/// cannot be added without deciding whether a package carries it.
+///
+/// `CARRIED` = the publish writes it into the package. `EXCLUDED` = dropped, and
+/// `compute_publish_report` tells the author. `SILENT` = dropped without a line,
+/// WITH the reason it does not need one.
+#[cfg(test)]
+pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
+    ("sheets", "CARRIED: sheets/{id}/{data,styles,cell_styles,layout,metadata}.json"),
+    ("tables", "CARRIED: tables/{id}.json, filtered to published sheets"),
+    ("slicers", "CARRIED: slicers.json, filtered to published sheets"),
+    ("theme", "CARRIED: theme.json (applied only while the subscriber's theme is still default)"),
+    ("scripts", "CARRIED: modules/{id}.json — inert until the subscriber runs them"),
+    ("notebooks", "CARRIED: notebooks/{id}.json — execution output stripped"),
+    ("charts", "CARRIED: charts.json, sheet ids remapped on pull"),
+    ("sparklines", "CARRIED: sparklines.json, sheet ids remapped on pull"),
+    ("named_ranges", "CARRIED: in the signed version manifest"),
+    ("ribbon_filters", "CARRIED: ribbon_filters.json (workbook-scoped)"),
+    ("pane_controls", "CARRIED: pane_controls.json (workbook-scoped)"),
+    ("pivot_layouts", "CARRIED: pivot_layouts.json (workbook-scoped)"),
+    ("pivot_definitions", "CARRIED: pivot_definitions/{id}.json; output cells are excluded and recomputed by the subscriber"),
+    ("bi_pivot_metadata", "CARRIED: pivot_definitions/bi_metadata.json"),
+    ("object_scripts", "CARRIED: object_scripts/{id}.json, consent-gated on the subscriber"),
+    ("media", "CARRIED: media/{sha256} artifacts, only what published sheets reference"),
+    ("extension_data", "CARRIED: extension_data.json, merged additively on pull"),
+    ("conditional_formats", "CARRIED: conditional_formats.json, filtered to published sheets"),
+    ("data_validations", "CARRIED: data_validations.json, filtered to published sheets"),
+    ("controls", "CARRIED: controls.json, filtered to published sheets and sanitized"),
+    ("cell_types", "CARRIED: as custom_objects of kind 'cellType'"),
+    ("cell_behaviors", "CARRIED: cell_behaviors.json, filtered to published sheets"),
+    ("scenarios", "CARRIED: scenarios.json, filtered to published sheets"),
+    ("outlines", "CARRIED: outlines.json, filtered to published sheets"),
+    ("comments", "CARRIED when the publisher opts in (include_comments); otherwise EXCLUDED and reported as 'comments'"),
+    ("user_files", "EXCLUDED: reported 'workbookFiles' — subscriber-local by policy"),
+    ("properties", "EXCLUDED: reported 'documentProperties'"),
+    ("sheet_protections", "EXCLUDED: reported 'protection'"),
+    ("workbook_protection", "EXCLUDED: reported 'workbookProtection'"),
+    ("default_row_height", "EXCLUDED: reported 'gridDefaults'"),
+    ("default_column_width", "EXCLUDED: reported 'gridDefaults'"),
+    ("bi_connection_roles", "EXCLUDED: reported 'biRoleSelections'"),
+    (
+        "bi_connections",
+        "SILENT: a package embeds each data source as its OWN model under \
+         models/{id}/, and the subscriber's connection is built from that. The \
+         publisher's local connection record is machine-specific (file paths, \
+         bindings) and would be wrong on any other machine, so there is nothing \
+         a subscriber loses by not receiving it.",
+    ),
+    (
+        "bi_connection_caches",
+        "SILENT: the offline data a subscriber needs travels as the package's \
+         own model plus its calculated-table Arrow snapshots. The author's local \
+         cache directory is a rebuildable mirror of the same query results, keyed \
+         by connection ids that do not exist on the subscriber's machine.",
+    ),
+    (
+        "active_sheet",
+        "SILENT: which tab was selected is a view preference, and a package's \
+         sheets are APPENDED to the subscriber's workbook — there is no sense in \
+         which the publisher's tab index names a sheet on the other side.",
+    ),
+    (
+        "pending_recalc",
+        "SILENT: publish REFUSES outright when this is non-empty \
+         (calp_publish's first gate), so a package can never carry one. Shipping \
+         half-calculated cells would send a subscriber numbers that look \
+         authoritative and are stale, with no indicator anywhere.",
+    ),
+    (
+        "format_version",
+        "SILENT: the INBOUND .cala stamp of the file this workbook was read \
+         from. A package carries its own version identity (min_app_version in \
+         the signed manifest) and this number has no meaning inside one.",
+    ),
+];

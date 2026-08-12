@@ -33,24 +33,51 @@ export const KNOWN_ISSUES: KnownIssue[] = [
   // registration batch, merge-redo direction fix, multi-sheet save, .cala
   // sheet metadata, autofilter persistence). If any of them resurface, the
   // oracles will re-flag them — re-ledger rather than re-suppress blindly.
-  {
-    ledgerId: "BUG-0014",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["sheets[0].colWidths.", "sheets[1].colWidths."],
-    reason:
-      "Undo of pivot creation does not restore auto-sized column widths. " +
-      "NOTE: this also masks other width-undo regressions while open. " +
-      "Found 2026-06-11.",
-  },
-  {
-    ledgerId: "BUG-0015",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["pivots."],
-    reason:
-      "Undo of pivot creation leaves a ghost pivot definition in " +
-      "PivotState.pivot_tables. Contradicts [verified] undo.pivot-filter — " +
-      "needs investigation. Found 2026-06-11.",
-  },
+  // BUG-0014 (`sheets[0].colWidths.` + `sheets[1].colWidths.`) and BUG-0015
+  // (`pivots.`) WERE HERE. Both are gone, and the reason each one went is
+  // different — which is the whole point of re-examining a suppression instead
+  // of renewing it.
+  //
+  // WHAT THEY ACTUALLY SUPPRESSED. Neither was scoped to its defect. The
+  // filter suppresses a violation when EVERY digest-diff path is covered by a
+  // prefix, so `pivots.` swallowed the entire pivot subtree — every field of
+  // every pivot definition, for every cause — and the two `colWidths.` prefixes
+  // swallowed ALL column-width divergence on the first two sheets, from any
+  // cause at all. BUG-0014's own note admitted the second half ("this also
+  // masks other width-undo regressions while open") and it was true: the undo
+  // oracle is the instrument this programme trusts to prove undo correctness,
+  // and for pivots and for column widths it had been reporting a green it could
+  // not have seen a defect through since 2026-06-11.
+  //
+  // BUG-0014 — STILL REAL, and now FIXED rather than suppressed.
+  // `auto_fit_pivot_columns` wrote straight into `column_widths` /
+  // `all_column_widths` and recorded nothing on the undo stack, so the widths
+  // simply never came back. It now returns what it overwrote and
+  // `record_pivot_definition_undo` records it in the SAME transaction as the
+  // pivot change (`pivot_col_widths`), because Excel undoes the two together.
+  //
+  // BUG-0015 — the ledgered CAUSE is fixed: `apply_pivot_create_restore`
+  // removes the entry from `PivotState.pivot_tables`, so the grid-source
+  // create/update path this bug was found on no longer leaves a ghost. But the
+  // blanket prefix had gone on to hide its own successors. Four other pivot
+  // commands mutate `pivot_tables` and record NO undo entry at all, and each
+  // of them produces exactly the divergence BUG-0015 describes:
+  //   * `create_pivot_from_bi_model` — creates a pivot Ctrl+Z cannot remove.
+  //     The literal BUG-0015 symptom on the BI path. FIXED (records
+  //     `pivot_create`, as the grid-source path always did).
+  //   * `relocate_pivot` — moving a pivot was not undoable. FIXED (records
+  //     `pivot_definition`; the restore re-renders from the same cache, which
+  //     is exactly right for a move).
+  //   * `update_bi_pivot_fields` — OPEN. Restoring the old definition against
+  //     the new BI query result would render the wrong thing, so it needs a
+  //     definition+cache snapshot, not a definition one.
+  //   * `change_pivot_data_source` — OPEN, same shape: it rebuilds the cache.
+  //   (`refresh_pivot_cache` records nothing either, and that one is correct:
+  //    Excel does not undo a PivotTable refresh.)
+  //
+  // The two OPEN commands are deliberately NOT re-suppressed. A walk that
+  // reaches them should fail loudly and name them; a prefix that hides them
+  // buys silence at the price of the instrument.
   // BUG-0020 (conditionalFormats.*) WAS HERE and is gone because the defect is
   // fixed, not because it was re-classified. The CF commands recorded no undo
   // entry at all — add/update/delete/reorder/clear were invisible to Ctrl+Z,

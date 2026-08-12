@@ -26,6 +26,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { webview2BrowserArguments } from "./webview2Args.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, "..");
@@ -38,8 +39,14 @@ fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
 const log = fs.createWriteStream(LOG_PATH, { flags: "w" });
 
 const stamp = () => new Date().toISOString();
+const BROWSER_ARGS = webview2BrowserArguments(CDP_PORT);
 log.write(`[launch] ${stamp()} tauri dev, CDP ${CDP_PORT}\n`);
+// Print the arguments the WebView will actually get. They decide whether every
+// screenshot golden in the tree means anything, and the last time they were
+// wrong nothing said so.
+log.write(`[launch] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=${BROWSER_ARGS}\n`);
 console.log(`[launch] app log -> ${LOG_PATH}`);
+console.log(`[launch] webview2 args: ${BROWSER_ARGS}`);
 
 const child = spawn(
   "yarn",
@@ -48,7 +55,11 @@ const child = spawn(
     cwd: APP_DIR,
     env: {
       ...process.env,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
+      // From the SHARED definition, never re-typed here. This line used to read
+      // `--remote-debugging-port=${CDP_PORT}` and nothing else, which threw away
+      // the colour-profile pin the PowerShell launcher had just set in the
+      // environment it handed us — see webview2Args.mjs.
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: webview2BrowserArguments(CDP_PORT),
     },
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],

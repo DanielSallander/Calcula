@@ -89,6 +89,14 @@ pub struct PullResult {
     /// `sheet_id` is the PACKAGE sheet id (un-remapped); `outline` is the
     /// opaque app payload. Empty for older packages.
     pub outlines: Vec<SavedSheetOutline>,
+    /// Cell-behavior bindings carried by the package (granular bricks phase 2).
+    /// `sheet_id` is the PACKAGE sheet id (un-remapped), like CF/DV/outlines;
+    /// `binding` is the opaque app payload naming the script that runs for the
+    /// bound range. Empty for packages published before behaviours travelled —
+    /// which, until this field existed, was EVERY package: a published report
+    /// arrived with typed cells whose behaviour had been silently dropped, and
+    /// nothing in the publish transparency report said so.
+    pub cell_behaviors: Vec<persistence::SavedCellBehavior>,
     /// Pane controls (Controls pane) carried by the package. WORKBOOK-scoped
     /// (no sheet remap needed) and complete: the package list is the
     /// publisher's whole pane-control set, in the deterministic (order, id)
@@ -644,6 +652,13 @@ pub fn pull(
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Vec::new(),
         };
+    // Cell-behavior bindings (granular bricks phase 2), same per-sheet opaque
+    // shape. Absent in packages published before behaviours travelled.
+    let pulled_cell_behaviors: Vec<persistence::SavedCellBehavior> =
+        match registry.read_artifact(pkg, ver, "cell_behaviors.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
 
     // Read pane controls (workbook-scoped, like pivot definitions — no
     // per-sheet filtering or sheet-id remap). The artifact carries the
@@ -889,6 +904,7 @@ pub fn pull(
         comments: pulled_comments,
         scenarios: pulled_scenarios,
         outlines: pulled_outlines,
+        cell_behaviors: pulled_cell_behaviors,
         pane_controls: pulled_pane_controls,
         custom_objects: pulled_custom_objects,
         slicers: pulled_slicers,
@@ -2348,6 +2364,15 @@ mod tests {
                     "columnGroups": []
                 }),
             });
+            wb.cell_behaviors.push(persistence::SavedCellBehavior {
+                sheet_id: sid,
+                binding: serde_json::json!({
+                    "id": format!("beh-{}", sid),
+                    "scriptId": "script-1",
+                    "startRow": 0, "startCol": 0, "endRow": 4, "endCol": 0,
+                    "claimClick": true, "enabled": true, "orphaned": false
+                }),
+            });
         }
         (wb, pkg_sheet_id)
     }
@@ -2404,6 +2429,90 @@ mod tests {
         assert_eq!(result.outlines.len(), 1, "outlines must be carried by .calp");
         assert_eq!(result.outlines[0].sheet_id, pkg_sheet_id);
         assert_eq!(result.outlines[0].outline, wb.outlines[0].outline);
+    }
+
+    /// A CELL-BEHAVIOR BINDING SURVIVES PUBLISH -> PULL, and only for published
+    /// sheets.
+    ///
+    /// Written as an EQUALITY check on the payload rather than a list of
+    /// expected keys: the binding is an opaque app-owned blob and the only
+    /// honest question is whether the bytes that went in came back.
+    ///
+    /// Until this carry existed, a published report's typed cells arrived with
+    /// nothing bound to them — they looked correct and did nothing — and the
+    /// publish transparency report had no line saying so either. It was the ONE
+    /// piece of granular-brick content that did not travel: `cell_types` ships
+    /// as a custom object, and the scripts a binding names already ship as
+    /// consent-gated object scripts.
+    #[test]
+    fn pull_carries_cell_behaviors_filtered_to_published_sheets() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let (wb, pkg_sheet_id) = make_wave_b_workbook();
+
+        let pub_result =
+            publish::publish(&reg, &wave_b_publish_req(&wb, false), prof.path()).unwrap();
+        assert_eq!(
+            pub_result.cell_behaviors_published, 1,
+            "exactly the published sheet's binding must ship"
+        );
+
+        let pull_req = PullRequest {
+            package_name: "wave-b-pkg".to_string(),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result =
+            pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+
+        assert_eq!(
+            result.cell_behaviors.len(),
+            1,
+            "cell-behavior bindings must be carried by .calp"
+        );
+        assert_eq!(result.cell_behaviors[0].sheet_id, pkg_sheet_id);
+        assert_eq!(
+            result.cell_behaviors[0].binding, wb.cell_behaviors[0].binding,
+            "the binding that came back must be byte-identical to the one published"
+        );
+    }
+
+    /// A package carrying a behaviour binding declares a minimum app version.
+    ///
+    /// Same reasoning as the spill-extent case: without the stamp an older app
+    /// pulls the package "successfully" and drops the bindings in silence, which
+    /// is the failure mode `carries_wave_content` exists to convert into an
+    /// honest refusal.
+    #[test]
+    fn a_published_cell_behavior_declares_a_minimum_app_version() {
+        let mut sheet = Sheet::new("Report".to_string());
+        sheet
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(1.0)));
+        let sid = sheet.id;
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![sheet];
+
+        let plain = wave_b_publish_req(&wb, false);
+        assert!(
+            !publish::carries_wave_content(&plain),
+            "a cell-only package must stay pullable by older apps"
+        );
+
+        wb.cell_behaviors.push(persistence::SavedCellBehavior {
+            sheet_id: sid,
+            binding: serde_json::json!({
+                "id": "beh-1", "scriptId": "s", "startRow": 0, "startCol": 0,
+                "endRow": 0, "endCol": 0, "claimClick": true, "enabled": true,
+                "orphaned": false
+            }),
+        });
+        let with_behavior = wave_b_publish_req(&wb, false);
+        assert!(
+            publish::carries_wave_content(&with_behavior),
+            "a package carrying a behaviour binding must declare a minimum app version"
+        );
     }
 
     #[test]

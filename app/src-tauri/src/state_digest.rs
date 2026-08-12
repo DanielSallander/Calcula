@@ -226,6 +226,27 @@ fn digest_cells(
 // against a dead page, and the only thing anyone can say afterwards is "it was
 // in the digest somewhere".
 //
+// THE SECOND WEDGE WAS NOT IN THE DIGEST, AND "THE LAST LINE IN THE LOG" IS WHY
+// ANYONE THOUGHT IT WAS (measured 2026-08-11).
+//
+// The first one was: `build_workbook_state_digest` really did take `grids`
+// before `grid`. The second one was `open_file` -> `restore_spill_map_on_load`
+// -> `recover_spill_map_by_evaluation`, holding `sheet_names` and waiting for
+// `grids` while the gather-refresh worker held both grid locks and waited for
+// `sheet_names`. That was established by suspending the wedged process and
+// walking every thread's stack from OUTSIDE it -- because, as this watchdog
+// discovered the hard way, nothing inside the process can report: the log file
+// is written through a `BufWriter` that is never flushed on this path, so the
+// last few kilobytes of the log do not exist on disk and the "last line" is
+// simply the last line that happened to fit. A digest entry with no completion
+// is therefore NOT evidence that the digest did not complete.
+//
+// The watchdog is kept, because naming the phase is still the right instrument
+// and it costs one relaxed store per phase. What is corrected here is the
+// CONCLUSION anyone should draw from it: if it does not print, that is not the
+// digest being stuck, it is the logger being downstream of the wedge. Get the
+// stacks.
+//
 // The digest takes about thirty locks. `Persisted<T>` is a **Mutex**, not an
 // RwLock -- `read()` is `lock()` -- so every one of them excludes every other
 // holder, and any of them can be the one. Knowing WHICH is the whole diagnosis,

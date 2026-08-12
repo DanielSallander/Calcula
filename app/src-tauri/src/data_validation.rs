@@ -740,9 +740,13 @@ pub fn validate_cell(
     // four-second formula would read as a frozen keyboard.
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.read().unwrap();
-    let validations = state.data_validations.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first, then everything else. The
+    // recalculation pass holds both grid locks and then takes `sheet_names`,
+    // and it runs on a background thread, so a reader that holds any other
+    // store and then waits for `grids` closes a cycle that hangs the app.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     // Get the validation rule for this cell
     let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {
@@ -825,9 +829,13 @@ pub fn get_invalid_cells(
 ) -> InvalidCellsResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.read().unwrap();
-    let validations = state.data_validations.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first, then everything else. The
+    // recalculation pass holds both grid locks and then takes `sheet_names`,
+    // and it runs on a background thread, so a reader that holds any other
+    // store and then waits for `grids` closes a cycle that hangs the app.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     let mut invalid_cells = Vec::new();
 
@@ -881,9 +889,13 @@ pub fn get_validation_list_values(
     col: u32,
 ) -> Option<Vec<String>> {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let validations = state.data_validations.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first, then everything else. The
+    // recalculation pass holds both grid locks and then takes `sheet_names`,
+    // and it runs on a background thread, so a reader that holds any other
+    // store and then waits for `grids` closes a cycle that hangs the app.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     if let Some(sheet_validations) = validations.get(&active_sheet) {
         if let Some(validation) = get_validation_for_cell(sheet_validations, row, col) {
@@ -934,9 +946,13 @@ pub fn validate_pending_value(
 ) -> CellValidationResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.read().unwrap();
-    let validations = state.data_validations.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first, then everything else. The
+    // recalculation pass holds both grid locks and then takes `sheet_names`,
+    // and it runs on a background thread, so a reader that holds any other
+    // store and then waits for `grids` closes a cycle that hangs the app.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
+    let validations = state.data_validations.read().unwrap();
 
     // Get the validation rule for this cell
     let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {

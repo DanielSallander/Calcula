@@ -148,6 +148,74 @@ async function macroIdByName(page: Page, name: string): Promise<string | null> {
   }, name);
 }
 
+// ---------------------------------------------------------------------------
+// EVIDENCE. A cell assertion cannot say WHY the cell is empty.
+//
+// Journey 1 failed deterministically for a whole pass and went undiagnosed
+// because everything it could report was `expected "28282", received ""`. The
+// click path (Controls.runFloatingButtonClick) has FOUR outcomes and three of
+// them speak only through a toast the spec never read:
+//
+//   notFound -> "…no longer exists in this workbook"   (toast)
+//   failed   -> "\"<name>\" failed: <message>"         (toast)
+//   ran      -> silent, refetches the grid
+//   no provider -> "the Macro Recorder extension is not loaded" (toast)
+//
+// So "the macro ran and wrote nothing" and "the macro threw" looked identical
+// from here. These helpers make the difference visible AT THE POINT OF FAILURE,
+// which is the whole difference between a defect that can be fixed and one that
+// comes back as a mystery next pass.
+// ---------------------------------------------------------------------------
+
+/** Every toast currently on screen, newest last. */
+async function readToasts(page: Page): Promise<string[]> {
+  return page.locator("[data-toast]").allInnerTexts().catch(() => []);
+}
+
+/** The stored record for a macro id, exactly as the run path will read it. */
+async function readStoredMacro(
+  page: Page,
+  id: string,
+): Promise<{ id: string; name: string; description: string | null; source: string } | null> {
+  return page.evaluate(async (id) => {
+    const tauri = (window as any).__TAURI__;
+    try {
+      const s = await tauri.core.invoke("get_script", { id });
+      return { id: s.id, name: s.name, description: s.description ?? null, source: s.source };
+    } catch {
+      return null;
+    }
+  }, id);
+}
+
+/**
+ * Everything worth knowing when the button did not write what it should have.
+ *
+ * Deliberately reports the RUNTIME MARKER separately: it is the field that
+ * decides which interpreter runs the macro (`macroRunRoute`), and a module whose
+ * marker is missing is routed to the QuickJS module runtime, where this source
+ * merely DEFINES two functions and returns success without calling either — a
+ * completely silent no-op, which is exactly the observed symptom.
+ */
+async function diagnoseSilentButton(page: Page, macroId: string): Promise<string> {
+  const record = await readStoredMacro(page, macroId);
+  const toasts = await readToasts(page);
+  const designMode = await readDesignMode(page).catch(() => null);
+  const marker = record?.description?.match(/runtime=(\w+)/)?.[1] ?? "(none)";
+  return [
+    "",
+    "--- why did the button write nothing? -------------------------------",
+    `stored record:   ${record ? "present" : "MISSING — the id is not in the store"}`,
+    `runtime marker:  ${marker}  (objectScript = api.*, anything else routes to QuickJS)`,
+    `description:     ${record?.description ?? "(null)"}`,
+    `design mode:     ${designMode === null ? "unknown" : designMode}`,
+    `toasts on screen: ${toasts.length === 0 ? "(none — the click path reported nothing at all)" : JSON.stringify(toasts)}`,
+    "stored source:",
+    record ? record.source.split("\n").map((l) => `  | ${l}`).join("\n") : "  (none)",
+    "---------------------------------------------------------------------",
+  ].join("\n");
+}
+
 /**
  * Remove everything a test can leave behind: every module whose name carries the
  * spec prefix, and the button controls at the anchors the spec uses. Idempotent
@@ -356,15 +424,53 @@ test.describe("Macro link model", () => {
         await expect(library).toBeHidden({ timeout: 5_000 });
       });
 
+      // -- THE STORE HOLDS THE EDIT, AND STILL KNOWS ITS RUNTIME -------------
+      //
+      // Asserted BEFORE the click, so a save that lost something fails here —
+      // where the cause is named — instead of surfacing 45 seconds later as an
+      // empty cell. `description` carries the `runtime=objectScript` marker, and
+      // `macroRunRoute` reads it on every run: a module that arrives at the run
+      // path without it is handed to the QuickJS module runtime, which has no
+      // `api` binding, so this source defines two functions, calls neither, and
+      // reports success. That is a silent no-op indistinguishable from a click
+      // that never landed.
+      const savedMacroId = await macroIdByName(page, macroName);
+      expect(savedMacroId, "the edited macro must still be in the store").not.toBeNull();
+      await test.step("the store holds the EDITED source and still knows its runtime", async () => {
+        const record = await readStoredMacro(page, savedMacroId!);
+        expect(record, "get_script must return the record the run path will read").not.toBeNull();
+        expect(record!.source, "the edit was not persisted").toContain(EDITED);
+        expect(record!.source, "the old value survived the edit").not.toContain(ORIGINAL);
+        expect(
+          record!.description ?? "",
+          "the runtime marker was dropped by the save — the macro would be run " +
+            "by the WRONG interpreter, silently doing nothing"
+        ).toContain("runtime=objectScript");
+      });
+
       // -- THE PROOF: the SAME button now writes the EDITED value ------------
       await test.step("clicking the SAME button now writes the EDITED value", async () => {
         await clearCell(page, DATA.row, DATA.col);
         expect(await readCell(page, DATA.row, DATA.col)).toBe("");
+        // Clear the toast backlog so anything read afterwards belongs to THIS
+        // click. Without this the diagnosis quotes "Saved …" from the edit step.
+        await page.evaluate(() => {
+          document.querySelectorAll("[data-toast] button").forEach((b) => (b as HTMLButtonElement).click());
+        });
         const point = await buttonCanvasPoint(page, BUTTON.row, BUTTON.col);
         await grid.canvas.click({ position: point, force: true });
-        await expect
-          .poll(async () => readCell(page, DATA.row, DATA.col), { timeout: 45_000 })
-          .toContain(EDITED);
+        try {
+          await expect
+            .poll(async () => readCell(page, DATA.row, DATA.col), { timeout: 45_000 })
+            .toContain(EDITED);
+        } catch (e) {
+          // The cell assertion knows only that the cell is empty. Attach what
+          // the click path actually did, so this fails with a cause attached.
+          throw new Error(
+            `${e instanceof Error ? e.message : String(e)}\n` +
+              (await diagnoseSilentButton(page, savedMacroId!))
+          );
+        }
         // And decisively NOT the stale original — the copy-model bug.
         expect(await readCell(page, DATA.row, DATA.col)).not.toContain(ORIGINAL);
       });

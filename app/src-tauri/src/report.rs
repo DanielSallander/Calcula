@@ -509,16 +509,17 @@ fn write_report_to_grid(
     let old = get_report_region(state, report_id);
 
     {
-        let mut styles = state.style_registry.write(effect).unwrap();
-        // CANONICAL GRID LOCK ORDER: `grid` (the active-sheet mirror) BEFORE
-        // `grids`. The recalculation pass runs on a background thread and takes
-        // them in that order and holds both; anything that takes them the other
+        // CANONICAL LOCK ORDER: `grid` (the active-sheet mirror) BEFORE `grids`,
+        // and both BEFORE every other store. The recalculation pass runs on a
+        // background thread and takes them in that order and holds both while it
+        // goes on to take `style_registry`; anything that takes them the other
         // way round deadlocks the whole app with no panic and no log line. The
         // mirror is taken unconditionally here — it used to be acquired inside
         // the `sheet_idx == active_sheet` branch, below `grids` — which costs a
         // slightly wider critical section and buys the one order.
         let mut active_grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
+        let mut styles = state.style_registry.write(effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(sheet_idx) {
             if let Some(ref r) = old {
                 if r.sheet_index == sheet_idx {

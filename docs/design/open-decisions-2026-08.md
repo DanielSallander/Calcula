@@ -8741,7 +8741,18 @@ stale, and the same census's second half caught that too:
 Three of the crate's tests were red on arrival. **`app-lib` is 1,467 / 0 / 5 ignored now** — 1,464
 that existed, all green, plus this pass's three new census tests.
 
-#### 5. THE SECOND DEADLOCK IS REAL AND IS NOT FIXED
+#### 5. THE SECOND DEADLOCK IS REAL AND IS NOT FIXED  —  **CLOSED 2026-08-11 by §3ca, and this section's diagnosis was wrong on every point**
+
+> Read §3ca before this. The wedge is NOT in the digest: it is `open_file` -> `restore_spill_map_on_load`
+> -> `recover_spill_map_by_evaluation`, holding `sheet_names` and waiting for `grids`, against
+> `queue_gather_refresh`'s own `std::thread`, holding both grid locks and waiting for `sheet_names`.
+> Proved from the stacks of the wedged process, dumped from OUTSIDE it. The reasoning below — "the
+> last line in the log is the digest, therefore the digest did not return" — is exactly the
+> inference that cost this three passes, and it is unsound: the log is written through a `BufWriter`
+> that this path never flushes, so the tail of a wedged process's log is missing, always. The claim
+> below that only two commands run off the main thread is false as well — there are 114
+> `#[tauri::command] pub async fn` commands plus the spawned workers, and it is one of the spawned
+> workers that is the other half of the cycle.
 
 The lock-order fix is necessary and is not sufficient. On the rerun of the same fresh seed, on the
 fixed build, **the app wedged again** with the same signature: last log line
@@ -8902,6 +8913,1257 @@ apply it deliberately.
 **The app is left running on CDP 9222 and answering.**
 
 ---
+
+### 3bw. The repaint race behind two visual goldens is a PRODUCT defect: the selection fetch was never cancelled, so the SLOWER of two chains won (2026-08-11)
+
+§3bv left "`grid with data` and `cell selection highlight` differ between two runs of the same suite —
+a formula's repaint races the capture" as a harness-timing problem. Half of it is. The other half is a
+correctness defect in the application, and it was found by asking WHICH repaint, not by re-recording.
+
+#### What the two goldens actually contain
+
+Opened, not inferred. `grid-core-selection-single.png` selects **C3**, whose formula is `=B3*2`, and
+the golden holds a faint blue **dashed box with a 5% fill around B3** — the PASSIVE reference
+highlight (`isPassive` in `gridRenderer/rendering/references.ts`, 1px, dash `[6,4]`, border at 31%
+opacity). It is grid chrome, painted on the canvas, and it is not produced by the grid at all.
+
+#### Who paints it, and how far away that is
+
+`FormulaInput.tsx` — the FORMULA BAR — owns it. Its selection effect answers "what does the newly
+selected cell contain" and writes THREE pieces of shared state: the bar's text, the spill-ref flag,
+and, through `dispatch`, `state.formulaReferences`, which the canvas paints. Getting that answer costs
+up to **five backend round trips**: `getMergeInfo` (twice for a range), `getSpillRanges`, `getCell`,
+and for a formula cell `isSheetProtected` + `getCellProtection`.
+
+The effect fired `fetchCellContent()` with **no cancellation and no cleanup function**. So:
+
+* a capture taken between the click and the fifth round trip photographs a grid with no highlight, and
+  one taken after photographs a grid with it — the golden encodes a coin flip; and, far worse,
+* two selections in quick succession leave **two chains racing, and the SLOWER one wins**. Select a
+  formula cell, then a plain one, and the formula bar can end up showing the PREVIOUS cell's formula
+  while the canvas keeps painting the PREVIOUS cell's precedent box. A wrong answer on screen about
+  which cell you are standing on, with no error and nothing to retry.
+
+The second point is the reason this is filed as a defect rather than as a wait: **a capture helper
+cannot fix a state that is not a function of the selection.** Waiting longer only photographs the
+race's winner more reliably.
+
+#### The fix, and the proof it has teeth
+
+A cancellation token checked after EVERY await — not once at the top, because each await is a point
+at which a newer selection can have superseded this one — and returned as the effect's cleanup.
+`setIsSpillRef(false)` moved to AFTER its `getCell`, since it was the one write that a superseded
+chain could still land.
+
+`src/shell/FormulaBar/__tests__/formulaInputSelectionRace.test.tsx` **forces** the interleaving rather
+than hoping for it: the first selection's `getCell` is held on a deferred promise and released only
+after the second selection has been answered.
+
+| step | result |
+|---|---|
+| with the fix | **3 passed** |
+| cleanup removed (sabotage) | **FAILS** — `expected '=B3*2' to be 'Name'`: the superseded C3 chain put its formula back in the bar |
+| restored | 3 passed |
+
+**It is complementary to `renderSignal.ts`, not a duplicate of it.** That signal is `dataSeq` /
+`paintedDataSeq` on the GridCanvas FETCH-and-paint cycle. The passive highlight changes neither: it
+arrives as a dispatch from the formula bar, so the grid can be quiescent by that measure while the
+highlight is still five IPC hops away. Both are needed — one makes the end state deterministic, the
+other makes the capture wait for the paint.
+
+### 3bx. A run whose application dies reported hundreds of failures and looked like a catastrophic regression (2026-08-11)
+
+MEASURED, not theorised. A full ordered `--project=functional` pass was killed at **test 166 of ~550**,
+forty minutes in, by a second agent's launcher (`Get-Process -Name app | Stop-Process -Force` —
+`TerminateProcess(handle, -1)`, hence exit `0xffffffff` and no panic, the signature §3af already spent
+a pass diagnosing). The run **carried on**: every worker restart failed its CDP connect, and ~380
+tests "failed" in 1 ms each. Nothing in the report said the application was gone. The summary line at
+the end — "N failed" — was a lie by omission, and the only way to find out was to read the app log.
+
+That is the same shape as a test that hangs: the harness reports a number where it should report a
+condition.
+
+* `e2e/fixtures.ts` — when the CDP connect exhausts its retries, the harness now **counts `app.exe`
+  processes** and says which of two very different situations it is in: `0` means the application is
+  gone and nothing after that line is a test result; `>=1` means the app is up but its debugging port
+  is not answering (a `tauri dev` rebuild in flight, or an instance launched without
+  `--remote-debugging-port`), which is a different fix. A marker file is written.
+* `e2e/global-teardown.ts` — prints the banner **before** the manual-mode early return, because
+  `E2E_MANUAL=1` is how these suites are actually driven and therefore exactly where the lie was told.
+* `e2e/global-setup.ts` — clears the marker at the start, so the banner can only ever be about the
+  run you are reading.
+* `e2e/__tests__/appGoneMessage.test.ts` — the WORDING is the whole guard, so it has a unit tier.
+  `describeUnreachableApp` is split out as a pure function and all three arms are pinned (gone /
+  up-but-not-answering / could-not-tell). A guard whose message nothing checks decays back into
+  "connect failed" on the first refactor.
+
+**It does not skip and it does not swallow.** A crash caused by the product must still fail the suite;
+turning these into skips would hide the thing the program exists to catch. What changed is that the
+failure now NAMES its cause instead of presenting as an assertion.
+
+**Residual, stated plainly:** Playwright has no supported way for a fixture to STOP a run, so a doomed
+run still walks to the end. The banner and the marker make it unmistakable; `--max-failures` is the
+blunt instrument available if a pass wants the run to stop as well.
+
+### 3by. The 34 functional goldens are TWO causes, and the bigger one is not the colour profile — it is the DEVICE PIXEL RATIO. Plus: the colour-profile pin has never been in force on the manual launch path (2026-08-11)
+
+§3bv attributed all 34 functional golden failures to the display colour profile and left them to be
+re-recorded under the new `--force-color-profile=sRGB` pin. That attribution is **half right, and the
+half that is missing is the larger half**. Re-recording on it would have produced a corpus that fails
+again the next time the app opens on a different monitor — which, measured below, is something that
+happens between one launch and the next on this machine.
+
+Everything here was derived from the committed PNGs and the renderer source, with no running app.
+
+#### 1. The two corpora disagree about a colour that no colour profile can move
+
+`e2e/tests/__screenshots__` (functional, recorded 2026-08-06..08-11) and
+`e2e/visual/__screenshots__` (re-recorded 2026-08-11 16:11 under the pin) contain the same empty-grid
+capture at the same size, 1218x542. Their palettes:
+
+| | functional (Aug 9) | visual (Aug 11, pinned) |
+|---|---|---|
+| background | `255,255,255` x581448 | `255,255,255` x581448 |
+| **gridline** | **`241,241,241` x39493** | **`226,226,226` x39961** |
+| header fill | `248,249,250` x30199 | `248,249,250` x30245 |
+| header border | `208,208,208` x2369 | `208,208,208` x2369 |
+
+Same coordinates, same counts, one colour different. A scanline through y=100 reads 241 across the
+whole run in one and 226 across the whole run in the other.
+
+**A colour-profile change cannot do that.** The transform was fitted (below) from matched pairs and it
+is the IDENTITY on neutrals — `255,255,255`, `248,249,250`, `240,240,240`, `192,192,192`, `60,60,60`
+and `51,51,51` are bit-identical across the two corpora. `226,226,226` and `241,241,241` are both
+neutral. Something else moved.
+
+#### 2. What moved: `devicePixelRatio`, through the one hairline in the renderer
+
+`drawGridLines` (`src/core/lib/gridRenderer/rendering/grid.ts`) is the ONLY stroke in the renderer
+that is not one CSS pixel wide:
+
+```ts
+const deviceScale = (ctx.getTransform?.().a) || 1;
+ctx.lineWidth = 1 / deviceScale;                       // a true 1-DEVICE-pixel hairline
+const snap = (v) => (Math.round(v * deviceScale) + 0.5) / deviceScale;
+```
+
+and `GridCanvas.draw` sets that transform to `devicePixelRatio * zoom`. `toHaveScreenshot` captures at
+**CSS** scale (that is its documented default, and it is why both images are 1218x542 regardless).
+So the hairline resolves to:
+
+```
+dpr = 1  ->  full coverage of #e2e2e2        ->  226,226,226
+dpr = 2  ->  ~48% coverage of #e2e2e2 on white -> 241,241,241     (255 - 29*0.483 = 241)
+```
+
+**The header border is the control that names dpr rather than zoom or geometry.** It is stroked at
+`lineWidth = 1`, it is unaffected by `deviceScale`, and its pixel count is IDENTICAL in both corpora
+(2369 vs 2369). A zoom change, a layout change or a different window size would have moved it too.
+
+`DEFAULT_THEME.gridLine` is `#e2e2e2`; `screenshotGates.ts` records the painted value as `#f1f1f1`.
+Both are right — they were measured at different dpr — and the discrepancy sat in the tree unremarked.
+
+**The product is not wrong.** A device hairline is what makes the grid look like Excel's on a high-DPI
+screen. It is the HARNESS that must stop photographing the monitor.
+
+#### 3. The colour transform, fitted rather than asserted
+
+Three matched pairs (empty grid, status bar, full window) give a clean map, since flat-neighbourhood
+pixels can be paired without any content assumption:
+
+```
+255,255,255 -> 255,255,255      248,249,250 -> 248,249,250     60,60,60 -> 60,60,60
+230,236,246 -> 227,236,247      225,234,247 -> 222,234,249
+ 63,112,75  ->  33,115,70        95,180,134 ->  16,185,129     119,191,152 -> 52,195,148
+```
+
+Fitted in linear light as a 3x3 matrix (the shape a profile conversion actually has):
+
+```
+[ 1.37929  -0.37716  -0.00282 ]     worst channel error on the fitted pairs: 1 on
+[-0.05989   1.09001  -0.03072 ]     every neutral and low-chroma pair, 16 on the
+[-0.02393  -0.10035   1.12440 ]     three saturated ones (which are 10x the gate anyway)
+```
+
+That is a textbook wide-gamut -> sRGB primaries conversion. Its consequence for the corpus is
+specific: **only saturated colour moves past the comparator gate.** `#217346` (the status bar) scores
+YIQ 135 against a gate of 14.1; the UI blues score 1.7 and cannot fail anything.
+
+#### 4. Attribution, per golden
+
+`px moved` is computed by applying the fitted transform / the dpr hairline change to the committed
+golden and counting pixels past pixelmatch's gate at `threshold: 0.02`; `budget` is
+`min(200, 0.0005*px)`.
+
+| spec | golden | dpr px | profile px | budget | attribution |
+|---|---|---|---|---|---|
+| comments-notes | `grid-comments-cell-with-indicator` | 113 | 0 | 1 | dpr |
+| comments-notes | `grid-comments-indicators-visible` | 184 | 0 | 1 | dpr |
+| comments-notes | `grid-notes-cell-with-indicator` | 100 | 15 | 1 | dpr + profile |
+| dimensions | `grid-dimensions-after-col-width` | 38337 | 974 | 200 | dpr + profile |
+| dimensions | `grid-dimensions-after-row-height` | 38314 | 377 | 200 | dpr + profile |
+| dimensions | `grid-dimensions-after-set-col-width` | 37636 | 1010 | 200 | dpr + profile |
+| dimensions | `grid-dimensions-before-row-height` | 39427 | 387 | 200 | dpr + profile |
+| dimensions | `grid-dimensions-before-width` | 39427 | 389 | 200 | dpr + profile |
+| dimensions | `grid-dimensions-mixed-widths` | 37154 | 317 | 200 | dpr + profile |
+| evaluate-formula | `grid-evaluate-formula-constant` | 40015 | 753 | 200 | dpr + profile |
+| evaluate-formula | `grid-evaluate-formula-init` | 40010 | 753 | 200 | dpr + profile |
+| formula-autocomplete | `autocomplete-dropdown-visible` | 920 | 17168 | 37 | dpr + profile |
+| go-to-special | `grid-go-to-special-blanks` | 39953 | 366 | 200 | dpr + profile |
+| go-to-special | `grid-go-to-special-formulas-sheet` | 517 | 0 | 3 | dpr |
+| grid-rendering | `empty-grid-full-window` | 39493 | 35045 | 200 | dpr + profile |
+| grid-rendering | `grid-after-clear-b1` | 39475 | 368 | 200 | dpr + profile |
+| grid-rendering | `grid-before-clear` | 39414 | 440 | 200 | dpr + profile |
+| grid-rendering | `grid-cells-with-text` | 39495 | 317 | 200 | dpr + profile |
+| grid-rendering | `grid-empty-grid-default` | 39493 | 317 | 200 | dpr + profile |
+| grid-rendering | `grid-formatted-cells-bold-italic` | 39493 | 317 | 200 | dpr + profile |
+| paste-special | `grid-paste-special-formatting-result` | 39744 | 1302 | 200 | dpr + profile |
+| paste-special | `grid-paste-special-values-result` | 39741 | 1296 | 200 | dpr + profile |
+| protection | `grid-protection-allow-edit-cleared` | 39983 | 603 | 200 | dpr + profile |
+| protection | `grid-protection-sheet-protected` | 39982 | 603 | 200 | dpr + profile |
+| ribbon-tabs | `ribbon-home-tab-buttons` | 0 | 2580 | 87 | **profile only** |
+| ribbon-tabs | `ribbon-home-tab-default` | 0 | 2580 | 87 | **profile only** |
+| ribbon-tabs | `ribbon-minimized` | 47088 | 33113 | 200 | dpr + profile |
+| ribbon-tabs | `ribbon-ribbon-after-expand` | 0 | 2580 | 87 | **profile only** |
+| ribbon-tabs | `ribbon-ribbon-before-minimize` | 0 | 2580 | 87 | **profile only** |
+| ribbon-tabs | `ribbon-ribbon-format-state` | 0 | 2580 | 87 | **profile only** |
+| ribbon-tabs | `ribbon-ribbon-tab-home-restored` | 0 | 2580 | 87 | **profile only** |
+| ribbon-tabs | `ribbon-ribbon-tab-insert` | 198 | 2139 | 87 | dpr + profile |
+| scrolling | `grid-scroll-after-wheel-down` | 39536 | 237 | 200 | dpr + profile |
+| scrolling | `grid-scroll-before` | 39430 | 387 | 200 | dpr + profile |
+| scrolling | `grid-scroll-distant-cell-z100` | 39716 | 420 | 200 | dpr + profile |
+| scrolling | `grid-scroll-row-5000` | 39071 | 452 | 200 | dpr + profile |
+| status-bar | `statusbar-aggregation-sum-avg-count` | 0 | 29644 | 15 | **profile only** |
+| status-bar | `statusbar-aggregation-updated` | 0 | 29645 | 15 | **profile only** |
+| status-bar | `statusbar-text-range` | 0 | 29899 | 15 | **profile only** |
+| tables | `grid-tables-after-create` | 302 | 2534 | 9 | dpr + profile |
+| tables | `grid-tables-before-create` | 1114 | 0 | 9 | **dpr only** |
+| tables | `grid-tables-totals-row-sum` | 1102 | 0 | 7 | **dpr only** |
+| budget-model (scenario) | `scenario-budget-model-title` | 39481 | 36262 | 200 | dpr + profile |
+| data-cleanup (scenario) | `scenario-data-cleanup-filtered` | 39516 | 35092 | 200 | dpr + profile |
+| monthly-report (scenario) | `scenario-monthly-report-table` | 39582 | 35167 | 200 | dpr + profile |
+
+**36 of 45 are moved by dpr; 40 by the profile; every one of the 45 by at least one of them. Nine
+would NOT have been explained by the colour profile at all**, and three of those (`tables-before-create`,
+`tables-totals-row-sum`, `go-to-special-formulas-sheet`) hold no saturated colour whatsoever — under
+the profile-only story they had to be read as regressions.
+
+The `visual` corpus is the mirror image: every one of its goldens holds `226,226,226` (dpr 1). It is
+internally consistent — and, as §6 shows once the app was actually measured, it is the corpus that is
+out of step with THIS machine, which runs at dpr 2. The functional corpus matches the machine; the
+visual one does not.
+
+#### 5. THE PIN WAS NEVER IN FORCE ON THE MANUAL PATH
+
+Found while adding the dpr flag, and it is the reason the two corpora could diverge in the first
+place. There are two launch paths and each carried its own copy of the argument string:
+
+```
+global-setup.ts    --remote-debugging-port=N --force-color-profile=sRGB
+launch-vba-batch   --remote-debugging-port=N --force-color-profile=sRGB
+launch-app.mjs     --remote-debugging-port=N                              <-- and it wins
+```
+
+`launch-app.mjs` spreads `process.env` and then REASSIGNS
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, so the PowerShell launcher's value — the one carrying a
+fifteen-line comment about why it is load-bearing — was discarded by the very script it hands off to.
+`E2E_MANUAL=1` through `launch-vba-batch.ps1` is how every suite in this program is actually run, so
+**no manual run has ever had the colour-profile pin**, including the one that re-recorded the visual
+corpus.
+
+Fixed by removing the copies: `app/e2e/webview2Args.mjs` is now the single definition, imported by
+`launch-app.mjs` and by `global-setup.ts`, and the PowerShell launcher no longer sets the variable at
+all. `launch-app.mjs` PRINTS the arguments it applies, to both the console and the app log, because
+the last time they were wrong nothing said so.
+
+```
+export const DETERMINISTIC_CAPTURE_FLAGS = ["--force-color-profile=sRGB"];
+```
+
+`e2e/tsconfig.json` gains `allowJs` so the `.ts` side can import the shared `.mjs`; `tsc -p
+e2e/tsconfig.json` is clean.
+
+#### 6. `--force-device-scale-factor=1` WAS the obvious matching pin. It is wrong, and the measurement is the point
+
+It was added, run against the live app, and removed. Recorded here so it is not re-proposed:
+
+| | no flag | `--force-device-scale-factor=1` |
+|---|---|---|
+| `devicePixelRatio` | 2 | **1** |
+| canvas transform `a` | 2 | **1** |
+| CSS viewport | 1280x800 | **2560x1600** |
+| `[data-grid-canvas-layer]` | **1218x542** | **2498x1342** |
+
+**Tauri sizes its window in LOGICAL units**, so the CSS viewport is ALREADY scale-independent — 1280x800
+on a 100% display and on a 200% display alike, which is why both corpora are 1218x542 despite being
+recorded on different machines' displays. Forcing the device scale factor to 1 makes CSS equal
+PHYSICAL, so the viewport became 2560x1600 and the grid layer 2498x1342. That does not stabilise the
+corpus; it invalidates every golden's SIZE.
+
+So the LAYOUT is already pinned and the HAIRLINE is not, and no browser flag pins one without
+unpinning the other.
+
+**The dpr is therefore asserted, not forced.** `app/e2e/captureEnvironment.ts` records what the corpus
+assumes (dpr 2, grid layer 1218x542, viewport 1280x800) and
+`describeCaptureEnvironmentMismatch` turns a mismatch into one sentence naming the display, the
+hairline values on both sides, and the two ways out. It is called once per worker from
+`waitForGridStable` and from the three capture helpers that do not go through it, so no capture path
+can skip it. The wording is the whole value, so it has a unit tier that drives every arm to failure:
+`e2e/__tests__/captureEnvironment.test.ts`, **5 passed**.
+
+That reverses which corpus is the odd one out. The machine's natural configuration IS dpr 2, so:
+
+* `e2e/tests` + `e2e/scenarios` (241 hairline) MATCH the machine and do not need re-recording for dpr;
+* `e2e/visual` (226 hairline) was recorded on a 100% display and is the corpus that must be
+  re-recorded — 18 goldens, not 45;
+* separately, the ~14 goldens whose attribution above includes `profile` must be re-recorded, because
+  the colour pin is now genuinely delivered for the first time (§5). The dpr-only rows should pass
+  untouched, and that is the check that the attribution table is right.
+
+#### 7. Measured live, on the running app, with the fix in place
+
+```
+devicePixelRatio 2 -> hairline 241,241,241 (matches e2e/tests)
+status bar backgroundColor  rgb(33, 115, 70)   = #217346 exactly -> the colour pin is DELIVERED
+window.__CALCULA_GRID_RENDER__  { dataSeq: 3, fetchesInFlight: 0, refetchQueued: false,
+                                  paintSeq: 40, paintedDataSeq: 3 }  -> quiescent, and live
+```
+
+The status-bar reading is the first direct confirmation that the colour pin reaches the WebView on the
+manual path at all; before §5 it did not.
+
+#### 8. What is left, and why it is not done here
+
+The re-record and its verification need EXCLUSIVE use of the machine, and this pass did not get it:
+two other agents launched suites against the same app (`--project=scenario`, then
+`--project=journey pivot-undo-fidelity`) while this one was measuring. Recording goldens against an
+app another suite is mutating would bake that suite's residue into the corpus — the precise failure
+§3ar and §3br spent two passes avoiding.
+
+The order for whoever holds the machine next:
+
+1. cold launch; the capture-environment guard now fails the FIRST capture if the display is wrong, so
+   this is no longer something to remember;
+2. `--project=visual` — expect all 18 to fail on the hairline. That failure IS the confirmation, and
+   the guard should not fire (the guard is about dpr, the visual corpus is a dpr-2 machine reading a
+   dpr-1 corpus, so it is the goldens that are wrong, not the display);
+3. record visual, verify on an independent cold run;
+4. `--project=functional`, cold and ordered: only the `profile` rows of the table above may fail.
+   Anything else is a regression, not a re-record;
+5. record those, verify;
+6. the teeth probe (`DEFAULT_THEME.gridLine` `#e2e2e2` -> `#c8c8c8`, full reload, confirm red, revert,
+   confirm green).
+
+#### 7. Two functional failures that are NOT screenshots, found in the same run
+
+§3bv reported the functional suite as "every failure a screenshot". In the interrupted run of
+2026-08-11 18:00 two non-screenshot tests failed before the app was killed, both in
+`flagged-defects.spec.ts`:
+
+* `4. Copy and hidden rows > copy over a MANUAL hide includes the hidden row (Excel's rule)` (3.7s)
+* `7. Data validation click target > cell body selects; only the chevron opens the list` (5.0s)
+
+They are recorded here rather than diagnosed — they are outside this pass's ownership — but "every
+failure a screenshot" should not be carried forward as if it were still true.
+
+### 3bz. `macro-link-model` test 1 — STILL OPEN, but the search space is now small and the experiment is written down (2026-08-11)
+
+§3bv §10 left this undiagnosed: the button runs the ORIGINAL macro, and after the macro is edited in
+place through Developer ▸ Macros… and saved, the same button writes nothing within 45 s. **This pass
+did not get exclusive app time to run the experiment** (another agent held the machine in a Rust
+edit/build loop for the whole window — §3bq's environment problem again, and the launcher now refuses
+rather than stealing, which is the right fix). What it did do is cut the hypothesis space by READING,
+so the next pass can settle it in ten minutes rather than rediscovering the paths.
+
+**Eliminated by reading — each one stated with the reason, so nobody re-walks it:**
+
+* **"Save is delete+recreate, so the capability grants are revoked"** (§3bv's suggested first check).
+  It is not. `MacroLibraryDialog.save` → `updateMacroModule` → `saveWorkbookScript` → Rust
+  `save_script`, which is a plain `scripts.insert(id, script)` keyed by id. `revoke_script` is called
+  only from `delete_script`.
+* **"The transient mount id collides with the previous run's"**. `runObjectScriptOnce` builds
+  `__calcula_<prefix>_<base36 time>_<seq>`, unique per call, and unmounts in a `finally`.
+* **"The runtime marker regex misses the recorder's description"**.
+  `/\bruntime=(objectScript|notebook)\b/` matches `Recorded macro · runtime=objectScript · 1 action …`.
+
+**The surviving candidates, in the order the probe distinguishes them:**
+
+1. **The route flips to the wrong runtime.** `runMacroByRef` routes on `record.description`. If the
+   dialog's Save writes the description away (it passes `loaded.description`, and `loaded` is built
+   with `script.description ?? null`), `macroRunRoute` returns `moduleRuntime` and the source goes to
+   `run_script` — QuickJS, which has no `api` binding. That source DEFINES two functions and calls
+   neither, so QuickJS **succeeds, reports 0 cells, and writes nothing**. Silent, no error, exactly
+   the symptom. Note the dialog's own on-screen route note reads
+   `loaded?.description ?? selectedEntry?.description`, so the UI would keep showing the right route
+   even in this state — it would mask the defect.
+2. **The SECOND click never works, edit or no edit.** The first run's `beginBatch`/`commitBatch` pair
+   is closed by `runObjectScriptOnce`'s `finally` only when THIS run opened it; if a transaction is
+   left open, the next run's `beginBatch` throws and the outcome is `failed` — which the click path
+   DOES voice as a toast, and which the spec never reads. That makes it a spec gap as well as a
+   product one.
+3. **It fails loudly and the spec only watches the cell.** `runFloatingButtonClick` raises a toast for
+   `notFound` and for `failed`. The spec polls `readCell` for 45 s and asserts nothing about toasts,
+   so a perfectly well-behaved refusal reads as "wrote nothing".
+
+**The experiment**, in this order, all through the product paths:
+
+1. click the linked button **twice with no edit in between** — this alone separates candidate 2 from
+   candidates 1 and 3;
+2. dump `get_script(id)` **before and after** the dialog Save and compare `description` byte for byte
+   — this settles candidate 1;
+3. capture `[data-toast]` text and the console after every click — this settles candidate 3;
+4. call `macroRunService.runMacroByRef(id)` directly and print the `MacroRunOutcome`, which names
+   `ran` / `notFound` / `failed` explicitly.
+
+**Whatever the cause turns out to be, the spec is owed one change regardless**: it must assert on the
+outcome the product voices, not only on the cell. A test that watches a cell for 45 s cannot tell "the
+macro ran and wrote nothing" from "the run was refused and said so", and those need different fixes.
+
+---
+
+### 3ca. THE SECOND DEADLOCK, MEASURED AND CLOSED. It was never the digest — it is `open_file` against a background worker nobody had counted, on a lock pair the census did not cover (2026-08-11)
+
+§3bv left this open with an instrument and a next step: "run the fresh seed, wait for the STUCK line,
+fix the lock it names." The STUCK line never came, and it never could have. This pass got the two
+stacks instead, and they name a different function, a different lock pair, and a different thread
+from every hypothesis in the register.
+
+#### 1. The measurement, because three passes of reasoning had produced 0 for 3
+
+The brief's instruction was to observe the wedge from OUTSIDE the process. There is no debugger on
+this machine (no `cdb`, no WinDbg, no procdump; the Windows Kits install has no `Debuggers`
+directory) and the machine is **ARM64** — `rustc -vV` reports host `aarch64-pc-windows-msvc`, which
+is easy to miss because `$env:PROCESSOR_ARCHITECTURE` says `AMD64` inside an emulated shell. So a
+dumper was written and CHECKED IN: `scratchpad/stackdump.rs` (dependency-free FFI to kernel32 +
+dbghelp), `scratchpad/build-stackdump.ps1` (it needs MSVC's `link.exe` ahead of Git's, like
+everything else on this machine) and `scratchpad/wedge-watch.ps1`. It is built with the app's own
+rustc, so it is an ARM64 process reading an ARM64 process.
+
+Two things about it are worth keeping, because both cost real time:
+
+* **dbghelp's `StackWalk64` does not support `IMAGE_FILE_MACHINE_ARM64`.** It returns the PC and the
+  LR and then garbage — measured, the third frame comes back with the low 48 bits of a plausible
+  address and junk in the top 16. The Windows ARM64 ABI instead REQUIRES a frame-pointer chain
+  (`x29` -> [saved x29, saved LR]) for every non-leaf function, so the walker follows that by hand
+  with `ReadProcessMemory`. That produces complete, correctly symbolised Rust stacks with file and
+  line, against the PDBs already sitting next to `app.exe`.
+* **The wedge has to be caught, not waited for.** `scratchpad/wedge-watch.ps1` polls the process and
+  dumps every thread the moment `Responding` is false AND CPU time has been flat for 20 s, then
+  dumps a second time five seconds later. Two dumps that agree are the difference between "deadlock"
+  and "slow".
+
+It caught the wedge on the first armed run, during a plain `--project=scenario` batch.
+
+#### 2. The two stacks, verbatim
+
+```
+-- thread 44452 (the MAIN thread; a synchronous Tauri command, so the WebView2 pump is stopped)
+   #0   ZwWaitForAlertByThreadId+0x4
+   #1   RtlWaitOnAddress+0x1b4
+   #2   WaitOnAddress+0x34
+   #4   std::sync::poison::mutex::Mutex<alloc::vec::Vec<engine::grid::Grid> >::lock   [mutex.rs:489]
+   #5   app_lib::document_effect::Persisted<alloc::vec::Vec<Grid> >::read             [document_effect.rs:512]
+   #6   app_lib::spill_restore::recover_spill_map_by_evaluation                       [spill_restore.rs:303]
+   #7   app_lib::spill_restore::restore_spill_map_on_load                             [spill_restore.rs:504]
+   #8   app_lib::persistence::open_file                                               [persistence.rs:3473]
+   #9   app_lib::run::closure$1::closure$649                                          [persistence.rs:2526]
+   #11  tauri::webview::Webview<..>::on_message                                       [webview/mod.rs:1888]
+   #12  tauri::ipc::protocol::get::closure$0
+   #15  wry::webview2::impl$3::attach_custom_protocol_handler::closure$0
+   #16  webview2_com_sys::..::WebResourceRequestedEventHandler_Impl::Invoke
+
+-- thread 88412 (a plain std::thread spawned by queue_gather_refresh)
+   #0   ZwWaitForAlertByThreadId+0x4
+   #1   RtlWaitOnAddress+0x1b4
+   #3   std::sys::sync::mutex::futex::Mutex::lock_contended                           [futex.rs:61]
+   #4   std::sync::poison::mutex::Mutex<alloc::vec::Vec<alloc::string::String> >::lock [mutex.rs:489]
+   #5   app_lib::document_effect::Persisted<alloc::vec::Vec<String> >::read           [document_effect.rs:512]
+   #6   app_lib::calculation::recalculate_sheet_values                                [calculation.rs:1815]
+   #7   app_lib::calp_commands::queue_gather_refresh::closure$0                       [calp_commands.rs:10618]
+   #13  std::thread::impl$0::spawn_unchecked_::closure$1
+   #16  BaseThreadInitThunk+0x40
+```
+
+Both stacks are byte-identical in two dumps five seconds apart, and they are the ONLY two threads in
+the process blocked on a mutex out of 22.
+
+Reading the source at those two lines gives the cycle exactly:
+
+| thread | holds | wants |
+|---|---|---|
+| main, `recover_spill_map_by_evaluation` | `sheet_names`, `tables`, `table_names`, `named_ranges`, `user_files` | **`grids`** |
+| worker, `recalculate_sheet_values` (calculation.rs:1813-1815) | **`grid`**, **`grids`** | `sheet_names` |
+
+#### 3. Three beliefs in the register were false, and each one is why this took four passes
+
+**a. "It is the digest."** It is not, and it never was on the second wedge. The app log's last line
+was a `DIGEST` entry with no completion, and that was read as "the digest did not return" three
+times running. It means nothing: `write_log` writes through a `BufWriter` that this path never
+flushes ("No flush here - let the OS buffer handle it for performance"), so the last few kilobytes
+of any log belonging to a process that never exits do not exist on disk. The tail of the log is
+simply the last line that happened to fill a buffer. In the dump run the real last line was
+`LOAD|restamped 4 formula(s)`, which is inside `open_file`, one call above the wedge — and the
+`SPILL|pre-v7 workbook: recovered ...` line that follows it in a healthy open is missing.
+
+The phase watchdog §3bv built could not report for the same reason, plus a second: the digest was
+not stuck, so there was nothing for it to say. It is KEPT — naming the phase is still the right
+instrument and it costs one relaxed store — with its header corrected to say what a silent watchdog
+actually means.
+
+**b. "This crate has exactly TWO commands that run off the main thread."** That counted
+`#[tauri::command(async)]`, which matches two functions. It missed `#[tauri::command] pub async fn`,
+which Tauri also runs on the async runtime: **114 of them** (60 in `bi/model_editor.rs`, 20 in
+`bi/commands.rs`, 9 in `pivot/commands.rs`, ...). And it missed the plain `std::thread::spawn`
+workers, one of which — `queue_gather_refresh`, which exists precisely so a blocking `reqwest` call
+does not park a runtime thread — is the thread in the dump. The premise "everything else is
+serialised on the main thread and therefore safe" was never true.
+
+**c. "The pair is the unit."** `state.grid` / `state.grids` are two of about forty locks. The pair
+census closed the pair and the app wedged again the same day on `(sheet_names, grids)`. The rule
+that actually holds is the one the pass imposes on everyone else:
+
+> **`grid` first, `grids` second, every other state lock after. Nothing else may be held when a grid
+> lock is acquired.**
+
+#### 4. The direction is a measurement, not a preference
+
+Both orders were counted over the whole crate before choosing:
+
+| candidate canonical order | distinct functions that violate it |
+|---|---|
+| **grid/grids FIRST** (the recalculation pass's own order) | **49** |
+| grid/grids LAST (hold everything else, take the grids last) | 127 |
+
+So the pass's order is both the cheaper one and the one that cannot be changed cheaply anyway — it
+is the chain that runs on background threads, and everything else has to agree with IT. That is the
+same argument §3bv made for the pair, now applied to all forty.
+
+**All 49 are fixed.** Most were a statement swap. Six needed a guard hoisted out of a branch to the
+top of its function (`create_table`, `set_calculated_column`, `apply_pivot_create_restore`,
+`trace_precedents`, `trace_dependents`, `apply_override_value_to_grid`), which widens a critical
+section — the price of one order, exactly as the pair pass paid it. One of those hoists is a trap
+worth naming: **`set_calculated_column` ends by calling `recalc_after_active_sheet_bulk_rewrite`,
+which takes both grid locks itself.** Hoisting the guards to the top of the function without adding
+an explicit `drop` before that call would have converted a two-thread deadlock into a ONE-thread
+self-deadlock — `Persisted<T>` is a `std::sync::Mutex` and is not re-entrant. Every hoist in this
+pass was audited for that, and it is why the drops are written out with a reason rather than left to
+scope.
+
+#### 5. The class, precisely — because the next one will not be caught by the wrong guard
+
+This is a **lock-order inversion**, the same class as §3bv's, not a new one. It is NOT a re-entrant
+acquisition, NOT a lock held across an `await`, and NOT a channel hand-off blocking a holder — the
+progress-emitter hand-off §3bv left out on suspicion is exonerated by these stacks and remains out.
+
+**The old census does not cover it and could not have.**
+`no_function_holds_the_two_grid_locks_in_the_inverted_order` asks one question about one pair. The
+generalised census `no_lock_is_held_while_a_grid_lock_is_acquired` (same file) asks it about every
+lock, and is what would have caught this. Both are kept: the pair census is a cheaper, sharper
+statement about the pair that hung twice, and it is a self-test for the general one.
+
+#### 6. The guards, and the teeth on each
+
+* **`the_load_paths_spill_recovery_does_not_hold_sheet_names_while_it_waits_for_grids`** — the
+  measured deadlock as a LIVE test. This thread plays the pass and holds `grids`; the real
+  `recover_spill_map_by_evaluation` runs on another thread and blocks; a probe thread with a
+  deadline then asks whether `sheet_names` is free. It **FAILS in two seconds rather than hanging**,
+  which matters because a hang is invisible to an exit-status check. Non-vacuity partner:
+  `the_sheet_names_probe_itself_can_fail_the_way_the_defect_did`.
+  **TEETH PROVED**: with `spill_restore.rs` put back the way it was, this test fails with the
+  deadlock message and nothing else in the suite notices. Restored afterwards and re-verified.
+* **`no_lock_is_held_while_a_grid_lock_is_acquired`** — the crate-wide census. It models two things
+  a naive scan gets wrong, and both were found by measurement rather than foresight:
+  * Rust drops TEMPORARIES at the end of the statement. `let n = *state.active_sheet.read()?;` holds
+    nothing afterwards. Without this the first run reported 130 violations, 48 of them that shape.
+  * `} else {` has a net brace delta of ZERO but ends the scope of every guard the `if` arm bound,
+    so closes are applied before opens. Without it `protection.rs`'s two-armed
+    `if sheet_index == active_sheet { grid } else { grids }` reads as one arm holding the other's.
+* **The census's own bug, caught by its own teeth, and this is the important part.** The first draft
+  scoped a guard bound on a line ending in `{` to the block that opens there — right for
+  `if let Ok(x) = state.y.lock() {`, catastrophically wrong for `let x = match state.y.read() { ... };`,
+  where the binding outlives the match. `recover_spill_map_by_evaluation` binds ALL SIX of its
+  guards that way. **The census passed against a tree with the real defect deliberately
+  re-introduced.** It was only found because the teeth run was done against the inverted tree rather
+  than assumed. Fixing it immediately surfaced two more genuine violations the mis-scoping had
+  hidden — `calp_commands::apply_override_value_to_grid` (holds four name stores, then takes both
+  grid locks — the identical shape to the deadlock, on the `.calp` override path) and
+  `persistence::restore_pivot_definitions`. Both fixed. There is now a `let-bound match arms` tooth
+  and an `if-let header` tooth, one for each side of that distinction.
+
+#### 6b. FIXING AN ORDERING DEFECT CREATES A DIFFERENT ONE, AND IT IS WORSE — a second census for it
+
+Turning a function round almost always means HOISTING a guard out of the branch that used it, which
+WIDENS its scope. If anything later in the same function takes that same lock again, the thread
+blocks on itself: `Persisted<T>` is a `std::sync::Mutex` and is not re-entrant. That is not a cycle
+between two threads — it is one thread, no partner, no timeout, and no second stack to compare
+against. It is strictly harder to diagnose than what it replaced.
+
+**This pass created two of them and nearly shipped one.**
+
+* `tables::set_calculated_column` ends by calling `recalc_after_active_sheet_bulk_rewrite`, which
+  takes both grid locks itself. Caught by reading the function's tail before building.
+* `calp_commands::apply_override_value_to_grid` ends with an orphaned-spill sweep that RE-READS
+  `grids`. Caught only because the callers were being audited for the same hazard afterwards.
+
+Both are now released with an explicit `drop` carrying the reason, rather than left to scope.
+
+So there is a second census: **`no_function_takes_the_same_lock_twice_while_it_still_holds_it`**,
+over the same walk. Three things it has to get right, each found by running it rather than by
+thinking about it:
+
+* **`drop(x)` releases ONE guard, not all of them.** The pair census clears its whole held-set at
+  the first `drop(` — an under-approximation, which is the safe direction for an ORDERING question.
+  For a RE-ENTRANCY question it is the UNSAFE direction, and `apply_override_value_to_grid` is
+  exactly the shape it misses: five `drop`s of unrelated guards, then the re-acquisition. The
+  re-entrancy half therefore tracks guards by their BINDING NAME and releases only the one named.
+  Before this, the census passed against the tree with the defect deliberately re-introduced.
+* **A closure handed to `spawn` runs on another thread.** `mcp_start` holds `running` and hands a
+  closure that clears `running` when the server exits — correct, and a naive scan calls it
+  re-entrant. Acquisitions inside a spawned closure are excluded, and there is a tooth proving the
+  exclusion turns off again at the closure's brace, or everything after the first `spawn(` in a
+  function would stop being checked.
+* **A statement can span lines.** `let d = state.writeback_declarations.lock()` followed by
+  `.map(|d| d.clone()).unwrap_or_default();` binds nothing; judged on its first line alone it reads
+  as a live guard, and `calp_refresh_apply` — which does it twice — is reported as a violator. The
+  census now reads the whole statement, and both false positives disappear while the real one stays.
+
+**TEETH PROVED against the real tree, twice:** with `apply_override_value_to_grid`'s two `drop`s
+removed, the census fails naming exactly that function and nothing else. Restored and re-verified.
+
+#### 6c. The live proof, and what it did and did not settle
+
+**Before the fix, on a cold app**, `--project=scenario` wedged during the budget-model file: the
+window stopped answering, CPU went flat, and the watcher dumped the two stacks quoted above. That is
+the reproduction — the scenario project, not a 150-action soak walk, which is why §3bv could never
+get a clean run at it.
+
+**After the fix, on a cold app of the fixed build, the same suite ran to completion in 1.0 minute
+and never stopped answering.** The watcher was armed throughout and fired nothing. That is the
+result this pass is about.
+
+Three tests in that run failed, and none of them is the wedge:
+
+* two are `toHaveScreenshot` goldens (`scenario-data-cleanup-filtered`,
+  `scenario-monthly-report-table`) — the §3by class, which is a golden-capture problem this pass did
+  not touch;
+* one is a save/reload oracle violation on budget-model phase 05 whose 23 differences are all cells
+  APPEARING after the reload at columns 94-99 — `Region` / `Amount` / `Sum of Amount` /
+  `Northern Territories Wholesale`, which is the MONTHLY-REPORT scenario's pivot output, in a
+  workbook that scenario had not run in yet. So the reloaded file contains content the live state
+  does not, in a region belonging to a different scenario. That has the shape of §2w
+  (a document-scoped store surviving a reset and being written into the save) rather than anything
+  to do with lock order.
+
+**The third one is NOT attributed, and the reason is worth recording.** The re-run that would have
+settled it never started: another process was editing `app/src-tauri` at the same time, `tauri dev`'s
+file watcher rebuilt the application underneath the suite, and the app went away mid-run. That also
+means the three failures above were measured against an app that may have restarted, so their
+attribution is weaker than the wedge result, which is a property of the run as a whole rather than
+of any one assertion. **A second agent editing `src-tauri` during an E2E batch invalidates that
+batch** — the same rule that says not to edit it yourself.
+
+#### 7. Numbers
+
+`app-lib` **1,479 / 0 / 5 ignored** (1,467 on arrival; +12 tests: 7 new here, the rest from work
+landing alongside), verified over five consecutive runs at 1, 4 and 8 threads ·
+core workspace **1,339 / 0** · `cargo check --all-targets` clean, 0 warnings · the generalised census,
+the re-entrancy census and the original pair census all report **0**.
+
+One honest anomaly: a single earlier run of the app-lib suite reported three failures
+(`tofu_pin_policy_guard_tests::only_subscribe_and_install_may_create_a_calp_pin`,
+`xlsx_loss_census::every_excluded_verdict_names_a_category_the_report_emits`,
+`restore_registry_tests::defer_agrees_with_legacy_prefix_logic`). None of the three reads anything
+this pass changed, and none has reproduced in six subsequent runs. The likeliest explanation is a
+binary built from a source tree that changed under it — two of the three read source files at
+RUNTIME while the third embeds them at COMPILE time, so a build/run straddling an edit produces
+exactly this. Recorded rather than explained away; if it returns, that mechanism is the first thing
+to check.
+
+### 3cb. INTEGRATION PASS: the handed-over numbers re-measured, and the golden corpus turns out to be TWO corpora that nothing compares (2026-08-11)
+
+> Read §3by first. It measured the dpr split and wrote the mechanism down correctly. What this
+> section adds is the two things it did not: **which side is right**, and **a test that can tell**.
+
+#### 1. Every handed-over number was re-measured before anything was reconciled
+
+The brief's own warning ("a handed-over 1,460 / 0 failed was false last pass, three tests were red
+on arrival") was taken literally: nothing below is quoted from a report.
+
+| suite | brief's baseline | measured this pass | delta |
+|---|---|---|---|
+| `check-types` | 0 | **0** | — |
+| `lint:boundaries` | 0 | **0** | — |
+| `check:script-typings` | 39 / 736 | **39 / 736** | — |
+| `check:line-endings` | clean | **clean** | — |
+| vitest | 748 files / 106,231 | **755 files / 106,284 / 0 failed** | +7 files, +53 |
+| `cargo check --all-targets` (core) | 0 warnings | **0 warnings** | — |
+| `cargo check --all-targets` (app) | 0 warnings | **0 warnings** | — |
+| core workspace | 1,337 | **1,339 / 0** | +2 |
+| script-engine (within core) | 111 | **111 / 0** | — |
+| app-lib | 1,467 | **1,479 / 0 / 5 ignored** | +12 |
+| `test_pivot` | 56 | **56 / 0** | — |
+| model-engine-lib | 2,192 | **2,192 / 0 / 80 ignored** | — |
+
+All twelve agree with the incoming reports once the reports' own deltas are applied. **No red test
+arrived this time** -- the thing the brief warned about did not recur.
+
+Of the +7 vitest files, five are attributable with confidence by mtime: `renderSignal`,
+`formulaInputSelectionRace`, `appGoneMessage` and `captureEnvironment` from the goldens pass, and
+`goldenCorpus` (+15) added here. The remaining two come from the deadlock/oracle passes and the
+walker consolidation; **they cannot be attributed exactly, because `git` was unavailable to this
+pass** and an mtime cannot separate "created today" from "edited today". Stated rather than
+guessed. The +4 tests beyond those are the marker guard in section 5 below.
+
+One number in the brief is a mis-split rather than a drift: **"core 1,337 · script-engine 111" are
+not additive.** `script-engine` is a member of the core workspace, so its 111 is inside the 1,339,
+not alongside it. `cargo test --workspace` in `core/` runs twelve binaries totalling 1,339.
+
+#### 2. THE FINDING: the screenshot corpus is two corpora, and the guard that should have said so asks the wrong population
+
+§3by established that the functional corpus holds the dpr-2 hairline and the visual corpus holds
+dpr-1, and built `captureEnvironment.ts` to assert the display once per run. That guard is right and
+stays. It has one blind spot, and it is the blind spot it exists to close:
+
+> it compares **the RUN** to a constant. Nothing compares **the CORPUS** to that constant.
+
+Decoding all 71 committed goldens (dependency-free PNG decoder, `e2e/goldenCorpus.ts`):
+
+```text
+44 goldens  hold 241,241,241  (dpr 2)  e2e/tests, e2e/scenarios     recorded 08-06 .. 08-09
+27 goldens  hold 226,226,226  (dpr 1)  e2e/visual, ALL of it        re-recorded 08-11 14:11-14:13
+```
+
+**Which side is right is now settled by measurement rather than left open.** The display is a 200%
+display: GDI reports `DESKTOPHORZRES` 2944 against `HORZRES` 1472, a ratio of exactly 2. So a
+DPI-aware WebView2 sees `devicePixelRatio` 2, dpr 2 is the truth on this machine, the 44 are correct,
+and **the 27 re-recorded that afternoon encode an environment this machine does not produce**.
+`captureEnvironment.ts` declares `devicePixelRatio: 2` and describes it as "the display configuration
+every committed golden was captured under". For 27 of 71 files that sentence is false, and no test
+could say so, **because no test had ever looked at a golden**. Ledgered as **BUG-0023**.
+
+**Was a structural regression baked in by the re-record?** No, and this is evidence rather than
+opinion. §3bz handed over a triage method — fit a global colour map across the corpus, re-colour, and
+look at the residual — and it works. Fitting the untouched dpr-2 `grid-empty-grid-default` against the
+re-recorded dpr-1 `grid-core-empty-canvas` (same scene, both 1218x542):
+
+```text
+distinct source colours                        425
+residual not explained by a pure colour map   5,499 px of 660,156  = 0.83%
+residual bounding box                         x 4..1214, y 0..541   (i.e. the whole frame)
+top transitions   241,241,241 -> 255,255,255  1,980
+                  255,255,255 -> 226,226,226  1,980     <- symmetric: a 1-px gridline phase shift
+                  248,249,250 -> 102,102,102     88     <- header text rasterization
+```
+
+The two leading transitions are **equal in count and opposite in direction** — that is a gridline
+moving one pixel, not a product change — and the residual is spread over the entire frame with no
+localized bounding box. A structural difference would present as a compact box. So contract (c)'s
+substance holds: **no golden absorbed a product regression.** What the re-record did absorb is a
+whole-image *scale* change, invisibly, which is the half of (c) that was not being guarded.
+
+#### 3. The guard that was missing, and its teeth
+
+`e2e/goldenCorpus.ts` + `e2e/__tests__/goldenCorpus.test.ts` (15 tests) ask the question of the
+committed bytes. It reads each golden's capture path off the hairline constant — exact flat fills,
+~39,400 px per grid capture, so the signal is unambiguous — and holds every file to the environment
+its corpus declares.
+
+The 27 known-bad files are a **quarantine, not a suppression**, and the difference is enforced, in
+the shape §5 argued for:
+
+* every quarantined file must still measure exactly dpr 1 — re-record one correctly and the entry is
+  **stale and fails**, so it cannot outlive the defect;
+* the quarantine's file list must exactly equal the classifiable goldens under `visual/` — so a new
+  golden landing on the wrong path **fails by name** instead of being absorbed. The
+  directory-prefix alternative is precisely the shape that let `pivots.` hide the whole pivot
+  subtree for two months; it is not repeated.
+
+**Teeth proved by sabotage against the real corpus, not planted strings:**
+
+| sabotage | result |
+|---|---|
+| drop one file from the quarantine | **2 tests FAIL**, both naming `grid-workflow-undo-step2.png` |
+| declare the corpus is dpr 1 (flip `CAPTURE_ENVIRONMENT`) | **FAILS**, naming all 36 classifiable dpr-2 goldens |
+| quarantine a file that is NOT mis-recorded | **2 tests FAIL**: "DELETE the entry — a quarantine that has stopped describing a real defect is a blanket" |
+| all three reverted | **15 passed** |
+
+#### 4. An environment trap that makes app-lib look catastrophically broken, and is not
+
+`cargo test --lib` exited **`0xC0000139` STATUS_ENTRYPOINT_NOT_FOUND** — zero tests run, the failure
+mode `fix-test-manifest.ps1` exists to prevent. The documented recipe
+(`cargo test --no-run` ; `fix-test-manifest.ps1` ; `cargo test`) is **insufficient once the crate has
+more than one test target**:
+
+```text
+cargo test --lib --no-run               builds + links app_lib
+cargo test --test test_pivot --no-run   re-resolves features, RELINKS app_lib
+fix-test-manifest.ps1                   patches the exe
+cargo test --lib                        re-resolves AGAIN, RELINKS, and the patch is GONE
+```
+
+The manifest is embedded into an already-linked exe, so **any subsequent link discards it**. The
+robust recipe, used for every Rust number in this section:
+
+```text
+cargo test --no-run --message-format=json    ONE invocation: all targets, one feature resolution
+fix-test-manifest.ps1 -TargetDir <dir>       patch AFTER the final link
+<run each executable directly>               cargo cannot relink what it is not invoked for
+```
+
+Two cautions learned doing it. `--message-format=json` lists the **application binary** among its
+`executable` entries — running that launches the real app and blocks (it happened here; the process
+was killed and the tree left clean). And `fix-test-manifest.ps1` reports through `Write-Host`, so
+`2>&1 | Out-File` captures nothing; use `*>&1`.
+
+#### 5. SHARED-FILE RESIDUE: three agents edited the app-died mechanism and left it with three copies of its one path
+
+§3bx built the "the application went away" banner across three files, because it is three stages of
+one mechanism: `global-setup.ts` CLEARS the marker so a banner can only ever be about this run,
+`fixtures.ts` WRITES it the moment a CDP connect proves the app is gone, and `global-teardown.ts`
+READS it. Two of those three files were being rewritten by a second agent at the same time, and the
+merge left each stage computing `results/APP-DIED.txt` **independently**.
+
+The sharpest evidence that this was residue rather than design is in the tree itself:
+
+```ts
+// fixtures.ts
+/**
+ * ... Exported so the teardown cannot look in a different place.
+ */
+export const APP_DIED_MARKER = path.join(HERE, "results", "APP-DIED.txt");
+
+// global-teardown.ts  -- looked in a different place anyway
+const marker = path.join(__dirname, "results", "APP-DIED.txt");
+```
+
+Three copies that happen to agree is not one source of truth. The failure mode is silent and it
+un-does exactly what §3bx was for: move `results/`, and the marker is still written, nothing reads
+it, and the run ends with "N failed" again.
+
+**Fixed** by extracting `e2e/appDiedMarker.ts` — a LEAF module on purpose, since `global-setup.ts`
+runs in Node before the test runner exists and must not drag the Playwright fixture graph in just to
+learn a path. All three stages now import it; `fixtures.ts` re-exports it so existing importers are
+undisturbed.
+
+**Guarded**, because agreeing today is what these three did before: a source-level census in
+`e2e/__tests__/appGoneMessage.test.ts` asserts the path is defined in exactly one module and that no
+stage contains the literal `"APP-DIED.txt"`. Teeth proved by re-duplicating the path in
+`global-teardown.ts` — the census fails naming that file and the consequence ("the marker gets
+written and nothing reads it"); reverted, 7/7 green.
+
+#### 6. Contract verdicts, each attacked rather than read
+
+| contract | verdict | evidence |
+|---|---|---|
+| (a) the deadlock test FAILS rather than hangs | **HELD** | Re-inverted the `sheet_names`/`grids` order in `spill_restore.rs`, rebuilt, ran under a hard 180s deadline: the binary **exited in 4.18s** with `the_load_paths_spill_recovery_does_not_hold_sheet_names_while_it_waits_for_grids` FAILED, carrying its DEADLOCK sentence. Restored: 14/14 green. |
+| (b) every census fires, each with a self-test | **HELD — and it is TWELVE families, not nine** | All twelve detector self-tests ran green inside the 1,479. Two censuses additionally attacked on the REAL tree: (i) re-inverting the lock order made the crate-wide census name the true offender verbatim — `spill_restore.rs::recover_spill_map_by_evaluation takes grids while holding [sheet_names]`; (ii) appending a non-recalculating cell writer at the very END of `data.rs` — the position the stripper was once blind to — failed **both** enumerating censuses by name (recalculation AND spill-map). |
+| (c) no golden re-recorded over a structural difference | **SUBSTANCE HELD; the guard was missing and now exists** | 0.83% residual, symmetric, no bounding box (§2 above). But 27 goldens *were* re-recorded onto a different capture path with nothing able to detect it. BUG-0023 + the new census. |
+| (d) the suppression is the narrowest expression of a real defect | **HELD, and stronger than required** | `KNOWN_ISSUES` is **empty**. Both prefix suppressions are gone; the two pivot defects that survive are named (BUG-0021/0022) and deliberately left un-suppressed so a walk that reaches them fails loudly. |
+| (e) nothing grew a second implementation | **HELD** | ONE renderer (`expression_to_formula` is a one-line delegation to `engine::ast_render::render_formula_raw`); ONE cascade family (`cascade_cross_sheet_dependents`, `recalc_after_active_sheet_bulk_rewrite`, `recalc_after_off_sheet_write`, one definition each); ONE `apply_spill_decision` with exactly **6** call sites; ONE minimiser (`minimizeTrace`), and the duplicate v1 invariant runner is now DELETED rather than forked. The PNG decoder added here is genuinely new — the tree had only a PNG *encoder*, in `image-ingress.spec.ts`. |
+
+#### 7. Left open, deliberately
+
+* **BUG-0023** — the 27 visual goldens must be re-recorded at dpr 2. Not done here: it requires an
+  E2E run, which this pass was scoped out of. The quarantine will fail the moment they are.
+* **BUG-0021 / BUG-0022** — `update_bi_pivot_fields` and `change_pivot_data_source` still record no
+  undo entry; both need a definition+cache snapshot.
+* `model-engine-lib` carries **18 pre-existing `cargo check --all-targets` warnings** (unused imports
+  and variables, all in test targets). Untouched: they predate this pass, and the brief's
+  "0 warnings both" covers core and app, both of which are clean.
+* §3bz's `macro-link-model` experiment is still unrun, for the same reason as BUG-0023.
+
+### 3cc. PROVED LIVE. The deadlock reproduced ON DEMAND and then survived, and the golden corpus turns out to split on a SECOND axis that the axis-one guard structurally cannot see (2026-08-11)
+
+Everything below is a run that was performed. The app was cold-launched for this batch
+(`scratchpad/launch-vba-batch.ps1`, CDP 9222) and `scratchpad/wedge-watch.ps1` was armed throughout.
+
+#### 1. THE DEADLOCK — reproduced on demand, then gone. Both halves measured on this machine
+
+§3ca closed the deadlock by reasoning from two stacks and fixed 49 functions. It could not show the
+wedge coming back on demand, because the fix was already in the tree when it was written. This pass
+put the defect BACK and watched the application die, then took it out again — which is the only form
+of evidence that distinguishes "the fix works" from "the wedge stopped happening".
+
+**The sabotage is one statement swap**: in `recover_spill_map_by_evaluation`, move the `grids`
+acquisition from FIRST back to LAST, i.e. exactly the order §3ca's stacks caught.
+
+| stage | app-lib lock-order tests | `--project=scenario` on a cold app of that build |
+|---|---|---|
+| fixed (arrival state) | **14 passed / 0 failed** in 0.44 s | — |
+| **inverted (the defect re-introduced)** | **12 passed / 2 FAILED** in 1.78 s | **WEDGED.** 10 passed, 3 failed, **11 did not run**, 8.7 min |
+| restored (byte-identical, sha256 verified) | **14 passed / 0 failed** in 0.43 s | **15 passed, 3 failed, 6 did not run, 1.1 min** — no wedge |
+
+The two tests that failed on the inverted build are the two that should:
+`the_load_paths_spill_recovery_does_not_hold_sheet_names_while_it_waits_for_grids` (its own DEADLOCK
+sentence) and `no_lock_is_held_while_a_grid_lock_is_acquired`, which named the offender verbatim —
+`spill_restore.rs::recover_spill_map_by_evaluation takes grids while holding [sheet_names, files,
+tables, table_names, named_ranges]`. Both **fail in under two seconds rather than hanging**, which is
+the property that matters: a hang is invisible to an exit-status check.
+
+**And the live wedge is the same wedge.** `wedge-watch.ps1` caught the inverted build four times
+during that scenario run and the stacks are §3ca's, symbol for symbol, in two dumps five seconds
+apart:
+
+```
+-- thread 67792 (#0 = the MAIN thread)
+   std::sync::poison::mutex::Mutex<Vec<engine::grid::Grid> >::lock          [mutex.rs:489]
+   app_lib::document_effect::Persisted<Vec<Grid> >::read                    [document_effect.rs:512]
+   app_lib::spill_restore::recover_spill_map_by_evaluation                  [spill_restore.rs:331]
+   app_lib::spill_restore::restore_spill_map_on_load                        [spill_restore.rs:536]
+   app_lib::persistence::open_file                                          [persistence.rs:3485]
+
+-- thread 40600 (a plain std::thread from queue_gather_refresh)
+   app_lib::document_effect::Persisted<Vec<String> >::read                  [document_effect.rs:512]
+   app_lib::calculation::recalculate_sheet_values                           [calculation.rs:1815]
+   app_lib::calp_commands::queue_gather_refresh::closure$0                  [calp_commands.rs:10717]
+```
+
+The process reported `Responding: False` with CPU flat at 1.20 s for the rest of the run, while
+Playwright reported the same three "failures" §3ca's interrupted run did — a `page.evaluate` timeout
+and `Target page, context or browser has been closed`. **That is the shape to recognise**: a wedge
+does not present as a wedge, it presents as a handful of timeouts and a suite that stops.
+
+On the fixed build the watcher was armed for the whole batch — scenario twice, functional twice,
+visual four times, journey, macro, soak and invariant — and **fired nothing**. Zero dumps.
+
+**The scenario project is the number the brief asked for, and it ends at 24 / 24.** Immediately
+after the fix it read 15 passed / 3 failed / 6 did not run in 1.1 min, TWICE, with byte-identical
+failure counts (32548 / 31444 / 31444 px) — all three `toHaveScreenshot` goldens, which section 2
+shows to be a capture-path artifact and not a product difference. The "6 did not run" was mechanical:
+each scenario is a serial chain, so a failed phase skips that scenario's remaining phases, and those
+6 phases had therefore not been exercised since before the deadlock. Once the three goldens were
+re-recorded the whole chain runs: **`--project=scenario` 24 passed / 0 failed, 1.3 min.**
+
+That last point is worth stating on its own, because it is the difference between the wedge being
+gone and the suite being green: **the deadlock had been hiding six scenario phases behind a wedge,
+and three colour-profile goldens were hiding the same six behind an early abort.** Only removing
+both shows all 24.
+
+**One thing §3ca left unattributed did NOT reproduce.** Its post-fix run had a save/reload oracle
+violation on budget-model phase 05 whose 23 differences were another scenario's pivot output.
+Phase 05 passes here, on both runs. §3ca said itself that the run it was measured in may have been
+restarted underneath by another agent's rebuild; that now looks like the explanation. Recorded as
+not-reproduced rather than fixed — nothing was done to it.
+
+#### 2. THE GOLDEN CORPUS SPLITS ON TWO AXES, AND CLOSING ONE PROVED NOTHING ABOUT THE OTHER
+
+§3cb built `goldenCorpus.ts` because the corpus had split across two DEVICE SCALE FACTORS and
+nothing compared the corpus to the environment. That guard is right and it worked. It also closed
+exactly one axis, and this is the pass that found out the corpus splits on two.
+
+**Measured, on a cold functional run of the fixed build: 512 passed / 31 failed / 11 skipped,
+38.0 min. All 31 failures are goldens — ZERO non-screenshot failures — and NONE of the 31 is dpr.**
+Every failing pair holds the same hairline constant on both sides. The dpr work of §3by/§3cb is
+sound and is not what these are.
+
+They are the COLOUR PROFILE, and the mechanism is §3by §5 landing: `webview2Args.mjs` became the one
+definition of the WebView2 arguments, so `--force-color-profile=sRGB` reached the manual launch path
+for the first time. Before that **no manual run had ever had the pin**, and the manual path is how
+every golden in this tree was recorded. So the app now renders sRGB and the whole corpus encodes the
+display.
+
+**The direction is proved from source, not asserted.** Pairing each failing golden with the capture
+the run produced and reducing the difference to a colour relation:
+
+```
+63,112,75   -> 33,115,70      29,569 px of statusbar-text-range      fanOut = 1
+95,180,134  -> 16,185,129        230 px of ribbon-home-tab-buttons   fanOut = 1
+230,236,246 -> 227,236,247     1,609 px of grid-before-clear         fanOut = 1
+```
+
+and `33,115,70` is `#217346`, `16,185,129` is `#10b981` — the colours the application DECLARES
+(`uiTypes.ts`, `ribbonIcons.tsx`, `darkTheme.ts`). **The pinned capture reproduces the source-declared
+colour bit-exactly and the committed golden does not.** The goldens are the stale side. The first two
+of those pairs are also two of the three saturated pairs §3by fitted its 3x3 matrix to — measured
+again here, on a different day and a different run, independently.
+
+**What makes this safe to re-record, stated as a test rather than as a judgement.** A colour-profile
+change is a RECOLOURING: every pixel keeps its position and each source colour maps to ONE
+destination everywhere in the frame. Content that MOVED is not a function — the same source colour
+fans out to many destinations, and the moved pixels have a compact bounding box. So the evidence is
+the fan-out:
+
+| | functional share | distinct source colours | bounding box |
+|---|---|---|---|
+| all 31 failing goldens | **0.9666 .. 1.0000** | 3 .. 557 | the whole region wherever that colour appears; no compact box |
+
+The residual below 1.0 is text antialiasing over recoloured backgrounds, which is the expected
+second-order effect of a recolouring and not a displacement.
+
+#### 2b. THE NEW GUARD, and it fires on the real tree rather than on a synthetic
+
+`readColourProfile` / `describeProfileSplit` in `e2e/goldenCorpus.ts`, with
+`CAPTURE_ENVIRONMENT.colourProfile` as the constant they are measured against. It is a SECOND axis
+and not a flag on the first, for a reason that is the whole finding:
+
+> **The profile transform is the IDENTITY on neutrals, and both hairline constants are neutral.**
+> A corpus can agree perfectly about device pixel ratio and still be two corpora. Axis one cannot
+> see axis two, at all, ever.
+
+The two populations differ as well — a bare grid crop has a hairline and no chrome; a status-bar
+strip has chrome and no hairline — so the reader ABSTAINS (`no-chrome`) rather than counting greys
+as agreement, and there is a unit test for exactly that.
+
+**Teeth, on the committed bytes and not on a fixture:** run against the corpus as it stood before the
+re-record, the new case failed and named **15 goldens** — every one that carries enough saturated
+chrome to be classified — while the other 23 cases in the file stayed green. Eight further cases
+drive the detector to failure synthetically, including the direction that matters most:
+`fires in the OTHER direction too, so a lost pin is not read as a stale corpus`. If the launcher
+ever stops delivering the pin, the corpus is suddenly "wrong" and the correct fix is the launcher;
+a guard that could only say "re-record" would bake this display into every golden and end the
+suite's portability. The message says which.
+
+#### 2c. The re-record, and BUG-0023 self-expiring exactly as designed
+
+| corpus | action | result |
+|---|---|---|
+| `e2e/visual` (27) | re-recorded at dpr 2 | `--project=visual` **18/18**, then **18/18** again — but see §8, both runs were WARM |
+| `e2e/tests` (42; 38 rewritten) | `--update-snapshots=changed` | that run itself **543 passed / 0 failed / 11 skipped** (38.6 min) |
+| `e2e/scenarios` (3) | `--update-snapshots=changed` | **24 passed**, then **24/24** on an independent verification run |
+
+`--update-snapshots=changed` rather than `all` deliberately: `all` rewrites goldens that currently
+PASS, which discards the evidence they represent for no gain. 55 of the 72 committed goldens were
+rewritten in total (27 visual + 38 tests + 3 scenarios, less overlap), and 17 were left untouched
+because they were already right.
+
+**AND THE RE-RECORD FOUND SOMETHING THE SUITE CANNOT REPORT.** Three goldens —
+`ribbon-minimized`, `ribbon-ribbon-after-expand`, `ribbon-ribbon-tab-home-restored` — were on the
+stale profile and **appear nowhere in the full ordered functional run's output**, passing or failing.
+The reason is `softly()`: despite the name it RETHROWS on a real pixel diff (it swallows only
+"snapshot doesn't exist"), so a test with several screenshot assertions aborts at the FIRST one and
+the rest are never compared. All three sit after a failing sibling in their test.
+
+So a failing run systematically UNDER-REPORTS how much of the corpus is affected — 31 failing tests
+against 34 affected goldens here — and the goldens hidden that way are invisible to exactly the
+instrument that is supposed to be watching them. The colour-profile census found all three, because
+it reads the committed BYTES rather than watching a run. That is the second time in two passes that
+asking the corpus a question directly has beaten asking the suite. (In `--update-snapshots` mode
+`toHaveScreenshot` does not throw, so the update run reached all three and rewrote them — which is
+how they came to be fixed at all.)
+
+Decoding all 72 committed goldens after the visual re-record: **72 of 72 read dpr 2**, zero dpr 1.
+So `MIS_RECORDED_CORPORA` is now **empty** and BUG-0023 is closed — not by deleting a suppression,
+but because the two self-expiry cases (`still describes a real, unfixed split` /
+`names exactly the classifiable goldens under $dir`) would have FAILED the moment the files stopped
+measuring `recordedAt: 1`. The quarantine was built so that it could not outlive its defect, and it
+did not.
+
+#### 3. `macro-link-model` test 1 — PASSES, and the register's leading hypothesis is now excluded
+
+§3bz left three candidates and an experiment, unrun for want of exclusive machine time. On a cold app
+of the fixed build, in the ordered functional suite:
+
+```
+ok 256 macro-link-model.spec.ts:331 > 1. a button runs the CURRENT macro after it is edited
+                                       (link, not copy)   (5.0s)
+ok 257 macro-link-model.spec.ts:488 > 2+3. double-click opens the editor on the macro, and Run executes it
+ok 258 macro-link-model.spec.ts:613 > 4. deleting a linked macro warns, and the orphaned button says so
+```
+
+**5.0 s, not a 45-second poll that expires** — the failure was a timeout, so a pass this fast is not
+a marginal one. And it is not vacuous: the spec writes ORIGINAL through the button first and asserts
+it lands, edits the macro through the dialog, then asserts the store holds the EDITED source AND
+still carries `runtime=objectScript` BEFORE clicking again. That last assertion is candidate 1 —
+"the route flips to the wrong runtime because Save drops the description" — and it passed, so
+candidate 1 is excluded on this evidence rather than on argument. All 16 tests in the macro family
+pass.
+
+The most likely account of the original failure is §3bq: it was observed while another agent held the
+machine in a Rust edit/build loop, and `tauri dev`'s watcher restarts the app underneath a run.
+Recorded as not-reproduced on a quiet machine.
+
+#### 4. The oracle suppression list, checked rather than quoted
+
+`KNOWN_ISSUES` in `e2e/oracles/knownIssues.ts` is **an empty array**. Read, not asserted: the file is
+140 lines of which the array body is comments only. BUG-0021 and BUG-0022 remain deliberately
+un-suppressed, so a walk that reaches them fails loudly.
+
+#### 5. THE ONE FAILURE THE VERIFICATION RUN FOUND, and it is NOT a golden — `vba-idioms-wave3` #5
+
+The re-record's verification run is **542 passed / 1 failed / 11 skipped, 37.8 min** (from
+512 / 31 / 11). Every golden that failed before now passes, including the three the suite could not
+previously report on. The single remaining failure is new, is not a screenshot, and had passed in
+both earlier full runs the same evening.
+
+`5. a getSheets() loop builds a TOC of internalReference links` retypes the token `SEEDREF` to `A1`
+in the macro editor and then asserts the stored module source. It got:
+
+```
+Expected substring:  const jump = "A1"
+Received:            const jump = "A";        <- the final 1 is missing
+```
+
+**There are exactly two explanations and this pass could not separate them.** Both are worth writing
+down because they live in different layers and need opposite fixes:
+
+* **(a) a dropped keystroke.** `retypeToken` does `dblclick` then
+  `keyboard.type(to, { delay: 40 })` into a Monaco editor. Monaco tokenizes and can raise a suggest
+  widget asynchronously; a keystroke landing in that window can be swallowed. Harness defect.
+* **(b) `liveState === "live"` is not a promise that the store has caught up.** The helper types,
+  then polls the module's live indicator, then reads the store. If the idle write-through fired on
+  the `A` and flipped the indicator to `live` before the `1` had marked the module dirty again, the
+  poll is satisfied by the PREVIOUS write-through and the store read is stale — while the editor
+  buffer is perfectly correct. That is a status indicator that lies, i.e. the same class as §3bw's
+  formula-bar race: a state that is not a function of its input.
+
+**The measurement that separates them is one line**: read the Monaco buffer at the moment the
+assertion fails. If the buffer holds `A1`, it is (b) and the indicator is the defect; if it holds
+`A`, it is (a) and the typing is. The spec cannot currently tell, and **its message asserts (b)'s
+conclusion while describing (a)'s symptom** — it says "the module store holds the typed edit", which
+sends the reader to the store, the one layer the evidence exonerates. That is the same shape §3bz
+recorded for `macro-link-model`: a test that watches one side cannot distinguish "the write was
+wrong" from "the read was early".
+
+**Reproduction status, stated precisely rather than rounded:** 1 failure in 3 full ordered runs of
+the same spec this evening. Running the spec ALONE fails for an unrelated reason — it depends on
+sheets earlier specs create, and fails at line 1080 with `Expected 1, Received 0` — so isolation is
+not a valid reproduction and was not treated as one.
+
+**And it is six copies, not one.** `retypeToken` is defined independently in
+`macro-live-edit.spec.ts`, `vba-idioms-wave1..4.spec.ts` and `vba-wiring-batch.spec.ts` — six
+verbatim-ish copies of the one input path, so whichever explanation is right, the fix has to be made
+six times or the helper has to be lifted first. **Deliberately NOT done here**: it is a six-file
+refactor of the input path of ~40 currently-green tests, and proving it safe costs a 38-minute run
+per attempt. Filed rather than half-done, which is the choice this register asks for.
+
+#### 6. THE NARROWED ORACLE EARNED ITS KEEP: a fresh seed found a real defect, and it minimized to THREE actions — **BUG-0026**
+
+§5a removed the two blanket suppressions and left `KNOWN_ISSUES` empty, on the argument that a walk
+reaching an unfixed defect should fail loudly. This is the first pass to run fresh seeds against
+that, and the argument paid:
+
+| walk | seed | result |
+|---|---|---|
+| soak | `20260810` (known) | **1 passed**, 2.2 min |
+| soak | `1786446166374` (known) | **1 passed**, 2.1 min |
+| soak | `20260812731` (**fresh**) | **FAILED — `contextual-ribbon-tabs`**, minimized to 3 |
+| invariant | `1786396152029` (known) | **1 passed**, 1.1 min |
+| invariant | `1786456498740` (known) | **HUNG** — see §7; **1 passed**, 1.5 min once §7 was fixed |
+| invariant | `20260812914` (**fresh**) | **FAILED — `contextual-ribbon-tabs`**, minimized to 3 |
+
+```
+Contextual tab "Slicer" is visible but at least one slicer must exist.
+Found: slicers=0, charts=0, tables=0, pivots=0, timelines=0, sparklines=0
+```
+
+**The minimiser reduced 45 actions to 3, and the shrink verdict is `confirmed` over 20 replays**
+(14 of the discarded candidates passed; none failed a DIFFERENT way, so `shrinkOtherOutcomes` is
+clean):
+
+```
+table.create  ->  slicer.create  ->  table.delete
+```
+
+**The cause was found by reading, and it is exact.** `slicers=0` in the violation means the slicer
+really was deleted — §3bt's object-dependency cascade did its job. What survives is the RIBBON.
+`SlicerEvents.SLICER_DELETED` is dispatched from **exactly one place in the whole tree**:
+`deleteSlicerAsync` in `extensions/Slicer/lib/slicerStore.ts`, which is the FRONTEND delete path
+(context menu, Options pane). `extensions/Slicer/index.ts` listens for it and calls
+`deselectSlicer()`, under a comment that says in so many words *"without this, deleting a selected
+slicer leaves the Options tab visible with no slicer to configure"* — so this exact defect was
+already known and already fixed, **for the direct path only**.
+
+Deleting the owning TABLE removes the slicer through the backend cascade, which never passes through
+`deleteSlicerAsync`. No event is raised, the selection is never cleared, and a contextual tab goes on
+offering commands for an object that no longer exists.
+
+**This is the frontend half of §3bt, and the object-deps census structurally cannot see it.** That
+census asks whether a Rust delete command DECLARES what happens to its dependents. It does — that is
+why `slicers=0`. It does not and cannot ask whether the UI was TOLD. The same shape as §2 of this
+section: closing an axis proves nothing about the axis next to it.
+
+**Two harnesses, two generators, the SAME three actions.** The fresh `invariant` seed
+`20260812914` — a different spec, a different generator instance — reduced independently to
+**exactly the same minimum**, `table.create -> slicer.create -> table.delete`, with the same
+violation and verdict `confirmed` over 30 replays. Two independent reductions converging on the same
+three actions is about as strong as a monkey-walk finding gets.
+
+Its `shrinkOtherOutcomes` also recorded `{"(passed)": 20, "save-reload-round-trip": 2}` — during
+reduction, two candidate traces failed a DIFFERENT way. That is §3bo's "different reproducible
+failure" accounting doing its job. It is a LEAD, not a finding: it was never the reported violation
+and was not reduced, so it is recorded here and not ledgered.
+
+**Left failing on purpose.** Not suppressed, per §5a's rule — both seeds are recorded, both bundles
+are on disk with 3-action replay commands, and a walk that reaches it should keep saying so.
+
+#### 7. A WALK HUNG FOR TWELVE MINUTES AND PRINTED NOTHING — `actionTimeout` was never set, and that is FIXED
+
+Found by running the known invariant seed `1786456498740`. The walk stopped at
+`[step 47/75] ribbon.switch-tab` and produced **no further output for twelve minutes** while the
+application stayed alive, `Responding: True`, CPU flat, CDP answering. Not a wedge — §3ca's deadlock
+stops the WebView2 message pump and this did not.
+
+**The mechanism, and it is two defaults meeting:**
+
+* `ribbon.switch-tab` (`e2e/walker/actionCatalog.ts`) probes `isVisible({ timeout: 500 })` and then
+  calls a bare `.click()`. **Playwright's default `actionTimeout` is 0 — no timeout at all** — so a
+  button that is visible but never ACTIONABLE (covered, or never stable) parks there forever. The
+  config set `expect.timeout` and never set `actionTimeout`, and there are 5 such bare `.click()`
+  calls in the catalog.
+* `state-consistency.spec.ts` raises its own ceiling with `test.setTimeout(1_500_000)`, so the
+  project's 300 s timeout does not apply and the hang had **25 minutes** to run in.
+
+So the one bound was a 25-minute test timeout, and until it expired the run was indistinguishable
+from a slow walk. **A hang is invisible to an exit-status check** — the hazard this program's own
+brief names — and here it was invisible to a human watching the log as well.
+
+**FIXED** in `playwright.config.ts`: `actionTimeout: 30_000`, `navigationTimeout: 60_000`, with the
+measurement written next to them. 30 s is far above the slowest legitimate action in these suites,
+so it cannot convert a slow action into a false failure; it converts an INFINITE one into a reported
+failure that names the locator.
+
+**Teeth, measured both ways on the same seed:**
+
+| | result |
+|---|---|
+| before (`actionTimeout` unset) | silent hang at step 47, **12+ minutes** and still going, ceiling 25 min |
+| after (`actionTimeout: 30_000`) | `[action failed] ribbon.switch-tab: locator.click: Timeout 30000ms exceeded.` — named, bounded, the walk CONTINUES and the seed completes: **1 passed (1.5 min)** |
+
+The seed passes. The twelve minutes were entirely the missing bound.
+
+#### 8. THE "RUN IT COLD, TWICE" RULE CAUGHT MY OWN RE-RECORD. 4 of the 27 visual goldens do not survive a cold app
+
+The brief's instruction was "run `visual` cold **twice** and assert the same result both times — a
+single green run cannot distinguish a fixed race from a lucky one." Taken literally, it found
+something, and what it found is **this pass's own work**.
+
+`--project=visual` was recorded and then verified **18/18, twice** — but all three of those runs were
+against the app instance that had already been driven through functional, scenario and journey. The
+app was then **killed and cold-launched**, and the same suite run again:
+
+| run | app | result |
+|---|---|---|
+| record + 2 verifications | warm (post-functional/scenario/journey) | **18/18**, **18/18** |
+| verification 3 | **COLD**, first suite on the instance | **14 passed / 4 FAILED** |
+| verification 4 | same cold instance, immediately after | **15 passed / 3 failed** |
+
+So three of the twenty-seven are a function of something other than the page, and a fourth is not
+even stable between two consecutive runs:
+
+* **`core-empty-grid`** — failed on the FIRST capture after a cold start, passed on the second. Its
+  dominant transitions are `221,245,237 -> 255,255,255` (510 px) and `128,217,188 -> 255,255,255`
+  (80 px): a pale green highlight present in the golden and absent from the cold capture. That is a
+  selection/highlight that has not settled on the first capture after launch — the §3bw class again
+  (a capture that is not a function of its input), one screen over.
+* **`menu-file-open`, `menu-edit-open`, `menu-data-open`** — fail on a cold app in BOTH cold runs and
+  pass on a warm one in all three warm runs. **Deterministic per condition, opposite between
+  conditions.** The differences are not a recolouring: fan-out reaches 22, and saturated colours map
+  to greys (`37,98,156 -> 110,110,110`, `96,37,38 -> 65,65,66`, `193,153,97 -> 153,153,154`), i.e.
+  coloured menu iconography in the golden against grey in the cold capture. The likeliest reading is
+  an icon font or an accent asset that is resolved only after the app has been exercised — but that
+  is a hypothesis, and it is recorded as one.
+
+**What this means for the re-record, stated plainly rather than minimised.** The dpr and
+colour-profile work in §2 stands — it was derived from the committed bytes and is independent of
+warm/cold. But **the `visual` corpus as re-recorded here is trustworthy for 23 of its 27 files and
+NOT for these 4**, because they were captured under a condition the suite does not control and does
+not declare. Re-recording them cold would simply invert which condition fails; the fix is to make the
+capture deterministic (settle the highlight; force the icon assets), which is a product/harness
+change and not a re-record.
+
+**Filed, not papered over.** Had the two-cold-runs rule not been in the brief, this pass would have
+reported "visual 18/18" twice over and been wrong about four goldens — which is precisely the failure
+the rule exists to prevent, and it is worth noting that it caught the agent applying it.
 
 ## 4. OWNER DECISIONS — not work, product calls
 
@@ -10150,3 +11412,197 @@ them rather than a schedule pushing them.
 **Also not on this list, and deliberately: the Home-tab-header right-click affordance.** It is shell
 work (a generic `PanelDefinition.contextMenuItems` field), it is the discoverability half of a
 feature that already works through the View menu, and nothing depends on it.
+
+
+---
+
+## 5. The oracle suppressions, re-examined — and what they were hiding (2026-08-11)
+
+### 5a. Two `knownIssues.ts` entries blinded the undo oracle to ALL pivot and ALL column-width divergence — **BOTH REMOVED**, the ledgered defects **FIXED**, and four successors found underneath
+
+**What the suppressions actually covered.** `app/e2e/oracles/knownIssues.ts` held two entries:
+
+| ledger | oracle | `pathPrefixes` |
+|---|---|---|
+| BUG-0014 | `undo-round-trip` | `sheets[0].colWidths.`, `sheets[1].colWidths.` |
+| BUG-0015 | `undo-round-trip` | `pivots.` |
+
+Neither was scoped to its defect. `filterKnownIssues` drops a violation when **every** digest-diff
+path is covered by some prefix, so `pivots.` swallowed the whole pivot subtree — every field of every
+pivot definition, from any cause — and the two `colWidths.` prefixes swallowed all column-width
+divergence on the first two sheets, likewise from any cause. BUG-0014's own note admitted the second
+half ("this also masks other width-undo regressions while open"), and it was right.
+
+This matters more than an ordinary open bug. The undo round-trip oracle is the instrument this
+programme has been trusting to prove undo correctness; two of the three S12 soak leaks were undo
+defects and a third (`conditionalFormats`) was itself a ledgered bug the oracle had been suppressing.
+For pivots and for column widths the oracle had been reporting a green it **could not have seen a
+defect through** since 2026-06-11.
+
+**BUG-0014 — still real. FIXED.** `auto_fit_pivot_columns`
+(`app/src-tauri/src/pivot/operations.rs`) wrote straight into `column_widths` /
+`all_column_widths` — persisted document state — and recorded nothing on the undo stack, so the
+widths never came back. It now RETURNS what it overwrote (`Vec<(u32, Option<f64>)>`; `None` = the
+column had no explicit width, so the restore REMOVES the entry rather than writing a default) and
+`record_pivot_definition_undo` records it in the SAME transaction as the pivot change, as a new
+`pivot_col_widths` restore kind. Excel undoes a pivot field change and the column resize it caused as
+one step, so recording a second transaction would have cost the user a second Ctrl+Z.
+
+The kind is **sheet-INDEXED**, because a pivot can render on a sheet the user is not looking at (a
+subscribed report renders on its own appended sheet) and the fit writes `all_column_widths[dest]`
+there. An active-sheet-only restore would have done nothing at all on that path — the same
+sheet-blindness that made `CellChange::SetCell` grow a `sheet` field.
+
+**It is `defer: true`, and the first version was not.** `apply_changes` takes `column_widths` at the
+top of the restore pass and holds it across every INLINE restore, so an inline handler that writes
+that store deadlocks against its own caller — std's `RwLock` is not reentrant. Measured: the app
+stopped answering on the first undo the new journey spec performed, and the harness reported it as
+"the application went away", not as a lock bug. `registry_matches_expected_domains` pins the `true`.
+
+**BUG-0015 — the ledgered CAUSE is fixed, and the prefix had gone on to hide its SUCCESSORS.**
+`apply_pivot_create_restore` does remove the entry from `PivotState.pivot_tables`, so the
+grid-source create+configure path the bug was found on no longer leaves a ghost. But four other pivot
+commands mutate `pivot_tables` and record **no undo entry at all**, and each produces exactly the
+divergence BUG-0015 describes:
+
+| command | verdict |
+|---|---|
+| `create_pivot_from_bi_model` | **FIXED.** Created a pivot Ctrl+Z could not remove — the literal BUG-0015 symptom on the BI path. Now records `pivot_create` from the CLEAN pre-calc cache, as the grid-source path always did. |
+| `relocate_pivot` | **FIXED.** Moving a pivot was not undoable, so Ctrl+Z silently reverted whatever came before it instead. Records `pivot_definition`; the restore re-renders from the same cache, which is exactly right for a move. |
+| `update_bi_pivot_fields` | **OPEN — BUG-0021.** It re-queries the model and replaces the cache, so restoring the old definition against the NEW cache would render the wrong thing. Needs a definition+cache snapshot, i.e. the shape `pivot_create`/`pivot_delete` already use. |
+| `change_pivot_data_source` | **OPEN — BUG-0022.** Same shape: it rebuilds the cache from the new range. |
+| `refresh_pivot_cache` | **Correct as-is.** Excel does not undo a PivotTable refresh. |
+
+The two OPEN commands are deliberately **not** re-suppressed. A walk that reaches them should fail
+loudly and name them; a prefix that hides them buys silence at the price of the instrument.
+
+**Proved live**, not only reasoned: `app/e2e/journeys/pivot-undo-fidelity.spec.ts` performs the
+create+configure sequence a user performs, asks the oracle's own question with `diffDigests` and no
+filter anywhere near it, and asserts the whole digest — not just the two prefixes — returns. Every
+assertion is preceded by its own positive control from the SAME digest (the pivot is proved present;
+the widths are proved to have CHANGED), because a width assertion passes trivially if the fit never
+happened.
+
+### 5b. And the redo asymmetry that finding it exposed: **every undo snapshot is JSON, and serde_json's default parser is a ULP out** — FIXED
+
+With the suppressions gone, the round trip was green on undo and one path short on redo:
+
+```
+configured   colWidths {"98":198, "99":92.60000000000001}
+undo  x2     colWidths {}                                    <- BUG-0014 fixed
+redo  x2     colWidths {"98":198, "99":92.6}                 <- a DIFFERENT f64
+```
+
+`92.6` and `92.60000000000001` are two distinct doubles, and nothing recomputes the fit on redo — the
+value came back changed from an exact round trip through our own undo stack. The cause is not in the
+pivot code at all: **`record_custom_restore` payloads are JSON**, and `serde_json`'s default parser
+is a fast approximate one that can be a single ULP out. `serde_json` is now declared in
+`app/src-tauri/Cargo.toml` with `features = ["float_roundtrip"]`.
+
+This is worth reading past the width. The magnitude is invisible for a column width; the *class* is
+not, because every custom restore in the crate travels the same way — a cell value, a chart axis
+bound, a control's numeric state, a scenario's changing-cell value. An undo that returns a number
+which is not the number that was there is precisely the silent-drift failure this programme exists to
+catch, and it had been sitting under a suppression that made the whole subtree unobservable.
+
+### 5c. The `.calp` publish path had no coverage census, and had drifted — **FIXED, with the census**
+
+The never-examined surface taken next was `.calp` publish/pull, on the register's own reasoning: it
+is the path that carries a document to another machine, and its transparency report is a promise to
+the author about what a subscriber will receive.
+
+`compute_publish_report` (`app/src-tauri/src/calp_commands.rs`) is a hand-maintained account of what
+a package carries and what it leaves behind, with **nothing tying it to `persistence::Workbook`** —
+the same shape the xlsx loss report was in before `XLSX_LOSS_COVERAGE` was built, and it had drifted
+the same way:
+
+| field | was | now |
+|---|---|---|
+| `cell_behaviors` | **neither carried nor mentioned** | CARRIED as `cell_behaviors.json`, filtered to published sheets, materialized on pull and on refresh |
+| `workbook_protection` | dropped silently | EXCLUDED and reported (`workbookProtection`) |
+| `default_row_height` / `default_column_width` | dropped silently | EXCLUDED and reported (`gridDefaults`) |
+| `bi_connection_roles` | dropped silently | EXCLUDED and reported (`biRoleSelections`) |
+
+`cell_behaviors` was the real loss and the sharpest one: a cell TYPE ships (as a `cellType` custom
+object) and the BEHAVIOR bound to it did not, so a published report arrived with typed cells that
+looked correct and **did nothing** — with no line in the transparency report to say so. The scripts a
+binding names already ship consent-gated as object scripts, so a binding introduces no reach a
+subscriber has not already been asked about. `carries_wave_content` now stamps `min_app_version` when
+a binding is present, so an older app refuses the pull instead of dropping the bindings in silence.
+
+The three "dropped silently" rows are policy exclusions that were *correct* and simply unstated. The
+grid defaults are the interesting one: a package's sheets are APPENDED to the subscriber's own
+workbook and these two are one-per-workbook, so applying the publisher's values would re-size every
+sheet the subscriber already had. Explicit widths and heights DO travel; only the fallback reverts.
+That is a defensible policy and now it is a written one.
+
+**`CALP_PUBLISH_COVERAGE` is the producer the report never had.** Every `persistence::Workbook` field
+must be CARRIED, EXCLUDED (dropped, and the report says so) or SILENT (dropped, with the reason it
+needs no line), and the field names come out of `core/persistence/src/lib.rs` at TEST TIME. Four
+tests in `document_store_census_tests.rs`:
+
+* `the_publish_report_covers_every_workbook_field` — a new field cannot be added without a verdict.
+* `the_publish_coverage_table_names_no_field_that_no_longer_exists` — a stale entry is how a real
+  field ends up looking covered.
+* `every_publish_coverage_entry_states_a_verdict` — and a SILENT verdict must argue, not label.
+* `every_excluded_verdict_names_a_category_the_report_emits` — the half a plain list cannot check.
+  "EXCLUDED: reported 'gridDefaults'" is a claim about ANOTHER FUNCTION, and that is exactly the kind
+  of statement that silently stops being true. It parses the category out of each verdict and greps
+  `compute_publish_report` for the line that emits it.
+
+Sabotage: `the_publish_census_detectors_actually_fire` proves both detectors can see what they are
+looking for, including an EXCLUDED verdict citing a category the report does not emit.
+
+**One trap worth recording, because it disarmed a DIFFERENT guard.**
+`only_subscribe_and_install_may_create_a_calp_pin` isolates production code in `calp_commands.rs` by
+splitting the source at the first test-gate attribute and keeping what precedes it. Putting a
+test-gated table above the pinning call sites truncated that scan to a string containing none of
+them — the guard passed over nothing while reporting success. Writing the attribute out in a COMMENT
+does it too: the split is textual and does not know a comment from code. `CALP_PUBLISH_COVERAGE`
+therefore lives at the END of the file, with a note that says why without naming the attribute.
+
+### 5d. Contract state at the close of this pass
+
+* `cargo check --lib --all-targets` — 0 errors, 0 warnings.
+* app-lib unit tests — **1,479 passed / 0 failed / 5 ignored.** (Mid-pass this run had one failure,
+  `state_digest_lock_order_tests::the_load_paths_spill_recovery_does_not_hold_sheet_names_while_it_waits_for_grids`
+  — the instrument filed for the open load-path deadlock (§3bv), deliberately red and owned
+  elsewhere. It went green during the pass, while its owner was editing that file. The count is
+  above the 1,467 baseline by this pass's five census tests plus other agents' additions.)
+* `calp` crate — 321 + 11 + 4 tests, all green, including two new round-trip tests.
+* `lint:boundaries` clean; the e2e vitest tier 57/57.
+* `pivot-undo-fidelity.spec.ts` — **2/2 on the app**, after the §5b fix landed.
+
+**Both new detectors were sabotage-checked, not merely observed passing.**
+
+| sabotage | what should fire | what did |
+|---|---|---|
+| `auto_fit_pivot_columns`'s return value discarded at the call site (the exact pre-fix behaviour) | the journey spec's BUG-0014 assertion | `sheets[0].colWidths.98: "<absent>" -> 198` and `...99: "<absent>" -> 92.60000000000001`, under the BUG-0014 message. The `relocate_pivot` test stayed green, so the two halves are independent. |
+| `cell_behaviors.json` publish write disabled | `pull_carries_cell_behaviors_filtered_to_published_sheets` | failed on its own message ("cell-behavior bindings must be carried by .calp") |
+
+Both sabotages were reverted and both suites re-run green afterwards.
+
+**Left OPEN and named, not suppressed:** BUG-0021 (`update_bi_pivot_fields`) and BUG-0022
+(`change_pivot_data_source`). Both need a definition+cache snapshot rather than the definition-only
+`pivot_definition` restore, because both replace the cache. Ledgered with repros.
+
+**Found in passing, filed rather than fixed** (each is another owner's territory or a bigger job):
+
+* `delete_pivot_table` does not remove the pivot's entry from `PivotState.bi_metadata`, and
+  `collect_pivot_definitions` writes **every** metadata entry to the saved workbook without filtering
+  to pivots that still exist — so deleting BI pivots accumulates orphan metadata in the `.cala`. This
+  is the object-deps census's class (§3bt).
+* `create_pivot_inner` does not `save_overwritten_cells`, and `apply_pivot_create_restore` clears the
+  destination region outright. For the UI path the created pivot is empty so the exposure is small;
+  for the MCP path, which creates a CONFIGURED pivot in one step, undoing the creation deletes
+  whatever data the pivot was dropped on top of.
+* `update_cell_impl` writes `row_heights` / `column_widths` through the computed-property
+  re-evaluation with no dimension record on the undo stack. Believed self-healing (undo re-runs the
+  computed properties against the restored value) — worth confirming rather than assuming.
+
+**The environment was NOT quiet for any of this** — §3bq again. Two other agents held the machine for
+most of the pass: a `--project=functional` and a `--project=scenario` run at the start, then live
+edits to `state_digest.rs` and `calp_commands.rs` with a `tauri dev` watcher restarting the app under
+the measurements. Two probe runs were destroyed mid-measurement by a rebuild (visible as a document
+that reset to empty between two reads three seconds apart). Anything below a full re-run on a quiet
+machine should be re-verified rather than trusted.

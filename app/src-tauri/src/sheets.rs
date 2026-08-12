@@ -666,9 +666,13 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
         crate::document_effect::CleanReason::Navigation,
     );
     let (result, switched) = {
-    let sheet_names = state.sheet_names.read().unwrap();
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
+    // including `sheet_names`. The recalculation pass takes `sheet_names` only
+    // AFTER both grid locks and runs on a background thread, so holding it here
+    // and then waiting for a grid lock closes a cycle that hangs the app.
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
@@ -770,9 +774,13 @@ pub fn add_sheet(
     // per-sheet persisted vector.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let result = {
-    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
+    // including `sheet_names`. The recalculation pass takes `sheet_names` only
+    // AFTER both grid locks and runs on a background thread, so holding it here
+    // and then waiting for a grid lock closes a cycle that hangs the app.
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
@@ -920,9 +928,10 @@ pub fn delete_sheet(
     // rather than corrupting the file). The cost is parsing the repaired text
     // twice on a command that already walks every formula on every sheet.
     {
-        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        // CANONICAL LOCK ORDER: both grid locks first, then `sheet_names`.
         let current_grid = state.grid.read().map_err(|e| e.to_string())?;
         let grids = state.grids.read().map_err(|e| e.to_string())?;
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
         let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if index < sheet_names.len() && sheet_names.len() > 1 {
             let deleted_name = sheet_names[index].clone();
@@ -954,10 +963,13 @@ pub fn delete_sheet(
     // OTHER sheets can be bound to them.
     let mut removed_sources: Vec<crate::object_deps::DeletedSource> = Vec::new();
     let result = {
-    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
-    // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
+    // including `sheet_names`. The recalculation pass takes `sheet_names` only
+    // AFTER both grid locks and runs on a background thread, so holding it here
+    // and then waiting for a grid lock closes a cycle that hangs the app.
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
@@ -1715,9 +1727,13 @@ pub fn move_sheet(
     crate::protection::check_workbook_structure(&state, "move a sheet")?;
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
+    // including `sheet_names`. The recalculation pass takes `sheet_names` only
+    // AFTER both grid locks and runs on a background thread, so holding it here
+    // and then waiting for a grid lock closes a cycle that hangs the app.
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
@@ -1946,9 +1962,13 @@ pub fn copy_sheet(
 
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
+    // including `sheet_names`. The recalculation pass takes `sheet_names` only
+    // AFTER both grid locks and runs on a background thread, so holding it here
+    // and then waiting for a grid lock closes a cycle that hangs the app.
     let mut current_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();

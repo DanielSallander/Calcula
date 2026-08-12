@@ -672,9 +672,12 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
 
 /// Get unique values from a table column.
 fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
-    let tables = state.tables.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first (see the note in
+    // `state_digest_lock_order_tests`). The recalculation pass holds both grid
+    // locks and then takes `tables` on a background thread.
     let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.read().unwrap();
+    let tables = state.tables.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Find the table
@@ -729,9 +732,12 @@ fn get_table_available_values(
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
-    let tables = state.tables.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first (see the note in
+    // `state_digest_lock_order_tests`). The recalculation pass holds both grid
+    // locks and then takes `tables` on a background thread.
     let grids = state.grids.read().unwrap();
     let style_registry = state.style_registry.read().unwrap();
+    let tables = state.tables.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let table = tables

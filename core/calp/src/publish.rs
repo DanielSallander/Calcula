@@ -152,6 +152,8 @@ pub struct PublishResult {
     pub scenario_sheets_published: usize,
     /// Sheets that carried row/column outline groups (Wave B).
     pub outline_sheets_published: usize,
+    /// Cell-behavior bindings on the published sheets (granular bricks phase 2).
+    pub cell_behaviors_published: usize,
     /// Pane controls (Controls pane) carried by the package (workbook-scoped).
     pub pane_controls_published: usize,
     /// Slicers on the published sheets (Wave A).
@@ -380,6 +382,14 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
             .outlines
             .iter()
             .any(|o| published_sheet_ids.contains(&o.sheet_id))
+        // A cell-behavior binding. It fails this function's test the same way a
+        // spill extent does: an older app pulls "successfully" and the typed
+        // cells arrive inert, with nothing anywhere saying the behaviour was
+        // dropped. Refusing the pull is the honest failure.
+        || wb
+            .cell_behaviors
+            .iter()
+            .any(|b| published_sheet_ids.contains(&b.sheet_id))
         || wb.theme != engine::theme::ThemeDefinition::default()
         // A DYNAMIC-ARRAY SPILL EXTENT on a published sheet. It fails this
         // function's test in its sharpest form: an older app pulls the package
@@ -887,6 +897,30 @@ pub fn publish(
         )?;
     }
 
+    // Write CELL BEHAVIOR bindings on the published sheets — per-sheet opaque
+    // payloads, the same shape as CF/DV/outlines.
+    //
+    // These were the one piece of granular-brick content that never travelled.
+    // A cell TYPE ships (as a `cellType` custom object) and its BEHAVIOR — the
+    // binding that says which script runs for a range — did not, so a published
+    // report arrived with typed cells that looked right and did nothing. The
+    // scripts themselves already ship consent-gated as object scripts; a binding
+    // is inert metadata naming one of them, so it carries no reach a subscriber
+    // has not already been asked about.
+    let published_cell_behaviors: Vec<_> = request
+        .workbook
+        .cell_behaviors
+        .iter()
+        .filter(|b| published_sheet_ids.contains(&b.sheet_id))
+        .collect();
+    if !published_cell_behaviors.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "cell_behaviors.json",
+            serde_json::to_string_pretty(&published_cell_behaviors)?.as_bytes(),
+        )?;
+    }
+
     // Write pane controls (Controls pane) — WORKBOOK-scoped like pivot
     // definitions, not filtered per sheet: the pane strip belongs to the
     // workbook, so a report package carries all of it. Sorted by (order, id)
@@ -1184,6 +1218,7 @@ pub fn publish(
         comment_sheets_published: published_comments.len(),
         scenario_sheets_published: published_scenarios.len(),
         outline_sheets_published: published_outlines.len(),
+        cell_behaviors_published: published_cell_behaviors.len(),
         pane_controls_published: published_pane_controls.len(),
         slicers_published: published_slicers.len(),
         ribbon_filters_published: published_ribbon_filters.len(),

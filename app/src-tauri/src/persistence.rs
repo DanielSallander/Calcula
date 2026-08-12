@@ -1864,6 +1864,14 @@ fn restore_pivot_definitions(
     let load = crate::document_effect::DocumentEffect::deliberately_clean(
         crate::document_effect::CleanReason::LoadingFromDisk,
     );
+    // CANONICAL LOCK ORDER: `grids` FIRST, then everything else. The
+    // recalculation pass holds both grid locks and then takes `pivot_tables`,
+    // on a background thread, so taking them the other way round here closes a
+    // cycle that hangs the app.
+    let grids = match state.grids.read() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
     let mut pivot_tables = match pivot_state.pivot_tables.write(&load) {
         Ok(pt) => pt,
         Err(_) => return,
@@ -1871,11 +1879,6 @@ fn restore_pivot_definitions(
 
     // Clear any existing pivot state
     pivot_tables.clear();
-
-    let grids = match state.grids.read() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
 
     for saved in &workbook.pivot_definitions {
         // Deserialize the PivotDefinition from opaque JSON
@@ -2668,6 +2671,25 @@ pub fn open_file(
                 );
             }
         }
+        // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else.
+        // These two used to be taken BELOW `sheet_names` / `sheet_ids` /
+        // `column_widths` / `row_heights`, and that inversion is one half of
+        // the deadlock that wedged the app: this function -- on the main thread,
+        // inside a synchronous command, so the WebView2 message pump stops with
+        // it -- held `sheet_names` and waited for `grids`, while
+        // `queue_gather_refresh`'s worker held both grid locks and waited for
+        // `sheet_names`. Measured from the stacks of the wedged process.
+        //
+        // Set the active grid (clone from the all_grids vec).
+        let mut grid = state.grid.write(&load_effect).map_err(|e| e.to_string())?;
+        *grid = all_grids[active_idx].clone();
+
+        // Store per-sheet grids.
+        // Note: set_active_sheet swaps between grids[i] and state.grid,
+        // so the active sheet slot in grids holds a copy too.
+        let mut grids = state.grids.write(&load_effect).map_err(|e| e.to_string())?;
+        *grids = all_grids;
+
         let mut names = state.sheet_names.write(&load_effect).map_err(|e| e.to_string())?;
         *names = workbook.sheets.iter().map(|s| s.name.clone()).collect();
 
@@ -2678,21 +2700,11 @@ pub fn open_file(
         // Set active sheet index
         *state.active_sheet.write(&load_effect).map_err(|e| e.to_string())? = active_idx;
 
-        // Set the active grid (clone from the all_grids vec)
-        let mut grid = state.grid.write(&load_effect).map_err(|e| e.to_string())?;
-        *grid = all_grids[active_idx].clone();
-
         // Set active sheet dimensions
         let mut col_widths = state.column_widths.write(&load_effect).map_err(|e| e.to_string())?;
         let mut row_heights = state.row_heights.write(&load_effect).map_err(|e| e.to_string())?;
         *col_widths = all_cw_vec[active_idx].clone();
         *row_heights = all_rh_vec[active_idx].clone();
-
-        // Store per-sheet grids and dimensions
-        // Note: set_active_sheet swaps between grids[i] and state.grid,
-        // so the active sheet slot in grids holds a copy too.
-        let mut grids = state.grids.write(&load_effect).map_err(|e| e.to_string())?;
-        *grids = all_grids;
 
         let mut all_cw = state.all_column_widths.write(&load_effect).map_err(|e| e.to_string())?;
         *all_cw = all_cw_vec;

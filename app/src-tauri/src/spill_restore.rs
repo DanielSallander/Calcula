@@ -276,11 +276,47 @@ pub(crate) fn recover_spill_map_by_evaluation(
     // not personally start this pass.
     let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Background);
 
-    // Canonical lock order: everything that is not a grid first, grids next,
-    // the spill maps last (`reevaluate_formula_cell` takes them AFTER its
-    // caller's grid locks). Nothing here can invert it because nothing here
-    // takes a lock it has not already taken by this point.
+    // CANONICAL LOCK ORDER: `grids` FIRST, then everything else, spill maps
+    // last. THE ORDER BELOW WAS THE OTHER WAY ROUND AND IT DEADLOCKED THE APP.
+    //
+    // The comment that used to sit here declared the opposite rule -- "every-
+    // thing that is not a grid first, grids next" -- and asserted that nothing
+    // here could invert it. Neither half was true. The crate's canonical order
+    // is set by `run_calculation_pass` and `recalculate_sheet_values`, which
+    // BOTH take `grid`, then `grids`, and only then `sheet_names` / `user_files`
+    // / `tables` / `table_names` / `named_ranges`; and both of them run on
+    // background threads, so a main-thread path that takes those the other way
+    // round closes a cycle.
+    //
+    // MEASURED, from the stacks of a wedged process (2026-08-11, scenario
+    // project, dumped from OUTSIDE because the logger is inside the wedge):
+    //
+    //   main thread 44452:  open_file -> restore_spill_map_on_load ->
+    //     recover_spill_map_by_evaluation  HOLDS sheet_names, tables,
+    //     table_names, named_ranges, user_files  WAITS for grids
+    //   worker 88412 (queue_gather_refresh's own std::thread):
+    //     recalculate_sheet_values  HOLDS grid + grids  WAITS for sheet_names
+    //
+    // Both stacks identical in two dumps five seconds apart. The app answers
+    // nothing from that moment: the main thread is inside a synchronous
+    // command, so the WebView2 message pump stops with it -- no panic, no
+    // crash, and the log's last line is whatever was written before it, which
+    // is why three passes attributed this to the digest.
+    //
+    // `no_lock_is_held_while_a_grid_lock_is_acquired` in
+    // `state_digest_lock_order_tests` now enforces the order crate-wide, and
+    // `the_load_paths_spill_recovery_does_not_hold_sheet_names_while_it_waits_for_grids`
+    // in the same file runs THIS function against a held `grids` and fails --
+    // rather than hanging -- if the order below is ever put back.
+    let grids = match state.grids.read() {
+        Ok(g) => g,
+        Err(_) => return report,
+    };
     let sheet_names = match state.sheet_names.read() {
+        Ok(g) => g,
+        Err(_) => return report,
+    };
+    let user_files = match user_files_state.files.lock() {
         Ok(g) => g,
         Err(_) => return report,
     };
@@ -293,14 +329,6 @@ pub(crate) fn recover_spill_map_by_evaluation(
         Err(_) => return report,
     };
     let named_ranges = match state.named_ranges.read() {
-        Ok(g) => g,
-        Err(_) => return report,
-    };
-    let user_files = match user_files_state.files.lock() {
-        Ok(g) => g,
-        Err(_) => return report,
-    };
-    let grids = match state.grids.read() {
         Ok(g) => g,
         Err(_) => return report,
     };
@@ -423,12 +451,16 @@ pub(crate) fn recover_spill_map_by_evaluation(
         }
     }
 
-    drop(grids);
-    drop(user_files);
+    // Released in the reverse of the acquisition order above. All six are gone
+    // before `commit_recovered_spills` takes the spill maps, which is what lets
+    // the spill maps be last in the canonical order without this function
+    // having to hold anything across them.
     drop(named_ranges);
     drop(table_names);
     drop(tables);
+    drop(user_files);
     drop(sheet_names);
+    drop(grids);
 
     commit_recovered_spills(state, proven, &mut report);
     report

@@ -1,7 +1,121 @@
 {
   "version": 1,
-  "nextId": 21,
+  "nextId": 24,
   "bugs": [
+    {
+      "id": "BUG-0023",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "golden-corpus capture-path census"
+      },
+      "violation": {
+        "oracleId": "visual-golden",
+        "message": "The committed screenshot corpus is split across two capture paths. Decoding all 71 goldens: 44 hold the dpr-2 grid hairline (241,241,241) and 27 -- the whole e2e/visual tree, all re-recorded 2026-08-11 14:11-14:13 -- hold the dpr-1 hairline (226,226,226). The display is 200% (GDI DESKTOPHORZRES 2944 / HORZRES 1472 = 2), so dpr 2 is correct and the visual corpus encodes an environment this machine does not produce. e2e/captureEnvironment.ts declares devicePixelRatio 2 as the configuration EVERY committed golden was captured under; for 27 of 71 files that is false.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run npm run e2e:visual on this machine. Every grid golden under e2e/visual differs from its capture by ~39,400 pixels against a 200-pixel budget, entirely in the gridline hairline. No product code is involved.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.95,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The visual corpus was re-recorded through a launch whose device pixel ratio was 1. The re-record absorbed no structural change: fitting the dpr-2 grid-empty-grid-default against the dpr-1 grid-core-empty-canvas leaves 0.83% residual, and it is a symmetric one-pixel gridline phase shift (1980 px of 241->255 against 1980 px of 255->226) plus text rasterization, spread over the whole frame with no localized bounding box.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/visual/__screenshots__/core-visual.spec.ts/*.png",
+          "app/e2e/visual/__screenshots__/workflow-visual.spec.ts/*.png",
+          "app/e2e/goldenCorpus.ts"
+        ],
+        "diffSummary": "The 27 e2e/visual goldens were re-recorded at dpr 2 on 2026-08-11 against a cold app of the fixed build (--project=visual --update-snapshots, 18/18). Decoding all 72 committed goldens afterwards reads dpr 2 on every one of them, so MIS_RECORDED_CORPORA is now empty and the BUG-0023 quarantine is deleted. The quarantine was designed to self-expire and it did: its two cases assert that every quarantined file still MEASURES recordedAt (1), so they would have failed the moment the files were corrected.",
+        "validatedBy": [
+          "--project=visual: 18/18, twice, on independent consecutive runs (2.3m each)",
+          "app/e2e/__tests__/goldenCorpus.test.ts: the corpus-split case is quiet on the dpr axis"
+        ]
+      },
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0022",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "oracle-suppression re-examination"
+      },
+      "violation": {
+        "oracleId": "undo-round-trip",
+        "message": "`change_pivot_data_source` records no undo entry at all: repointing a pivot at a different source range is not undoable. Same discovery as BUG-0021.",
+        "digestDiffPaths": [
+          "pivots."
+        ]
+      },
+      "repro": {
+        "description": "Create a pivot, use Change Data Source to point it at a different range, press Ctrl+Z — the pivot keeps the new source.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "app-bug",
+        "confidence": 0.95,
+        "behaviorIds": [
+          "undo.pivot-filter"
+        ],
+        "rootCauseHypothesis": "The command rebuilds the PivotCache from the new range, so like BUG-0021 it needs a definition+cache snapshot rather than the definition-only pivot_definition restore.",
+        "suggestedFixArea": "rust"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "",
+        "validatedBy": []
+      },
+      "status": "open"
+    },
+    {
+      "id": "BUG-0021",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "oracle-suppression re-examination"
+      },
+      "violation": {
+        "oracleId": "undo-round-trip",
+        "message": "`update_bi_pivot_fields` records no undo entry at all: changing a BI pivot's fields is not undoable, and Ctrl+Z afterwards silently undoes whatever action came before it instead. Found by narrowing the blanket `pivots.` suppression that had hidden the whole pivot subtree from the undo round-trip oracle since 2026-06-11.",
+        "digestDiffPaths": [
+          "pivots."
+        ]
+      },
+      "repro": {
+        "description": "Create a pivot from a BI model, change its fields via update_bi_pivot_fields, press Ctrl+Z — the pivot keeps the new fields and an unrelated earlier edit is reverted instead.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "app-bug",
+        "confidence": 0.95,
+        "behaviorIds": [
+          "undo.pivot-filter"
+        ],
+        "rootCauseHypothesis": "The command mutates PivotState.pivot_tables (six write sites) and never calls record_pivot_definition_undo. A definition-only snapshot is not sufficient: the command re-queries the model and replaces the cache, so restoring the old definition against the NEW cache would render the wrong thing. It needs a definition+cache snapshot, i.e. the shape pivot_create/pivot_delete already use.",
+        "suggestedFixArea": "rust"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "",
+        "validatedBy": []
+      },
+      "status": "open"
+    },
     {
       "id": "BUG-0020",
       "discovered": "2026-06-11",
@@ -32,12 +146,17 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/conditional_formatting.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "fixed 2026-08-11 — the CF commands (add/update/delete/reorder/clear) recorded no undo entry at all. They now snapshot the sheet's whole rule list as `obj_conditional_formats` and announce the `conditionalFormats` refresh domain. The ledger status lagged the fix; corrected while re-examining the oracle suppressions, which had already removed the BUG-0020 entry.",
+        "validatedBy": [
+          "undo_s12_soak_leak_tests (app crate)"
+        ]
       },
-      "status": "triaged"
+      "status": "fixed"
     },
     {
       "id": "BUG-0019",
@@ -251,12 +370,20 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/pivot/operations.rs",
+          "app/src-tauri/src/pivot/commands.rs",
+          "app/src-tauri/src/undo_commands.rs",
+          "app/e2e/oracles/knownIssues.ts"
+        ],
+        "diffSummary": "fixed (cause) — the ledgered path no longer leaves a ghost: `apply_pivot_create_restore` removes the entry from `PivotState.pivot_tables`. Re-examining the suppression found the blanket `pivots.` prefix had gone on to hide its SUCCESSORS: four pivot commands mutate `pivot_tables` and record no undo entry at all. `create_pivot_from_bi_model` (the same symptom on the BI path — a pivot Ctrl+Z could not remove) and `relocate_pivot` are fixed here. `update_bi_pivot_fields` and `change_pivot_data_source` remain OPEN as BUG-0021 and BUG-0022: both rebuild the cache, so they need a definition+cache snapshot rather than the definition-only one. `refresh_pivot_cache` records nothing and is correct — Excel does not undo a PivotTable refresh.",
+        "validatedBy": [
+          "app-lib unit tests",
+          "undo round-trip oracle with the suppression removed"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0014",
@@ -288,12 +415,20 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/pivot/operations.rs",
+          "app/src-tauri/src/pivot/commands.rs",
+          "app/src-tauri/src/undo_commands.rs",
+          "app/e2e/oracles/knownIssues.ts"
+        ],
+        "diffSummary": "fixed — `auto_fit_pivot_columns` wrote into `column_widths` / `all_column_widths` and recorded nothing on the undo stack. It now returns the widths it overwrote and `record_pivot_definition_undo` records them in the SAME transaction as the pivot change, as a new `pivot_col_widths` restore kind that is sheet-INDEXED (a pivot can render on a sheet the user is not looking at, where the fit writes `all_column_widths[dest]`). `None` means the column had no explicit width, so the restore removes the entry rather than writing a default.",
+        "validatedBy": [
+          "app-lib unit tests",
+          "undo round-trip oracle with the suppression removed"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0013",
@@ -842,6 +977,187 @@
         ]
       },
       "status": "fixed"
+    },
+    {
+      "id": "BUG-0024",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "cold functional run + golden colour-profile census"
+      },
+      "violation": {
+        "oracleId": "visual-golden",
+        "message": "The committed screenshot corpus is ALSO split on a second axis that the device-pixel-ratio census structurally cannot see: the COLOUR PROFILE. Measured on a cold --project=functional run of the fixed build: 512 passed / 31 failed / 11 skipped, and all 31 failures are goldens with NONE of them dpr (every failing pair holds the same hairline on both sides). The app declares #217346 (33,115,70) and #10b981 (16,185,129); a capture under --force-color-profile=sRGB reproduces those bit-exactly and the committed goldens hold 63,112,75 / 95,180,134, the wide-gamut transform of them. The pin reached the manual launch path for the first time when e2e/webview2Args.mjs became the single definition of the WebView2 arguments (register 3by section 5), and the manual path is how every golden in this tree was recorded -- so the whole corpus predates the pin. The profile transform is the IDENTITY on neutrals and both hairline constants are neutral, which is exactly why the dpr census reported a clean corpus over this.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run --project=functional on this machine before the re-record. statusbar-text-range alone moves 30,683 px (99.88% of the capture) against a 15-pixel budget, and 29,569 of them are the single mapping 63,112,75 -> 33,115,70. No product code is involved.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.99,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The goldens were recorded before --force-color-profile=sRGB was actually delivered on the manual launch path. The direction is proved from source rather than assumed: 33,115,70 and 16,185,129 are the literal colours the application declares (uiTypes.ts, ribbonIcons.tsx, darkTheme.ts), so the PINNED capture is the faithful one and the committed golden is the stale one. Structurally safe to re-record: reducing each failing pair to a colour relation gives a functional share of 0.9666..1.0000 with fan-out 1 on every dominant mapping and no compact bounding box, which is a recolouring and not a displacement.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/tests/__screenshots__/**/*.png (38 goldens)",
+          "app/e2e/scenarios/__screenshots__/**/*.png (3 goldens)",
+          "app/e2e/goldenCorpus.ts (readColourProfile + describeProfileSplit)",
+          "app/e2e/captureEnvironment.ts (CAPTURE_ENVIRONMENT.colourProfile)",
+          "app/e2e/__tests__/goldenCorpus.test.ts"
+        ],
+        "diffSummary": "Re-recorded with --update-snapshots=changed (never 'all', which would rewrite goldens that currently pass and discard the evidence they represent), and added the missing SECOND census axis so the same class cannot recur silently. readColourProfile abstains on neutrals rather than counting them as agreement; describeProfileSplit fires in BOTH directions, so a LOST pin is reported as a launcher fault instead of being re-recorded into every golden.",
+        "validatedBy": [
+          "the new census fired on the REAL corpus before the fix, naming 15 goldens, while the other 23 cases in the file stayed green",
+          "--project=functional --update-snapshots=changed: 543 passed / 0 failed / 11 skipped",
+          "--project=scenario: 24/24 (the project that the deadlock had wedged)",
+          "app/e2e/__tests__: 34/34 with both axes quiet"
+        ]
+      },
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0025",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "e2e",
+        "seed": null,
+        "runId": "functional verification run after the golden re-record"
+      },
+      "violation": {
+        "oracleId": "vba-idioms-wave3",
+        "message": "vba-idioms-wave3 #5 retypes the token SEEDREF to A1 in the macro editor and then reads the stored module source. Expected substring 'const jump = \"A1\"'; the store held 'const jump = \"A\"' -- the final keystroke is missing. Passed in both earlier full ordered runs the same evening; 1 failure in 3.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run --project=functional in its natural order. Running the spec ALONE is NOT a reproduction: it depends on sheets earlier specs create and fails at line 1080 with Expected 1 / Received 0, a different assertion entirely.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "undetermined",
+        "confidence": 0.5,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "TWO candidates, in different layers, not separated by the available evidence. (a) A DROPPED KEYSTROKE: retypeToken does dblclick + keyboard.type(delay 40) into Monaco, which tokenizes and can raise a suggest widget asynchronously; a key landing in that window can be swallowed. Harness defect. (b) THE LIVE INDICATOR LIES: the helper types, polls the module live indicator, then reads the store. If the idle write-through fired on the 'A' and flipped the indicator to live before the '1' had re-dirtied the module, the poll is satisfied by the PREVIOUS write-through and the store read is stale while the editor buffer is correct -- a state that is not a function of its input, the same class as the FormulaInput selection race (register 3bw). THE MEASUREMENT THAT SEPARATES THEM IS ONE LINE: read the Monaco buffer at the moment the assertion fails. Buffer holds A1 -> (b); buffer holds A -> (a).",
+        "suggestedFixArea": "test-or-product"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "NOT FIXED. The assertion's own message ('the module store holds the typed edit') points at the store, which the evidence exonerates -- it faithfully persisted whatever the buffer contained. Whichever explanation is right, retypeToken exists as SIX independent copies (macro-live-edit, vba-idioms-wave1..4, vba-wiring-batch), so the fix must either be made six times or the helper lifted into e2e/helpers first. Deliberately not attempted in the same pass that re-recorded 58 goldens: it is the input path of ~40 currently-green tests and each verification costs a 38-minute run.",
+        "validatedBy": []
+      },
+      "status": "open"
+    },
+    {
+      "id": "BUG-0026",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "soak",
+        "seed": 20260812731,
+        "runId": "soak random walk, fresh seed"
+      },
+      "violation": {
+        "oracleId": "contextual-ribbon-tabs",
+        "message": "Contextual tab \"Slicer\" is visible but at least one slicer must exist. Found: slicers=0, charts=0, tables=0, pivots=0, timelines=0, sparklines=0",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "MINIMIZED TO 3 ACTIONS by the in-spec ddmin, shrink verdict 'confirmed' over 20 replays: table.create -> slicer.create -> table.delete. The slicer IS deleted (slicers=0, so the 3bt backend cascade works); the RIBBON keeps offering a Slicer Options tab for it. CONFIRMED INDEPENDENTLY by a second harness: invariant seed 20260812914 reduced to the SAME three actions with verdict confirmed over 30 replays (bundle app/e2e/results/invariant/failures/2026-08-11T21-59-23-762Z-invariant-contextual-ribbon-tabs).",
+        "trace": "app/e2e/results/soak/failures/2026-08-11T21-37-06-340Z-soak-contextual-ribbon-tabs/minimized.trace.json",
+        "actionCount": 3
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 0.95,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "THE FRONTEND NEVER HEARS ABOUT A CASCADED DELETE. SlicerEvents.SLICER_DELETED is dispatched from exactly one place in the tree -- deleteSlicerAsync in extensions/Slicer/lib/slicerStore.ts -- which is the FRONTEND delete path (context menu, Options pane). Slicer/index.ts listens for that event and calls deselectSlicer(), with a comment saying 'without this, deleting a selected slicer leaves the Options tab visible with no slicer to configure' -- i.e. the defect was already known and fixed for the DIRECT path. Deleting the owning TABLE removes the slicer through the register-3bt object-dependency cascade, which runs in the backend and never passes through deleteSlicerAsync, so no event is raised, the selection is never cleared, and the contextual tab survives its subject. This is the frontend half of the 3bt cascade and the object-deps census cannot see it: that census checks that a Rust delete command DECLARES what happens to its dependents, not that the UI is told when a dependent dies.",
+        "suggestedFixArea": "extensions/Slicer + the cascade announcement"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "NOT FIXED and DELIBERATELY NOT SUPPRESSED -- the oracle should keep failing loudly on this seed. Filed with a 3-action confirmed reproduction so it can be fixed and re-verified directly.",
+        "validatedBy": []
+      },
+      "status": "open"
+    },
+    {
+      "id": "BUG-0027",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "e2e",
+        "seed": 1786456498740,
+        "runId": "invariant walk, known seed"
+      },
+      "violation": {
+        "oracleId": "harness",
+        "message": "An invariant walk stopped at [step 47/75] ribbon.switch-tab and printed nothing for TWELVE MINUTES while the app stayed alive, Responding=True, CPU flat, CDP answering. Not the lock-order wedge (that stops the WebView2 message pump; this did not).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "E2E_MANUAL=1 INVARIANT_SEED=1786456498740 npx playwright test --project=invariant --grep \"random action sequence\" with actionTimeout unset.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.99,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "TWO DEFAULTS MEETING. (1) Playwright's default actionTimeout is 0 -- NO timeout -- so locator.click() waits for actionability forever; playwright.config.ts set expect.timeout and never set actionTimeout, and walker/actionCatalog.ts has 5 bare .click() calls, ribbon.switch-tab among them (it probes isVisible({timeout:500}) and then clicks unbounded, so a visible-but-not-actionable button parks it). (2) state-consistency.spec.ts raises its own ceiling with test.setTimeout(1_500_000), so the project's 300s does not apply and the hang had 25 minutes to run in. A hang is invisible to an exit-status check.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/playwright.config.ts"
+        ],
+        "diffSummary": "use.actionTimeout = 30_000 and use.navigationTimeout = 60_000, with the measurement recorded beside them. 30s is far above the slowest legitimate action in these suites, so it cannot turn a slow action into a false failure; it turns an infinite one into a reported failure that names the locator.",
+        "validatedBy": [
+          "BEFORE: silent hang at step 47, 12+ minutes and still going against a 25-minute ceiling",
+          "AFTER, same seed: '[action failed] ribbon.switch-tab: locator.click: Timeout 30000ms exceeded.' -- named, bounded, walk continues, 1 passed (1.5m)"
+        ]
+      },
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0028",
+      "discovered": "2026-08-11",
+      "source": {
+        "kind": "e2e",
+        "seed": null,
+        "runId": "visual project, cold vs warm app"
+      },
+      "violation": {
+        "oracleId": "visual-golden",
+        "message": "4 of the 27 e2e/visual goldens are a function of app WARMTH rather than of the page. --project=visual is 18/18 twice on a warm app (one that has already run functional/scenario/journey) and 14/18 then 15/18 on a cold-launched one. menu-file-open, menu-edit-open and menu-data-open fail on cold in BOTH cold runs and pass on warm in ALL THREE warm runs -- deterministic per condition, opposite between conditions. core-empty-grid failed the FIRST capture after a cold start and passed the second, so it is not even stable within one condition.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run --project=visual against an app that has already run other suites: 18/18. Kill the app, cold-launch it, run --project=visual as the first suite on the instance: 4 fail, then 3 fail on an immediate re-run.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.8,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "NOT a recolouring and therefore not a capture-path artifact: fan-out reaches 22 and saturated colours map to greys (37,98,156 -> 110,110,110; 96,37,38 -> 65,65,66; 193,153,97 -> 153,153,154), i.e. coloured menu iconography present in the golden and grey in the cold capture -- consistent with an icon font or accent asset that only resolves once the app has been exercised, though that specific mechanism is a hypothesis and was not confirmed. core-empty-grid is separate: its dominant transitions are 221,245,237 -> 255,255,255 (510 px) and 128,217,188 -> 255,255,255 (80 px), a pale green highlight present in the golden and absent from the first cold capture -- a highlight that has not settled, the same class as the FormulaInput selection race (register 3bw).",
+        "suggestedFixArea": "test-capture-determinism"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "NOT FIXED. Re-recording them cold would only invert which condition fails; the fix is to make the capture deterministic (settle the highlight before capturing; force the icon assets to be resolved), which is a harness/product change rather than a re-record. The other 23 visual goldens and all 38 tests/ + 3 scenarios/ goldens re-recorded in this pass are unaffected -- the dpr and colour-profile findings were derived from the committed bytes and are independent of warm/cold.",
+        "validatedBy": []
+      },
+      "status": "open"
     }
   ]
 }

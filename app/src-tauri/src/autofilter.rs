@@ -1012,8 +1012,9 @@ pub(crate) fn apply_auto_filter_inner(
     }
     // Gate passed, so this call will commit an AutoFilter.
     let effect = DocumentEffect::mutates(file_state);
-    let mut auto_filters = state.auto_filters.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: `grids` first (see `state_digest_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let mut auto_filters = state.auto_filters.write(&effect).unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1482,8 +1483,9 @@ pub fn get_filter_unique_values(
     column_index: u32,
 ) -> UniqueValuesResult {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let auto_filters = state.auto_filters.read().unwrap();
+    // CANONICAL LOCK ORDER: `grids` first (see `state_digest_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.read().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let _theme = state.theme.read().unwrap();

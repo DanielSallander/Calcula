@@ -9,6 +9,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as http from "http";
 import { fileURLToPath } from "url";
+import { webview2BrowserArguments } from "./webview2Args.mjs";
+import { APP_DIED_MARKER } from "./appDiedMarker";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
@@ -52,6 +54,13 @@ function waitForCDP(port: number, timeoutMs: number): Promise<void> {
 }
 
 export default async function globalSetup() {
+  // Clear the "the application went away" marker from any earlier run, so the
+  // banner the teardown prints can only ever be about THIS one. Written by
+  // e2e/fixtures.ts the moment a CDP connect proves the app is gone.
+  try {
+    if (fs.existsSync(APP_DIED_MARKER)) fs.unlinkSync(APP_DIED_MARKER);
+  } catch { /* a stale marker we cannot remove must not stop the run */ }
+
   // Manual mode — caller manages the app lifecycle.
   if (process.env.E2E_MANUAL === "1") {
     console.log("[e2e] Manual mode — expecting Calcula already running with CDP on port", CDP_PORT);
@@ -126,19 +135,12 @@ export default async function globalSetup() {
     env: {
       ...cleanEnv,
       ...rustEnv,
-      // Tell WebView2 to open a CDP port -- and to rasterize into a FIXED
-      // colour profile.
-      //
-      // `--force-color-profile=sRGB` is load-bearing for every screenshot
-      // golden in the tree. Without it a capture goes through the display's
-      // colour profile, so a golden encodes the MONITOR as well as the page.
-      // Measured 2026-08-11: the status bar is a hard-coded `#217346` in
-      // `StatusBar.tsx`; every committed golden holds `rgb(63,112,75)`; a
-      // capture taken the same day holds `rgb(33,115,70)`, which is `#217346`
-      // exactly. When that transform changed, 34 functional and all 18 visual
-      // tests failed at once with a uniform per-channel delta, hours after the
-      // same suites had been green on the same machine.
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT} --force-color-profile=sRGB`,
+      // The CDP port plus the flags that make a screenshot a function of the
+      // PAGE rather than of the machine it was taken on. Defined ONCE, in
+      // e2e/webview2Args.mjs, which also records how each flag was measured —
+      // this file and the manual launcher had drifted apart, and the drift cost
+      // the whole golden corpus its meaning twice over.
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: webview2BrowserArguments(CDP_PORT),
     },
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],

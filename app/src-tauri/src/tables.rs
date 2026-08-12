@@ -767,7 +767,13 @@ pub fn create_table(
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: the grid mirror first (see `delete_table`). It is
+    // read further down to pick up the header text; taken there, it was taken
+    // while `tables` and `table_names` were still held, which is the inverted
+    // order. Hoisted rather than deferred because the read has to happen inside
+    // the same critical section that decides the table's shape.
+    let grid = state.grid.read().unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
 
     // Validate or generate name
@@ -803,8 +809,8 @@ pub fn create_table(
         }
     }
 
-    // Read header text from grid cells (or generate generic names)
-    let grid = state.grid.read().unwrap();
+    // Read header text from grid cells (or generate generic names). `grid` was
+    // acquired at the top of the function -- see the lock-order note there.
     let col_count = (max_col - min_col + 1) as usize;
     let mut header_names: Vec<String> = Vec::with_capacity(col_count);
 
@@ -952,11 +958,16 @@ pub fn delete_table(
     // Past the protection gate. Deleting a table drops it from `workbook.tables`,
     // rewrites every dependent structured reference, and prunes its object scripts --
     // three persisted stores, and none of them dirtied before.
+    // CANONICAL LOCK ORDER: `grid`, `grids`, then everything else. The
+    // recalculation pass holds both grid locks and then takes `tables` /
+    // `table_names`, and it runs on a background thread, so taking them the
+    // other way round here closes a cycle that hangs the app. See
+    // `no_lock_is_held_while_a_grid_lock_is_acquired`.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut tables = state.tables.write(&effect).unwrap();
-    let mut table_names = state.table_names.write(&effect).unwrap();
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
 
     // Clone before removal: the ref rewrite below needs the table still present
     // in the registry to resolve `Table1[Col]` into a concrete range.
@@ -1139,10 +1150,11 @@ pub fn rename_table(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
-    let mut table_names = state.table_names.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
 
     // Check if new name already exists
     let upper_new = new_name.to_uppercase();
@@ -1902,9 +1914,10 @@ pub fn set_totals_row_function(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -2014,9 +2027,10 @@ pub fn toggle_totals_row(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -2509,10 +2523,11 @@ pub fn convert_to_range(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
-    let mut table_names = state.table_names.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
+    let mut table_names = state.table_names.write(&effect).unwrap();
 
     // Find the table
     let table = match tables
@@ -2668,9 +2683,10 @@ pub fn check_table_auto_expand(
     // dirtiness the edit did not already imply -- but the paths below DO rewrite the
     // persisted table, so the write must still be authorised rather than skipped.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut tables = state.tables.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = tables.get_mut(&active_sheet)?;
 
@@ -3134,7 +3150,14 @@ pub fn set_calculated_column(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`). They are
+    // used only inside the `if !formula.is_empty()` block below, where they used
+    // to be taken while `tables` was still held -- the inverted order. Hoisting
+    // them here costs an unconditional acquisition of two locks this command was
+    // going to take in every case that does any work.
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut tables = state.tables.write(&effect).unwrap();
 
     let table = match tables.get_mut(&active_sheet).and_then(|t| t.get_mut(&table_id)) {
         Some(t) => t,
@@ -3173,8 +3196,8 @@ pub fn set_calculated_column(
             }
         };
 
-        let mut grid = state.grid.write(&effect).unwrap();
-        let mut grids = state.grids.write(&effect).unwrap();
+        // `grid` and `grids` were acquired at the top of the function -- see the
+        // lock-order note there.
         let sheet_names = state.sheet_names.read().unwrap();
         let table_names = state.table_names.read().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
@@ -3281,9 +3304,18 @@ pub fn set_calculated_column(
         }
     }
 
-    // PHASE B — after every guard above is released. The grid/user-files guards
-    // are scoped to the block above; `tables` is not, so it is dropped here.
+    // PHASE B — after every guard above is released. The user-files guard is
+    // scoped to the block above; `tables` and BOTH GRID GUARDS are not, so they
+    // are dropped here. The grid guards are function-scoped because the
+    // canonical lock order needs them taken before `tables` (see the note at the
+    // top); dropping them here is not tidiness but a REQUIREMENT --
+    // `recalc_after_active_sheet_bulk_rewrite` takes both itself, and
+    // `Persisted<T>` is a `std::sync::Mutex`, which is not re-entrant. Holding
+    // them across this call self-deadlocks the calling thread, and if that
+    // thread is the main one the whole window stops answering.
     drop(tables);
+    drop(grids);
+    drop(grid);
     let mut recalculated = Vec::new();
     crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
         &state,

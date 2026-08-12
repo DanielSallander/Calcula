@@ -24,15 +24,56 @@
 
 param(
     [int]$Port = 9222,
-    [int]$VitePort = 5173
+    [int]$VitePort = 5173,
+    # Take the machine even though something is already answering on $Port.
+    # WITHOUT this the launcher REFUSES rather than stealing another run's app.
+    [switch]$TakeOver
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $appDir = Join-Path $repoRoot "app"
+$lockPath = Join-Path $appDir "e2e\results\.e2e-launch-lock.json"
 
 Write-Host ""
 Write-Host "  Calcula E2E batch launcher - CDP $Port" -ForegroundColor Cyan
+
+# --- 0a. DO NOT STEAL A RUNNING APP ------------------------------------------
+# This script used to open with `Get-Process -Name app | Stop-Process -Force`:
+# a kill BY NAME, of every Calcula on the machine, unconditionally. When two
+# agents work on this repo at once -- which is how this program is actually run
+# -- whoever launches second silently destroys the other's app mid-suite.
+# MEASURED 2026-08-11: a full ordered `--project=functional` pass was killed at
+# test 166 of ~550 (40 minutes in) by a second launcher; the remaining ~380
+# tests then "failed" in 1 ms each because CDP was gone. `Stop-Process -Force`
+# is `TerminateProcess(handle, -1)`, so the victim's log shows exit 0xffffffff
+# and no panic -- which this register had already spent a pass diagnosing once
+# (S3af). Hundreds of failures that look like product regressions and are not.
+#
+# The fix is to make the collision LOUD instead of silent. A launcher that finds
+# CDP answering says whose it is and stops.
+$existing = $null
+try {
+    $existing = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/version" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+} catch { $existing = $null }
+if ($existing -and -not $TakeOver) {
+    $holders = @(Get-Process -Name app -ErrorAction SilentlyContinue |
+        ForEach-Object { "pid $($_.Id) started $($_.StartTime.ToString('HH:mm:ss'))" })
+    Write-Host ""
+    Write-Host "  REFUSING TO LAUNCH: something is already answering CDP on port $Port." -ForegroundColor Yellow
+    if ($holders.Count -gt 0) { Write-Host "  app.exe: $($holders -join '; ')" -ForegroundColor Yellow }
+    Write-Host "  Another agent or an earlier run owns this machine. Killing it would turn" -ForegroundColor Yellow
+    Write-Host "  its suite into hundreds of 1ms failures that look like product regressions." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Wait for it, or run a SECOND instance on its own ports:" -ForegroundColor Gray
+    Write-Host "    -Port 9223 -VitePort 5174   (vite's port must also be free)" -ForegroundColor Gray
+    Write-Host "  Only if you are certain the holder is abandoned:  -TakeOver" -ForegroundColor Gray
+    Write-Host ""
+    exit 2
+}
+if ($existing -and $TakeOver) {
+    Write-Host "  -TakeOver: an app is answering on $Port and will be replaced" -ForegroundColor Yellow
+}
 
 # --- 0. kill a PREVIOUS launcher ---------------------------------------------
 # A launcher whose app has died keeps running (yarn is still up) and keeps its
@@ -60,11 +101,30 @@ foreach ($p in $allProcs) {
     Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
-# --- 1. kill stale instances -------------------------------------------------
-foreach ($name in @("app", "calcula")) {
-    Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host "  killing stale $name (pid $($_.Id))" -ForegroundColor DarkGray
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+# --- 1. kill OUR OWN stale instance, by recorded PID -------------------------
+# Scoped to the process this script started last time, recorded in the lock file
+# below -- never `-Name app`, which is every Calcula on the machine including
+# another agent's live suite (see 0a). A PID is also re-checked for identity
+# before it is killed: PIDs are recycled, and killing a stranger that inherited
+# the number is the same defect one level down.
+if (Test-Path $lockPath) {
+    try {
+        $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
+        foreach ($stalePid in @($lock.appPid, $lock.launcherPid)) {
+            if (-not $stalePid) { continue }
+            $proc = Get-Process -Id ([int]$stalePid) -ErrorAction SilentlyContinue
+            if (-not $proc) { continue }
+            if ($proc.Name -notin @("app", "calcula", "node", "powershell", "pwsh")) { continue }
+            if ($lock.startedAt -and $proc.StartTime -and
+                ([datetime]$lock.startedAt - $proc.StartTime).Duration().TotalMinutes -gt 5) {
+                Write-Host "  pid $stalePid is not ours any more (started $($proc.StartTime)) - leaving it" -ForegroundColor DarkGray
+                continue
+            }
+            Write-Host "  killing our previous $($proc.Name) (pid $stalePid)" -ForegroundColor DarkGray
+            Stop-Process -Id ([int]$stalePid) -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host "  lock file unreadable - not killing anything by guess" -ForegroundColor DarkGray
     }
 }
 $squatters = @(netstat -ano | Select-String "LISTENING" | Select-String ":$VitePort\s" |
@@ -89,21 +149,16 @@ Remove-Item Env:CC, Env:AR, Env:CFLAGS -ErrorAction SilentlyContinue
 $env:CARGO_TARGET_DIR = "C:\Users\Salle\AppData\Local\calcula-target"
 
 # --- 4. CDP ------------------------------------------------------------------
-# `--force-color-profile=sRGB` is NOT cosmetic and NOT optional.
+# The WebView2 arguments are NOT set here any more. They live in ONE module,
+# app/e2e/webview2Args.mjs, which launch-app.mjs (below) and global-setup.ts
+# both import -- along with the measurements that say why each flag is
+# load-bearing for every screenshot golden in the tree.
 #
-# Every screenshot golden in the tree was captured through the DISPLAY's colour
-# profile. Measured 2026-08-11: the status bar is a hard-coded `#217346` in
-# `StatusBar.tsx`, every committed golden holds `rgb(63,112,75)`, and a capture
-# taken the same day holds `rgb(33,115,70)` -- which is `#217346` exactly. So the
-# goldens encode a transform that belongs to the monitor, not to the product,
-# and the day it changes EVERY screenshot test in both suites fails at once with
-# a uniform per-channel delta. That is what happened: 34 functional + 18 visual,
-# all of them, hours after the same suites had been green on the same machine.
-#
-# Forcing the colour profile makes a capture a function of the PAGE and nothing
-# else, so a golden means the same thing tomorrow, on another display, and after
-# Windows changes a colour setting.
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port --force-color-profile=sRGB"
+# Setting them here was worse than useless: launch-app.mjs built its own env and
+# reassigned WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS to the CDP port alone, so the
+# value this line so carefully explained was DISCARDED by the very script this
+# line hands off to. Every manual run captured through the display's colour
+# profile regardless. Only the port is passed on, and it goes through CDP_PORT.
 
 # --- 5. spawn through the node tee ------------------------------------------
 # The spawn AND the log tee both live in app/e2e/launch-app.mjs. PowerShell was
@@ -123,4 +178,34 @@ Set-Location $appDir
 Write-Host "  node e2e/launch-app.mjs  (yarn tauri dev --config src-tauri/tauri.e2e.conf.json)" -ForegroundColor DarkGray
 Write-Host "  app log -> $(Join-Path $appDir 'e2e\results\app-dev.log')" -ForegroundColor DarkGray
 Write-Host ""
-node e2e/launch-app.mjs
+
+# Record what WE started, so the next run of this script can clean up after
+# itself by PID instead of by name. Written before the spawn (so a launcher that
+# dies mid-start still leaves a trail) and updated with the app's PID once the
+# window exists.
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $lockPath) | Out-Null
+@{ launcherPid = $PID; appPid = $null; cdpPort = $Port; vitePort = $VitePort;
+   startedAt = (Get-Date).ToString("o") } | ConvertTo-Json | Set-Content -Path $lockPath -Encoding UTF8
+
+$recorder = Start-Job -ScriptBlock {
+    param($lockPath, $port)
+    # The app process appears a few seconds after `tauri dev` starts building.
+    for ($i = 0; $i -lt 300; $i++) {
+        Start-Sleep -Seconds 1
+        $app = Get-Process -Name app -ErrorAction SilentlyContinue |
+            Sort-Object StartTime -Descending | Select-Object -First 1
+        if ($app) {
+            $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
+            $lock.appPid = $app.Id
+            $lock | ConvertTo-Json | Set-Content -Path $lockPath -Encoding UTF8
+            return
+        }
+    }
+} -ArgumentList $lockPath, $Port
+
+try {
+    node e2e/launch-app.mjs
+} finally {
+    Stop-Job $recorder -ErrorAction SilentlyContinue | Out-Null
+    Remove-Job $recorder -Force -ErrorAction SilentlyContinue | Out-Null
+}

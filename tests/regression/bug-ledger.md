@@ -3,9 +3,39 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 20 | Open: 4 | Triaged: 1 | Fixed: 15 | Other: 0
+Total: 23 | Open: 5 | Triaged: 0 | Fixed: 18 | Other: 0
 
-## BUG-0020 `[triaged]`
+## BUG-0023 `[open]`
+
+**Found:** 2026-08-11 (review)
+**Oracle:** visual-golden
+
+The committed screenshot corpus is split across two capture paths. Decoding all 71 goldens: 44 hold the dpr-2 grid hairline (241,241,241) and 27 -- the whole e2e/visual tree, all re-recorded 2026-08-11 14:11-14:13 -- hold the dpr-1 hairline (226,226,226). The display is 200% (GDI DESKTOPHORZRES 2944 / HORZRES 1472 = 2), so dpr 2 is correct and the visual corpus encodes an environment this machine does not produce. e2e/captureEnvironment.ts declares devicePixelRatio 2 as the configuration EVERY committed golden was captured under; for 27 of 71 files that is false.
+
+**Repro:** Run npm run e2e:visual on this machine. Every grid golden under e2e/visual differs from its capture by ~39,400 pixels against a 200-pixel budget, entirely in the gridline hairline. No product code is involved.
+**Triage:** test-bug (confidence 0.95) — The visual corpus was re-recorded through a launch whose device pixel ratio was 1. The re-record absorbed no structural change: fitting the dpr-2 grid-empty-grid-default against the dpr-1 grid-core-empty-canvas leaves 0.83% residual, and it is a symmetric one-pixel gridline phase shift (1980 px of 241->255 against 1980 px of 255->226) plus text rasterization, spread over the whole frame with no localized bounding box.
+
+## BUG-0022 `[open]`
+
+**Found:** 2026-08-11 (review)
+**Oracle:** undo-round-trip
+
+`change_pivot_data_source` records no undo entry at all: repointing a pivot at a different source range is not undoable. Same discovery as BUG-0021.
+
+**Repro:** Create a pivot, use Change Data Source to point it at a different range, press Ctrl+Z — the pivot keeps the new source.
+**Triage:** app-bug (confidence 0.95) — The command rebuilds the PivotCache from the new range, so like BUG-0021 it needs a definition+cache snapshot rather than the definition-only pivot_definition restore.
+
+## BUG-0021 `[open]`
+
+**Found:** 2026-08-11 (review)
+**Oracle:** undo-round-trip
+
+`update_bi_pivot_fields` records no undo entry at all: changing a BI pivot's fields is not undoable, and Ctrl+Z afterwards silently undoes whatever action came before it instead. Found by narrowing the blanket `pivots.` suppression that had hidden the whole pivot subtree from the undo round-trip oracle since 2026-06-11.
+
+**Repro:** Create a pivot from a BI model, change its fields via update_bi_pivot_fields, press Ctrl+Z — the pivot keeps the new fields and an unrelated earlier edit is reverted instead.
+**Triage:** app-bug (confidence 0.95) — The command mutates PivotState.pivot_tables (six write sites) and never calls record_pivot_definition_undo. A definition-only snapshot is not sufficient: the command re-queries the model and replaces the cache, so restoring the old definition against the NEW cache would render the wrong thing. It needs a definition+cache snapshot, i.e. the shape pivot_create/pivot_delete already use.
+
+## BUG-0020 `[fixed]`
 
 **Found:** 2026-06-11 (soak-walk, seed 777)
 **Oracle:** undo-round-trip
@@ -14,6 +44,8 @@ Conditional formatting rules are not registered in the undo system — a CF rule
 
 **Repro:** add_conditional_format, then Ctrl+Z — the rule remains. Caught by the undo round-trip oracle (seed 777, 80 actions).
 **Triage:** app-bug (confidence 0.9) — conditional_formatting.rs add/update/delete/reorder commands push no undo transactions. Fix with the obj_* swap pattern (snapshot the sheet's Vec<ConditionalFormatDefinition>, like obj_validation).
+**Fix:** fixed — fixed 2026-08-11 — the CF commands (add/update/delete/reorder/clear) recorded no undo entry at all. They now snapshot the sheet's whole rule list as `obj_conditional_formats` and announce the `conditionalFormats` refresh domain. The ledger status lagged the fix; corrected while re-examining the oracle suppressions, which had already removed the BUG-0020 entry.
+  Files: app/src-tauri/src/conditional_formatting.rs, app/src-tauri/src/undo_commands.rs
 
 ## BUG-0019 `[fixed]`
 
@@ -26,9 +58,6 @@ Second-order cross-sheet recalculation does not cascade: with Sheet2!B3 = Sheet1
 **Triage:** app-bug (confidence 0.9) — In commands/data.rs update_cell, the cross-sheet dependent propagation (the dep_sheet_idx block around line ~1240) runs only for the edited cell's direct cross-sheet dependents; cells recalculated in the local cascade (C9) never get their own cross_sheet_dependents looked up. Fix: after the local recalc loop, iterate the recalculated cells and propagate their cross-sheet dependents transitively.
 **Fix:** fixed — Two independent causes, one per hop, both in cascade_cross_sheet_dependents. (1) The walk was rooted ONLY on the cells the caller edited; the cells the caller RECALCULATED were marked processed but never queued, so C9's cross-sheet dependents were never looked up (hop 1, exactly the triage hypothesis). Both sets are now walk roots. (2) The walk expanded a NON-ACTIVE sheet's same-sheet dependents through the ACTIVE sheet's dependents map — a map with no sheet dimension — so Sheet2!B4 = B2-B3 was invisible (hop 2). A per-sheet SheetDependencyIndex is now derived on demand from that sheet's own formula ASTs (cell + whole-column + whole-row edges) and expanded in topological order. Both hand-copied duplicates of the walk in update_cells_batch_core (paste) and fill_range were deleted in favour of the shared function, and a wiring test fails if a third copy appears.
   Files: app/src-tauri/src/commands/data.rs, app/src-tauri/src/calculation.rs, app/src-tauri/src/control_values.rs, app/src-tauri/src/commands/cross_sheet_recalc_tests.rs, app/e2e/scenarios/budget-model.scenario.ts
-**Fix (2026-08-07, second pass — found on the RUNNING app while proving the first):** a FOURTH cause, and the one that mattered most in practice. Every test above visits the referencing sheet exactly once (go there, type the formula, come back); a user opens the summary sheet again to look at it. That SECOND visit disabled cross-sheet recalculation for the rest of the session. `CrossSheetDependentsMap` is keyed by sheet NAME and the cascade looks a cell up under the workbook's official name, but `rebuild_all_dependencies_from_grid` — which runs on every sheet switch — registered straight from the AST's spelling instead of normalising it, so `=sheet1!A2` re-registered under a key nothing looks up. The four hand-copied inline normalisers are now one `normalize_cross_sheet_refs` in lib.rs that the rebuild also calls. Repro: Sheet1!A1=100, A2==A1*2, Sheet2!A1==Sheet1!A2, Sheet2!A2==A1+1; edit A1 to 250 after one Sheet1->Sheet2->Sheet1 round trip — Sheet2 stayed at 200/201. Pinned by `revisiting_a_sheet_does_not_lose_its_cross_sheet_dependents` and `a_cross_sheet_reference_registers_under_the_official_sheet_name`, both A/B-verified against the old code.
-**Oracle correction (2026-08-07):** the restored scenario assertions read `B3`/`B4` with `getCellDisplayValue`, which only ever answers for the ACTIVE sheet — while Sheet1 was active, so they read Sheet1!B3 = "Budget" and could never have passed. They now read Sheet2 through `get_workbook_state_digest` (a pure read of the stored per-sheet grids: no mirror, no recalculation, no dependency rebuild — a sheet switch would have masked the bug). The expected values 27800 / -500 are unchanged.
-  Files: app/src-tauri/src/lib.rs, app/src-tauri/src/undo_commands.rs, app/src-tauri/src/commands/data.rs, app/src-tauri/src/commands/structure.rs, app/src-tauri/src/commands/cross_sheet_recalc_tests.rs, app/e2e/scenarios/budget-model.scenario.ts, app/e2e/journeys/correctness-cluster.spec.ts
 
 ## BUG-0018 `[fixed]`
 
@@ -66,7 +95,7 @@ Recalculation does not propagate to dependent formulas after a sheet switch: wit
 **Fix:** fixed — Same-sheet propagation after sheet switch fixed (calculate_now mirror sync + dependency rebuild on switch). Residual second-order cross-sheet cascade tracked as BUG-0019.
   Files: app/src-tauri/src/calculation.rs, app/src-tauri/src/sheets.rs, app/src-tauri/src/undo_commands.rs
 
-## BUG-0015 `[open]`
+## BUG-0015 `[fixed]`
 
 **Found:** 2026-06-11 (scenario)
 **Oracle:** undo-round-trip
@@ -75,8 +104,10 @@ Undo of pivot-table creation leaves the pivot definition behind in PivotState.pi
 
 **Repro:** Invoke create_pivot_table + update_pivot_fields (as scenario monthly-report phase 05 does), then Ctrl+Z twice — get_all_pivot_tables still returns the pivot definition.
 **Triage:** app-bug (confidence 0.7) — The pivot undo transaction restores cells/protected regions but does not remove the (definition, cache) entry from PivotState.pivot_tables, or the direct command path skips undo registration the UI path performs.
+**Fix:** fixed — fixed (cause) — the ledgered path no longer leaves a ghost: `apply_pivot_create_restore` removes the entry from `PivotState.pivot_tables`. Re-examining the suppression found the blanket `pivots.` prefix had gone on to hide its SUCCESSORS: four pivot commands mutate `pivot_tables` and record no undo entry at all. `create_pivot_from_bi_model` (the same symptom on the BI path — a pivot Ctrl+Z could not remove) and `relocate_pivot` are fixed here. `update_bi_pivot_fields` and `change_pivot_data_source` remain OPEN as BUG-0021 and BUG-0022: both rebuild the cache, so they need a definition+cache snapshot rather than the definition-only one. `refresh_pivot_cache` records nothing and is correct — Excel does not undo a PivotTable refresh.
+  Files: app/src-tauri/src/pivot/operations.rs, app/src-tauri/src/pivot/commands.rs, app/src-tauri/src/undo_commands.rs, app/e2e/oracles/knownIssues.ts
 
-## BUG-0014 `[open]`
+## BUG-0014 `[fixed]`
 
 **Found:** 2026-06-11 (scenario)
 **Oracle:** undo-round-trip
@@ -85,6 +116,8 @@ Undo of pivot-table creation does not restore column widths: creating a pivot au
 
 **Repro:** Create a pivot at H1 (columns auto-size), Ctrl+Z until the pivot is gone — column H keeps its pivot-fitted width. Caught by the undo round-trip oracle in scenario monthly-report phase 05.
 **Triage:** app-bug (confidence 0.75) — Pivot render auto-fit sets column widths outside the pivot-create undo transaction.
+**Fix:** fixed — fixed — `auto_fit_pivot_columns` wrote into `column_widths` / `all_column_widths` and recorded nothing on the undo stack. It now returns the widths it overwrote and `record_pivot_definition_undo` records them in the SAME transaction as the pivot change, as a new `pivot_col_widths` restore kind that is sheet-INDEXED (a pivot can render on a sheet the user is not looking at, where the fit writes `all_column_widths[dest]`). `None` means the column had no explicit width, so the restore removes the entry rather than writing a default.
+  Files: app/src-tauri/src/pivot/operations.rs, app/src-tauri/src/pivot/commands.rs, app/src-tauri/src/undo_commands.rs, app/e2e/oracles/knownIssues.ts
 
 ## BUG-0013 `[fixed]`
 

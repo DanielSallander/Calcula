@@ -874,10 +874,13 @@ pub fn add_computed_property(
     drop(rev_deps);
 
     // Apply the computed value to the target
-    let mut rh = state.row_heights.write(&effect).unwrap();
-    let mut cw = state.column_widths.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else. The
+    // recalculation pass holds them and then takes `row_heights` /
+    // `column_widths` / `style_registry` on a background thread.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut rh = state.row_heights.write(&effect).unwrap();
+    let mut cw = state.column_widths.write(&effect).unwrap();
     let mut style_reg = state.style_registry.write(&effect).unwrap();
 
     let (dimension_changes, needs_style_refresh) = apply_property_value(
@@ -1017,10 +1020,13 @@ pub fn update_computed_property(
     drop(rev_deps);
 
     // Apply effect
-    let mut rh = state.row_heights.write(&effect).unwrap();
-    let mut cw = state.column_widths.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else. The
+    // recalculation pass holds them and then takes `row_heights` /
+    // `column_widths` / `style_registry` on a background thread.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut rh = state.row_heights.write(&effect).unwrap();
+    let mut cw = state.column_widths.write(&effect).unwrap();
     let mut style_reg = state.style_registry.write(&effect).unwrap();
 
     let (dimension_changes, needs_style_refresh) = apply_property_value(

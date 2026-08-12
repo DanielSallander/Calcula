@@ -108,7 +108,11 @@ fn group_into_ranges(
 /// Reads from the `dependencies` map (what this formula references).
 #[tauri::command]
 pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResult {
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
+    // `grids` is read in the cross-sheet loop below; taken THERE it was taken
+    // while seven other guards were alive, which is the inverted order.
     let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let dependencies = state.dependencies.lock().unwrap();
     let column_dependencies = state.column_dependencies.lock().unwrap();
@@ -173,9 +177,8 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
                 .position(|n| n == sheet_name)
                 .unwrap_or(0);
 
-            // Check if the referenced cell is an error
-            // We need to look at the other grid if it exists
-            let grids = state.grids.read().unwrap();
+            // Check if the referenced cell is an error. `grids` was acquired
+            // at the top of the function -- see the lock-order note there.
             let is_error = if sheet_idx < grids.len() {
                 cell_is_error(&grids[sheet_idx], cs_row, cs_col)
             } else {
@@ -210,7 +213,11 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
 /// Reads from the `dependents` map (what formulas reference this cell).
 #[tauri::command]
 pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResult {
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
+    // `grids` is read in the cross-sheet loop below; taken THERE it was taken
+    // while seven other guards were alive, which is the inverted order.
     let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let dependents = state.dependents.lock().unwrap();
     let column_dependents = state.column_dependents.lock().unwrap();
@@ -275,8 +282,8 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
                 format!("Sheet{}", sheet_idx + 1)
             };
 
-            // Check if the dependent cell is an error
-            let grids = state.grids.read().unwrap();
+            // Check if the dependent cell is an error. `grids` was acquired at
+            // the top of the function -- see the lock-order note there.
             let is_error = if sheet_idx < grids.len() {
                 cell_is_error(&grids[sheet_idx], cs_row, cs_col)
             } else {

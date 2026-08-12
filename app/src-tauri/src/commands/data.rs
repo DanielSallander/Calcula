@@ -1524,8 +1524,10 @@ fn update_cell_impl(
         &state, &pane_control_state, &ribbon_filter_state,
     );
 
-    // Lock user files for FILEREAD/FILELINES/FILEEXISTS support
-    let user_files = user_files_state.files.lock().unwrap();
+    // NOTE: user files (FILEREAD/FILELINES/FILEEXISTS) are locked BELOW, after
+    // the grid locks. They used to be locked here, which held them across the
+    // `state.grid` acquisition -- the inverted order, because the recalculation
+    // pass holds both grid locks and then takes `files` on a background thread.
 
     // Check sheet protection: a locked cell on a protected sheet is refused.
     let active_sheet_for_region_check = *state.active_sheet.read().unwrap();
@@ -1557,13 +1559,15 @@ fn update_cell_impl(
         }
     }
 
-    let sheet_names = state.sheet_names.read().unwrap();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     let mut styles = state.style_registry.write(&effect).unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -3011,7 +3015,9 @@ pub(crate) fn update_cells_batch_core(
     // Build the apply-time UDF resolver from the pre-fetched results table (if
     // any). Omitting udfResults -> None -> behavior identical to before.
     let udf_resolver = udf_results.as_ref().map(|t| crate::scripting::udf::make_udf_resolver(t));
-    let user_files = user_files_state.files.lock().unwrap();
+    // NOTE: user files are locked BELOW, after the grid locks -- canonical lock
+    // order. Locked here, they were held across `state.grid`, which is the
+    // order the recalculation pass takes on a background thread inverted.
     let perf_batch_size = updates.len();
 
     // Early return for empty batch
@@ -3092,14 +3098,15 @@ pub(crate) fn update_cells_batch_core(
         return Ok(Vec::new());
     }
 
-    // Acquire all locks once
-    let sheet_names = state.sheet_names.read().unwrap();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -6352,14 +6359,16 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
         return;
     }
 
-    // Control snapshot and user files BEFORE the grid locks (canonical order:
-    // control stores first, grids last), exactly as `update_cell_impl` does.
+    // Control snapshot BEFORE the grid locks -- it takes control stores and
+    // releases them, so it holds nothing when the grid locks are taken. USER
+    // FILES are locked AFTER them: the canonical order is grid, grids, then
+    // everything else, and the recalculation pass takes `files` on a background
+    // thread only once it holds both.
     let control_values = crate::control_values::build_control_values(
         state,
         pane_control_state,
         ribbon_filter_state,
     );
-    let user_files = user_files_state.files.lock().unwrap();
 
     // SUBTOTAL/AGGREGATE ROW-VISIBILITY SNAPSHOT, built BEFORE any grid lock and
     // held for the whole pass — the same guard `update_cell_impl` and
@@ -6382,7 +6391,6 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     // to `recalculate_sheet_values`, which installs the guard itself.
     let _visibility_pass = crate::row_visibility::begin_pass(state);
 
-    let sheet_names = state.sheet_names.read().unwrap();
     // RECALC COMPANION. This pass re-derives cell VALUES from inputs that are
     // themselves persisted (formulas, literals, locale, control values), so it
     // must not dirty on its own account: the ENTRY command that made those
@@ -6394,6 +6402,8 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     );
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let dependents_map = state.dependents.lock().unwrap();
@@ -6750,10 +6760,11 @@ pub fn update_cell_on_sheets(
     // value across several sheets left the document looking unmodified.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let wrote: Vec<usize> = {
+        // CANONICAL LOCK ORDER: `grids` first, then everything else.
+        let mut grids = state.grids.write(&effect).unwrap();
         let locale = state.locale.lock().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let sheet_names = state.sheet_names.read().unwrap();
-        let mut grids = state.grids.write(&effect).unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
@@ -7072,7 +7083,9 @@ pub fn fill_range(
     let control_values = crate::control_values::build_control_values(
         &state, &pane_control_state, &ribbon_filter_state,
     );
-    let user_files = user_files_state.files.lock().unwrap();
+    // NOTE: user files are locked BELOW, after the grid locks -- canonical lock
+    // order (the recalculation pass takes `files` only after both grid locks,
+    // on a background thread).
 
     // Sheet protection over the FILL TARGET (the source is only read).
     {
@@ -7123,10 +7136,11 @@ pub fn fill_range(
     // Every gate above has passed; the fill below commits.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
-    // Acquire all locks once
-    let sheet_names = state.sheet_names.read().unwrap();
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();

@@ -539,10 +539,13 @@ pub(crate) fn recalc_control_dependents_core(
     // lock set (all pass-1 locks have dropped; recalculate_sheet_values takes
     // and releases its own).
     let updated_cells = {
-        let user_files = user_files_state.files.lock().unwrap();
-        let sheet_names = state.sheet_names.read().unwrap();
+        // CANONICAL LOCK ORDER: both grid locks first. The recalculation
+        // pass takes `sheet_names` and `files` only AFTER them and runs on a
+        // background thread, so this block had the inverted order.
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
+        let user_files = user_files_state.files.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
 
         // The active-sheet mirror (state.grid) is the source of truth; grids[i]

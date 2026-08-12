@@ -950,10 +950,12 @@ pub(crate) fn update_pivot_in_grid(
     // Get old region before writing new data
     let old_region = get_pivot_region(state, pivot_id);
 
-    let mut styles = state.style_registry.write(effect).unwrap();
-    // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else
+    // (the style registry included). The recalculation pass holds both grid
+    // locks and then takes `style_registry` on a background thread.
     let mut active_grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let mut styles = state.style_registry.write(effect).unwrap();
     if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
         // Clear old pivot area first if it exists
         if let Some(ref region) = old_region {
@@ -1023,15 +1025,34 @@ pub(crate) fn update_pivot_in_grid(
 /// Auto-fit column widths for a pivot table based on cell content.
 /// Scans all visible cells in the view and sets each column width to fit
 /// the longest formatted value, using a character-based width estimate.
+///
+/// RETURNS WHAT IT OVERWROTE, and that return value is not decoration.
+///
+/// This function writes straight into `column_widths` / `all_column_widths`,
+/// which are persisted document state, and for the whole life of the pivot
+/// feature it recorded NOTHING on the undo stack. So undoing a pivot change put
+/// the pivot back and left the columns at their pivot-fitted width for ever —
+/// ledgered as BUG-0014 and, worse, SUPPRESSED in the undo oracle behind a
+/// blanket `sheets[0].colWidths.` / `sheets[1].colWidths.` prefix, which hid
+/// every OTHER column-width undo defect on the first two sheets along with it.
+///
+/// The caller records the returned previous values in the SAME undo transaction
+/// as the pivot mutation that caused the fit (`record_pivot_definition_undo`),
+/// because Excel undoes a pivot field change and its column resize as one step,
+/// not two.
+///
+/// `None` for a column means "there was no explicit width" — the restore has to
+/// REMOVE the entry rather than write a default, or the column comes back
+/// pinned at a width the user never set.
 pub(crate) fn auto_fit_pivot_columns(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
-) {
+) -> Vec<(u32, Option<f64>)> {
     if view.col_count == 0 || view.row_count == 0 {
-        return;
+        return Vec::new();
     }
 
     let (_dest_row, dest_col) = destination;
@@ -1115,10 +1136,11 @@ pub(crate) fn auto_fit_pivot_columns(
         })
         .collect();
     let active = *state.active_sheet.read().unwrap();
+    let mut previous: Vec<(u32, Option<f64>)> = Vec::with_capacity(fitted.len());
     if dest_sheet_idx == active {
         let mut widths = state.column_widths.write(effect).unwrap();
         for (col, w) in fitted {
-            widths.insert(col, w);
+            previous.push((col, widths.insert(col, w)));
         }
     } else {
         let mut all = state.all_column_widths.write(effect).unwrap();
@@ -1126,7 +1148,7 @@ pub(crate) fn auto_fit_pivot_columns(
             all.push(std::collections::HashMap::new());
         }
         for (col, w) in fitted {
-            all[dest_sheet_idx].insert(col, w);
+            previous.push((col, all[dest_sheet_idx].insert(col, w)));
         }
     }
 
@@ -1137,6 +1159,8 @@ pub(crate) fn auto_fit_pivot_columns(
         dest_col,
         dest_col + view.col_count as u32 - 1
     );
+
+    previous
 }
 
 /// Looks up a value in a pivot table for GETPIVOTDATA.

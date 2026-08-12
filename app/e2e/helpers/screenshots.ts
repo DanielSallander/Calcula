@@ -15,6 +15,39 @@
 import { type Page, type Locator, expect } from "@playwright/test";
 import { readGridGeometry, cellRangeRectFrom, parseCellRef, type GridGeometry } from "./grid";
 import { SCREENSHOT_DEFAULTS } from "./screenshotGates";
+import { describeCaptureEnvironmentMismatch } from "../captureEnvironment";
+
+// ============================================================================
+// THE DISPLAY IS PART OF THE GOLDEN, SO IT IS CHECKED BEFORE THE FIRST CAPTURE
+//
+// Checked ONCE per worker, not per capture: it cannot change mid-run, and forty
+// identical complaints would bury the one that matters. The first capture of the
+// run pays one `page.evaluate`.
+//
+// It THROWS. A capture taken in the wrong environment does not produce a diff
+// worth reading — it produces ~39,400 differing pixels on every grid golden with
+// no relation to the product, which is exactly the wreckage this guard exists to
+// name. See e2e/captureEnvironment.ts for the measurement.
+// ============================================================================
+let captureEnvironmentChecked = false;
+
+async function assertCaptureEnvironment(page: Page): Promise<void> {
+  if (captureEnvironmentChecked) return;
+  captureEnvironmentChecked = true;
+  const reading = await page.evaluate(() => {
+    const el = document.querySelector("[data-grid-canvas-layer]");
+    const rect = el ? el.getBoundingClientRect() : null;
+    return {
+      devicePixelRatio: window.devicePixelRatio,
+      gridCanvasLayer: rect
+        ? { width: Math.round(rect.width), height: Math.round(rect.height) }
+        : null,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    };
+  });
+  const mismatch = describeCaptureEnvironmentMismatch(reading);
+  if (mismatch) throw new Error(mismatch);
+}
 
 // ============================================================================
 // Selector resolution
@@ -242,14 +275,96 @@ export async function waitForGridStable(page: Page, timeoutMs = 3000): Promise<v
     timeout: timeoutMs,
   });
 
+  // Every capture path in this file awaits this function, so this is the one
+  // place the display can be checked without remembering to.
+  await assertCaptureEnvironment(page);
+
   // Stop canvas-painted motion before waiting for it to settle. Ordered first
-  // so the two rAF ticks below are the frames that park the dash phase.
+  // so the rAF ticks below are the frames that park the dash phase.
   await settleCanvasMotion(page);
 
-  // Wait for any pending Tauri invocations to complete
-  await page.waitForTimeout(500);
+  // THE WAIT THAT IS A WAIT, not a sleep (see src/core/lib/renderSignal.ts).
+  //
+  // This used to be a flat 500 ms. `GridCanvas.fetchCells` is async and DEFERS
+  // a request that arrives while another is in flight, re-issuing it afterwards
+  // through `fetchGeneration`; the repaint that shows the new cells happens in
+  // a later effect. None of that was observable from here, so a capture taken
+  // 500 ms after an edit was a picture of whichever state the machine happened
+  // to have reached — which is why two visual goldens differed between two runs
+  // of the same suite while sixteen were byte-identical.
+  //
+  // `__CALCULA_GRID_RENDER__` is quiescent only when nothing is in flight,
+  // nothing is queued, AND the last paint already reflects the last committed
+  // data. That last clause is the one a boolean "is it idle" cannot express:
+  // between `setCells` and the repaint the component is idle by every other
+  // measure.
+  //
+  // THE OLD 500 ms IS KEPT AS A FLOOR, DELIBERATELY. Quiescence below is about
+  // the GridCanvas fetch-and-paint cycle, and not everything in frame is on it:
+  // the formula bar's passive reference highlight is dispatched into
+  // `state.formulaReferences` after up to five IPC round trips of its own (see
+  // the register, the FormulaInput selection race), so the grid can be
+  // quiescent while that chrome is still in flight. Dropping the sleep in
+  // favour of the signal would have traded one blind spot for another; running
+  // them CONCURRENTLY costs nothing — the floor and the wait overlap — and the
+  // capture leaves only when both are satisfied.
+  const floor = page.waitForTimeout(500);
 
-  // Wait for requestAnimationFrame cycle to complete (canvas repaint)
+  const settled = await page.evaluate(async (budgetMs) => {
+    const signal = () =>
+      (window as unknown as Record<string, { fetchesInFlight: number; refetchQueued: boolean; dataSeq: number; paintedDataSeq: number } | undefined>)
+        .__CALCULA_GRID_RENDER__;
+    // No signal: a page without the grid canvas (a dialog-only capture, or an
+    // older build). Nothing to wait for — say so rather than burn the budget.
+    if (!signal()) return "absent";
+    // rAF RACED AGAINST A TIMER, not awaited bare. `requestAnimationFrame` does
+    // not fire in a window the compositor considers hidden (minimised, or
+    // occluded by a full-screen window), and a bare await would then hang here
+    // until the TEST timeout — turning a screenshot into a 30-second stall with
+    // no message, which is the shape this whole program keeps deleting.
+    const frame = () =>
+      new Promise<void>((r) => {
+        let done = false;
+        const settle = () => {
+          if (done) return;
+          done = true;
+          r();
+        };
+        requestAnimationFrame(settle);
+        setTimeout(settle, 50);
+      });
+    const quiescent = () => {
+      const s = signal()!;
+      return s.fetchesInFlight === 0 && !s.refetchQueued && s.paintedDataSeq === s.dataSeq;
+    };
+    const deadline = Date.now() + budgetMs;
+    // Two CONSECUTIVE quiescent frames, not one: a fetch is started from an
+    // effect, so a single sample can land in the tick between "painted" and
+    // "the next fetch begins".
+    let streak = 0;
+    while (Date.now() < deadline) {
+      await frame();
+      streak = quiescent() ? streak + 1 : 0;
+      if (streak >= 2) return "quiescent";
+    }
+    return "timeout";
+  }, timeoutMs);
+
+  await floor;
+
+  if (settled === "timeout") {
+    // Loud, not fatal: the screenshot assertion that follows is the real check,
+    // and a silent give-up here is exactly the shape that produced a golden
+    // nobody could explain. Say which capture was still moving.
+    console.warn(
+      `[screenshot] the grid never went quiescent within ${timeoutMs}ms — the ` +
+        `capture that follows may be racing a repaint. Read ` +
+        `window.__CALCULA_GRID_RENDER__ to see which counter is still moving.`
+    );
+  }
+
+  // One more rAF pair after quiescence, so the parked dash phase and any DOM
+  // overlay that reacted to the final paint are composited before the capture.
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => resolve());
@@ -730,6 +845,7 @@ export async function takeDialogScreenshot(
   // Wait for dialog to fully render. waitForSelector THROWS on a miss, which is
   // the behaviour every helper in this file must have; resolveOne then also
   // rejects a matched-but-zero-sized dialog.
+  await assertCaptureEnvironment(page);
   await page.waitForSelector(selector, { state: "visible", timeout: 5000 });
   await page.waitForTimeout(300);
 
@@ -864,6 +980,7 @@ export async function takeRibbonScreenshot(
     threshold?: number;
   }
 ): Promise<void> {
+  await assertCaptureEnvironment(page);
   await parkPointerAwayFromChrome(page);
   await page.waitForTimeout(300);
   const ribbon = await resolveOne(page, "the ribbon", [
@@ -900,6 +1017,7 @@ export async function takeStatusBarScreenshot(
     threshold?: number;
   }
 ): Promise<void> {
+  await assertCaptureEnvironment(page);
   await page.waitForTimeout(200);
   const statusBar = await resolveOne(page, "the status bar", [
     "[data-testid='status-bar']",

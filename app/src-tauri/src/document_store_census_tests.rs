@@ -2084,4 +2084,171 @@ mod xlsx_loss_census {
             "the field parser no longer sees `media`"
         );
     }
+
+    // ========================================================================
+    // THE .calp PUBLISH-COVERAGE CENSUS
+    // ========================================================================
+    //
+    // The same producer, for the OTHER distribution path, and it was missing for
+    // the same reason: `compute_publish_report` is a hand-maintained account of
+    // what a package carries and what it leaves behind, with nothing tying it to
+    // `persistence::Workbook`. It had drifted. `cell_behaviors` was neither
+    // carried nor mentioned, so a published report's typed cells arrived inert;
+    // `workbook_protection`, `bi_connection_roles` and the two workbook-wide
+    // grid defaults were dropped with no line anywhere admitting it.
+    //
+    // A .calp is sent to somebody else, so a silent drop is worse here than in
+    // the xlsx case: the subscriber cannot tell an incomplete report from a
+    // complete one.
+
+    #[test]
+    fn the_publish_report_covers_every_workbook_field() {
+        let covered: std::collections::HashMap<&str, &str> =
+            crate::calp_commands::CALP_PUBLISH_COVERAGE.iter().copied().collect();
+
+        let mut missing = Vec::new();
+        for field in workbook_fields() {
+            if !covered.contains_key(field.as_str()) {
+                missing.push(field);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these `persistence::Workbook` fields have no entry in \
+             CALP_PUBLISH_COVERAGE, so nobody has decided whether publishing a \
+             .calp carries them:\n  {}\n\nAdd each one as CARRIED (the publish \
+             writes it into the package), EXCLUDED (dropped, and \
+             `compute_publish_report` says so), or SILENT (dropped, WITH the \
+             reason it needs no line).",
+            missing.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_publish_coverage_table_names_no_field_that_no_longer_exists() {
+        let fields: std::collections::HashSet<String> = workbook_fields().into_iter().collect();
+        let stale: Vec<&str> = crate::calp_commands::CALP_PUBLISH_COVERAGE
+            .iter()
+            .map(|(f, _)| *f)
+            .filter(|f| !fields.contains(*f))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "CALP_PUBLISH_COVERAGE names fields that are not on \
+             `persistence::Workbook` any more: {:?}. A stale entry is how a REAL \
+             field ends up looking covered.",
+            stale
+        );
+    }
+
+    #[test]
+    fn every_publish_coverage_entry_states_a_verdict() {
+        for (field, reason) in crate::calp_commands::CALP_PUBLISH_COVERAGE {
+            assert!(
+                reason.starts_with("CARRIED")
+                    || reason.starts_with("EXCLUDED")
+                    || reason.starts_with("SILENT"),
+                "coverage entry for `{}` must start with CARRIED, EXCLUDED or \
+                 SILENT so the verdict is readable at a glance; got {:?}",
+                field,
+                reason
+            );
+            // SILENT is the only verdict that can hide a loss from BOTH the
+            // author and the subscriber, so it has to argue rather than assert.
+            if reason.starts_with("SILENT") {
+                assert!(
+                    reason.len() > 60,
+                    "the SILENT verdict for `{}` needs a written reason, not a \
+                     label: {:?}",
+                    field,
+                    reason
+                );
+            }
+        }
+    }
+
+    /// Every EXCLUDED verdict names the report category the author actually
+    /// sees, and that category has to EXIST in `compute_publish_report`.
+    ///
+    /// This is the half a plain coverage list cannot check. "EXCLUDED: reported
+    /// 'gridDefaults'" is a claim about another function, and a claim about
+    /// another function is exactly the kind of statement that silently stops
+    /// being true — which is how `protection` came to be the only exclusion line
+    /// while three more categories were being dropped without one.
+    #[test]
+    fn every_excluded_verdict_names_a_category_the_report_emits() {
+        let report_src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/calp_commands.rs"),
+        )
+        .expect("cannot read calp_commands.rs");
+
+        let mut unbacked = Vec::new();
+        for (field, reason) in crate::calp_commands::CALP_PUBLISH_COVERAGE {
+            if !reason.starts_with("EXCLUDED") && !reason.contains("EXCLUDED and reported") {
+                continue;
+            }
+            // The category is the single-quoted name in the verdict.
+            let Some(open) = reason.find('\'') else {
+                unbacked.push(format!("{}: EXCLUDED verdict names no category", field));
+                continue;
+            };
+            let rest = &reason[open + 1..];
+            let Some(close) = rest.find('\'') else {
+                unbacked.push(format!("{}: unterminated category name", field));
+                continue;
+            };
+            let category = &rest[..close];
+            let needle = format!("&mut excluded, \"{}\"", category);
+            if !report_src.contains(&needle) {
+                unbacked.push(format!(
+                    "{}: claims the report emits an `excluded` category {:?}, and \
+                     `compute_publish_report` has no such line",
+                    field, category
+                ));
+            }
+        }
+        assert!(
+            unbacked.is_empty(),
+            "these EXCLUDED verdicts are not backed by the transparency report \
+             they cite:\n  {}",
+            unbacked.join("\n  ")
+        );
+    }
+
+    /// The publish census must be able to SEE an uncovered field, and the
+    /// EXCLUDED-verdict check must be able to see an unbacked claim.
+    #[test]
+    fn the_publish_census_detectors_actually_fire() {
+        let covered: std::collections::HashSet<&str> =
+            crate::calp_commands::CALP_PUBLISH_COVERAGE
+                .iter()
+                .map(|(f, _)| *f)
+                .collect();
+        assert!(
+            !covered.contains("a_field_nobody_declared"),
+            "sanity: the coverage set must not contain an invented name"
+        );
+        // The field that started this one: a behaviour binding is the only piece
+        // of granular-brick content that never travelled in a package.
+        let fields = workbook_fields();
+        assert!(
+            fields.iter().any(|f| f == "cell_behaviors"),
+            "the field parser no longer sees `cell_behaviors` -- the store whose \
+             omission shipped reports full of inert typed cells"
+        );
+
+        // SABOTAGE the EXCLUDED-verdict check: a category the report does not
+        // emit must be reported as unbacked. Same parse, fake input.
+        let report_src = "item(&mut excluded, \"workbookFiles\", 1, \"...\");";
+        let verdict = "EXCLUDED: reported 'aCategoryNobodyEmits'";
+        let open = verdict.find('\'').expect("test verdict has a quote");
+        let rest = &verdict[open + 1..];
+        let close = rest.find('\'').expect("test verdict closes its quote");
+        let needle = format!("&mut excluded, \"{}\"", &rest[..close]);
+        assert!(
+            !report_src.contains(&needle),
+            "the EXCLUDED-verdict detector cannot see an unbacked category, so \
+             it would pass on a report that stopped emitting one"
+        );
+    }
 }

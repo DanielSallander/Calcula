@@ -10,11 +10,22 @@
  *   import { test, expect } from "../fixtures";
  */
 import { test as base, expect, type Page, type Browser, chromium } from "@playwright/test";
+import { execSync } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 import { GridHelper } from "./helpers/grid";
+import { APP_DIED_MARKER } from "./appDiedMarker";
 
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
+
+/**
+ * Re-exported for the specs and helpers that already import it from here.
+ * The path itself lives in `./appDiedMarker` so that all THREE stages of the
+ * mechanism -- clear, write, read -- take it from one place.
+ */
+export { APP_DIED_MARKER };
 
 // ---------------------------------------------------------------------------
 // Worker-scoped fixtures (shared across all tests in one worker)
@@ -38,12 +49,107 @@ type TestFixtures = {
   gridPersistent: GridHelper;
 };
 
+/** How many `app.exe` processes exist right now. -1 when the query itself failed. */
+function countAppProcesses(): number {
+  try {
+    const out = execSync(
+      'powershell -NoProfile -Command "@(Get-Process app -ErrorAction SilentlyContinue).Count"',
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
+    ).trim();
+    return /^\d+$/.test(out) ? Number(out) : -1;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * THE APPLICATION GOING AWAY IS NOT A TEST RESULT, AND IT USED TO LOOK LIKE ONE.
+ *
+ * Every spec in a project shares ONE app instance and ONE worker. When that app
+ * dies mid-run — a `Stop-Process -Force` from another launcher, a `tauri dev`
+ * file-watcher rebuild triggered by an edit under `src-tauri`, a real abort —
+ * this fixture can no longer connect. Playwright's answer is to fail the test
+ * and restart the worker, which tries again, fails again, and keeps going:
+ * MEASURED on 2026-08-11, a run whose app was killed at test 166 of ~550
+ * carried on to produce **hundreds of 1 ms "failures"**, none of which were
+ * about the product. The report is then indistinguishable from a catastrophic
+ * regression, and the run has to be thrown away by hand — after it has burnt
+ * another half hour.
+ *
+ * So the harness says it out loud, once, in the place that knows: the connect
+ * that failed. It records WHETHER AN `app.exe` EXISTS AT ALL, because that is
+ * what separates the two very different situations:
+ *
+ *   0 processes  -> the app is gone. Nothing after this line is a test result.
+ *   >=1          -> the app is up but its CDP port is not answering (a restart
+ *                   in progress, or a second instance launched without
+ *                   `--remote-debugging-port`), which is a different fix.
+ *
+ * A marker file is left for `global-teardown.ts` so the run ENDS with the
+ * statement too — a banner at the bottom of the log, where the reader is
+ * looking, rather than one line lost among the failures.
+ *
+ * IT DOES NOT SKIP AND IT DOES NOT SWALLOW. A crash caused by the product must
+ * still fail the suite; turning these into skips would hide exactly the thing
+ * this program exists to catch. What changes is that the failure now NAMES its
+ * cause instead of presenting as an assertion.
+ */
+/**
+ * The message, as a PURE function of the two facts that decide it.
+ *
+ * Split out from the side-effecting reporter so it has a unit tier: the whole
+ * value of this guard is the WORDING (it is what a reader will act on), and a
+ * guard whose wording nothing checks is one edit away from going back to
+ * "connect failed". `e2e/__tests__/appGoneMessage.test.ts` pins all three arms.
+ */
+export function describeUnreachableApp(
+  appProcessCount: number,
+  cause: unknown,
+  cdpPort: number = CDP_PORT,
+  attempts: number = MAX_RETRIES,
+): string {
+  const verdict =
+    appProcessCount === 0
+      ? "NO app.exe IS RUNNING — the application is gone. Nothing reported after " +
+        "this point is a test result; re-launch and re-run."
+      : appProcessCount > 0
+        ? `${appProcessCount} app.exe process(es) are running but CDP port ${cdpPort} is not ` +
+          "answering — the app is probably restarting (a `tauri dev` rebuild after " +
+          "an edit under src-tauri), or an instance was launched without " +
+          "--remote-debugging-port."
+        : "could not query the process list, so whether the app is running is unknown.";
+
+  return (
+    `[e2e] CANNOT REACH THE APPLICATION on CDP port ${cdpPort} after ${attempts} attempts.\n` +
+    `      ${verdict}\n` +
+    `      Underlying error: ${cause instanceof Error ? cause.message : String(cause)}`
+  );
+}
+
+function reportAppGone(cause: unknown): Error {
+  const apps = countAppProcesses();
+  const message = describeUnreachableApp(apps, cause);
+
+  try {
+    fs.mkdirSync(path.dirname(APP_DIED_MARKER), { recursive: true });
+    fs.writeFileSync(
+      APP_DIED_MARKER,
+      `${new Date().toISOString()}\napp.exe processes: ${apps}\n${message}\n`,
+      "utf-8",
+    );
+  } catch {
+    // A marker we cannot write must not replace the error we can throw.
+  }
+  console.error(message);
+  return new Error(message);
+}
+
 async function connectWithRetry(): Promise<Browser> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       return await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     } catch (error) {
-      if (attempt === MAX_RETRIES) throw error;
+      if (attempt === MAX_RETRIES) throw reportAppGone(error);
       console.log(`[e2e] CDP connect attempt ${attempt} failed, retrying in ${RETRY_DELAY_MS}ms...`);
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }

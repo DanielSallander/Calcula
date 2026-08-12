@@ -108,12 +108,21 @@ fn store_view(pivot_state: &PivotState, pivot_id: PivotId, view: &PivotView) {
 /// Record a pivot definition undo snapshot.
 /// `saved_cells` are cells that were overwritten by the pivot expansion
 /// (so that `undo_pivot_overwrite` can restore them when the user cancels).
+///
+/// `prev_col_widths` are the widths a pivot auto-fit overwrote on this pivot's
+/// destination sheet (empty when auto-fit is off). They ride in the SAME
+/// transaction as the definition, because Excel undoes a pivot change and the
+/// column resize it caused as one step — and because recording them separately
+/// would make every field change cost the user two Ctrl+Z presses. Until this
+/// existed, `auto_fit_pivot_columns` recorded nothing at all and the widths
+/// simply never came back (BUG-0014).
 fn record_pivot_definition_undo(
     state: &AppState,
     pivot_id: PivotId,
     definition: PivotDefinition,
     overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
     dest_sheet_idx: usize,
+    prev_col_widths: Vec<(u32, Option<f64>)>,
     description: &str,
 ) {
     #[derive(serde::Serialize)]
@@ -130,9 +139,23 @@ fn record_pivot_definition_undo(
         dest_sheet_idx,
     };
     let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+    // ONE critical section for the whole step. The width record is serialized
+    // here rather than through `record_pivot_col_widths_undo` so the stack lock
+    // is taken exactly once: releasing it between `begin_transaction` and the
+    // second `record_custom_restore` would let a concurrent command open its own
+    // transaction in the gap and split what the user sees as one action.
+    let widths_data =
+        crate::undo_commands::encode_pivot_col_widths_snapshot(dest_sheet_idx, prev_col_widths);
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.begin_transaction(description);
     undo_stack.record_custom_restore("pivot_definition".to_string(), data, description);
+    if let Some(widths) = widths_data {
+        undo_stack.record_custom_restore(
+            crate::undo_commands::PIVOT_COL_WIDTHS_RESTORE_KIND.to_string(),
+            widths,
+            description,
+        );
+    }
     undo_stack.commit_transaction();
 }
 
@@ -454,10 +477,12 @@ pub fn create_pivot_inner(
 
     // Write pivot output to destination grid (empty for now, but reserves the space)
     {
-        let mut styles = state.style_registry.write(&effect).unwrap();
-        // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+        // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else
+        // (the style registry included). The recalculation pass holds both grid
+        // locks and then takes `style_registry` on a background thread.
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
+        let mut styles = state.style_registry.write(&effect).unwrap();
 
         // Verify destination sheet exists
         if dest_sheet_idx >= grids.len() {
@@ -1023,10 +1048,13 @@ pub async fn update_pivot_fields(
     update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
     let grid_write_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-    // Auto-fit column widths if enabled
-    if auto_fit {
-        auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
-    }
+    // Auto-fit column widths if enabled. The widths it overwrites are carried
+    // into the undo record below so the resize undoes WITH the field change.
+    let prev_col_widths = if auto_fit {
+        auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view)
+    } else {
+        Vec::new()
+    };
 
     // Update pivot region tracking
     let t3 = Instant::now();
@@ -1046,7 +1074,7 @@ pub async fn update_pivot_fields(
     // Record undo snapshot AFTER successful completion (not before, to avoid
     // stale entries when the operation is cancelled).
     // Include saved overwritten cells so undo_pivot_overwrite can restore them.
-    record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, "Pivot table field change");
+    record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, prev_col_widths, "Pivot table field change");
 
     log_perf!(
         "PIVOT",
@@ -1229,7 +1257,7 @@ pub fn toggle_pivot_group(
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
                 finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
-                record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
+                record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!(
@@ -1264,7 +1292,7 @@ pub fn toggle_pivot_group(
             let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
             response.overwritten_cell_count = saved_cells.len() as u32;
             finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some((&*pane_control_state, &*ribbon_filter_state)));
-            record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
+            record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
             log_perf!(
@@ -1299,7 +1327,7 @@ pub fn toggle_pivot_group(
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
-    record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, "Pivot expand/collapse");
+    record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, Vec::new(), "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
@@ -1589,7 +1617,7 @@ pub fn relocate_pivot(
     log_info!("PIVOT", "relocate_pivot pivot_id={} to ({},{})", pivot_id, new_row, new_col);
 
     // 1. Update the definition's destination
-    let view = {
+    let (view, old_definition) = {
         let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         let (definition, cache) = pivot_tables
             .get_mut(&pivot_id)
@@ -1600,10 +1628,15 @@ pub fn relocate_pivot(
             return Ok(()); // No-op if destination unchanged
         }
 
+        // The definition BEFORE the move, for undo. Excel undoes a PivotTable
+        // move; this command recorded nothing at all, so the pivot stayed where
+        // it was dragged and Ctrl+Z silently undid whatever came before it.
+        let old_definition = definition.clone();
+
         definition.destination = (new_row, new_col);
 
         // 2. Recalculate the view at the new destination
-        safe_calculate_pivot(definition, cache)
+        (safe_calculate_pivot(definition, cache), old_definition)
     };
 
     // 3. Resolve sheet index
@@ -1624,6 +1657,19 @@ pub fn relocate_pivot(
 
     // 6. Store the updated view
     store_view(&pivot_state, pivot_id, &view);
+
+    // 7. Record the move as ONE undo step. `apply_pivot_definition_restore`
+    //    puts the old definition back and re-renders from the SAME cache, which
+    //    is exactly right for a move: nothing about the data changed.
+    record_pivot_definition_undo(
+        &state,
+        pivot_id,
+        old_definition,
+        Vec::new(),
+        dest_sheet_idx,
+        Vec::new(),
+        "Move pivot table",
+    );
 
     log_info!("PIVOT", "relocate_pivot pivot_id={} complete", pivot_id);
     Ok(())
@@ -5619,6 +5665,12 @@ pub async fn create_pivot_from_bi_model(
     // Create empty cache (0 fields)
     let cache = PivotCache::new(pivot_id, 0);
 
+    // The CLEAN pre-calc cache, kept for the undo snapshot — the same rule
+    // `create_pivot_inner` documents: a post-calc cache can hold computed maps
+    // with non-string keys that serde_json refuses, which would silently write
+    // an EMPTY snapshot and make undo unable to delete the pivot.
+    let undo_cache = cache.clone();
+
     // Calculate initial view (will be empty)
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
@@ -5630,10 +5682,12 @@ pub async fn create_pivot_from_bi_model(
 
     // Write empty pivot placeholder to grid
     {
-        let mut styles = state.style_registry.write(&effect).unwrap();
-        // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+        // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else
+        // (the style registry included). The recalculation pass holds both grid
+        // locks and then takes `style_registry` on a background thread.
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
+        let mut styles = state.style_registry.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let active_sheet = *state.active_sheet.read().unwrap();
             let pivot_merges = if dest_sheet_idx == active_sheet {
@@ -5663,8 +5717,37 @@ pub async fn create_pivot_from_bi_model(
 
     // Store pivot
     let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
+    let undo_definition = definition.clone();
     pivot_tables.insert(pivot_id, (definition, cache_mut));
     drop(pivot_tables);
+
+    // Record undo for the creation (undo = delete the pivot), exactly as the
+    // grid-source `create_pivot_inner` does.
+    //
+    // THIS COMMAND RECORDED NOTHING UNTIL NOW. Creating a pivot from a BI model
+    // wrote a definition into `PivotState.pivot_tables` that Ctrl+Z could not
+    // remove — the pivot stayed on the sheet and in the saved workbook for ever.
+    // It is the exact symptom BUG-0015 describes, on a path the ledgered bug
+    // never named, and the undo oracle could not report it because a blanket
+    // `pivots.` suppression was filtering the whole subtree.
+    {
+        #[derive(serde::Serialize)]
+        struct PivotFullSnapshot {
+            pivot_id: PivotId,
+            definition: PivotDefinition,
+            cache: PivotCache,
+        }
+        let snapshot = PivotFullSnapshot {
+            pivot_id,
+            definition: undo_definition,
+            cache: undo_cache,
+        };
+        let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Create pivot table");
+        undo_stack.record_custom_restore("pivot_create".to_string(), data, "Create pivot table");
+        undo_stack.commit_transaction();
+    }
 
     // Set as active pivot
     *pivot_state.active_pivot_id.lock().unwrap() = Some(pivot_id);
@@ -5844,7 +5927,14 @@ pub async fn update_bi_pivot_fields(
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
                 if auto_fit {
-                    auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
+                    // DELIBERATELY DISCARDED, and it is a known gap, not an
+                    // oversight: `update_bi_pivot_fields` records NO undo entry
+                    // at all (register §2as-BI), so there is no transaction for
+                    // the width record to join. Recording it on its own would be
+                    // worse than not recording it — Ctrl+Z would resize the
+                    // columns back while leaving the pivot changed. The widths
+                    // become undoable the moment this command becomes undoable.
+                    let _ = auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
                 }
                 update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
                 recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
@@ -7086,7 +7176,10 @@ pub async fn update_bi_pivot_fields(
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
     if auto_fit {
-        auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
+        // Discarded for the same reason as the cosmetic branch above: this
+        // command records no undo entry, so there is no step for the resize to
+        // belong to. See the note there.
+        let _ = auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
     }
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
@@ -7259,9 +7352,10 @@ pub fn show_report_filter_pages(
         // Create a new sheet with this value's name
         let sheet_name = sanitize_sheet_name(value_label);
 
-        // Use AppState to create the sheet and write the pivot view
-        let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+        // Use AppState to create the sheet and write the pivot view.
+        // CANONICAL LOCK ORDER: `grids` FIRST, then everything else.
         let mut grids = state.grids.write(&effect).unwrap();
+        let mut sheet_names = state.sheet_names.write(&effect).unwrap();
 
         // Skip if sheet already exists -- IGNORING CASE, the comparison the
         // rest of the crate makes when it looks a sheet up by name.

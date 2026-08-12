@@ -2364,10 +2364,13 @@ pub(crate) fn recalc_visibility_dependents_core(
 
     // Pass 2: active sheet, spill-aware, under the update_cell-style lock set.
     let updated_cells = {
-        let user_files = user_files_state.files.lock().unwrap();
-        let sheet_names = state.sheet_names.read().unwrap();
+        // CANONICAL LOCK ORDER: both grid locks first. The recalculation
+        // pass takes `sheet_names` and `files` only AFTER them and runs on a
+        // background thread, so this block had the inverted order.
         let mut grid = state.grid.write(&effect).unwrap();
         let mut grids = state.grids.write(&effect).unwrap();
+        let user_files = user_files_state.files.lock().unwrap();
+        let sheet_names = state.sheet_names.read().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
         if active_sheet < grids.len() {
             grids[active_sheet] = grid.clone();

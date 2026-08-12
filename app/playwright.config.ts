@@ -52,6 +52,27 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    // A SINGLE ACTION MAY NOT HANG. Playwright's default `actionTimeout` is 0,
+    // i.e. NO timeout: `locator.click()` waits for actionability forever and the
+    // only bound is the test timeout.
+    //
+    // MEASURED 2026-08-11, and this is why the number is here rather than in a
+    // comment somewhere: an `invariant` walk stopped at
+    // `[step 47/75] ribbon.switch-tab` and printed NOTHING for the next twelve
+    // minutes on a live, RESPONDING app. The action probes `isVisible({timeout:
+    // 500})` and then calls a bare `.click()`, so a button that is visible but
+    // never actionable (covered by an overlay, or never stable) parks there —
+    // and `state-consistency.spec.ts` raises its own ceiling with
+    // `test.setTimeout(1_500_000)`, so the hang had **25 minutes** to run in,
+    // silently. A hang is invisible to an exit-status check, which is the one
+    // failure mode this whole program keeps deleting.
+    //
+    // 30s is well above the slowest legitimate action measured in these suites
+    // (the app's own heavy dialogs settle in single-digit seconds), so this
+    // cannot turn a slow action into a false failure — it turns an INFINITE one
+    // into a reported failure that names the locator.
+    actionTimeout: 30_000,
+    navigationTimeout: 60_000,
   },
 
   projects: [

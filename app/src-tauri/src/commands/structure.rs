@@ -3820,13 +3820,14 @@ pub fn relocate_cell_references(
         return Ok(Vec::new());
     }
 
-    let sheet_names = state.sheet_names.read().unwrap();
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();

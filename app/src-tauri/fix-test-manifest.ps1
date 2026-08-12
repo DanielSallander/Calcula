@@ -12,9 +12,32 @@
 # with tauri-build's own manifest on the app bin. So: embed the
 # common-controls v6 dependency into the already-linked test exes with mt.exe.
 #
-# USAGE:  cargo test --no-run ; ./fix-test-manifest.ps1 ; cargo test
+# USAGE:  cargo test --no-run --message-format=json > build.json
+#         ./fix-test-manifest.ps1 -TargetDir <dir>
+#         <run each executable from build.json DIRECTLY>
+#
 #         (idempotent - exes that already have a resource section are skipped;
 #          pass -TargetDir to point at a non-default CARGO_TARGET_DIR)
+#
+# THE ORDER IS LOAD-BEARING, AND THE OBVIOUS RECIPE IS WRONG once the crate has
+# more than one test target. The manifest is embedded into an ALREADY-LINKED
+# exe, so ANY subsequent link throws it away:
+#
+#   cargo test --lib --no-run              builds + links app_lib
+#   cargo test --test test_pivot --no-run  re-resolves features, RELINKS app_lib
+#   ./fix-test-manifest.ps1                patches the exe
+#   cargo test --lib                       re-resolves AGAIN, RELINKS -> patch GONE
+#                                          -> 0xC0000139, zero tests run
+#
+# So: build EVERY target in ONE cargo invocation (one feature resolution), patch
+# after that final link, then run the exes yourself - cargo cannot relink what
+# it is not invoked for. Measured 2026-08-11; see docs/design/open-decisions-2026-08.md
+# section 3cb.4.
+#
+# TWO TRAPS while doing that. `--message-format=json` lists the APPLICATION
+# binary among its `executable` entries; running that launches the real app and
+# blocks. And this script reports through Write-Host, so `2>&1 | Out-File`
+# captures nothing - use `*>&1`.
 
 param(
     [string]$TargetDir = (Join-Path $PSScriptRoot "target")

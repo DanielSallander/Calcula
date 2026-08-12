@@ -268,13 +268,17 @@ pub(crate) fn rebuild_all_dependencies(state: &AppState) {
     // needs the official sheet names to canonicalise cross-sheet keys, and
     // taking that lock inside would add a fourth lock to a function some
     // callers already reach while holding the grid.
+    // CANONICAL LOCK ORDER: `grid` FIRST, then everything else. The
+    // recalculation pass holds both grid locks and then takes `sheet_names` /
+    // `named_ranges` / `tables` on a background thread, so a reader that holds
+    // any of those and then waits for a grid lock closes a cycle.
+    let grid = state.grid.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap().clone();
     // Same rule for the name tables: acquired HERE, at the call site, so a
     // caller that already holds one cannot deadlock inside the rebuild.
     let named_ranges = state.named_ranges.read().unwrap();
     let tables = state.tables.read().unwrap();
     let table_names = state.table_names.read().unwrap();
-    let grid = state.grid.read().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     rebuild_all_dependencies_from_grid(
         &grid,
@@ -1123,6 +1127,7 @@ fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &Ribb
 fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_calp_reset_restore(s, e, d, inv, rp); }
 fn r_outline(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_outline_restore(s, e, d, inv); }
 fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_user_hidden_restore(s, e, d, inv); }
+fn r_pivot_col_widths(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_col_widths_restore(s, e, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -1143,6 +1148,20 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // dimension refresh the frontend already runs, so no store domain.
     m.insert("default_row_height", RestoreSpec { restore: r_default_dim, domains: NONE, defer: false });
     m.insert("default_column_width", RestoreSpec { restore: r_default_dim, domains: NONE, defer: false });
+    // A pivot auto-fit's column resize (BUG-0014). Geometry, like the two
+    // above, so no store domain — the frontend re-reads dimensions on the
+    // refresh it already runs.
+    //
+    // DEFERRED, and the first version of this was not. `apply_changes` takes
+    // `column_widths` at the top of the pass and holds it until the inline
+    // restores are done, so an INLINE handler that reaches for
+    // `state.column_widths.write(..)` deadlocks against its own caller — std's
+    // RwLock is not reentrant. Measured: the app stopped answering on the first
+    // undo the journey spec performed, and the harness reported it as "the
+    // application went away", not as a lock bug. The deferred pass runs after
+    // every grid/style/width lock is dropped, which is exactly the contract the
+    // pivot/slicer/ribbon-filter restores already rely on.
+    m.insert(PIVOT_COL_WIDTHS_RESTORE_KIND, RestoreSpec { restore: r_pivot_col_widths, domains: NONE, defer: true });
     // Deferred (defer: true) — acquire other state locks; run after grid locks drop.
     m.insert("pivot_definition", RestoreSpec { restore: r_pivot_definition, domains: MutationDomains::of(Pivot), defer: true });
     m.insert("pivot_create", RestoreSpec { restore: r_pivot_create, domains: MutationDomains::of(Pivot), defer: true });
@@ -2246,6 +2265,14 @@ fn apply_pivot_create_restore(
 
     let pivot_id = snapshot.pivot_id;
 
+    // CANONICAL LOCK ORDER: `grid`, `grids`, then everything else. The two grid
+    // guards are needed only inside the `old_region` branch below, but taking
+    // them THERE takes them while `pivot_tables` is held -- and the
+    // recalculation pass holds both grid locks and then takes `pivot_tables` on
+    // a background thread, which is a cycle. Neither `get_pivot_region` nor
+    // `resolve_dest_sheet_index` touches a grid lock, so hoisting is safe.
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
     // Save current state for redo (redo = re-create the pivot)
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
     if let Some((definition, cache)) = pivot_tables.get(&pivot_id) {
@@ -2265,9 +2292,8 @@ fn apply_pivot_create_restore(
         // Clear the pivot grid region
         let old_region = get_pivot_region(state, pivot_id);
         if let Some(ref region) = old_region {
-            // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
-            let mut grid = state.grid.write(&effect).unwrap();
-            let mut grids = state.grids.write(&effect).unwrap();
+            // `grid` and `grids` were acquired at the top of the function -- see
+            // the lock-order note there.
             if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
                 clear_pivot_region_from_grid(
                     dest_grid,
@@ -3881,6 +3907,10 @@ mod restore_registry_tests {
             ("hyperlink", false, MutationDomains::of(Hyperlinks)),
             ("default_row_height", false, NONE),
             ("default_column_width", false, NONE),
+            // DEFERRED, unlike the two geometry kinds above it: `apply_changes`
+            // holds `column_widths` for the whole inline pass, so an inline
+            // handler that writes it deadlocks against its own caller.
+            ("pivot_col_widths", true, NONE),
             ("outline", true, MutationDomains::of(Outline)),
             ("pivot_definition", true, MutationDomains::of(Pivot)),
             ("pivot_create", true, MutationDomains::of(Pivot)),
@@ -4073,6 +4103,113 @@ pub(crate) fn record_outline_undo(
         serde_json::to_vec(&snap).unwrap_or_default(),
         description,
     );
+}
+
+// ============================================================================
+// PIVOT AUTO-FIT COLUMN WIDTHS (BUG-0014)
+// ============================================================================
+
+/// The restore kind a pivot auto-fit records so its column resize is undone
+/// with the pivot change that caused it.
+pub(crate) const PIVOT_COL_WIDTHS_RESTORE_KIND: &str = "pivot_col_widths";
+
+/// The widths a pivot auto-fit overwrote, on ONE sheet.
+///
+/// Sheet-INDEXED rather than active-sheet-implicit, because a pivot can render
+/// on a sheet the user is not looking at (a subscribed report renders on its own
+/// appended sheet) and the fit writes `all_column_widths[dest]` in that case.
+/// An active-sheet-only restore would silently do nothing there — the same
+/// sheet-blindness that made `CellChange::SetCell` grow a `sheet` field.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PivotColWidthsSnapshot {
+    sheet_index: usize,
+    /// `(column, width before the fit)`. `None` = the column had no explicit
+    /// width, so the restore REMOVES the entry rather than writing a default.
+    previous: Vec<(u32, Option<f64>)>,
+}
+
+/// Serialize the column widths a pivot auto-fit overwrote, for the caller to
+/// record inside the SAME transaction as the pivot mutation (Excel undoes the
+/// two together, and a separate transaction would cost the user a second
+/// Ctrl+Z).
+///
+/// Returns `None` when there is nothing to record — auto-fit off, or an empty
+/// view — so the no-op is decided here rather than at every call site.
+pub(crate) fn encode_pivot_col_widths_snapshot(
+    sheet_index: usize,
+    previous: Vec<(u32, Option<f64>)>,
+) -> Option<Vec<u8>> {
+    if previous.is_empty() {
+        return None;
+    }
+    let snap = PivotColWidthsSnapshot { sheet_index, previous };
+    serde_json::to_vec(&snap).ok()
+}
+
+/// Put the pre-fit column widths back, capturing the CURRENT ones as the
+/// symmetric inverse so redo re-applies the fit.
+fn apply_pivot_col_widths_restore(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snap: PivotColWidthsSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] bad pivot column-width snapshot: {}", e);
+            return;
+        }
+    };
+
+    let active = match state.active_sheet.read() {
+        Ok(a) => *a,
+        Err(_) => return,
+    };
+
+    let mut inverse: Vec<(u32, Option<f64>)> = Vec::with_capacity(snap.previous.len());
+
+    if snap.sheet_index == active {
+        let Ok(mut widths) = state.column_widths.write(effect) else { return };
+        for (col, prev) in &snap.previous {
+            let current = widths.get(col).copied();
+            inverse.push((*col, current));
+            match prev {
+                Some(w) => {
+                    widths.insert(*col, *w);
+                }
+                None => {
+                    widths.remove(col);
+                }
+            }
+        }
+    } else {
+        let Ok(mut all) = state.all_column_widths.write(effect) else { return };
+        if snap.sheet_index >= all.len() {
+            return;
+        }
+        for (col, prev) in &snap.previous {
+            let current = all[snap.sheet_index].get(col).copied();
+            inverse.push((*col, current));
+            match prev {
+                Some(w) => {
+                    all[snap.sheet_index].insert(*col, *w);
+                }
+                None => {
+                    all[snap.sheet_index].remove(col);
+                }
+            }
+        }
+    }
+
+    let inverse_snap = PivotColWidthsSnapshot {
+        sheet_index: snap.sheet_index,
+        previous: inverse,
+    };
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: PIVOT_COL_WIDTHS_RESTORE_KIND.to_string(),
+        data: serde_json::to_vec(&inverse_snap).unwrap_or_default(),
+    });
 }
 
 /// Restore one sheet's outline, capturing the CURRENT one as the symmetric

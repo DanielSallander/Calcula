@@ -38,16 +38,53 @@ export function FormulaInput(): React.ReactElement {
     }
   }
 
+  /**
+   * WHAT THE SELECTION FETCH WRITES, AND WHY IT IS CANCELLED
+   * =========================================================
+   * This effect answers "what does the newly selected cell contain" and it
+   * writes THREE pieces of shared state: the formula bar's text, the spill-ref
+   * flag, and — through `dispatch` — `state.formulaReferences`, which the GRID
+   * CANVAS paints as the faint dashed precedent boxes (`isPassive` in
+   * gridRenderer/rendering/references.ts). So a cell click repaints the grid,
+   * not just this input.
+   *
+   * Getting the answer takes up to FIVE backend round trips: `getMergeInfo`
+   * (twice for a range), `getSpillRanges`, `getCell`, and — only for a formula
+   * cell — `isSheetProtected` + `getCellProtection`. That is 5 IPC hops between
+   * the click and the paint.
+   *
+   * It used to fire `fetchCellContent()` with NO cancellation and NO cleanup, so
+   * two selections in quick succession left two chains racing and **the SLOWER
+   * one won**. Selecting a formula cell and then a plain one could therefore end
+   * with the formula bar showing the PREVIOUS cell's formula and the canvas
+   * still painting the PREVIOUS cell's precedents — a wrong answer on screen
+   * about which cell you are standing on, with no error and nothing to retry.
+   * The last write should belong to the last selection; whether it did was
+   * decided by which IPC call the backend happened to answer first.
+   *
+   * It also made two visual goldens (`grid with data`, `cell selection
+   * highlight`) unstable run to run: a capture taken between the click and the
+   * highlight photographs a grid with no highlight, and one taken after
+   * photographs a grid with it. Fixing the RACE is what makes the end state a
+   * function of the selection; the capture helper then only has to wait for it
+   * (see waitForGridStable in e2e/helpers/screenshots.ts).
+   *
+   * `cancelled` is checked after EVERY await, before every write — not once at
+   * the top — because each await is a point at which a newer selection can have
+   * superseded this one.
+   */
   useEffect(() => {
     // Skip cell content fetch when chart series formula is displayed
     if (chartSeriesFormula) return;
 
     if (!editing && state.selection) {
       const { startRow, startCol, endRow, endCol } = state.selection;
+      let cancelled = false;
 
       const fetchCellContent = async () => {
         try {
           const mergeInfo = await getMergeInfo(startRow, startCol);
+          if (cancelled) return;
 
           let cellRow = startRow;
           let cellCol = startCol;
@@ -57,6 +94,7 @@ export function FormulaInput(): React.ReactElement {
             cellCol = mergeInfo.startCol;
           } else {
             const activeMerge = await getMergeInfo(endRow, endCol);
+            if (cancelled) return;
             if (activeMerge) {
               cellRow = activeMerge.startRow;
               cellCol = activeMerge.startCol;
@@ -68,6 +106,7 @@ export function FormulaInput(): React.ReactElement {
 
           // Check if this cell is a non-origin spill cell
           const spillRanges = await getSpillRanges();
+          if (cancelled) return;
           let spillOrigin: { row: number; col: number } | null = null;
           for (const sr of spillRanges) {
             if (
@@ -83,6 +122,7 @@ export function FormulaInput(): React.ReactElement {
           if (spillOrigin) {
             // Non-origin spill cell: show the origin cell's formula in grey
             const originCell = await getCell(spillOrigin.row, spillOrigin.col);
+            if (cancelled) return;
             const formula = originCell?.formula || "";
             // Show in R1C1 (relative to the origin cell) when that style is active.
             setDisplayValue(
@@ -98,8 +138,9 @@ export function FormulaInput(): React.ReactElement {
               dispatch(clearFormulaReferences());
             }
           } else {
-            setIsSpillRef(false);
             const cell = await getCell(cellRow, cellCol);
+            if (cancelled) return;
+            setIsSpillRef(false);
             if (cell) {
               let content = cell.formula || cell.display || "";
 
@@ -110,12 +151,14 @@ export function FormulaInput(): React.ReactElement {
                     isSheetProtected(),
                     getCellProtection(cellRow, cellCol),
                   ]);
+                  if (cancelled) return;
                   if (sheetProt && cellProt.formulaHidden) {
                     content = "";
                   }
                 } catch {
                   // Ignore errors - show formula as fallback
                 }
+                if (cancelled) return;
               }
 
               // Show the formula in R1C1 notation when that reference style is
@@ -139,6 +182,7 @@ export function FormulaInput(): React.ReactElement {
             }
           }
         } catch (error) {
+          if (cancelled) return;
           console.error("[FormulaInput] Failed to fetch cell content:", error);
           setDisplayValue("");
           setIsSpillRef(false);
@@ -147,6 +191,9 @@ export function FormulaInput(): React.ReactElement {
       };
 
       fetchCellContent();
+      return () => {
+        cancelled = true;
+      };
     }
   }, [editing, state.selection, state.referenceStyle, dispatch, chartSeriesFormula]);
 

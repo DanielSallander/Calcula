@@ -30,27 +30,74 @@ test.describe("Core Visual Regression", () => {
     await takeStatusBarScreenshot(appPage, "core-default-statusbar");
   });
 
+  /**
+   * The block these two tests photograph, and what each cell must hold once it
+   * is written. Declared ONCE so the write and the verification cannot drift.
+   */
+  const DATA_BLOCK: Array<[ref: string, input: string, expected: string]> = [
+    ["A1", "Name", "Name"],
+    ["B1", "Value", "Value"],
+    ["C1", "Total", "Total"],
+    ["A2", "Alpha", "Alpha"],
+    ["B2", "100", "100"],
+    ["C2", "=B2*2", "200"],
+    ["A3", "Beta", "Beta"],
+    ["B3", "200", "200"],
+    ["C3", "=B3*2", "400"],
+    ["A4", "Gamma", "Gamma"],
+    ["B4", "300", "300"],
+    ["C4", "=SUM(B2:B4)", "600"],
+  ];
+
+  /**
+   * Fail if the block is not EXACTLY what the golden is supposed to show.
+   *
+   * WHY THIS EXISTS. `grid.setCellValue` reaches its cell by computing a canvas
+   * pixel from grid geometry, and that arithmetic drifts (measured elsewhere in
+   * this suite: a range captured as M3:T19 on one run and N3:T20 on the next).
+   * A write that lands one column over produces a grid that looks entirely
+   * plausible and differs from the golden by a whole column — a diff the next
+   * pass reads as a rendering regression. Twelve backend reads turn that into a
+   * named failure at the point of the mistake.
+   *
+   * It also covers the formulas: C2/C3/C4 are the only cells here whose value
+   * arrives from a recalculation, so asserting their RESULTS is what proves the
+   * capture is not racing the round trip rather than merely hoping it is not.
+   */
+  async function expectDataBlock(grid: any): Promise<void> {
+    for (const [ref, , expected] of DATA_BLOCK) {
+      await expect
+        .poll(async () => await grid.getCellDisplayValue(ref), {
+          timeout: 10_000,
+          message: `${ref} is not what this golden is supposed to photograph`,
+        })
+        .toBe(expected);
+    }
+  }
+
   test("grid with data - basic cell content", async ({ grid, appPage }) => {
     await appPage.keyboard.press("Control+Home");
     await appPage.waitForTimeout(300);
 
-    // Enter some sample data
-    await grid.setCellValue("A1", "Name");
-    await grid.setCellValue("B1", "Value");
-    await grid.setCellValue("C1", "Total");
-    await grid.setCellValue("A2", "Alpha");
-    await grid.setCellValue("B2", "100");
-    await grid.setCellValue("C2", "=B2*2");
-    await grid.setCellValue("A3", "Beta");
-    await grid.setCellValue("B3", "200");
-    await grid.setCellValue("C3", "=B3*2");
-    await grid.setCellValue("A4", "Gamma");
-    await grid.setCellValue("B4", "300");
-    await grid.setCellValue("C4", "=SUM(B2:B4)");
+    for (const [ref, input] of DATA_BLOCK) {
+      await grid.setCellValue(ref, input);
+    }
 
-    // Click A1 to deselect editing state
-    await grid.clickCell("A1");
-    await appPage.waitForTimeout(500);
+    // The data is the subject of the picture, so it is asserted before the
+    // picture is taken — including the three recalculated cells.
+    await expectDataBlock(grid);
+
+    // Park the selection on A1 through the NAME BOX, not `clickCell`. Same
+    // reasoning as the editing-mode golden below: the Name Box is a real DOM
+    // input that selects exactly A1 every time, where a canvas click computes a
+    // pixel and can leave an ambient range selection behind. The selection
+    // rectangle is the largest block of pixels in a grid capture, so recording
+    // after a `clickCell` freezes one side of a coin flip into the golden.
+    await grid.navigateTo("A1");
+    expect(
+      (await grid.getNameBoxValue()).toUpperCase(),
+      "the golden is a picture of the block with A1 selected"
+    ).toBe("A1");
 
     await takeGridScreenshot(appPage, "core-data-entry");
   });
@@ -59,14 +106,42 @@ test.describe("Core Visual Regression", () => {
     await appPage.keyboard.press("Control+Home");
     await appPage.waitForTimeout(300);
 
-    // Single cell selection
-    await grid.clickCell("C3");
-    await appPage.waitForTimeout(300);
+    // This test photographs the selection over the block the previous test
+    // wrote. It does NOT write it, so it must not assume it: a run that starts
+    // here (`--grep`, a retry, a reordering) would otherwise photograph an
+    // empty grid and compare it against a golden full of data.
+    await expectDataBlock(grid);
+
+    // Single cell selection — via the Name Box, for the reason above.
+    await grid.navigateTo("C3");
+    expect((await grid.getNameBoxValue()).toUpperCase()).toBe("C3");
     await takeGridScreenshot(appPage, "core-selection-single");
 
-    // Range selection
-    await grid.selectRange("A1", "C4");
+    // Range selection. `selectRange` starts from a canvas click, so pin the
+    // anchor with the Name Box first and let Shift+arrows do the extension —
+    // the same keyboard path a user has, and one that cannot land on the wrong
+    // cell. Assert the result before photographing it.
+    await grid.navigateTo("A1");
+    await grid.shiftArrowSelect(3, 2); // A1 -> C4
     await appPage.waitForTimeout(300);
+    const selection = await appPage.evaluate(() => {
+      const gs = (window as unknown as Record<string, any>).__CALCULA_GRID_STATE__;
+      const s = gs?.selection;
+      return s
+        ? { startRow: s.startRow, startCol: s.startCol, endRow: s.endRow, endCol: s.endCol }
+        : null;
+    });
+    expect(selection, "the grid state must expose the selection this golden shows").not.toBeNull();
+    expect(
+      {
+        top: Math.min(selection!.startRow, selection!.endRow),
+        left: Math.min(selection!.startCol, selection!.endCol),
+        bottom: Math.max(selection!.startRow, selection!.endRow),
+        right: Math.max(selection!.startCol, selection!.endCol),
+      },
+      "the golden is a picture of A1:C4 selected"
+    ).toEqual({ top: 0, left: 0, bottom: 3, right: 2 });
+
     await takeGridScreenshot(appPage, "core-selection-range");
   });
 
