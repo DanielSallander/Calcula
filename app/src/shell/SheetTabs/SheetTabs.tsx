@@ -128,11 +128,23 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   }, []);
 
   // Reload sheets whenever a SHEET_CHANGED event fires from outside
-  // (e.g., when a sheet is added from CreatePivotDialog)
+  // (e.g., when a sheet is added from CreatePivotDialog), or when the sheet
+  // COLLECTION itself changed.
+  //
+  // §3cd: "sheets:refresh" is the `sheets` domain's event. An MCP tool that
+  // adds, renames, moves or deletes a sheet runs entirely in the backend, with
+  // no frontend call to return from -- it used to emit a bespoke Tauri event of
+  // this same name that NOTHING in the app had ever listened to, so an
+  // AI-created sheet simply never appeared in the tab bar. It now announces the
+  // domain and the Shell translator dispatches this.
   useEffect(() => {
     const handleExternalSheetChange = () => { loadSheets(); };
     window.addEventListener("app:sheet-changed", handleExternalSheetChange);
-    return () => window.removeEventListener("app:sheet-changed", handleExternalSheetChange);
+    window.addEventListener("sheets:refresh", handleExternalSheetChange);
+    return () => {
+      window.removeEventListener("app:sheet-changed", handleExternalSheetChange);
+      window.removeEventListener("sheets:refresh", handleExternalSheetChange);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

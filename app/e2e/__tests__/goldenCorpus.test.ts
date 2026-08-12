@@ -28,8 +28,17 @@ import {
   CHROME_GREEN_SRGB,
   CHROME_GREEN_DISPLAY,
   ACCENT_SRGB,
+  readPressedAccentFill,
+  describeStaleRibbonState,
+  staleProductStateFor,
+  EMPTY_DOCUMENT_GOLDENS,
+  STALE_PRODUCT_STATE_GOLDENS,
+  PRESSED_ACCENT_FLOOR,
   type GoldenReading,
   type MisRecordedCorpus,
+  type RibbonStateReading,
+  type StaleProductStateGolden,
+  type EmptyDocumentGolden,
 } from "../goldenCorpus";
 
 // vitest's root is `app/`, and this file is loaded through a transform whose
@@ -57,6 +66,18 @@ const readings: GoldenReading[] = walkPngs(E2E_ROOT)
     const image = decodePng(readFileSync(full));
     return { file, ...readHairline(image), ...readColourProfile(image) };
   })
+  .sort((a, b) => a.file.localeCompare(b.file));
+
+/**
+ * The PRODUCT-STATE axis, read off the same bytes. Kept separate from
+ * `readings` because it has a different population -- only the goldens that
+ * contain a Home ribbon can hold a latched toggle -- and a different remedy.
+ */
+const ribbonStates: RibbonStateReading[] = walkPngs(E2E_ROOT)
+  .map((full) => ({
+    file: relative(E2E_ROOT, full).split(sep).join("/"),
+    pressedAccentPixels: readPressedAccentFill(decodePng(readFileSync(full))),
+  }))
   .sort((a, b) => a.file.localeCompare(b.file));
 
 describe("the committed golden corpus", () => {
@@ -376,3 +397,271 @@ describe("the PNG decoder", () => {
     }
   });
 });
+// ===========================================================================
+// THE THIRD AXIS: which BUILD took the picture, not which machine
+// ===========================================================================
+// dpr and colour profile both ask about the display. Neither can see a golden
+// that photographs a product state the application no longer produces, which is
+// what BUG-0029 is: `tests/.../empty-grid-full-window.png` still shows the
+// latched Center-Vertically toggle that BUG-0028 removed from an empty
+// workbook, because the pass that fixed the product re-recorded the `visual`
+// project and no other.
+
+/** Calls that put something in a cell, i.e. that end the "empty workbook" claim. */
+const WRITE_CALLS = [
+  "setCellValueDirect",
+  "setCellValue",
+  "typeIntoCell",
+  "keyboard.type(",
+  "applyFormatting",
+  "insertRow",
+  "insertColumn",
+  "pasteInto",
+];
+
+function readSpec(spec: string): string {
+  return readFileSync(join(E2E_ROOT, ...spec.split("/")), "utf8");
+}
+
+/** The `test(...)` block that contains `capture`, sliced out of the spec source. */
+function testBlockFor(source: string, capture: string): string {
+  const at = source.indexOf(`"${capture}"`);
+  if (at < 0) return "";
+  const starts = [...source.matchAll(/\n\s*test\(/g)].map((m) => m.index ?? 0);
+  const start = starts.filter((i) => i < at).pop();
+  if (start === undefined) return "";
+  const end = starts.find((i) => i > at) ?? source.length;
+  return source.slice(start, end);
+}
+
+/** The file's `test.beforeEach` body, near enough for a token scan. */
+function beforeEachOf(source: string): string {
+  const at = source.indexOf("test.beforeEach(");
+  return at < 0 ? "" : source.slice(at, at + 600);
+}
+
+describe("the golden corpus and the build that produced it", () => {
+  it("shows an UNLIT Home tab on every golden taken on a brand-new workbook", () => {
+    const message = describeStaleRibbonState(ribbonStates);
+    expect(message, message ?? "").toBeNull();
+  });
+
+  it("measures a latched toggle at all - the reader is not returning zero everywhere", () => {
+    // Non-vacuity, and the exact shape the dpr axis lacked for a day: if
+    // nothing in the corpus ever measured LIT, the case above would be passing
+    // over a reader that cannot see its own subject.
+    const lit = ribbonStates.filter((r) => r.pressedAccentPixels > PRESSED_ACCENT_FLOOR);
+    expect(
+      lit.length,
+      "no committed golden holds the latched-toggle fill, so the product-state " +
+        "census is checking nothing",
+    ).toBeGreaterThan(5);
+
+    // And the two sides are separated by an order of magnitude, which is what
+    // makes PRESSED_ACCENT_FLOOR a measurement rather than a guess.
+    const unlit = ribbonStates
+      .filter((r) => r.pressedAccentPixels > 0 && r.pressedAccentPixels <= PRESSED_ACCENT_FLOOR)
+      .map((r) => r.pressedAccentPixels);
+    expect(Math.max(...unlit)).toBeLessThan(
+      Math.min(...lit.map((r) => r.pressedAccentPixels)) / 4,
+    );
+  });
+
+  it.each(EMPTY_DOCUMENT_GOLDENS)(
+    "$capture really is captured on an empty workbook - the population cannot lie",
+    (golden: EmptyDocumentGolden) => {
+      // The declared population is checked against the SPEC, so an entry cannot
+      // claim a populated capture is empty and cannot survive its test being
+      // rewritten to write a cell first.
+      expect(
+        ribbonStates.some((r) => r.file === golden.file),
+        `${golden.file} is declared as an empty-document golden but no such file exists`,
+      ).toBe(true);
+
+      const source = readSpec(golden.spec);
+      const block = testBlockFor(source, golden.capture);
+      expect(
+        block.length,
+        `no test( ... ) block in ${golden.spec} contains the capture "${golden.capture}"`,
+      ).toBeGreaterThan(0);
+
+      const resetAt = block.indexOf("resetToNewWorkbook(");
+      const inBeforeEach = beforeEachOf(source).includes("resetToNewWorkbook(");
+      expect(
+        resetAt >= 0 || inBeforeEach,
+        `"${golden.capture}" is declared empty-document, but neither its test ` +
+          `nor ${golden.spec}'s beforeEach calls resetToNewWorkbook`,
+      ).toBe(true);
+
+      const captureAt = block.indexOf(`"${golden.capture}"`);
+      const between = block.slice(resetAt >= 0 ? resetAt : 0, captureAt);
+      const writes = WRITE_CALLS.filter((w) => between.includes(w));
+      expect(
+        writes,
+        `"${golden.capture}" writes to the grid before it is captured ` +
+          `(${writes.join(", ")}), so it is NOT an empty-document golden`,
+      ).toEqual([]);
+    },
+  );
+
+  it.each(STALE_PRODUCT_STATE_GOLDENS)(
+    "stale-state quarantine $ledgerId still describes a real, un-re-recorded golden",
+    (entry: StaleProductStateGolden) => {
+      const reading = ribbonStates.find((r) => r.file === entry.file);
+      expect(
+        reading,
+        `${entry.ledgerId} names ${entry.file}, which no longer exists`,
+      ).toBeDefined();
+      expect(
+        reading?.pressedAccentPixels,
+        `${entry.ledgerId} claims ${entry.file} measures ${entry.pressedAccentPixels} ` +
+          `pressed-accent pixels. It does not. If it was re-recorded against the ` +
+          `fixed build, DELETE the entry - a quarantine that has stopped ` +
+          `describing a real defect is a blanket.`,
+      ).toBe(entry.pressedAccentPixels);
+      expect(
+        EMPTY_DOCUMENT_GOLDENS.some((g) => g.file === entry.file),
+        `${entry.ledgerId} quarantines a golden that is not in the declared ` +
+          `empty-document population, so the rule it suppresses never applied to it`,
+      ).toBe(true);
+      expect(entry.reason.length).toBeGreaterThan(80);
+      expect(entry.ledgerId).toMatch(/^BUG-\d{4}$/);
+    },
+  );
+});
+
+describe("the stale-product-state detector actually fires", () => {
+  const population: EmptyDocumentGolden[] = [
+    {
+      file: "visual/__screenshots__/v.spec.ts/fresh.png",
+      spec: "visual/v.spec.ts",
+      capture: "fresh",
+    },
+    {
+      file: "visual/__screenshots__/v.spec.ts/known.png",
+      spec: "visual/v.spec.ts",
+      capture: "known",
+    },
+  ];
+
+  it("says nothing when every empty-document golden reads unlit", () => {
+    expect(
+      describeStaleRibbonState(
+        [
+          { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 36 },
+          { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 23 },
+        ],
+        population,
+        [],
+      ),
+    ).toBeNull();
+  });
+
+  it("names the stray FILE, its count, and why the other two axes cannot see it", () => {
+    const message = describeStaleRibbonState(
+      [
+        { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 546 },
+        { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 23 },
+      ],
+      population,
+      [],
+    );
+    expect(message).toContain("visual/__screenshots__/v.spec.ts/fresh.png");
+    expect(message).toContain("546");
+    expect(message).toContain("which BUILD");
+    expect(message).toContain("--update-snapshots=changed");
+    // The unlit sibling must NOT be named: a message that lists the whole
+    // corpus is the blanket this program keeps refusing.
+    expect(message).not.toContain("known.png");
+  });
+
+  it("goes quiet for a stray a quarantine names, and only for that one", () => {
+    const quarantine: StaleProductStateGolden[] = [
+      {
+        file: "visual/__screenshots__/v.spec.ts/known.png",
+        ledgerId: "BUG-9999",
+        reason: "x".repeat(90),
+        pressedAccentPixels: 546,
+      },
+    ];
+    const message = describeStaleRibbonState(
+      [
+        { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 546 },
+        { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 546 },
+      ],
+      population,
+      quarantine,
+    );
+    expect(message).toContain("fresh.png");
+    expect(message).not.toContain("known.png");
+    expect(
+      staleProductStateFor("visual/__screenshots__/v.spec.ts/known.png", quarantine),
+    ).toBeDefined();
+    expect(
+      staleProductStateFor("visual/__screenshots__/v.spec.ts/fresh.png", quarantine),
+    ).toBeUndefined();
+  });
+
+  it("ignores a lit golden that is NOT declared empty-document - a populated cell may latch", () => {
+    // The rule is about empty workbooks, not about latched toggles. A capture
+    // taken on a cell that exists SHOULD show the effective format, and six
+    // committed goldens legitimately do.
+    expect(
+      describeStaleRibbonState(
+        [{ file: "tests/__screenshots__/t.spec.ts/populated.png", pressedAccentPixels: 546 }],
+        population,
+        [],
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("the pressed-accent reader", () => {
+  it("counts the latched fill and ignores the neutrals the other axes live on", () => {
+    const solid = (rgb: [number, number, number], n: number) => {
+      const buf = new Uint8Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        buf[i * 3] = rgb[0];
+        buf[i * 3 + 1] = rgb[1];
+        buf[i * 3 + 2] = rgb[2];
+      }
+      return { width: n, height: 1, rgb: buf };
+    };
+    expect(readPressedAccentFill(solid([222, 245, 237], 100))).toBe(100);
+    // Within tolerance (the button's blended edge) still counts.
+    expect(readPressedAccentFill(solid([221, 245, 237], 40))).toBe(40);
+    // The hairline constants and white must not.
+    expect(readPressedAccentFill(solid([241, 241, 241], 100))).toBe(0);
+    expect(readPressedAccentFill(solid([226, 226, 226], 100))).toBe(0);
+    expect(readPressedAccentFill(solid([255, 255, 255], 100))).toBe(0);
+    // Nor the accent at full strength - that is an ICON, not a latched fill.
+    expect(readPressedAccentFill(solid([16, 185, 129], 100))).toBe(0);
+  });
+
+  it("reads the real pair: an EMPTY-workbook capture is unlit, a POPULATED one is lit", () => {
+    // THIS CASE USED TO READ THE BUG-0029 FILE AS ITS LIT EXAMPLE, and that was
+    // a mistake with a shelf life: `empty-grid-full-window.png` was re-recorded
+    // on 2026-08-12 and now measures 36, so the case failed the moment the bug
+    // it was built on was FIXED. A non-vacuity example must be something the
+    // corpus holds permanently, not the defect of the day.
+    //
+    // `sheets-default-tabs` is the right lit example and it is lit LEGITIMATELY:
+    // its capture follows a `setCellValue`, so the cell exists and its effective
+    // format genuinely is middle-aligned. That is the distinction the whole axis
+    // rests on -- the rule is "no golden taken on an EMPTY workbook may show a
+    // latched toggle", not "no golden may" -- so pinning it here means the
+    // reader is proved able to see BOTH sides on files that will still be in the
+    // tree next year.
+    const read = (p: string) =>
+      readPressedAccentFill(decodePng(readFileSync(join(E2E_ROOT, ...p.split("/")))));
+    const empty = read("visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png");
+    const populated = read(
+      "visual/__screenshots__/core-visual.spec.ts/sheets-default-tabs.png",
+    );
+    expect(empty).toBeLessThan(PRESSED_ACCENT_FLOOR);
+    expect(populated).toBeGreaterThan(PRESSED_ACCENT_FLOOR);
+    // Both are 1280x800 captures of the same window; the gap is the toggle.
+    expect(populated - empty).toBeGreaterThan(400);
+  });
+});
+

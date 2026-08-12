@@ -18,6 +18,7 @@ const matching = {
   devicePixelRatio: CAPTURE_ENVIRONMENT.devicePixelRatio,
   gridCanvasLayer: { ...CAPTURE_ENVIRONMENT.gridCanvasLayer },
   viewport: { ...CAPTURE_ENVIRONMENT.viewport },
+  compositedCanvasLayers: CAPTURE_ENVIRONMENT.compositedCanvasLayers,
 };
 
 describe("capture environment guard", () => {
@@ -75,5 +76,61 @@ describe("capture environment guard", () => {
     expect(
       describeCaptureEnvironmentMismatch({ ...matching, gridCanvasLayer: null }),
     ).toBeNull();
+  });
+
+  // ---------------------------------------------------------------------------
+  // THE THIRD AXIS — a COMPOSITED CANVAS, which is what BUG-0028 was.
+  //
+  // The dpr and colour-profile arms above are both properties of the DISPLAY.
+  // This one is a property of the COMPOSITOR, and it is the only axis of the
+  // three that the app itself can flip at runtime: reading the grid canvas back
+  // often enough (the `rendering` capture seam does) makes Chromium drop GPU
+  // acceleration for it, which un-composites the canvas, which un-composites
+  // every overlay drawn over it, which switches those overlays' text from
+  // grayscale back to LCD antialiasing.
+  // ---------------------------------------------------------------------------
+
+  it("names a COMPOSITED CANVAS, the antialiasing it changes, and the ledger id", () => {
+    const msg = describeCaptureEnvironmentMismatch({
+      ...matching,
+      compositedCanvasLayers: 1,
+    });
+    expect(msg).not.toBeNull();
+    // What was read, and what the corpus assumes.
+    expect(msg).toContain("1 canvas(es) are COMPOSITED");
+    expect(msg).toContain(String(CAPTURE_ENVIRONMENT.compositedCanvasLayers));
+    // The MECHANISM, in the order it actually runs.
+    expect(msg).toContain("overlay");
+    expect(msg).toContain("LCD");
+    expect(msg).toContain("GRAYSCALE");
+    // The ledger entry, so the next reader finds the measurement.
+    expect(msg).toContain("BUG-0028");
+    // The remedy, and the one that must NOT be reached for.
+    expect(msg).toContain("--disable-accelerated-2d-canvas");
+    expect(msg).toContain("do NOT re-record");
+    // It must not also blame the display, which is correct in this reading.
+    expect(msg).not.toContain("devicePixelRatio is");
+  });
+
+  it("treats an UNREADABLE layer tree as a failure, not as agreement", () => {
+    // A guard that cannot run is not a guard that passed. `null` is what the
+    // helper returns when no CDP session or no LayerTree domain is available.
+    const msg = describeCaptureEnvironmentMismatch({
+      ...matching,
+      compositedCanvasLayers: null,
+    });
+    expect(msg).not.toBeNull();
+    expect(msg).toContain("could not be read");
+    expect(msg).toContain("unverified");
+  });
+
+  it("stays silent when the reading simply does not carry the axis", () => {
+    // `takeDialogScreenshot` and `takeRibbonScreenshot` call the guard on a
+    // reading assembled without a CDP session in some callers' tests; an ABSENT
+    // field is not the same claim as an unreadable layer tree, and must not be
+    // reported as one.
+    const { compositedCanvasLayers, ...withoutAxis } = matching;
+    void compositedCanvasLayers;
+    expect(describeCaptureEnvironmentMismatch(withoutAxis)).toBeNull();
   });
 });

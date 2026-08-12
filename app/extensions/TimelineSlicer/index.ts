@@ -28,6 +28,7 @@ import {
   resetSelectionHandlerState,
   getSelectedTimelineIds,
   isTimelineSelected,
+  dropTimelineFromSelection,
   broadcastSelectedTimelines,
 } from "./handlers/selectionHandler";
 
@@ -500,11 +501,15 @@ function activate(context: ExtensionContext): void {
   // ribbon tab is removed.
   // -----------------------------------------------------------------------
 
+  // §3cd: the event now comes from `refreshCache`'s id diff rather than from
+  // the frontend delete route, so it fires for a BACKEND CASCADE too -- delete
+  // the pivot a timeline is sourced from, or the sheet it sits on, and this is
+  // what takes the contextual tab down.
   const handleTimelineDeleted = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     const deletedId = detail?.timelineId as number | undefined;
-    if (deletedId != null && isTimelineSelected(deletedId)) {
-      deselectTimeline();
+    if (deletedId != null) {
+      dropTimelineFromSelection(deletedId);
     }
   };
   window.addEventListener(TimelineSlicerEvents.TIMELINE_DELETED, handleTimelineDeleted);
@@ -522,6 +527,18 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("pivot:refresh", handlePivotRefresh);
   cleanupFunctions.push(() => {
     window.removeEventListener("pivot:refresh", handlePivotRefresh);
+  });
+
+  // §3cd: the `slicer` DOMAIN covers BOTH slicer families -- `ObjectKind::Slicer`
+  // and `ObjectKind::TimelineSlicer` map to it in object_deps.rs, because a
+  // timeline whose pivot is gone is the same ghost overlay a canvas slicer is.
+  // The Shell translator fans that domain out to "timelineslicers:refresh" as
+  // well as "slicers:refresh"; until this listener existed, the domain's promise
+  // held only by accident, because every route that announced "slicer" happened
+  // to announce "pivot" too.
+  window.addEventListener("timelineslicers:refresh", handlePivotRefresh);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("timelineslicers:refresh", handlePivotRefresh);
   });
 
   // -----------------------------------------------------------------------

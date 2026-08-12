@@ -83,11 +83,15 @@ export const LIVE_PERSIST_DEBOUNCE_MS = 400;
 export type LivePersistOutcome =
   /** Buffer and store already agreed; nothing was written. */
   | { status: "unchanged" }
-  /** Written, and the stored bytes ARE the buffer bytes. */
-  | { status: "saved"; stored: string }
+  /** Written, and the stored bytes ARE the buffer bytes. `input` is the buffer
+   *  this pass READ — which is not necessarily the buffer now, because a write
+   *  is not instantaneous and the author can type straight through one. Any
+   *  caller that acts on the buffer must compare against `input` first. */
+  | { status: "saved"; input: string; stored: string }
   /** Written after a TypeScript -> JavaScript compile: the stored bytes are NOT
-   *  the buffer bytes, so the caller must show the author what was stored. */
-  | { status: "compiled"; stored: string }
+   *  the buffer bytes, so the caller must show the author what was stored —
+   *  unless `input` is no longer what is on screen (see above). */
+  | { status: "compiled"; input: string; stored: string }
   /** A compile would have been needed and this pass is not allowed to rewrite
    *  the author's text (rule 4). Nothing was written; the buffer stays unsaved. */
   | { status: "deferred"; message: string }
@@ -218,6 +222,29 @@ export class LiveModulePersister {
   }
 
   /**
+   * The buffer was REPLACED PROGRAMMATICALLY with text that is already stored —
+   * the compiled JavaScript this persister has just written, put on screen
+   * because the author must be looking at the text that actually runs.
+   *
+   * It is not `note`: nothing was typed and nothing is owed to the store. But
+   * the mirror has to be told, or it goes on comparing the store against text
+   * that left the screen — and then `hasUnsavedEdits` is permanently true for
+   * every TypeScript module, which would strand the live indicator on "Saving…"
+   * for the rest of the session and make every idle pass re-write the same
+   * bytes. A pending timer is dropped only when the adopted text IS the stored
+   * text; anything else would discard a write that is still owed.
+   */
+  adopt(docId: string, source: string): void {
+    const entry = this.docs.get(docId);
+    if (!entry) return;
+    entry.buffer = source;
+    if (source === entry.stored && entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+  }
+
+  /**
    * Persist NOW and report what happened.
    *
    * `allowTransform` is the caller saying "this is an explicit gesture, you may
@@ -335,8 +362,8 @@ export class LiveModulePersister {
       const live = this.docs.get(docId);
       if (live) live.stored = gate.javascript;
       return gate.transformed
-        ? { status: "compiled", stored: gate.javascript }
-        : { status: "saved", stored: gate.javascript };
+        ? { status: "compiled", input: source, stored: gate.javascript }
+        : { status: "saved", input: source, stored: gate.javascript };
     })();
 
     entry.inFlight = pass;

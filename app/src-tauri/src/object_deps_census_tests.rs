@@ -800,6 +800,551 @@ fn collect_ts_sources(dir: &std::path::Path, out: &mut Vec<String>) {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. A CASCADE THAT DELETES AN OBJECT RUNS THAT OBJECT'S OWN CASCADE  (3cd)
+// ---------------------------------------------------------------------------
+//
+// Part 3 asks, for every row, "does the owner's delete command run this row's
+// cleanup?". It never asks the next question, and the next question is where
+// three live orphans were: an object deleted AS A DEPENDENT still has
+// dependents of its own, and it goes out through a different code path from the
+// one the census checked.
+//
+// Measured, all three found by this rule and not by reading the code:
+//
+//   * `delete_sheet` deletes the CHARTS on the sheet and never ran
+//     `cascade_deleted_charts`, so every pane-control slider bound to one kept
+//     claiming to drive a chart that no longer existed.
+//   * `cascade_deleted_sources` (the table and pivot delete path) deletes
+//     SLICERS and never ran `cascade_deleted_slicers`, so deleting the table a
+//     slicer filtered left every ribbon filter still cross-filtering against
+//     it -- the 3bn orphan itself, one level down.
+//   * Neither path pruned the OBJECT SCRIPTS of what it deleted (C10: the
+//     instanceId IS the object id, so the script is inherited by whatever is
+//     minted there next).
+//
+// The rule is mechanical and reads the matrix twice: if (O -> D) DELETES D, and
+// D has its own rows that disturb an OBJECT, then O's delete command must
+// contain those rows' symbols too.
+
+/// Transitive pairs that need no code, each with the reason.
+///
+/// The standard is `OUT_OF_SCOPE`'s: a one-line argument a reviewer can
+/// disagree with. Putting a real gap here is exactly how the next orphan
+/// survives, so each entry says what makes the cleanup unnecessary rather than
+/// inconvenient.
+const TRANSITIVE_EXEMPT: &[(&str, &str, &str, &str)] = &[
+    (
+        "delete_sheet",
+        "table",
+        "clear_table_auto_filter",
+        "The table's AutoFilter is a SHEET-KEYED record, and the deleted \
+         sheet's entry is dropped wholesale by remap_sheet_keyed_stores a few \
+         lines earlier. The other half of clear_table_auto_filter -- unhiding \
+         the rows the filter hid -- is moot on rows that no longer exist.",
+    ),
+];
+
+/// Which transitive cleanups are missing, given the text of every delete
+/// command. Extracted so the self-test can drive it with a synthetic world.
+fn missing_transitive_cascades(command_text: &[(&str, &str, String)]) -> Vec<String> {
+    let exempt: BTreeSet<(&str, &str, &str)> = TRANSITIVE_EXEMPT
+        .iter()
+        .map(|(c, d, s, _)| (*c, *d, *s))
+        .collect();
+    let mut out = Vec::new();
+    for rule in DEPENDENCY_MATRIX {
+        if !matches!(
+            rule.policy,
+            DeletePolicy::Cascade | DeletePolicy::CascadeOrRebind
+        ) {
+            continue;
+        }
+        let Some(dependent) = rule.dependent_kind else {
+            continue;
+        };
+        if dependent == rule.owner {
+            continue; // a kind that cascades into its own kind cannot recurse
+        }
+        for inner in DEPENDENCY_MATRIX.iter().filter(|r| r.owner == dependent) {
+            if inner.dependent_kind.is_none() {
+                continue; // not an object; nothing paints it
+            }
+            if !matches!(
+                inner.policy,
+                DeletePolicy::Cascade | DeletePolicy::CascadeOrRebind | DeletePolicy::Prune
+            ) {
+                continue;
+            }
+            if inner.implemented_by.is_empty() || inner.implemented_by.starts_with("frontend:") {
+                continue;
+            }
+            for (command, kind, text) in command_text {
+                if *kind != rule.owner.wire_name() {
+                    continue;
+                }
+                if exempt.contains(&(command, dependent.wire_name(), inner.implemented_by)) {
+                    continue;
+                }
+                if text.contains(inner.implemented_by) {
+                    continue;
+                }
+                out.push(format!(
+                    "`{}` deletes a {} ({} -> {}), and a deleted {} owes `{}` \
+                     ({} -> {}) -- which appears nowhere in its body",
+                    command,
+                    dependent.wire_name(),
+                    rule.owner.wire_name(),
+                    rule.dependent,
+                    dependent.wire_name(),
+                    inner.implemented_by,
+                    dependent.wire_name(),
+                    inner.dependent,
+                ));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn a_cascade_that_deletes_an_object_runs_that_objects_own_cascade() {
+    let sources = read_crate_sources();
+    let bodies = all_bodies(&sources);
+    let mut command_text: Vec<(&str, &str, String)> = Vec::new();
+    for (command, kind) in DELETE_COMMANDS {
+        command_text.push((command, kind.wire_name(), body_with_one_hop(command, &bodies)));
+    }
+    let missing = missing_transitive_cascades(&command_text);
+    assert!(
+        missing.is_empty(),
+        "an object is deleted as a DEPENDENT and its own cleanup never runs:\n  \
+         {}\n\
+         \n\
+         FIX: call the named cascade from the deleting path (the shared \
+         `cascade_deleted_sources` / `cascade_sheet_removed` helpers are where \
+         it belongs, so every caller gets it), or add a row to \
+         TRANSITIVE_EXEMPT with a written reason.",
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn the_transitive_detector_actually_fires() {
+    // Against a world where nothing is implemented, the three pairs this rule
+    // was written for must all be reported. If any of them stops coming back,
+    // removing the corresponding call from the crate would pass the build.
+    let empty_world: Vec<(&str, &str, String)> = DELETE_COMMANDS
+        .iter()
+        .map(|(command, kind)| (*command, kind.wire_name(), String::new()))
+        .collect();
+    let reported = missing_transitive_cascades(&empty_world);
+    for needle in [
+        "`delete_sheet` deletes a chart",
+        "`delete_table` deletes a slicer",
+        "`delete_pivot_table` deletes a slicer",
+        "`convert_to_range` deletes a slicer",
+    ] {
+        assert!(
+            reported.iter().any(|r| r.starts_with(needle)),
+            "the transitive detector did not fire for `{}`. Reported: {:?}",
+            needle,
+            reported
+        );
+    }
+
+    // The exemption really exempts (and only the pair it names).
+    assert!(
+        !reported
+            .iter()
+            .any(|r| r.contains("`delete_sheet`") && r.contains("clear_table_auto_filter")),
+        "TRANSITIVE_EXEMPT is not being honoured"
+    );
+
+    // And a world where every symbol is present reports nothing, so the rule
+    // discriminates rather than always failing.
+    let full_world: Vec<(&str, &str, String)> = DELETE_COMMANDS
+        .iter()
+        .map(|(command, kind)| {
+            (
+                *command,
+                kind.wire_name(),
+                DEPENDENCY_MATRIX
+                    .iter()
+                    .map(|r| r.implemented_by)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
+        .collect();
+    assert!(
+        missing_transitive_cascades(&full_world).is_empty(),
+        "the transitive rule reports gaps even when every cascade is present"
+    );
+}
+
+#[test]
+fn every_transitive_exemption_names_a_real_pair() {
+    // A stale exemption is worse than a missing one: it makes the census look
+    // complete while covering nothing.
+    let commands: BTreeSet<&str> = DELETE_COMMANDS.iter().map(|(n, _)| *n).collect();
+    let symbols: BTreeSet<&str> = DEPENDENCY_MATRIX.iter().map(|r| r.implemented_by).collect();
+    let kinds: BTreeSet<&str> = ObjectKind::ALL.iter().map(|k| k.wire_name()).collect();
+    for (command, dependent, symbol, reason) in TRANSITIVE_EXEMPT {
+        assert!(commands.contains(command), "exemption names no such command: {}", command);
+        assert!(kinds.contains(dependent), "exemption names no such kind: {}", dependent);
+        assert!(symbols.contains(symbol), "exemption names no such cascade: {}", symbol);
+        assert!(
+            reason.len() > 40,
+            "the exemption for {}/{} is not argued",
+            command,
+            symbol
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4. EVERY BACKEND-INITIATED CASCADE ANNOUNCES ITSELF  (3cd)
+// ---------------------------------------------------------------------------
+//
+// Part 3 proves the cascade RAN. It says nothing about whether anything on
+// screen was TOLD, and every object this matrix cascades into lives in a
+// frontend store that caches its own objects and paints its own overlay: a
+// slicer the backend deleted goes on rendering, and on claiming the pointer
+// events over the cells underneath, until that store re-reads.
+//
+// WHERE THE BOUNDARY IS, AND WHY IT IS THERE. A `#[tauri::command]` is invoked
+// BY the frontend, so the frontend route that called it announces on the way
+// back -- that half is `cascadeAnnouncementCensus.test.ts`, and it is not
+// re-checked here. What has no frontend call to return from is a mutation
+// started INSIDE the backend: the MCP tool surface, which an AI client drives
+// directly. Those had a scattering of bespoke per-kind Tauri events instead
+// ("charts:refresh", "tables:refresh", "pivots:refresh",
+// "named-ranges:refresh", "sheets:refresh"), none of which knew anything about
+// cascades -- an AI deleting a table left the slicers bound to it painting, the
+// exact 3bn wedge -- and one of which, "sheets:refresh", NOTHING in the app had
+// ever listened to, so an AI-created sheet never appeared in the tab bar.
+//
+// They all now call `object_deps::announce_cascade`, which derives the domain
+// list from DEPENDENCY_MATRIX itself.
+
+/// The symbols that mark "this code path runs an object cascade".
+///
+/// Read out of the matrix rather than listed: a row that DISTURBS a dependent
+/// OBJECT (`dependent_kind` is set) and names a backend symbol is exactly a
+/// path whose result some frontend store is caching. Rows whose dependent is a
+/// formula, a scheduler job or a capability grant are not object cascades and
+/// do not belong here -- nothing paints them.
+fn object_cascade_symbols() -> BTreeSet<&'static str> {
+    DEPENDENCY_MATRIX
+        .iter()
+        .filter(|r| r.dependent_kind.is_some())
+        .filter(|r| {
+            matches!(
+                r.policy,
+                DeletePolicy::Cascade | DeletePolicy::CascadeOrRebind | DeletePolicy::Prune
+            )
+        })
+        .filter(|r| !r.implemented_by.is_empty() && !r.implemented_by.starts_with("frontend:"))
+        .map(|r| r.implemented_by)
+        .collect()
+}
+
+/// Which MCP functions reach an object cascade WITHOUT announcing it.
+///
+/// Extracted so the self-test can drive it with a synthetic module: a detector
+/// that only ever runs against passing input is a detector nobody has seen
+/// fire.
+///
+/// `reach` is the body plus ONE delegation hop (the MCP wrapper is a thin shell
+/// over the real command, and by design shares its NAME with it -- `all_bodies`
+/// keeps both under that name, so the wrapper's "root" already contains the
+/// command it wraps). `own` is the wrapper's own text only: the announcement
+/// must be IN the MCP function, or the Tauri command it delegates to would
+/// vouch for it, and that command never announces because it does not need to.
+fn unannounced_backend_cascades(
+    functions: &[(String, String, String)],
+    symbols: &BTreeSet<&'static str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, own, reach) in functions {
+        let hit = symbols
+            .iter()
+            .find(|sym| reach.contains(&format!("{}(", sym)));
+        let Some(symbol) = hit else { continue };
+        if own.contains("announce_cascade(") {
+            continue;
+        }
+        out.push(format!(
+            "{}: reaches the cascade `{}` and never calls announce_cascade",
+            name, symbol
+        ));
+    }
+    out.sort();
+    out
+}
+
+/// Every free function defined under `src/mcp/`, as (name, own body, one-hop).
+fn mcp_functions(
+    sources: &[(String, String)],
+    bodies: &BTreeMap<String, Vec<String>>,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for (rel, text) in sources {
+        if !rel.starts_with("mcp/") {
+            continue;
+        }
+        for (name, own) in free_fn_bodies(text) {
+            // ONLY THE TOOL ENTRY POINTS. An announcement needs an `AppHandle`
+            // to emit through, so a private helper that has none structurally
+            // cannot make one -- `delete_chart_core` is exactly that, a body
+            // shared by the MCP tool and the Tauri command, and demanding an
+            // announcement there would be demanding the impossible in the one
+            // place it is also WRONG (the Tauri command's caller announces).
+            // The entry point that holds the handle is the one that owes it,
+            // and the non-vacuity list below pins that the four tools which
+            // destroy an object are all still seen.
+            if !own.contains("handle: &AppHandle") {
+                continue;
+            }
+            let reach = body_with_one_hop(&name, bodies);
+            out.push((format!("mcp::{}", name), own, reach));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_backend_initiated_cascade_announces_itself() {
+    let sources = read_crate_sources();
+    let bodies = all_bodies(&sources);
+    let symbols = object_cascade_symbols();
+    assert!(
+        symbols.len() >= 8,
+        "only {} object-cascade symbols derived from the matrix; the derivation \
+         is broken and this census would pass vacuously",
+        symbols.len()
+    );
+
+    let functions = mcp_functions(&sources, &bodies);
+    assert!(
+        functions.len() > 15,
+        "only {} functions found under src/mcp/ - the walk is broken, not the \
+         crate",
+        functions.len()
+    );
+
+    // NON-VACUITY. The four MCP tools that destroy a workbook object must be
+    // among the ones the scan classifies as reaching a cascade. If the scan
+    // stopped seeing them, every assertion below would pass with nothing in it.
+    let reaching: BTreeSet<&str> = functions
+        .iter()
+        .filter(|(_, _, reach)| symbols.iter().any(|s| reach.contains(&format!("{}(", s))))
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    for expected in [
+        "mcp::delete_table",
+        "mcp::delete_pivot",
+        "mcp::delete_sheet",
+        "mcp::delete_chart",
+    ] {
+        assert!(
+            reaching.contains(expected),
+            "`{}` is no longer seen to reach an object cascade. Either the MCP \
+             surface changed or the one-hop walk broke; a broken walk makes \
+             this census green forever. Seen: {:?}",
+            expected,
+            reaching
+        );
+    }
+
+    let gaps = unannounced_backend_cascades(&functions, &symbols);
+    assert!(
+        gaps.is_empty(),
+        "backend-initiated mutations that run a cascade and tell nobody:\n  {}\n\
+         \n\
+         FIX: call `crate::object_deps::announce_cascade(handle, \
+         ObjectKind::...)` after the mutation. Nothing on the frontend called \
+         these, so nothing on the frontend will announce for them, and the \
+         dependent's store keeps its object, paints its overlay and swallows \
+         the clicks meant for the cells underneath (3bn).",
+        gaps.join("\n  ")
+    );
+}
+
+#[test]
+fn the_backend_announcement_detector_actually_fires() {
+    let symbols = object_cascade_symbols();
+
+    // A function that reaches a cascade and says nothing IS reported...
+    let silent = vec![(
+        "mcp::delete_thing".to_string(),
+        "fn delete_thing() { let _ = 1; }".to_string(),
+        "fn delete_thing() { cascade_deleted_sources(&a, &b); }".to_string(),
+    )];
+    let reported = unannounced_backend_cascades(&silent, &symbols);
+    assert_eq!(
+        reported.len(),
+        1,
+        "a backend cascade with no announcement was not reported - removing an \
+         announce_cascade call would pass the build. Reported: {:?}",
+        reported
+    );
+    assert!(reported[0].contains("cascade_deleted_sources"));
+
+    // ...and the same function WITH the announcement is accepted, so the rule
+    // discriminates rather than simply always failing.
+    let announced = vec![(
+        "mcp::delete_thing".to_string(),
+        "fn delete_thing() { announce_cascade(handle, ObjectKind::Table); }".to_string(),
+        "fn delete_thing() { cascade_deleted_sources(&a, &b); }".to_string(),
+    )];
+    assert!(
+        unannounced_backend_cascades(&announced, &symbols).is_empty(),
+        "an announced cascade was still reported"
+    );
+
+    // A DELEGATE'S announcement must not vouch for the wrapper: the reach text
+    // carries it, the wrapper's own body does not.
+    let delegated = vec![(
+        "mcp::delete_thing".to_string(),
+        "fn delete_thing() { real_delete_thing(); }".to_string(),
+        "fn delete_thing() { real_delete_thing(); }\nfn real_delete_thing() { \
+         cascade_deleted_sources(&a, &b); announce_cascade(handle, x); }"
+            .to_string(),
+    )];
+    assert_eq!(
+        unannounced_backend_cascades(&delegated, &symbols).len(),
+        1,
+        "the delegate's announcement satisfied the wrapper. The Tauri command \
+         an MCP tool wraps NEVER announces (the frontend that called it does), \
+         so an announcement found through the hop is always somebody else's."
+    );
+
+    // A commented-out announcement is not an announcement - the sources this
+    // runs over are comment-stripped, so prove the stripper is what makes that
+    // true rather than luck.
+    let commented = strip_comments("fn f() {\n    // announce_cascade(handle, x);\n}\n");
+    assert!(
+        !commented.contains("announce_cascade("),
+        "comment stripping is broken; a cascade could be 'announced' by prose"
+    );
+
+    // And a function that touches NO cascade is not dragged in.
+    let unrelated = vec![(
+        "mcp::list_tables".to_string(),
+        "fn list_tables() { read_only(); }".to_string(),
+        "fn list_tables() { read_only(); }".to_string(),
+    )];
+    assert!(
+        unannounced_backend_cascades(&unrelated, &symbols).is_empty(),
+        "a read-only tool was asked to announce a cascade it does not run"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. THE DERIVED DOMAIN LIST  (3cd)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cascade_domains_are_derived_transitively_from_the_matrix() {
+    use crate::object_deps::{cascade_domains, UiDomain};
+
+    // A table delete owes the RIBBON FILTER store, and nobody wrote that down:
+    // a table cascades into its slicers, and a slicer is pruned out of every
+    // ribbon filter that cross-filters it. If the walk stopped at one level
+    // this would be {objects, slicer}.
+    let table = cascade_domains(ObjectKind::Table);
+    assert!(
+        table.contains(&"slicer") && table.contains(&"ribbonFilter"),
+        "table -> slicer -> ribbonFilter is the transitive edge this walk \
+         exists for; got {:?}",
+        table
+    );
+    assert!(
+        table.contains(&"objects"),
+        "the owner's OWN store is stale too - a backend-initiated delete has \
+         nobody to re-read it; got {:?}",
+        table
+    );
+
+    // A pivot reaches the timeline slicers as well, through the same domain the
+    // canvas slicers use.
+    let pivot = cascade_domains(ObjectKind::Pivot);
+    assert!(
+        pivot.contains(&"pivot") && pivot.contains(&"slicer") && pivot.contains(&"ribbonFilter"),
+        "got {:?}",
+        pivot
+    );
+
+    // The sheet is the widest owner in the workbook and must reach every store
+    // its cascade touches.
+    let sheet = cascade_domains(ObjectKind::Sheet);
+    for domain in ["sheets", "objects", "pivot", "slicer", "ribbonFilter"] {
+        assert!(
+            sheet.contains(&domain),
+            "deleting a sheet leaves the `{}` store stale and the walk did not \
+             report it; got {:?}",
+            domain,
+            sheet
+        );
+    }
+
+    // Pruning does NOT recurse: deleting a chart prunes the pane control that
+    // drove it, and the control SURVIVES, so the control's own dependents are
+    // untouched.
+    let chart = cascade_domains(ObjectKind::Chart);
+    assert!(chart.contains(&"paneControl"), "got {:?}", chart);
+
+    // A leaf owner announces only itself.
+    assert_eq!(cascade_domains(ObjectKind::Comment), vec!["annotations"]);
+
+    // The walk terminates on the cycles the matrix really has (a ribbon filter
+    // prunes its SIBLINGS, i.e. its own kind).
+    assert_eq!(cascade_domains(ObjectKind::RibbonFilter), vec!["ribbonFilter"]);
+
+    // Every wire name is a real domain, and `None` really is the absent one.
+    assert_eq!(UiDomain::None.wire_name(), None);
+    for kind in ObjectKind::ALL {
+        if let Some(name) = kind.ui_domain().wire_name() {
+            assert!(
+                !name.is_empty() && name.chars().all(|c| c.is_alphanumeric()),
+                "{} maps to a malformed domain name {:?}",
+                kind.wire_name(),
+                name
+            );
+        }
+    }
+}
+
+#[test]
+fn every_object_kind_declares_a_ui_domain_answer() {
+    // `ui_domain` is an exhaustive match, so the compiler already forces an
+    // answer for every variant. What it cannot force is that the answer is
+    // REACHABLE: a domain the Shell translator does not know is dropped on the
+    // floor in silence. The frontend census reads these names out of this file
+    // and looks each one up in MUTATION_DOMAIN_EVENTS; this half just pins that
+    // the kinds a cascade actually deletes are not all answered with `None`.
+    let cascaded: BTreeSet<&str> = DEPENDENCY_MATRIX
+        .iter()
+        .filter(|r| matches!(r.policy, DeletePolicy::Cascade | DeletePolicy::CascadeOrRebind))
+        .filter_map(|r| r.dependent_kind)
+        .filter(|k| k.ui_domain().wire_name().is_some())
+        .map(|k| k.wire_name())
+        .collect();
+    for expected in ["slicer", "timelineSlicer", "chart", "table", "pivot"] {
+        assert!(
+            cascaded.contains(expected),
+            "`{}` is cascade-deleted by some owner but answers UiDomain::None - \
+             nothing would ever refresh the store that paints it. Got {:?}",
+            expected,
+            cascaded
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // THE DETECTOR ACTUALLY FIRES
 // ---------------------------------------------------------------------------
 

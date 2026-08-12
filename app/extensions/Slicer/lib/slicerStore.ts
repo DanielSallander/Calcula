@@ -68,9 +68,10 @@ export async function createSlicerAsync(
 export async function deleteSlicerAsync(slicerId: string): Promise<boolean> {
   try {
     await api.deleteSlicer(slicerId);
-    itemsCache.delete(slicerId);
+    // SLICER_DELETED is NOT dispatched here. `refreshCache` diffs the id set
+    // and announces every slicer that went away, whatever removed it — see its
+    // doc comment for the defect that split (§3cd).
     await refreshCache();
-    window.dispatchEvent(new CustomEvent(SlicerEvents.SLICER_DELETED, { detail: { slicerId } }));
     // §3bn: ribbon filters name canvas slicers in crossFilterSlicerTargets, and
     // the backend just pruned this one out of them. The Controls pane caches
     // those filters, so without the announcement it keeps a cross-link to a
@@ -223,9 +224,40 @@ export async function refreshSlicerItems(slicerId: string): Promise<SlicerItem[]
 // Cache management
 // ============================================================================
 
+/**
+ * Re-read the slicer list from the backend — AND ANNOUNCE WHAT VANISHED.
+ *
+ * §3cd, BUG-0026. `SLICER_DELETED` used to be dispatched from exactly one
+ * place: `deleteSlicerAsync`, the route the user takes when they delete a
+ * slicer THEMSELVES. Every other way a slicer can disappear is a backend
+ * cascade — delete the table it filters, delete its pivot, delete the sheet it
+ * sits on, or have an AI client do any of those over MCP — and not one of them
+ * emitted anything. The measured symptom was three actions long
+ * (`table.create` -> `slicer.create` -> `table.delete`): the backend cascade
+ * removed the slicer correctly, the store re-read correctly, and the contextual
+ * Slicer ribbon tab stayed on screen with zero slicers in the workbook, because
+ * the SELECTION still named an id that no longer resolved.
+ *
+ * The fix is not another announcement at the new call site — that is how the
+ * first one came to have exactly one caller. THE REFRESH IS THE ANNOUNCER:
+ * whatever removed the slicer, the store finds out here, so this is the one
+ * place that can tell the truth about every route at once. `deleteSlicerAsync`
+ * no longer dispatches the event itself.
+ */
 export async function refreshCache(): Promise<void> {
   try {
+    const before = cachedSlicers.map((s) => s.id);
     cachedSlicers = await api.getAllSlicers();
+    const surviving = new Set(cachedSlicers.map((s) => s.id));
+    for (const slicerId of before) {
+      if (surviving.has(slicerId)) continue;
+      // The item list is keyed by slicer id and nothing else prunes it: before
+      // this, a cascade-deleted slicer leaked its items for the session.
+      itemsCache.delete(slicerId);
+      window.dispatchEvent(
+        new CustomEvent(SlicerEvents.SLICER_DELETED, { detail: { slicerId } }),
+      );
+    }
     syncSlicerRegions();
     // Also refresh items for all slicers so hit-testing works
     await Promise.all(cachedSlicers.map((s) => refreshSlicerItems(s.id)));

@@ -40,6 +40,7 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { editorText } from "../helpers/macroEditor";
 
 const SHEET = 0;
 
@@ -271,11 +272,6 @@ async function openMacroInEditor(page: Page, grid: any, macroName: string): Prom
 /** The document selector (the first .ose-select in the toolbar). */
 function documentSelect(editorPage: Page) {
   return editorPage.locator("select.ose-select").first();
-}
-
-/** The text Monaco is actually SHOWING (what the user reads on screen). */
-async function editorText(editorPage: Page): Promise<string> {
-  return editorPage.locator(".monaco-editor .view-lines").first().innerText();
 }
 
 /** Every console line the editor has printed, newest last. */

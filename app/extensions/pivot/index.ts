@@ -2000,14 +2000,11 @@ function activate(context: ExtensionContext): void {
     })
   );
 
-  // Bridge the backend "pivots:refresh" Tauri event (emitted after an OUT-OF-BAND
-  // MCP create_pivot) to the window "pivot:refresh" event, so an AI-created pivot
-  // appears live without a reload — mirroring the Charts charts:refresh bridge.
-  listenTauriEvent("pivots:refresh", () => {
-    window.dispatchEvent(new CustomEvent("pivot:refresh"));
-  }).then((unlisten) => {
-    cleanupFunctions.push(unlisten);
-  });
+  // (§3cd) An OUT-OF-BAND MCP pivot create/edit/delete no longer emits a
+  // bespoke "pivots:refresh" Tauri event; it announces the `pivot` DOMAIN, which
+  // the Shell translator fans out to the "pivot:refresh" handler above. The AI's
+  // pivot delete now also announces `slicer` + `ribbonFilter` -- deleting a pivot
+  // cascades into the slicers, the timelines and the ribbon filters bound to it.
 
   // Listen for external loading events (from filter/slicer bridges)
   const handleSetLoading = (e: Event) => {

@@ -8,7 +8,6 @@ import {
   AppEvents,
 } from "@api";
 import { emitAppEvent } from "@api/events";
-import { listenTauriEvent } from "@api/backend";
 import {
   removeGridRegionsByType,
   type OverlayRenderContext,
@@ -105,17 +104,11 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener(TableEvents.TABLE_DEFINITIONS_UPDATED, handleTableChanged);
   });
 
-  // Bridge the backend "tables:refresh" Tauri event (emitted after an OUT-OF-BAND
-  // MCP create_table) to the TABLE_DEFINITIONS_UPDATED window event, so an
-  // AI-created table appears live (refreshCache re-pulls from the backend).
-  // Mirrors the Charts charts:refresh bridge.
-  let unlistenTablesRefresh: (() => void) | undefined;
-  void listenTauriEvent("tables:refresh", () => {
-    window.dispatchEvent(new Event(TableEvents.TABLE_DEFINITIONS_UPDATED));
-  }).then((un) => {
-    unlistenTablesRefresh = un;
-  });
-  cleanupFunctions.push(() => unlistenTablesRefresh?.());
+  // (§3cd) An OUT-OF-BAND MCP table create/edit/delete no longer emits a
+  // bespoke "tables:refresh" Tauri event; it announces the `objects` DOMAIN,
+  // which the Shell translator fans out to TABLE_DEFINITIONS_UPDATED above. The
+  // AI's table delete now also announces `slicer` + `ribbonFilter`, which the
+  // bespoke event never could -- deleting a table cascades into both.
 
   // Ensure the ribbon tab appears immediately when a table is created
   const handleTableCreated = () => {

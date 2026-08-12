@@ -68,12 +68,48 @@ export const CAPTURE_ENVIRONMENT = {
    * path, which is what 31 of the functional suite's 31 failures were.
    */
   colourProfile: "srgb",
+  /**
+   * How many COMPOSITED layers may carry the `Canvas` compositing reason.
+   *
+   * ZERO, and it is forced -- `--disable-accelerated-2d-canvas` in
+   * `webview2Args.mjs`, where the measurement lives. This is the third axis of
+   * the same kind as the two above, and the one that made four goldens a
+   * function of how long the app had been running (BUG-0028):
+   *
+   *   an accelerated 2D canvas is its own composited layer
+   *     -> every DOM overlay that OVERLAPS it is composited too (`Overlap`)
+   *       -> Chromium will not use LCD text on a layer it cannot prove opaque
+   *         -> the overlay's text is GRAYSCALE-antialiased while the rest of
+   *            the window stays LCD.
+   *
+   * Measured 2026-08-12: the open File menu's text held 0 chromatic pixels with
+   * the canvas accelerated and 1,575 without, in the same 165x310 region, on
+   * one app, three seconds apart -- the only thing between the two readings
+   * being 120 `getImageData` calls, which is what Chromium's expensive-canvas
+   * heuristic watches for. The app makes those calls itself, through the
+   * `rendering` capture seam.
+   *
+   * UNLIKE the dpr, this one cannot be read off the committed bytes: LCD text
+   * is a property of each composited LAYER, not of the frame, so one capture
+   * holds both kinds at once and a per-file census over the corpus cannot
+   * express it (see the head of `goldenCorpus.ts`). It is therefore asserted
+   * against the RUN, here, which is the only place the question is answerable.
+   */
+  compositedCanvasLayers: 0,
 } as const;
 
 export interface CaptureEnvironmentReading {
   devicePixelRatio: number;
   gridCanvasLayer: { width: number; height: number } | null;
   viewport: { width: number; height: number };
+  /**
+   * Layers in the compositor whose reason includes `Canvas`.
+   *
+   * `null` means the layer tree could not be read at all (no CDP session, or
+   * the `LayerTree` domain refused). That is reported as its own failure rather
+   * than passed over: a guard that cannot run must say so, not return quietly.
+   */
+  compositedCanvasLayers?: number | null;
 }
 
 /**
@@ -117,6 +153,36 @@ export function describeCaptureEnvironmentMismatch(
         `recorded at — check the e2e Tauri config, and check that no launch is forcing a ` +
         `device scale factor (that makes the CSS viewport equal the PHYSICAL one, which ` +
         `defeats Tauri's logical window sizing).`,
+    );
+  }
+
+  if (reading.compositedCanvasLayers === null) {
+    problems.push(
+      `the compositor's layer tree could not be read, so the TEXT ANTIALIASING ` +
+        `condition this corpus assumes is unverified.\n` +
+        `    A guard that cannot run must say so rather than pass. Check that the ` +
+        `capture helper can open a CDP session and enable the LayerTree domain; ` +
+        `if the suite has genuinely moved off Chromium, this axis needs a new ` +
+        `instrument, not a deletion.`,
+    );
+  } else if (
+    reading.compositedCanvasLayers !== undefined &&
+    reading.compositedCanvasLayers !== CAPTURE_ENVIRONMENT.compositedCanvasLayers
+  ) {
+    problems.push(
+      `${reading.compositedCanvasLayers} canvas(es) are COMPOSITED, but the corpus ` +
+        `assumes ${CAPTURE_ENVIRONMENT.compositedCanvasLayers}.\n` +
+        `    An accelerated 2D canvas gets its own composited layer, every DOM ` +
+        `overlay that OVERLAPS it is then composited too, and Chromium will not ` +
+        `use LCD (subpixel) text on a layer it cannot prove opaque — so every ` +
+        `menu, dropdown and dialog drawn over the grid switches from LCD to ` +
+        `GRAYSCALE antialiasing while the rest of the window does not. Measured: ` +
+        `~2,900 differing pixels in one dropdown against a 200-pixel budget, with ` +
+        `nothing about the product changed. This is BUG-0028.\n` +
+        `    --disable-accelerated-2d-canvas (e2e/webview2Args.mjs) is what keeps ` +
+        `this at 0. If it is reaching the WebView and a canvas is composited ` +
+        `anyway, the flag has stopped working and the corpus is no longer ` +
+        `reproducible — fix the launcher, do NOT re-record.`,
     );
   }
 

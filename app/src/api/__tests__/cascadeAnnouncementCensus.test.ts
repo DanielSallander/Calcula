@@ -58,92 +58,111 @@ const read = (rel: string): string => fs.readFileSync(path.join(repoRoot, rel), 
 interface RustRow {
   owner: string;
   dependent: string;
+  dependentKind: string | null;
   policy: string;
 }
 
+function rustSource(): string {
+  return read("app/src-tauri/src/object_deps.rs");
+}
+
 function rustMatrix(): RustRow[] {
-  const src = read("app/src-tauri/src/object_deps.rs");
+  const src = rustSource();
   const start = src.indexOf("pub const DEPENDENCY_MATRIX");
   expect(start, "DEPENDENCY_MATRIX has moved or been renamed").toBeGreaterThan(-1);
   const body = src.slice(start);
   const rows: RustRow[] = [];
   const re =
-    /owner: ObjectKind::(\w+),\s*\n?\s*(?:\/\/[^\n]*\n\s*)*dependent: "((?:[^"\\]|\\[\s\S])*)",\s*\n?\s*policy: DeletePolicy::(\w+)/g;
+    /owner: ObjectKind::(\w+),\s*\n?\s*(?:\/\/[^\n]*\n\s*)*dependent: "((?:[^"\\]|\\[\s\S])*)",\s*\n?\s*dependent_kind: (None|Some\(ObjectKind::(\w+)\)),\s*\n?\s*policy: DeletePolicy::(\w+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(body)) !== null) {
-    rows.push({ owner: m[1], dependent: m[2].replace(/\\\s+/g, ""), policy: m[3] });
+    rows.push({
+      owner: m[1],
+      dependent: m[2].replace(/\\\s+/g, ""),
+      dependentKind: m[3] === "None" ? null : m[4],
+      policy: m[5],
+    });
   }
   return rows;
 }
 
-/** The three policies that CHANGE another object; the rest run no code. */
-const CASCADING_POLICIES = new Set(["Cascade", "CascadeOrRebind", "Prune"]);
-
 /**
- * Which MUTATION_REFRESH domain reaches the store that caches a dependent.
+ * `ObjectKind::ui_domain` — parsed out of the Rust `match`, not restated here.
  *
- * Keyed by a substring of the Rust row's `dependent` text, which names the
- * EDGE ("slicer.cacheSourceId / slicer.connectedSources"), so the mapping is
- * from the thing that goes stale to the domain that refreshes it.
- */
-const DEPENDENT_TO_DOMAIN: Array<{ match: RegExp; domain: string }> = [
-  { match: /^slicer\./, domain: "slicer" },
-  { match: /^timelineSlicer\./, domain: "slicer" },
-  { match: /^ribbonFilter\./, domain: "ribbonFilter" },
-  { match: /^paneControl\./, domain: "paneControl" },
-  { match: /^chart\.sheetIndex/, domain: "objects" },
-  { match: /^table \/ pivot on the sheet/, domain: "pivot" },
-];
-
-/**
- * Dependents that are NOT a frontend-cached overlay, each with the reason.
+ * THIS USED TO BE A LIST OF REGEXES IN THIS FILE, matching the dependent's
+ * free TEXT ("^slicer\." -> "slicer"), with a second list of prose excuses for
+ * the rest. Two problems, both of which the parse removes. A new object kind
+ * could be added to the Rust matrix and match neither list, and the census's
+ * answer to that was a hand-written excuse — a checklist entry, exactly what a
+ * census exists to replace. And the mapping was a SECOND source of truth for
+ * something the backend also has to know, now that a backend-initiated
+ * cascade announces its own domains (§3cd): two copies that drift is how the
+ * timeline slicers came to be mapped to the "slicer" domain here while the
+ * Shell translator reached only the canvas slicers.
  *
- * A new Rust row whose dependent matches neither this list nor the mapping
- * above fails `every dependent is classified`, which is the property that makes
- * this a census instead of a checklist.
+ * The Rust side is an exhaustive `match`, so the COMPILER now forces an answer
+ * for every object kind and this file just reads it.
  */
-const NOT_FRONTEND_CACHED: Array<{ match: RegExp; reason: string }> = [
-  {
-    match: /^autoFilter/,
-    reason:
-      "The AutoFilter extension reads row visibility from the backend on every " +
-      "repaint; it holds no object cache that can outlive the delete.",
-  },
-  {
-    match: /^formula\.|^grid cells|^definedName|^row visibility/,
-    reason: "Cell values, not objects. The recalculation writes them and the grid re-fetches.",
-  },
-  {
-    match: /^objectScript\.|^cellBehavior\.|^control\.properties\.macroRef|^scheduler job|^capability grants/,
-    reason:
-      "Script-side records. They paint nothing and claim no rectangle; a stale " +
-      "one is a failed lookup, not a swallowed click.",
-  },
-  {
-    match: /^slicer\.computedProperties|^computed-prop dependency edges/,
-    reason:
-      "Backend dependency edges. The slicer that owns them is itself covered by " +
-      "the slicer domain.",
-  },
-  {
-    match: /^sheet-index-keyed stores|^report\.sheetIndex|^ribbonFilter\.connectionId/,
-    reason:
-      "Re-read from the backend whenever the sheet changes (the sheet switch is " +
-      "itself the refresh), or, for the BI connection row, WarnAndKeep — nothing " +
-      "is deleted.",
-  },
-  { match: /^-$/, reason: "NoDependents rows carry a placeholder dependent." },
-];
-
-function domainFor(dependent: string): string | null {
-  for (const { match, domain } of DEPENDENT_TO_DOMAIN) {
-    if (match.test(dependent)) return domain;
+function uiDomains(): Map<string, string | null> {
+  const src = rustSource();
+  const at = src.indexOf("pub fn ui_domain(self) -> UiDomain {");
+  expect(at, "ObjectKind::ui_domain has moved or been renamed").toBeGreaterThan(-1);
+  const body = braceBody(src, src.indexOf("{", at));
+  const out = new Map<string, string | null>();
+  // `A | B | C => UiDomain::X,` — arms wrap over several lines.
+  const armRe = /((?:\s*ObjectKind::\w+\s*\|?)+)=>\s*UiDomain::(\w+)\s*,/g;
+  let m: RegExpExecArray | null;
+  while ((m = armRe.exec(body)) !== null) {
+    const domain = m[2] === "None" ? null : m[2][0].toLowerCase() + m[2].slice(1);
+    for (const kind of m[1].matchAll(/ObjectKind::(\w+)/g)) {
+      out.set(kind[1], domain);
+    }
   }
-  return null;
+  return out;
 }
 
-function isExcused(dependent: string): boolean {
-  return NOT_FRONTEND_CACHED.some(({ match }) => match.test(dependent));
+/** The policies that CHANGE another object; the rest run no code. */
+const CASCADING_POLICIES = new Set(["Cascade", "CascadeOrRebind", "Prune"]);
+/** The policies that REMOVE the dependent, so its own dependents cascade too. */
+const DELETING_POLICIES = new Set(["Cascade", "CascadeOrRebind"]);
+
+/**
+ * Every domain that deleting `owner` leaves stale — TRANSITIVELY, and without
+ * the owner's own.
+ *
+ * The transitive step is the whole reason `dependent_kind` exists in the Rust
+ * matrix. Deleting a table deletes its slicers, and deleting a slicer prunes it
+ * out of every ribbon filter that cross-filters it, so a table delete owes the
+ * ribbon-filter store. Before this walk, the census asked only for the domains
+ * of the owner's DIRECT dependents — `deleteTableAsync` announced "ribbonFilter"
+ * anyway, and nothing would have noticed if it stopped.
+ *
+ * The owner's OWN domain is excluded: the frontend route that deletes an object
+ * is, by construction, the one that knows about it, and it updates its own
+ * store on the spot. The BACKEND announcer includes it, because there a
+ * mutation has nobody to return to (`cascade_domains` in object_deps.rs, and
+ * `cascade_domains_are_derived_transitively_from_the_matrix` pins both halves).
+ */
+function requiredDomainsFor(owner: string, rows: RustRow[], domains: Map<string, string | null>): Set<string> {
+  const out = new Set<string>();
+  const seen = new Set<string>();
+  const queue = [owner];
+  while (queue.length > 0) {
+    const kind = queue.pop()!;
+    if (seen.has(kind)) continue;
+    seen.add(kind);
+    for (const row of rows) {
+      if (row.owner !== kind) continue;
+      if (!CASCADING_POLICIES.has(row.policy)) continue;
+      if (!row.dependentKind) continue;
+      const domain = domains.get(row.dependentKind);
+      if (domain) out.add(domain);
+      if (DELETING_POLICIES.has(row.policy)) queue.push(row.dependentKind);
+    }
+  }
+  const own = domains.get(owner);
+  if (own) out.delete(own);
+  return out;
 }
 
 // ===========================================================================
@@ -353,11 +372,204 @@ function auditRoutes(
 }
 
 // ===========================================================================
+// 3b. THE SELECTION HALF — the invariant BUG-0026 actually broke (§3cd)
+// ===========================================================================
+//
+// Refreshing the STORE is not the same as reconciling the UI, and BUG-0026 is
+// the difference. `table.create -> slicer.create -> table.delete`: the backend
+// cascade deleted the slicer correctly (§3bt), the announcement reached the
+// Slicer extension correctly (§3bn), the store re-read correctly — and the
+// contextual Slicer ribbon tab stayed on screen on a workbook with ZERO
+// slicers, because the tab is a function of the SELECTION and the selection is
+// a set of ids that nothing compared against the store.
+//
+// The same shape had already been found once, by the soak walk, on the Table
+// Design tab (`syncDesignTabToTables`), and fixed there alone. Slicers,
+// timeline slicers and pivots each carried it untouched.
+//
+// THE RULE, and why it is mechanical. An object kind that (a) some owner
+// CASCADE-DELETES in the Rust matrix and (b) drives a contextual ribbon tab —
+// which is exactly `addTaskPaneContextKey("<key>")` in its extension — must
+// have a reconciliation: a function reachable from the extension's refresh path
+// that drops the vanished object out of the selection. The (a) half is read
+// from the Rust matrix and the (b) half is found by SCANNING the extension
+// tree, so a new contextual tab on a cascade-deleted object fails this census
+// without anybody remembering to add a row.
+
+interface SelectionOwner {
+  /** The `addTaskPaneContextKey` key this extension registers. */
+  contextKey: string;
+  /** The ObjectKind whose disappearance must reconcile it. */
+  kind: string;
+  /** File holding the reconciliation. */
+  file: string;
+  /** The function that drops a vanished object out of the selection. */
+  reconcile: string;
+  /** File + symbol whose body must REACH the reconciliation. */
+  trigger: { file: string; symbol: string };
+  /**
+   * The tab LABEL the soak/invariant walk knows this tab by.
+   *
+   * `contextual-ribbon-tabs` (app/e2e/invariants/invariants.ts) SKIPS a
+   * contextual tab whose label it does not recognise -- deliberately, so a new
+   * feature cannot flood a fuzzer with false positives. The cost is that a
+   * sixth contextual tab would be invisible to the walk that found BUG-0026 in
+   * the first place. Naming the label here and checking it exists is the cheap
+   * half of the alignment: the census is the guard, and this makes sure the
+   * walk gets taught too.
+   */
+  walkTabLabel: string;
+  why: string;
+}
+
+const SELECTION_OWNERS: SelectionOwner[] = [
+  {
+    contextKey: "slicer",
+    walkTabLabel: "Slicer",
+    kind: "Slicer",
+    file: "app/extensions/Slicer/handlers/selectionHandler.ts",
+    reconcile: "dropSlicerFromSelection",
+    trigger: { file: "app/extensions/Slicer/lib/slicerStore.ts", symbol: "refreshCache" },
+    why:
+      "BUG-0026 itself. The store's refresh diffs the id set and dispatches " +
+      "SLICER_DELETED for whatever vanished; the extension's handler calls the " +
+      "reconciliation.",
+  },
+  {
+    contextKey: "timeline-slicer",
+    walkTabLabel: "Timeline",
+    kind: "TimelineSlicer",
+    file: "app/extensions/TimelineSlicer/handlers/selectionHandler.ts",
+    reconcile: "dropTimelineFromSelection",
+    trigger: {
+      file: "app/extensions/TimelineSlicer/lib/timelineSlicerStore.ts",
+      symbol: "refreshCache",
+    },
+    why: "The identical defect: a timeline dies with its last pivot, and with its sheet.",
+  },
+  {
+    contextKey: "table",
+    walkTabLabel: "Table Design",
+    kind: "Table",
+    file: "app/extensions/Table/handlers/selectionHandler.ts",
+    reconcile: "syncDesignTabToTables",
+    trigger: { file: "app/extensions/Table/index.ts", symbol: "activate" },
+    why:
+      "Found first, by the soak walk (seed 20260810). The tab is re-derived from " +
+      "the CURRENT table list on TABLE_DEFINITIONS_UPDATED, which the `objects` " +
+      "domain dispatches.",
+  },
+  {
+    contextKey: "pivot",
+    walkTabLabel: "Pivot Table",
+    kind: "Pivot",
+    file: "app/extensions/Pivot/handlers/selectionHandler.ts",
+    reconcile: "updateCachedRegions",
+    trigger: { file: "app/extensions/Pivot/handlers/selectionHandler.ts", symbol: "updateCachedRegions" },
+    why:
+      "Reconciles in place: the regions ARE the store, so the function that " +
+      "receives them is the one that checks whether the active pivot survived. " +
+      "It used to fire only when the sheet had no pivots left at all.",
+  },
+  {
+    contextKey: "chart",
+    walkTabLabel: "Chart Design",
+    kind: "Chart",
+    file: "app/extensions/Charts/handlers/selectionHandler.ts",
+    reconcile: "deselectChart",
+    trigger: { file: "app/extensions/Charts/index.ts", symbol: "activate" },
+    why:
+      "Charts reconcile with the blunt instrument: `reloadCharts` (the " +
+      "charts:refresh handler, and the file-open path) deselects unconditionally " +
+      "before re-reading, so no chart id can outlive its object.",
+  },
+];
+
+/**
+ * Contextual context keys that are NOT a cascade-deleted workbook object, with
+ * the reason. Keeps the scan below honest without turning it into a checklist.
+ */
+const CONTEXT_KEYS_NOT_WORKBOOK_OBJECTS: Record<string, string> = {
+  collection: "A preview of a template collection; nothing in the workbook holds it.",
+  connections: "The BI connection dialog's own pane key. A connection is WarnAndKeep — never deleted out from under anything.",
+  "file-viewer": "The virtual-filesystem viewer. Not a grid object and not in the dependency matrix.",
+};
+
+/** Every `addTaskPaneContextKey("x")` in the extension tree. */
+function contextKeysInExtensions(): Map<string, string[]> {
+  const root = path.join(repoRoot, "app", "extensions");
+  const found = new Map<string, string[]>();
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules" || entry.name === "__tests__") continue;
+        walk(full);
+        continue;
+      }
+      if (!/\.tsx?$/.test(entry.name)) continue;
+      const text = stripComments(fs.readFileSync(full, "utf8"));
+      for (const m of text.matchAll(/addTaskPaneContextKey\(\s*["']([^"']+)["']/g)) {
+        const rel = path.relative(repoRoot, full).replace(/\\/g, "/");
+        found.set(m[1], [...(found.get(m[1]) ?? []), rel]);
+      }
+    }
+  };
+  walk(root);
+  return found;
+}
+
+/** Which selection owners fail to reconcile, given a reader. */
+export function unreconciledSelections(
+  owners: SelectionOwner[],
+  readFile: (rel: string) => string,
+): string[] {
+  const out: string[] = [];
+  for (const owner of owners) {
+    const handler = stripComments(readFile(owner.file));
+    if (!new RegExp(`function\\s+${owner.reconcile}\\s*[(<]`).test(handler)) {
+      out.push(`${owner.contextKey}: no reconciliation named ${owner.reconcile} in ${owner.file}`);
+      continue;
+    }
+    // The reconciliation must actually take the contextual tab down, or it is a
+    // no-op with a reassuring name.
+    const body = routeBody(handler, owner.reconcile);
+    const takesTabDown =
+      /unregisterPanel\s*\(|removeTaskPaneContextKey\s*\(/.test(body) ||
+      // ...or it delegates to the deselect that does.
+      [...body.matchAll(/\b(deselect\w+|sync\w+|handleSelectionChange)\s*\(/g)].some((m) =>
+        /unregisterPanel\s*\(|removeTaskPaneContextKey\s*\(/.test(routeBody(handler, m[1])),
+      );
+    if (!takesTabDown) {
+      out.push(
+        `${owner.contextKey}: ${owner.reconcile} never unregisters the contextual panel`,
+      );
+      continue;
+    }
+    const trigger = stripComments(readFile(owner.trigger.file));
+    if (!trigger.includes(owner.reconcile) && owner.trigger.file !== owner.file) {
+      // The store's refresh reaches the reconciliation through the extension's
+      // event handler, so accept EITHER a direct call or the announcement that
+      // drives it.
+      const announces = /DELETED/.test(routeBody(trigger, owner.trigger.symbol));
+      if (!announces) {
+        out.push(
+          `${owner.contextKey}: ${owner.trigger.symbol} in ${owner.trigger.file} neither ` +
+            `calls ${owner.reconcile} nor announces a deletion that would`,
+        );
+      }
+    }
+  }
+  return out;
+}
+
+// ===========================================================================
 // 4. The census
 // ===========================================================================
 
 describe("cascade announcement census — the frontend half of §3bt's seventh census", () => {
   const rows = rustMatrix();
+  const domains = uiDomains();
 
   it("the Rust matrix parses, and is the size the register says", () => {
     // A parse that silently matched nothing would make every assertion below
@@ -367,24 +579,28 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
     expect(rows.some((r) => r.owner === "Table" && /^slicer\./.test(r.dependent))).toBe(true);
   });
 
-  it("every dependent in the matrix is either mapped to a domain or excused with a reason", () => {
-    const unclassified = rows
-      .filter((r) => CASCADING_POLICIES.has(r.policy))
-      .filter((r) => domainFor(r.dependent) === null && !isExcused(r.dependent))
-      .map((r) => `${r.owner} -> ${r.dependent}`);
+  it("every object kind resolves to a declared UI domain, and every domain is a real one", () => {
+    // The classification itself is a compile-time property now: `ui_domain` is
+    // an exhaustive `match` in Rust, so a new ObjectKind cannot be added
+    // without answering. What this checks is that the answer PARSED, and that
+    // every kind the matrix actually names has one.
+    expect(domains.size, "ui_domain parsed to too few arms").toBeGreaterThanOrEqual(20);
+    const unresolved = [
+      ...new Set(rows.flatMap((r) => [r.owner, r.dependentKind ?? ""])),
+    ].filter((k) => k !== "" && !domains.has(k));
     expect(
-      unclassified,
-      "a cascading dependency was added to the Rust matrix without saying whether " +
-        "a frontend store caches it. Add it to DEPENDENT_TO_DOMAIN (with the " +
-        "domain that refreshes it) or to NOT_FRONTEND_CACHED (with the reason).",
+      unresolved,
+      "an ObjectKind appears in DEPENDENCY_MATRIX but not in ObjectKind::ui_domain — " +
+        "the parse is stale, and a stale parse silently maps it to no domain",
     ).toEqual([]);
   });
 
   it("every owner that cascades into a cached store has a frontend delete route, or a reason", () => {
     const owners = new Set(
       rows
-        .filter((r) => CASCADING_POLICIES.has(r.policy) && domainFor(r.dependent) !== null)
-        .map((r) => r.owner),
+        .filter((r) => CASCADING_POLICIES.has(r.policy))
+        .map((r) => r.owner)
+        .filter((owner) => requiredDomainsFor(owner, rows, domains).size > 0),
     );
     const unanswered = [...owners].filter(
       (o) => !DELETE_ROUTES[o] && !NO_FRONTEND_DELETE_ROUTE[o],
@@ -398,12 +614,9 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
 
   it("every frontend delete route announces the domains its cascade disturbs", () => {
     const required = new Map<string, Set<string>>();
-    for (const r of rows) {
-      if (!CASCADING_POLICIES.has(r.policy)) continue;
-      const domain = domainFor(r.dependent);
-      if (!domain) continue;
-      if (!required.has(r.owner)) required.set(r.owner, new Set());
-      required.get(r.owner)!.add(domain);
+    for (const owner of new Set(rows.map((r) => r.owner))) {
+      const domainsOwed = requiredDomainsFor(owner, rows, domains);
+      if (domainsOwed.size > 0) required.set(owner, domainsOwed);
     }
     const gaps = auditRoutes(required, DELETE_ROUTES, read);
     expect(
@@ -412,6 +625,28 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
         "The dependent's store keeps its object, paints its overlay and swallows " +
         "the clicks meant for the cells underneath (§3bn).",
     ).toEqual([]);
+  });
+
+  it("the requirement is TRANSITIVE — a table delete owes the ribbon-filter store", () => {
+    // The property the walk exists for, asserted directly so that flattening it
+    // back to one level fails here rather than silently weakening every route
+    // check above. A table cascades into its slicers; a slicer is pruned out of
+    // every ribbon filter that cross-filters it.
+    const table = requiredDomainsFor("Table", rows, domains);
+    expect([...table].sort()).toEqual(["ribbonFilter", "slicer"]);
+    // ...and the owner's OWN domain is not demanded of a frontend route.
+    expect(table.has("objects")).toBe(false);
+    // The sheet is the widest owner in the workbook.
+    // The sheet reaches "paneControl" only through TWO hops (sheet -> chart ->
+    // pane control), which is the edge the walk was written for and the one the
+    // backend cascade was missing entirely.
+    expect([...requiredDomainsFor("Sheet", rows, domains)].sort()).toEqual([
+      "objects",
+      "paneControl",
+      "pivot",
+      "ribbonFilter",
+      "slicer",
+    ]);
   });
 
   it("the routes named here all exist — a renamed function must fail loudly, not silently pass", () => {
@@ -442,12 +677,151 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
     // so a route could satisfy the rule above and still refresh nothing.
     const bootstrap = read("app/src/shell/bootstrap.ts");
     const table = bootstrap.slice(bootstrap.indexOf("MUTATION_DOMAIN_EVENTS"));
-    for (const domain of ["slicer", "ribbonFilter", "paneControl", "pivot", "objects"]) {
+    // EVERY domain the Rust side can name, not a hand-kept list: `ui_domain` is
+    // where the backend announcer gets its domains from too, so a name the
+    // translator does not know is dropped on the floor in silence in BOTH
+    // directions.
+    const named = [...new Set([...domains.values()].filter((d): d is string => d !== null))];
+    expect(named.length, "no domains parsed out of ui_domain").toBeGreaterThan(5);
+    for (const domain of named) {
       expect(
         new RegExp(`\\n\\s*${domain}:`).test(table),
         `the Shell translator has no mapping for the "${domain}" domain`,
       ).toBe(true);
     }
+  });
+
+  it("the backend announcement lands in the SAME translator", () => {
+    // §3cd. A mutation started inside the backend emits `mutation:refresh` as a
+    // Tauri event carrying the identical payload. If the Shell stopped bridging
+    // it, every MCP object tool would silently go back to changing nothing on
+    // screen — and nothing else in the repo would notice, because the bespoke
+    // per-kind events it replaced have been deleted.
+    const bootstrap = read("app/src/shell/bootstrap.ts");
+    expect(bootstrap).toContain('listenTauriEvent<MutationRefreshPayload>("mutation:refresh"');
+    expect(
+      bootstrap.indexOf("fanOutDomains"),
+      "the bridge must reuse the domain fan-out, not re-implement it",
+    ).toBeGreaterThan(-1);
+    // And the Rust side must still be emitting that exact name.
+    expect(rustSource()).toContain('pub const MUTATION_REFRESH_EVENT: &str = "mutation:refresh"');
+  });
+
+  // =======================================================================
+  // THE SELECTION HALF (§3cd)
+  // =======================================================================
+
+  it("every cascade-deleted object with a contextual tab has a selection reconciliation", () => {
+    const cascadeDeleted = new Set(
+      rows
+        .filter((r) => DELETING_POLICIES.has(r.policy))
+        .map((r) => r.dependentKind)
+        .filter((k): k is string => k !== null),
+    );
+    expect(
+      cascadeDeleted.has("Slicer"),
+      "the matrix no longer cascade-deletes a slicer — the parse is stale",
+    ).toBe(true);
+
+    const declared = new Map(SELECTION_OWNERS.map((o) => [o.contextKey, o]));
+    const missing: string[] = [];
+    for (const [key, files] of contextKeysInExtensions()) {
+      if (declared.has(key)) continue;
+      if (CONTEXT_KEYS_NOT_WORKBOOK_OBJECTS[key]) continue;
+      missing.push(`${key} (${files.join(", ")})`);
+    }
+    expect(
+      missing,
+      "a contextual ribbon tab appeared whose object may be deleted out from " +
+        "under it, and nothing says how the tab comes down. Add it to " +
+        "SELECTION_OWNERS with its reconciliation, or to " +
+        "CONTEXT_KEYS_NOT_WORKBOOK_OBJECTS with the reason.",
+    ).toEqual([]);
+
+    // NON-VACUITY: the scan must be finding the tabs this census is about.
+    const scanned = new Set(contextKeysInExtensions().keys());
+    for (const key of ["slicer", "timeline-slicer", "table", "pivot", "chart"]) {
+      expect(scanned.has(key), `the extension scan lost the "${key}" contextual tab`).toBe(true);
+    }
+  });
+
+  it("every declared reconciliation exists, takes the tab down, and is reachable", () => {
+    expect(
+      unreconciledSelections(SELECTION_OWNERS, read),
+      "a contextual ribbon tab can outlive the object it addresses. This is " +
+        "BUG-0026: three actions (table.create, slicer.create, table.delete) " +
+        "left the Slicer tab on a workbook with zero slicers.",
+    ).toEqual([]);
+  });
+
+  it("the walk that found BUG-0026 knows every contextual tab this census governs", () => {
+    // `contextual-ribbon-tabs` skips unrecognised labels on purpose, so a tab
+    // it has never heard of is invisible to the very harness that found this
+    // bug. Every tab the census governs must therefore be taught to it.
+    const invariants = read("app/e2e/invariants/invariants.ts");
+    const rules = invariants.slice(
+      invariants.indexOf("const CONTEXTUAL_TAB_RULES"),
+      invariants.indexOf("// ============", invariants.indexOf("const CONTEXTUAL_TAB_RULES")),
+    );
+    expect(rules.length, "CONTEXTUAL_TAB_RULES not found").toBeGreaterThan(100);
+    // TEETH for this rule: a label the walk does not know must come back false,
+    // or the containment check below is a comment.
+    expect(rules.includes("\n  Telepathy: {")).toBe(false);
+
+    // Plain string containment, not a regex: the rule keys are object-literal
+    // properties, quoted only when the label has a space, and a regex built by
+    // interpolating a label with a space in it is one escaping mistake away
+    // from matching nothing at all -- which is the vacuous pass this whole file
+    // is hardened against.
+
+    const untaught = SELECTION_OWNERS.filter(
+      (o) =>
+        !rules.includes(`\n  ${o.walkTabLabel}: {`) &&
+        !rules.includes(`\n  "${o.walkTabLabel}": {`),
+    ).map((o) => `${o.contextKey} -> "${o.walkTabLabel}"`);
+    expect(
+      untaught,
+      "a contextual tab the census governs has no rule in the soak/invariant " +
+        "walk, which SKIPS labels it does not recognise — so the walk that " +
+        "found BUG-0026 could not find its successor",
+    ).toEqual([]);
+  });
+
+  it("the store's refresh is the SINGLE announcer of a slicer's disappearance", () => {
+    // The specific regression that would re-open BUG-0026: putting the
+    // dispatch back on the delete route. The event then fires for the ONE path
+    // a user takes by hand and for none of the cascades — which is exactly the
+    // state the bug was found in.
+    for (const [file, symbol, event] of [
+      ["app/extensions/Slicer/lib/slicerStore.ts", "deleteSlicerAsync", "SLICER_DELETED"],
+      [
+        "app/extensions/TimelineSlicer/lib/timelineSlicerStore.ts",
+        "deleteTimelineAsync",
+        "TIMELINE_DELETED",
+      ],
+    ] as const) {
+      const store = read(file);
+      expect(
+        stripComments(routeBody(store, symbol)),
+        `${symbol} dispatches ${event} itself again — the refresh must be the ` +
+          "one announcer, or a backend cascade emits nothing (§3cd)",
+      ).not.toContain(event);
+      expect(
+        stripComments(routeBody(store, "refreshCache")),
+        `refreshCache in ${file} no longer announces ${event}`,
+      ).toContain(event);
+    }
+  });
+
+  it("the item caches are pruned by the same diff, not by the delete route", () => {
+    // A cascade-deleted slicer used to leak its cached item list for the whole
+    // session, because only `deleteSlicerAsync` ever removed the entry.
+    expect(routeBody(read("app/extensions/Slicer/lib/slicerStore.ts"), "refreshCache")).toContain(
+      "itemsCache.delete(",
+    );
+    expect(
+      routeBody(read("app/extensions/TimelineSlicer/lib/timelineSlicerStore.ts"), "refreshCache"),
+    ).toContain("dataCache.delete(");
   });
 
   // =======================================================================
@@ -507,6 +881,80 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
       }
     `;
     expect([...domainsAnnounced(synthetic, "deleteThingAsync")]).toEqual(["slicer"]);
+  });
+
+  it("the selection census fires for a tab that never reconciles — teeth", () => {
+    // The synthetic extension below has a contextual tab and a reconciliation
+    // that does not take it down. Without this case a rule that silently
+    // matched nothing would pass forever, which is the failure mode every
+    // census in this program has had to be hardened against.
+    const noop = `
+      export function dropThingFromSelection(id: string): void {
+        selected.delete(id);
+      }
+    `;
+    expect(
+      unreconciledSelections(
+        [
+          {
+            contextKey: "thing",
+            kind: "Thing",
+            file: "synthetic.ts",
+            reconcile: "dropThingFromSelection",
+            trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
+            walkTabLabel: "Thing",
+            why: "planted",
+          },
+        ],
+        () => noop,
+      ),
+    ).toEqual(["thing: dropThingFromSelection never unregisters the contextual panel"]);
+
+    // A missing function is reported too, and named.
+    expect(
+      unreconciledSelections(
+        [
+          {
+            contextKey: "thing",
+            kind: "Thing",
+            file: "synthetic.ts",
+            reconcile: "dropThingFromSelection",
+            trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
+            walkTabLabel: "Thing",
+            why: "planted",
+          },
+        ],
+        () => "export function somethingElse(): void {}",
+      )[0],
+    ).toContain("no reconciliation named dropThingFromSelection");
+
+    // ...and the real shape is accepted, so the rule discriminates.
+    const real = `
+      export function deselectThing(): void {
+        removeTaskPaneContextKey("thing");
+        unregisterPanel(THING_TAB_ID);
+      }
+      export function dropThingFromSelection(id: string): void {
+        if (!selected.delete(id)) return;
+        if (selected.size === 0) { deselectThing(); }
+      }
+    `;
+    expect(
+      unreconciledSelections(
+        [
+          {
+            contextKey: "thing",
+            kind: "Thing",
+            file: "synthetic.ts",
+            reconcile: "dropThingFromSelection",
+            trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
+            walkTabLabel: "Thing",
+            why: "planted",
+          },
+        ],
+        () => real,
+      ),
+    ).toEqual([]);
   });
 
   it("a COMMENT that names a domain does not satisfy the rule", () => {

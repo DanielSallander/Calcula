@@ -577,13 +577,30 @@ describe("MCP tools — every tool is tier-classified and every gate is real", (
 // heard of is therefore dropped without a word, which is the original defect
 // wearing the new design's clothes. Nothing but this test can see that.
 describe("undo/redo mutation-refresh domains", () => {
+  // ONE DECLARATION, and it moved (§3cd). `MutationDomain` used to be an enum
+  // in `undo_commands.rs`; a backend-initiated cascade then needed to announce
+  // the same domains, and for a while the crate had TWO enums naming the same
+  // wire strings. This test is what found that -- it reported "sheets" and
+  // "namedRanges" as TS domains no Rust emitter produced, which was true of the
+  // enum it was reading and false of the crate. `undo_commands` now aliases
+  // `object_deps::UiDomain`, which is where the object-kind -> domain mapping
+  // lives and therefore where the vocabulary belongs.
+  const objectDepsRs = readRepo("app/src-tauri/src/object_deps.rs");
   const undoRs = readRepo("app/src-tauri/src/undo_commands.rs");
   const eventsTs = readRepo("app/src/api/events.ts");
   const bootstrapTs = readRepo("app/src/shell/bootstrap.ts");
 
-  /** Every `Some("...")` wire name in `MutationDomain::wire_name`. */
+  /** Every `Some("...")` wire name in `UiDomain::wire_name`. */
   const rustDomains = (): string[] => {
-    const body = rustItemBody(stripRustNoise(undoRs), "pub(crate) fn wire_name");
+    // The RETURN TYPE is part of the needle: `object_deps.rs` declares two
+    // `wire_name` functions -- ObjectKind's (which returns a bare &str and has
+    // no `Some(...)` anywhere) comes first in the file, and matching it made
+    // this guard report an EMPTY Rust vocabulary, which is the vacuous pass
+    // every census here has had to be hardened against.
+    const body = rustItemBody(
+      stripRustNoise(objectDepsRs),
+      "pub fn wire_name(self) -> Option<&'static str>",
+    );
     return [...new Set([...body.matchAll(/Some\("([A-Za-z]+)"\)/g)].map((m) => m[1]))];
   };
 
@@ -652,6 +669,22 @@ describe("undo/redo mutation-refresh domains", () => {
         `this at compile time; this assertion exists because the lookup is "?? []" at ` +
         `runtime, so a row deleted along with a widened type would fail silently.`,
     ).toEqual([]);
+  });
+
+  it("there is exactly ONE Rust declaration of the domain vocabulary", () => {
+    // The drift this section exists to catch is between Rust and TypeScript. A
+    // SECOND Rust enum is the same drift with a shorter fuse, and it happened:
+    // `undo_commands` must alias the canonical type, never redeclare it.
+    expect(
+      /pub\(crate\) use crate::object_deps::UiDomain as MutationDomain;/.test(undoRs),
+      "undo_commands.rs no longer aliases object_deps::UiDomain",
+    ).toBe(true);
+    expect(
+      /enum MutationDomain/.test(undoRs),
+      "undo_commands.rs declares its own MutationDomain enum again — two Rust " +
+        "vocabularies for one wire format, which is how `sheets` and " +
+        "`namedRanges` came to be unknown to half the backend",
+    ).toBe(false);
   });
 
   it("the guards fire for a domain only one side knows", () => {

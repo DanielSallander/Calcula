@@ -70,84 +70,28 @@ pub struct UndoResult {
     pub refresh_domains: Vec<String>,
 }
 
-/// A frontend refresh DOMAIN an undo/redo touched. Mirrors the `MutationDomain`
-/// union in `app/src/api/events.ts` (camelCase over the wire, per the naming
-/// rule) — with `Hidden` the one exception, which keeps its own
-/// `hidden_changed` flag because it drives a dimension re-read rather than a
-/// store refresh.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
-pub(crate) enum MutationDomain {
-    Pivot,
-    Slicer,
-    RibbonFilter,
-    PaneControl,
-    Objects,
-    Hidden,
-    /// Row/column groups (the outline bar).
-    Outline,
-    /// Cell hyperlinks (the indicator set behind the cursor + context menu).
-    Hyperlinks,
-    /// Data-validation rules.
-    Validations,
-    /// Notes and comments.
-    Annotations,
-    /// On-grid controls (buttons, shapes, pictures). Its own domain rather than
-    /// a corner of "objects": the Controls extension holds ONE sheet's controls
-    /// in a frontend store and re-reads it on a sheet switch, so an undo that
-    /// puts a deleted shape back has to tell it to re-read — `grid:refresh`
-    /// repaints from that same stale store and changes nothing.
-    Controls,
-    /// Conditional-formatting rule DEFINITIONS. Its own domain for the same
-    /// reason `Validations` is: the ConditionalFormatting extension caches the
-    /// rule list in `cfStore.state.rules` and `grid:refresh` only makes it
-    /// re-EVALUATE that cache, so an undo that adds or removes a rule has to
-    /// say so or the grid keeps painting by the undone rule set.
-    ConditionalFormats,
-}
-
-impl MutationDomain {
-    /// Every domain, in declaration order — the iteration order of a set, so a
-    /// workbook announces identically on every run.
-    const ALL: [MutationDomain; 12] = [
-        MutationDomain::Pivot,
-        MutationDomain::Slicer,
-        MutationDomain::RibbonFilter,
-        MutationDomain::PaneControl,
-        MutationDomain::Objects,
-        MutationDomain::Hidden,
-        MutationDomain::Outline,
-        MutationDomain::Hyperlinks,
-        MutationDomain::Validations,
-        MutationDomain::Annotations,
-        MutationDomain::Controls,
-        MutationDomain::ConditionalFormats,
-    ];
-
-    /// The wire name the Shell translator keys off, or `None` for a domain that
-    /// is reported through a dedicated flag instead.
-    pub(crate) fn wire_name(self) -> Option<&'static str> {
-        match self {
-            MutationDomain::Pivot => Some("pivot"),
-            MutationDomain::Slicer => Some("slicer"),
-            MutationDomain::RibbonFilter => Some("ribbonFilter"),
-            MutationDomain::PaneControl => Some("paneControl"),
-            MutationDomain::Objects => Some("objects"),
-            MutationDomain::Hidden => None,
-            MutationDomain::Outline => Some("outline"),
-            MutationDomain::Hyperlinks => Some("hyperlinks"),
-            MutationDomain::Validations => Some("validations"),
-            MutationDomain::Annotations => Some("annotations"),
-            MutationDomain::Controls => Some("controls"),
-            MutationDomain::ConditionalFormats => Some("conditionalFormats"),
-        }
-    }
-}
+/// ONE VOCABULARY OF DOMAINS, and this is the alias to it (§3cd).
+///
+/// This enum used to be declared here, with its own `wire_name` match. Then a
+/// backend-initiated cascade needed to announce the same domains
+/// (`object_deps::announce_cascade`), and for a while the crate had TWO enums
+/// naming the same wire strings — which is the drift the whole domain design
+/// exists to prevent, one layer down. `crossLayerConstantDrift.test.ts` caught
+/// it the moment the second one grew a member the first did not have.
+///
+/// `object_deps::UiDomain` is the canonical declaration because that is where
+/// the mapping FROM an object kind TO its domain lives, and every domain in the
+/// vocabulary is some object kind's answer. Undo simply reports a SET of them.
+pub(crate) use crate::object_deps::UiDomain as MutationDomain;
 
 /// A SET of refresh domains. A restore kind declares a set, not a single class:
 /// `obj_validation` is both an object-store swap and a validation change, and
 /// the single-class field it replaces could only ever say one of the two.
+/// u32, not u16: the shared vocabulary is 16 members wide, so `1u16 << 15` was
+/// the last representable bit and the next domain anybody added would have
+/// shifted out of range — silently, into a set that contains nothing.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(crate) struct MutationDomains(u16);
+pub(crate) struct MutationDomains(u32);
 
 impl MutationDomains {
     pub(crate) const fn none() -> Self {
@@ -155,11 +99,11 @@ impl MutationDomains {
     }
 
     pub(crate) const fn of(d: MutationDomain) -> Self {
-        MutationDomains(1u16 << d as u16)
+        MutationDomains(1u32 << d as u32)
     }
 
     pub(crate) fn contains(self, d: MutationDomain) -> bool {
-        self.0 & (1u16 << d as u16) != 0
+        self.0 & (1u32 << d as u32) != 0
     }
 
     pub(crate) fn extend(&mut self, other: MutationDomains) {
@@ -1163,7 +1107,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // pivot/slicer/ribbon-filter restores already rely on.
     m.insert(PIVOT_COL_WIDTHS_RESTORE_KIND, RestoreSpec { restore: r_pivot_col_widths, domains: NONE, defer: true });
     // Deferred (defer: true) — acquire other state locks; run after grid locks drop.
-    m.insert("pivot_definition", RestoreSpec { restore: r_pivot_definition, domains: MutationDomains::of(Pivot), defer: true });
+    m.insert(PIVOT_DEFINITION_RESTORE_KIND, RestoreSpec { restore: r_pivot_definition, domains: MutationDomains::of(Pivot), defer: true });
     m.insert("pivot_create", RestoreSpec { restore: r_pivot_create, domains: MutationDomains::of(Pivot), defer: true });
     m.insert("pivot_delete", RestoreSpec { restore: r_pivot_delete, domains: MutationDomains::of(Pivot), defer: true });
     m.insert("slicer", RestoreSpec { restore: r_slicer, domains: MutationDomains::of(Slicer), defer: true });
@@ -2142,20 +2086,72 @@ pub fn redo(
 // PIVOT TABLE UNDO/REDO HANDLERS
 // ============================================================================
 
+/// The restore kind every pivot-definition undo records under. One constant, so
+/// the four places that record one cannot drift from the one place that reads it.
+pub(crate) const PIVOT_DEFINITION_RESTORE_KIND: &str = "pivot_definition";
+
 /// Snapshot of a pivot definition for undo/redo.
 /// Optionally includes cells that were overwritten when the pivot expanded,
 /// so that `undo_pivot_overwrite` can restore them when the user cancels.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct PivotDefinitionSnapshot {
-    pivot_id: pivot_engine::PivotId,
-    definition: PivotDefinition,
+pub(crate) struct PivotDefinitionSnapshot {
+    pub(crate) pivot_id: pivot_engine::PivotId,
+    pub(crate) definition: PivotDefinition,
     /// Cells overwritten by the pivot expansion.
     /// Empty when no cells were overwritten.
     #[serde(default)]
-    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+    pub(crate) overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
     /// Sheet index where overwritten cells lived.
     #[serde(default)]
+    pub(crate) dest_sheet_idx: usize,
+    /// The CACHE as it was, for the commands that replace it.
+    ///
+    /// A field change re-renders the SAME records, so the definition alone is a
+    /// complete description of what to put back and this stays `None` — the
+    /// cache can be large, and cloning one per field change would be a real
+    /// cost. But `change_pivot_data_source` rebuilds the cache from a different
+    /// range and `update_bi_pivot_fields` re-queries the model for one, and
+    /// restoring an old definition against the NEW records renders something
+    /// that was never on screen: field indices that mean different columns, or
+    /// rows the old definition never had. Those two record the cache (BUG-0021,
+    /// BUG-0022). `None` means "the cache was not touched — leave it alone".
+    #[serde(default)]
+    pub(crate) cache: Option<pivot_engine::PivotCache>,
+}
+
+/// Read a pivot-definition undo snapshot back.
+///
+/// The one decoder, for the same reason there is one encoder: `undo_pivot_overwrite`
+/// carried its own private copy of the struct, so the cache field this snapshot
+/// grew would have been invisible to it — and it would have gone on restoring a
+/// definition against records from a different query, which is the very defect
+/// the field exists to close.
+pub(crate) fn decode_pivot_definition_snapshot(data: &[u8]) -> Option<PivotDefinitionSnapshot> {
+    serde_json::from_slice(data).ok()
+}
+
+/// Serialize a pivot-definition undo snapshot.
+///
+/// THE ONE WRITER. This payload had three independent authors — the pivot
+/// commands, the MCP object tools (as an untyped `json!` literal) and the .calp
+/// reset — against a single reader, so a field added here reached one of them
+/// and was silently defaulted away in the others. `cache` is exactly such a
+/// field.
+pub(crate) fn encode_pivot_definition_snapshot(
+    pivot_id: pivot_engine::PivotId,
+    definition: PivotDefinition,
+    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
     dest_sheet_idx: usize,
+    cache: Option<pivot_engine::PivotCache>,
+) -> Vec<u8> {
+    let snapshot = PivotDefinitionSnapshot {
+        pivot_id,
+        definition,
+        overwritten_cells,
+        dest_sheet_idx,
+        cache,
+    };
+    serde_json::to_vec(&snapshot).unwrap_or_default()
 }
 
 /// Snapshot of a full pivot table (definition + cache) for create/delete undo.
@@ -2192,21 +2188,29 @@ fn apply_pivot_definition_restore(
         // Save current definition for inverse transaction
         let dest_sheet_idx_current = resolve_dest_sheet_index(state, definition);
 
-        let current_snapshot = PivotDefinitionSnapshot {
+        // THE INVERSE MIRRORS THE SNAPSHOT'S SHAPE. If this entry carries a
+        // cache, the action it undoes replaced the cache — so redoing it has to
+        // put the current one back too, or the redo would render the restored
+        // definition against records from before the change.
+        let inverse_data = encode_pivot_definition_snapshot(
             pivot_id,
-            definition: definition.clone(),
+            definition.clone(),
             // Overwritten cells for the inverse will be captured when redo runs
-            overwritten_cells: Vec::new(),
-            dest_sheet_idx: dest_sheet_idx_current,
-        };
-        let inverse_data = serde_json::to_vec(&current_snapshot).unwrap_or_default();
+            Vec::new(),
+            dest_sheet_idx_current,
+            snapshot.cache.as_ref().map(|_| cache.clone()),
+        );
         inverse_transaction.add_change(CellChange::CustomRestore {
-            kind: "pivot_definition".to_string(),
+            kind: PIVOT_DEFINITION_RESTORE_KIND.to_string(),
             data: inverse_data,
         });
 
-        // Restore the old definition
+        // Restore the old definition — and the records it was written against,
+        // when the action being undone replaced them.
         *definition = snapshot.definition;
+        if let Some(old_cache) = snapshot.cache {
+            *cache = old_cache;
+        }
 
         // Recalculate the view
         let view = safe_calculate_pivot(definition, cache);
@@ -3976,11 +3980,41 @@ mod restore_registry_tests {
     #[test]
     fn every_domain_but_hidden_has_a_wire_name() {
         for d in MutationDomain::ALL {
-            if d == MutationDomain::Hidden {
-                assert!(d.wire_name().is_none(), "hidden must not be announced as a domain");
+            // TWO members carry no wire name, and they mean different things.
+            // `Hidden` is a real domain reported through a dedicated flag;
+            // `None` is the answer `ObjectKind::ui_domain` gives for a kind no
+            // frontend store caches, and it is in ALL only so the list stays
+            // exhaustive against the enum.
+            if matches!(d, MutationDomain::Hidden | MutationDomain::None) {
+                assert!(d.wire_name().is_none(), "{d:?} must not be announced as a domain");
             } else {
                 assert!(d.wire_name().is_some(), "{d:?} has no wire name");
             }
+        }
+    }
+
+    /// `UiDomain::ALL` is hand-maintained; a variant missing from it is dropped
+    /// from every undo announcement in silence. The exhaustive `wire_name`
+    /// match is what the compiler DOES force, so the two are compared here.
+    #[test]
+    fn every_ui_domain_is_in_all() {
+        let names: std::collections::BTreeSet<Option<&'static str>> =
+            MutationDomain::ALL.iter().map(|d| d.wire_name()).collect();
+        // 16 variants, 14 of which have a distinct wire name; `Hidden` and
+        // `None` share the absent one.
+        assert_eq!(
+            MutationDomain::ALL.len(),
+            15 + 1,
+            "UiDomain::ALL has fallen out of step with the enum"
+        );
+        assert_eq!(names.len(), 14 + 1, "two domains share a wire name");
+        // And every ObjectKind's answer is a member.
+        for kind in crate::object_deps::ObjectKind::ALL {
+            assert!(
+                MutationDomain::ALL.contains(&kind.ui_domain()),
+                "{} maps to a domain that is not in UiDomain::ALL",
+                kind.wire_name()
+            );
         }
     }
 
@@ -4604,3 +4638,7 @@ mod undo_sheet_domain_tests;
 #[cfg(test)]
 #[path = "undo_s12_soak_leak_tests.rs"]
 mod undo_s12_soak_leak_tests;
+
+#[cfg(test)]
+#[path = "pivot_undo_cache_tests.rs"]
+mod pivot_undo_cache_tests;

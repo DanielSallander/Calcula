@@ -271,6 +271,97 @@ export function readHairline(image: DecodedPng): HairlineReading {
 // So the same question the dpr axis asks ("which capture path do these BYTES
 // come from") is answerable for the profile too, from the file alone.
 
+// ============================================================================
+// THE THIRD AXIS — TEXT ANTIALIASING — AND WHY IT IS NOT IN THIS FILE
+// ============================================================================
+// BUG-0028 was a third capture-path split: three `menu-*` goldens and the
+// functional corpus's `autocomplete-dropdown-visible` hold LCD (subpixel)
+// antialiased text in their overlays, and a cold app renders the same overlays
+// with GRAYSCALE antialiasing. ~2,900 differing pixels against a 200-pixel
+// budget, with nothing about the product changed. The obvious move — "add a
+// third reader here, next to the other two" — was ATTEMPTED, MEASURED, and
+// REJECTED, and the measurement is written down so it is not attempted again.
+//
+// The two axes above are properties of the WHOLE CAPTURE. A display has one
+// scale factor and one colour profile, so every pixel of a golden was produced
+// through the same one and counting exact constants over the file answers the
+// question.
+//
+// LCD text is a property of each COMPOSITED LAYER. Chromium will not use it on
+// a layer it cannot prove opaque, so one capture can hold both kinds at once —
+// and the failing ones do. Measured on `menu-file-open` (2026-08-12), same
+// frame, same run:
+//
+//     menu-bar strip (root layer)      expected 1251 chromatic px   actual 1251
+//     ribbon strip   (root layer)      expected 1373               actual 1373
+//     the open dropdown (own layer)    expected 2914               actual    0
+//
+// A per-file statistic therefore cannot separate the two states: over the whole
+// 1280x800 frame the counts are 195,201 against 193,272, a 1% difference in a
+// number whose value depends mostly on how much coloured chrome is in shot.
+// Three candidate readers were tried against the real pair — chromatic pixels,
+// monotone-channel pixels, and chromatic pixels flanked by neutrals — and the
+// closest separation any of them reached was 1.3x, against the 4x dominance
+// margin the readers above are held to. A reader at that margin is the shape
+// this program keeps deleting: it would report a verdict it cannot support.
+//
+// So the axis is asserted against the RUN instead, where it IS answerable in
+// one number: `CAPTURE_ENVIRONMENT.compositedCanvasLayers`, read off the
+// compositor's own layer tree by `assertCaptureEnvironment`
+// (e2e/helpers/screenshots.ts). It is pinned by
+// `--disable-accelerated-2d-canvas` in `webview2Args.mjs`, which is where the
+// mechanism is written out.
+//
+// IF A FUTURE PASS WANTS THIS AXIS HERE, the population it can honestly serve
+// is a capture whose ENTIRE FRAME is one overlay — a `takeDialogScreenshot`
+// golden. There are none in the tree today, which is the other reason this file
+// does not carry the reader.
+//
+// ----------------------------------------------------------------------------
+// 2026-08-12: TRIED AGAIN, WITH A BETTER READER, AND STILL REJECTED. The reason
+// is now MEASURED rather than argued, so nobody has to spend a third pass on it.
+// ----------------------------------------------------------------------------
+// The prompt for the retry was real: the first live `--project=functional` run
+// under `--disable-accelerated-2d-canvas` found `ribbon-ribbon-tab-insert.png`
+// on the grayscale side of this axis (BUG-0030), which is precisely the failure
+// a corpus census is supposed to catch before a run does.
+//
+// A FOURTH reader was built and it looked decisive. Instead of counting
+// chromatic pixels over a whole frame, it restricts the DENOMINATOR to MID-TONE
+// pixels (luminance 40..200 — glyph-edge territory, excluding the flat
+// background and the solid glyph core that dominate a frame) and asks what
+// fraction of those are neutral. Compared WITHIN a cohort of captures of the
+// same element — the eight 1280x136 `[data-testid='ribbon']` captures — it
+// separated **11.9x**, against the 4x margin the readers above are held to:
+//
+//     seven ribbon goldens        162 / 4287  =  3.8%
+//     ribbon-ribbon-tab-insert   2654 / 5920  = 44.8%   <-- the stale one
+//
+// It was built, wired into a cohort rule, and it FIRED on the real corpus,
+// naming the file. Then the file was re-recorded against the pinned build, and
+// the re-record is what killed the idea:
+//
+//     ribbon-ribbon-tab-insert, STALE      2654 / 5920  = 44.8%
+//     ribbon-ribbon-tab-insert, CORRECT    1733 / 5908  = 29.3%   <-- still high
+//     the rest of the cohort                162 / 4287  =  3.8%
+//
+// **The correct recording is 7.7x from its own cohort and only 1.5x from the
+// stale one.** So the reader does not answer the question it was built for. It
+// separates COMPOSITED from NOT-COMPOSITED, and part of the Insert ribbon is
+// composited for its own reasons in the current, correctly-pinned build — a
+// property of that tab's CONTENT, not of the environment the file was recorded
+// in. A cohort-agreement rule over it reports a true sentence that is not a
+// corpus defect, and would have been permanently red.
+//
+// That is the same shape as the 1.3x rejection above, one level subtler: a
+// reader whose two populations are separated by less than the margin returns
+// verdicts it cannot support. The axis stays asserted against the RUN, where it
+// is answerable in one number, and BUG-0030's class stays guarded by
+// `assertCaptureEnvironment` plus the discipline of re-running the other
+// projects when a capture pin changes — which is the actual lesson, and it is
+// a process one, not a reader.
+// ============================================================================
+
 /** The status-bar green as the app declares it (`#217346`), i.e. under the pin. */
 export const CHROME_GREEN_SRGB = "33,115,70";
 /** The same chrome as a capture through this machine's display profile holds it. */
@@ -483,5 +574,216 @@ export function describeProfileSplit(
     `If these goldens predate that, re-record them; if the pin has been LOST, fix the ` +
     `launcher rather than the corpus -- a re-record would then bake this display into ` +
     `every golden and the suite would stop being portable at all.`
+  );
+}
+
+// ============================================================================
+// A THIRD AXIS, AND IT IS NOT A CAPTURE PATH AT ALL -- IT IS PRODUCT STATE
+// ============================================================================
+// The two axes above answer "which machine took this picture". They cannot
+// answer the question that actually broke a project on 2026-08-12:
+//
+//     WHICH BUILD OF THE PRODUCT took this picture?
+//
+// BUG-0028 fixed a real product defect: `useHomeTabState` keyed its style read
+// on the selection alone and, when `getCell` returned null, returned WITHOUT
+// clearing -- so the Home tab kept the previous cell's format state over a cell
+// that holds nothing, and File > New / undo / Clear-Formats never re-read at
+// all. Five `visual` goldens were re-recorded against the fixed build.
+//
+// Nothing looked at the OTHER projects. `tests/.../empty-grid-full-window.png`
+// photographs the same brand-new workbook through the same
+// `resetToNewWorkbook` helper, in the `functional` project, and still carries
+// the residue: 546 pressed-accent pixels where the fixed build paints 36. The
+// pressed fill alone is 590 differing pixels against a 200-pixel budget, so it
+// cannot pass -- and no test in the tree could say so, because every guard was
+// about the capture environment and this is about the application.
+//
+// HOW THE STATE IS READ OFF THE BYTES. A latched Home-tab toggle paints
+// `rgba(16,185,129,0.14)` over white -- (222,245,237) -- inside a 30x26 box.
+// Counting that fill recovers "was a format toggle lit" from the file alone,
+// with no run involved, exactly as the hairline recovers the device pixel
+// ratio. Measured over all 71 committed goldens: an UNLIT capture holds 23..36
+// such pixels (stray anti-aliasing in the ribbon iconography) and a LIT one
+// holds 546 or more. There is no golden between 36 and 546, so the floor below
+// sits an order of magnitude clear of both sides.
+
+/** The fill a latched Home-tab toggle paints: `rgba(16,185,129,0.14)` on white. */
+export const PRESSED_ACCENT_FILL: readonly [number, number, number] = [222, 245, 237];
+
+/**
+ * Per-channel slack when matching the fill. The button's rounded corners and
+ * its 0.45-alpha border blend against neighbouring pixels, so an exact match
+ * would count only the interior and under-report a partially covered button.
+ */
+const PRESSED_ACCENT_TOLERANCE = 3;
+
+/**
+ * Above this many pressed-accent pixels a capture is showing a LATCHED toggle.
+ * Measured, not chosen: unlit goldens hold 23..36, lit ones 546+.
+ */
+export const PRESSED_ACCENT_FLOOR = 200;
+
+/** Count the latched-toggle fill in a decoded golden. PURE. */
+export function readPressedAccentFill(image: DecodedPng): number {
+  const [tr, tg, tb] = PRESSED_ACCENT_FILL;
+  let pixels = 0;
+  for (let i = 0; i < image.rgb.length; i += 3) {
+    if (
+      Math.abs(image.rgb[i] - tr) <= PRESSED_ACCENT_TOLERANCE &&
+      Math.abs(image.rgb[i + 1] - tg) <= PRESSED_ACCENT_TOLERANCE &&
+      Math.abs(image.rgb[i + 2] - tb) <= PRESSED_ACCENT_TOLERANCE
+    ) {
+      pixels += 1;
+    }
+  }
+  return pixels;
+}
+
+/** One golden's latched-toggle measurement. */
+export interface RibbonStateReading {
+  /** Path relative to `app/e2e`, forward-slashed. */
+  file: string;
+  pressedAccentPixels: number;
+}
+
+/**
+ * A golden whose capture is taken on a BRAND-NEW, EMPTY workbook, so the Home
+ * tab must read unlit.
+ *
+ * Declared rather than inferred, and then CHECKED AGAINST THE SPEC in
+ * `goldenCorpus.test.ts`: every entry must name a test that really calls
+ * `resetToNewWorkbook` before the capture, with no cell write in between. So
+ * the table cannot quietly claim a populated capture is empty, and an entry
+ * whose test is rewritten fails instead of going stale.
+ */
+export interface EmptyDocumentGolden {
+  /** Path relative to `app/e2e`, forward-slashed. */
+  file: string;
+  /** Spec source relative to `app/e2e`, forward-slashed. */
+  spec: string;
+  /** The exact capture name passed to the helper. */
+  capture: string;
+}
+
+export const EMPTY_DOCUMENT_GOLDENS: EmptyDocumentGolden[] = [
+  {
+    file: "visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png",
+    spec: "visual/core-visual.spec.ts",
+    capture: "core-empty-grid",
+  },
+  {
+    file: "visual/__screenshots__/core-visual.spec.ts/ribbon-core-default-ribbon.png",
+    spec: "visual/core-visual.spec.ts",
+    capture: "core-default-ribbon",
+  },
+  {
+    file: "visual/__screenshots__/core-visual.spec.ts/menu-file-open.png",
+    spec: "visual/core-visual.spec.ts",
+    capture: "menu-file-open",
+  },
+  {
+    file: "visual/__screenshots__/core-visual.spec.ts/menu-edit-open.png",
+    spec: "visual/core-visual.spec.ts",
+    capture: "menu-edit-open",
+  },
+  {
+    file: "visual/__screenshots__/core-visual.spec.ts/menu-data-open.png",
+    spec: "visual/core-visual.spec.ts",
+    capture: "menu-data-open",
+  },
+  {
+    file: "tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png",
+    spec: "tests/grid-rendering.spec.ts",
+    capture: "empty-grid-full-window",
+  },
+];
+
+/**
+ * Goldens that STILL hold a product state the current build no longer produces.
+ *
+ * The same two-sided quarantine as `MIS_RECORDED_CORPORA`, for the same reason:
+ * every entry must still measure exactly `pressedAccentPixels`, so re-recording
+ * the file correctly makes the entry stale and fails, and the entry cannot be
+ * widened to cover a second file without measuring that one too.
+ */
+export interface StaleProductStateGolden {
+  /** Path relative to `app/e2e`, forward-slashed. */
+  file: string;
+  /** Bug ledger id. */
+  ledgerId: string;
+  reason: string;
+  /** What the file measures TODAY, so the entry expires when that changes. */
+  pressedAccentPixels: number;
+}
+
+// EMPTY, and BUG-0029's entry is gone because the quarantine EXPIRED ITSELF
+// exactly as it was designed to (2026-08-12).
+//
+// The entry required `empty-grid-full-window.png` to still measure 546. The
+// `--project=functional` run it was waiting for happened, the file was
+// re-recorded against the fixed build, it now measures **36** -- the same 36 its
+// re-recorded sibling `core-empty-grid.png` holds, which is the number §7c
+// predicted from the bytes without running anything -- and the two-sided rule
+// turned red on its own author's entry rather than going quietly stale. That is
+// the whole point of the shape: a quarantine that stops describing a real defect
+// is a blanket, so it is built to fail when it stops being true.
+//
+// The live run also confirmed the arithmetic exactly: the comparator reported
+// **2,173** differing pixels against the 200-pixel budget, the same 2,173 §7c
+// computed off the committed bytes, with 510 of them the predicted
+// `221,245,237` fill.
+export const STALE_PRODUCT_STATE_GOLDENS: StaleProductStateGolden[] = [];
+
+/** Which stale-state quarantine, if any, claims this golden. PURE. */
+export function staleProductStateFor(
+  file: string,
+  quarantine: StaleProductStateGolden[] = STALE_PRODUCT_STATE_GOLDENS,
+): StaleProductStateGolden | undefined {
+  return quarantine.find((q) => q.file === file);
+}
+
+/**
+ * The sentence a corpus holding a product state the build no longer produces
+ * should carry.
+ *
+ * Returns null when every empty-document golden reads unlit. PURE, so the
+ * wording has a unit tier -- the point of this guard is to name the FILE and
+ * the MECHANISM rather than leave one red screenshot to be explained by eye.
+ */
+export function describeStaleRibbonState(
+  readings: RibbonStateReading[],
+  population: EmptyDocumentGolden[] = EMPTY_DOCUMENT_GOLDENS,
+  quarantine: StaleProductStateGolden[] = STALE_PRODUCT_STATE_GOLDENS,
+): string | null {
+  const declared = new Set(population.map((p) => p.file));
+  const lit = readings.filter(
+    (r) =>
+      declared.has(r.file) &&
+      r.pressedAccentPixels > PRESSED_ACCENT_FLOOR &&
+      staleProductStateFor(r.file, quarantine) === undefined,
+  );
+  if (lit.length === 0) return null;
+
+  return (
+    `[goldens] A GOLDEN PHOTOGRAPHS A PRODUCT STATE THIS BUILD NO LONGER ` +
+    `PRODUCES.\n` +
+    `  - ${lit.length} golden(s) taken on a BRAND-NEW, EMPTY workbook show a ` +
+    `LATCHED Home-tab toggle:\n` +
+    lit
+      .map((s) => `      ${s.file}  (${s.pressedAccentPixels} pressed-accent px)`)
+      .join("\n") +
+    `\n  An empty cell has no format, so no toggle may be lit. Until BUG-0028, ` +
+    `useHomeTabState returned without clearing when getCell resolved to null and ` +
+    `the ribbon kept the PREVIOUS cell's state; a golden recorded then is a ` +
+    `picture of the defect.\n` +
+    `  THIS AXIS IS INVISIBLE TO BOTH CHECKS ABOVE: dpr and colour profile ask ` +
+    `which MACHINE took the picture. This asks which BUILD did. A corpus can be ` +
+    `perfectly consistent about the display and still contain a screenshot of a ` +
+    `bug that has been fixed.\n` +
+    `  The latched fill is ${PRESSED_ACCENT_FILL.join(",")} over a 30x26 box -- ` +
+    `about 590 pixels against a 200-pixel comparator budget, so these cannot pass. ` +
+    `Re-record them against the fixed build with --update-snapshots=changed, ` +
+    `never "all".`
   );
 }

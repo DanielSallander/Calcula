@@ -4,14 +4,19 @@
  *
  * Lets an AI CREATE workbook structure (a named range), not just read it. The
  * tool routes through the same undoable create_named_range command the UI uses
- * and then emits "named-ranges:refresh" (the DefinedNames extension bridges that
- * Tauri event to NAMED_RANGES_CHANGED, so an out-of-band create appears live).
+ * and then ANNOUNCES the mutation, so an out-of-band create appears live.
  *
  * Asserts: (1) the create succeeds, (2) list_named_ranges shows the new name,
- * (3) the named-ranges:refresh event fired (the live-refresh path), and (4) a
- * single undo removes it (it went through the undo stack). The handshake runs
- * from Node (no CORS); the Tauri-event listener + read-back/undo run in the
- * WebView.
+ * (3) the announcement reached the UI, and (4) a single undo removes it (it
+ * went through the undo stack). The handshake runs from Node (no CORS); the
+ * Tauri-event listener + read-back/undo run in the WebView.
+ *
+ * (3) USED TO NAME THE TAURI EVENT `"named-ranges:refresh"`. §3cd (BUG-0026)
+ * deleted it with the other four per-kind announcements in favour of one
+ * `mutation:refresh` the Shell fans out through `MUTATION_DOMAIN_EVENTS`; the
+ * product is fine and the test was naming a dead transport. It now asserts the
+ * backend announcement AND NAMED_RANGES_CHANGED, the event the DefinedNames
+ * extension actually consumes — see mcp-create-table.spec.ts for why both.
  */
 import { test, expect } from "../fixtures";
 
@@ -38,14 +43,19 @@ test.describe("MCP create_named_range write tool (C1)", () => {
     const setup = await page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("set_script_security_level", { level: "enabled" });
-      // Arm a listener for the backend "named-ranges:refresh" Tauri event (the
-      // live-refresh signal the DefinedNames bridge consumes).
+      // Arm BOTH halves of the announcement (see the header).
       const api = await (window as any).__calcImport(
         new URL("/src/api/index.ts", document.baseURI).href,
       );
-      (window as any).__NR_REFRESH__ = false;
-      await api.listenTauriEvent("named-ranges:refresh", () => {
-        (window as any).__NR_REFRESH__ = true;
+      (window as any).__NR_ANNOUNCED_DOMAINS__ = null;
+      (window as any).__NR_UI_HEARD__ = false;
+      await api.listenTauriEvent("mutation:refresh", (payload: any) => {
+        const domains: string[] = payload?.domains ?? [];
+        const seen: string[] = (window as any).__NR_ANNOUNCED_DOMAINS__ ?? [];
+        (window as any).__NR_ANNOUNCED_DOMAINS__ = [...seen, ...domains];
+      });
+      window.addEventListener("app:named-ranges-changed", () => {
+        (window as any).__NR_UI_HEARD__ = true;
       });
       await tauri.core.invoke("mcp_start", {});
       const status: any = await tauri.core.invoke("mcp_status", {});
@@ -101,12 +111,31 @@ test.describe("MCP create_named_range write tool (C1)", () => {
       const listText: string = list.json?.result?.content?.[0]?.text ?? "";
       expect(listText).toContain(nrName);
 
-      // 3. The backend emitted named-ranges:refresh (the live-refresh path).
-      const refreshFired = await page.evaluate(async () => {
+      // 3. The mutation was announced, and the announcement reached the UI.
+      const announced = await page.evaluate(async () => {
         await new Promise((r) => setTimeout(r, 300));
-        return (window as any).__NR_REFRESH__ === true;
+        return {
+          domains: (window as any).__NR_ANNOUNCED_DOMAINS__ as string[] | null,
+          uiHeard: (window as any).__NR_UI_HEARD__ === true,
+        };
       });
-      expect(refreshFired, "create_named_range must emit named-ranges:refresh").toBe(true);
+      expect(
+        announced.domains,
+        "create_named_range must announce the mutation " +
+          "(object_deps::announce_cascade -> the mutation:refresh Tauri event). " +
+          "Nothing arrived at all.",
+      ).not.toBeNull();
+      expect(
+        announced.domains,
+        "the announcement must name the `namedRanges` domain — that is what " +
+          "ObjectKind::NamedRange maps to in object_deps::ui_domain",
+      ).toContain("namedRanges");
+      expect(
+        announced.uiHeard,
+        "the Shell must fan `namedRanges` out to NAMED_RANGES_CHANGED — that " +
+          "is the event the DefinedNames extension refreshes on, so without it " +
+          "an AI-created name is invisible in the Name Manager",
+      ).toBe(true);
 
       // 4. Undoable: a single undo removes the AI-created name.
       const namesAfterUndo = await page.evaluate(async () => {

@@ -102,6 +102,33 @@ export function deselectSlicer(): void {
 }
 
 /**
+ * Drop ONE slicer out of the selection because it no longer exists.
+ *
+ * §3cd, BUG-0026. The contextual Slicer Options tab is a function of the
+ * SELECTION, and the selection is a set of ids — so an id whose slicer was
+ * removed by a backend cascade (its table deleted, its pivot deleted, its sheet
+ * deleted, or any of those driven by an AI client over MCP) leaves the tab on
+ * screen addressing an object that is gone. The measured end state was a Slicer
+ * tab on a workbook with zero slicers.
+ *
+ * ONE slicer, not the whole selection: Excel keeps the rest of a multi-select
+ * when one of its members goes away, and the previous handler cleared
+ * everything. The panel is unregistered only when nothing is left to configure.
+ */
+export function dropSlicerFromSelection(slicerId: string): void {
+  if (!selectedSlicerIds.delete(slicerId)) return;
+  if (selectedSlicerIds.size === 0) {
+    // Re-arm the guard `deselectSlicer` checks — the delete above already
+    // emptied the set, and it returns early on an empty one.
+    selectedSlicerIds.add(slicerId);
+    deselectSlicer();
+    return;
+  }
+  broadcastSelectedSlicers();
+  requestOverlayRedraw();
+}
+
+/**
  * Get the currently selected slicer ID (primary/last-clicked).
  * For backward compatibility — returns the last selected slicer.
  */

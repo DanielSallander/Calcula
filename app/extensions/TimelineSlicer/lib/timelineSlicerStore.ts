@@ -78,13 +78,10 @@ export async function deleteTimelineAsync(
 ): Promise<boolean> {
   try {
     await api.deleteTimelineSlicer(timelineId);
-    dataCache.delete(timelineId);
+    // TIMELINE_DELETED is NOT dispatched here. `refreshCache` diffs the id set
+    // and announces every timeline that went away, whatever removed it
+    // (§3cd) -- see its doc comment.
     await refreshCache();
-    window.dispatchEvent(
-      new CustomEvent(TimelineSlicerEvents.TIMELINE_DELETED, {
-        detail: { timelineId },
-      }),
-    );
     return true;
   } catch (err) {
     console.error("[TimelineSlicer] Failed to delete timeline:", err);
@@ -230,9 +227,36 @@ export async function refreshTimelineData(
 // Cache management
 // ============================================================================
 
+/**
+ * Re-read the timeline list from the backend — AND ANNOUNCE WHAT VANISHED.
+ *
+ * §3cd, the timeline half of BUG-0026 and the identical defect. A timeline can
+ * only be sourced from a pivot, so `DEPENDENCY_MATRIX` deletes it whenever its
+ * last pivot goes (`pivot -> timelineSlicer.sourceId`, CascadeOrRebind) and
+ * again when its sheet is deleted — and `TIMELINE_DELETED` was dispatched from
+ * exactly one place, the frontend `deleteTimelineAsync`. Every cascade route
+ * therefore left the contextual Timeline Options tab addressing an id that no
+ * longer resolved.
+ *
+ * The refresh is the announcer, for the same reason as the canvas slicer's:
+ * whatever removed the timeline, the store finds out here.
+ */
 export async function refreshCache(): Promise<void> {
   try {
+    const before = cachedTimelines.map((t) => t.id);
     cachedTimelines = await api.getAllTimelineSlicers();
+    const surviving = new Set(cachedTimelines.map((t) => t.id));
+    for (const timelineId of before) {
+      if (surviving.has(timelineId)) continue;
+      // Nothing else prunes the per-timeline data cache; a cascade-deleted
+      // timeline leaked its cached response for the session.
+      dataCache.delete(timelineId);
+      window.dispatchEvent(
+        new CustomEvent(TimelineSlicerEvents.TIMELINE_DELETED, {
+          detail: { timelineId },
+        }),
+      );
+    }
     syncTimelineRegions();
     await Promise.all(cachedTimelines.map((t) => refreshTimelineData(t.id)));
   } catch (err) {

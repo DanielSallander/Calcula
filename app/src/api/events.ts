@@ -313,6 +313,15 @@ export type MutationDomain =
   | "ribbonFilter"
   | "paneControl"
   | "objects"
+  // The SHEET COLLECTION and the NAME LIST. Both exist because a mutation
+  // started INSIDE the backend has no frontend call to return from and must
+  // announce for itself (§3cd): an MCP tool that adds, renames, moves or
+  // deletes a sheet used to emit a bespoke "sheets:refresh" Tauri event that
+  // NOTHING on the frontend listened to, so the AI's sheet never appeared in
+  // the tab bar. They are domains rather than more bespoke events for the same
+  // reason all the others are — the Shell translator owns the mapping.
+  | "sheets"
+  | "namedRanges"
   // The NON-CELL domains. Undo/redo used to announce none of these, so
   // undoing a grouping, a hyperlink, a validation rule, a note or a deleted
   // shape left the owning extension's cache — and therefore the painted

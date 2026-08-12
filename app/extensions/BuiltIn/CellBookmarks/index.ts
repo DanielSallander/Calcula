@@ -297,13 +297,21 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregSelection);
 
   // ---- 10. Event: Sheet Changed (update current sheet in store) ----
-  const unregSheetChanged = onAppEvent(AppEvents.SHEET_CHANGED, (e: CustomEvent) => {
+  const unregSheetChanged = onAppEvent(AppEvents.SHEET_CHANGED, (detail) => {
     // Every emitter in the repo sends { sheetIndex, sheetName }; reading
     // `index` meant this never fired and the store kept the sheet it was
     // initialized with.
-    const detail = e.detail as { sheetIndex?: number } | undefined;
-    if (typeof detail?.sheetIndex === "number") {
-      setCurrentSheet(detail.sheetIndex);
+    //
+    // AND SO DID READING `e.detail`. `onAppEvent` hands the callback the
+    // CustomEvent's DETAIL, not the event -- so the previous signature looked
+    // for `{ sheetIndex }.detail`, which is undefined for every emitter in the
+    // repo, and the store STILL kept its initial sheet. The same fix, applied
+    // one level too shallow. (Found while wiring the `sheets` domain, which
+    // dispatches this event with no detail at all -- `.detail` of `undefined`
+    // would have thrown.)
+    const d = detail as { sheetIndex?: number } | undefined;
+    if (typeof d?.sheetIndex === "number") {
+      setCurrentSheet(d.sheetIndex);
     }
   });
   cleanupFns.push(unregSheetChanged);

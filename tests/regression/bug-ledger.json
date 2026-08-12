@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 24,
+  "nextId": 34,
   "bugs": [
     {
       "id": "BUG-0023",
@@ -64,20 +64,26 @@
       },
       "triage": {
         "verdict": "app-bug",
-        "confidence": 0.95,
+        "confidence": 1,
         "behaviorIds": [
           "undo.pivot-filter"
         ],
-        "rootCauseHypothesis": "The command rebuilds the PivotCache from the new range, so like BUG-0021 it needs a definition+cache snapshot rather than the definition-only pivot_definition restore.",
+        "rootCauseHypothesis": "CONFIRMED on the current tree: change_pivot_data_source recorded nothing at all, and it both rebuilds the cache from the new range and can overwrite cells it did not previously cover. Same root as BUG-0021 and fixed in the same pass.",
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/pivot/commands.rs (change_pivot_data_source snapshots definition+cache, saves the overwritten cells and records one step)",
+          "app/src-tauri/src/undo_commands.rs (the cache-carrying snapshot it needs)"
+        ],
+        "diffSummary": "The old definition AND the old cache are captured before the range is repointed, the cells the new (possibly larger) pivot overwrites are SAVED rather than merely counted, and one 'Change pivot data source' step is recorded after the work succeeds.",
+        "validatedBy": [
+          "undoing_a_cache_replacing_change_puts_the_old_records_back (app-lib)",
+          "cargo check --all-targets: 0 warnings"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0021",
@@ -101,20 +107,31 @@
       },
       "triage": {
         "verdict": "app-bug",
-        "confidence": 0.95,
+        "confidence": 1,
         "behaviorIds": [
           "undo.pivot-filter"
         ],
-        "rootCauseHypothesis": "The command mutates PivotState.pivot_tables (six write sites) and never calls record_pivot_definition_undo. A definition-only snapshot is not sufficient: the command re-queries the model and replaces the cache, so restoring the old definition against the NEW cache would render the wrong thing. It needs a definition+cache snapshot, i.e. the shape pivot_create/pivot_delete already use.",
+        "rootCauseHypothesis": "CONFIRMED on the current tree, and the code said so itself: the auto-fit branch carried a comment reading 'DELIBERATELY DISCARDED ... this command records NO undo entry at all'. The command has FIVE mutating exits (cosmetic fast path, no-fields-clear, no-measures-save, failed-query-save, main path) and none recorded anything. A definition-only snapshot is not sufficient because four of the five replace the cache.",
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/undo_commands.rs (PivotDefinitionSnapshot.cache + encode/decode + PIVOT_DEFINITION_RESTORE_KIND)",
+          "app/src-tauri/src/pivot/commands.rs (record_pivot_definition_undo takes a cache; 5 exits of update_bi_pivot_fields record)",
+          "app/src-tauri/src/mcp/objects.rs (json! literal -> the shared encoder)",
+          "app/src-tauri/src/calp_commands.rs (local struct copy -> the shared encoder)",
+          "app/src-tauri/src/pivot_undo_cache_tests.rs (new)"
+        ],
+        "diffSummary": "The pivot-definition undo snapshot grew an optional `cache`, and the restore puts it back when it is present. All five mutating exits of update_bi_pivot_fields now record ONE undo step, carrying the old cache (the four that replace it) and the saved overwritten cells and auto-fit column widths, so the resize undoes with the change that caused it instead of being discarded. The payload had THREE independent writers and a fourth private decoder in undo_pivot_overwrite; all four now go through one encoder/decoder in undo_commands, because a field added to one author is silently defaulted away in the others - which is exactly the failure `cache` would have had.",
+        "validatedBy": [
+          "app-lib: 5 new tests in undo_commands::pivot_undo_cache_tests, all green",
+          "cargo check --all-targets: 0 warnings",
+          "app-lib suite after the tree settled: 1491 passed / 0 failed / 5 ignored",
+          "sabotage check: removing the cache-restore arm fails undoing_a_cache_replacing_change_puts_the_old_records_back with left: 9, right: 4"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0020",
@@ -499,16 +516,20 @@
         "behaviorIds": [
           "save.sparklines"
         ],
-        "rootCauseHypothesis": "collect_sparklines_for_save exists in build_workbook_for_save, but either save_file's path does not include it, the .cala writer skips workbook.sparklines, or the load path never restores them into AppState.sparklines.",
+        "rootCauseHypothesis": "collect_sparklines_for_save exists in build_workbook_for_save, but either save_file's path does not include it, the .cala writer skips workbook.sparklines, or the load path never restores them into AppState.sparklines. || RE-TRIAGED 2026-08-12: already fixed on the tree and never closed -- the same pattern as BUG-0024, a filing that outlived its defect. collect_sparklines_for_save is wired into build_workbook_for_save, zip_io.rs writes sparklines.json and reads it back unconditionally, and restore_sparklines puts them into AppState. Reading the source cannot settle that, which is the only reason this entry survived three handovers; it was RUN.",
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/journeys/sparkline-persistence.spec.ts (new, the proof)"
+        ],
+        "diffSummary": "No product change was needed. Proved live on the real app: a real sparkline group, a real save_file to a real .cala, a real open_file, and the BACKEND'S OWN DIGEST on both sides -- the same instrument (save-reload-round-trip) that filed the bug. The digest hashes sheetIndex -> sorted groups_json, i.e. the group's LOCATION and SOURCE range, so it is strictly stronger than a count: a reload that restores an empty group at the wrong address would still fail. The spec also reads the .cala archive bytes directly and requires a sparklines.json entry, which separates 'the writer dropped it' from 'the reader dropped it' -- the two halves this bug's own triage could not tell apart. A non-vacuity assertion requires the digest to actually hold a group BEFORE the save, so the test cannot rot into a no-op.",
+        "validatedBy": [
+          "app/e2e/journeys/sparkline-persistence.spec.ts (journey run: 133 passed / 0 failed / 1 skipped)"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0010",
@@ -1017,7 +1038,8 @@
           "the new census fired on the REAL corpus before the fix, naming 15 goldens, while the other 23 cases in the file stayed green",
           "--project=functional --update-snapshots=changed: 543 passed / 0 failed / 11 skipped",
           "--project=scenario: 24/24 (the project that the deadlock had wedged)",
-          "app/e2e/__tests__: 34/34 with both axes quiet"
+          "app/e2e/__tests__: 34/34 with both axes quiet",
+          "re-triaged 2026-08-12: still fixed on this tree -- goldenCorpus.readColourProfile and CAPTURE_ENVIRONMENT.colourProfile are both present; the ledger entry, not the defect, was what outlived it"
         ]
       },
       "status": "fixed"
@@ -1041,19 +1063,39 @@
         "actionCount": null
       },
       "triage": {
-        "verdict": "undetermined",
-        "confidence": 0.5,
+        "verdict": "app-bug",
+        "confidence": 0.97,
         "behaviorIds": [],
-        "rootCauseHypothesis": "TWO candidates, in different layers, not separated by the available evidence. (a) A DROPPED KEYSTROKE: retypeToken does dblclick + keyboard.type(delay 40) into Monaco, which tokenizes and can raise a suggest widget asynchronously; a key landing in that window can be swallowed. Harness defect. (b) THE LIVE INDICATOR LIES: the helper types, polls the module live indicator, then reads the store. If the idle write-through fired on the 'A' and flipped the indicator to live before the '1' had re-dirtied the module, the poll is satisfied by the PREVIOUS write-through and the store read is stale while the editor buffer is correct -- a state that is not a function of its input, the same class as the FormulaInput selection race (register 3bw). THE MEASUREMENT THAT SEPARATES THEM IS ONE LINE: read the Monaco buffer at the moment the assertion fails. Buffer holds A1 -> (b); buffer holds A -> (a).",
-        "suggestedFixArea": "test-or-product"
+        "rootCauseHypothesis": "SEPARATED: hypothesis (b). The measurement the filing named -- read the Monaco buffer at the moment the assertion fails -- was taken deterministically instead of by re-running a 1-in-3 flake: a vitest reproduction of the exact sequence (type a character, let the 400ms idle window elapse, hold the store write open, type the next character while it is in flight, release) reproduces the symptom exactly. The store held 'A', the BUFFER held 'A1', and the live chip read 'live'. So no keystroke was dropped and this is NOT the grid's type-to-open defect; the editor's live indicator claimed the store held the buffer while a write was still owed. Corroborated by the harness's own history: two of the six copies of retypeToken's caller already carried a comment describing this race and worked around it by polling the store, and those two are green while the copy without the workaround is the flake.",
+        "suggestedFixArea": "frontend"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "NOT FIXED. The assertion's own message ('the module store holds the typed edit') points at the store, which the evidence exonerates -- it faithfully persisted whatever the buffer contained. Whichever explanation is right, retypeToken exists as SIX independent copies (macro-live-edit, vba-idioms-wave1..4, vba-wiring-batch), so the fix must either be made six times or the helper lifted into e2e/helpers first. Deliberately not attempted in the same pass that re-recorded 58 goldens: it is the input path of ~40 currently-green tests and each verification costs a 38-minute run.",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/extensions/ScriptableObjects/components/ObjectScriptEditorApp.tsx",
+          "app/extensions/ScriptableObjects/lib/liveModuleBuffer.ts",
+          "app/extensions/ScriptableObjects/__tests__/liveMacroEditing.test.tsx",
+          "app/extensions/ScriptableObjects/lib/__tests__/liveModuleBuffer.test.ts",
+          "app/e2e/helpers/macroEditor.ts (new)",
+          "app/e2e/tests/macro-live-edit.spec.ts",
+          "app/e2e/tests/vba-idioms-wave1.spec.ts",
+          "app/e2e/tests/vba-idioms-wave2.spec.ts",
+          "app/e2e/tests/vba-idioms-wave3.spec.ts",
+          "app/e2e/tests/vba-idioms-wave4.spec.ts",
+          "app/e2e/tests/vba-wiring-batch.spec.ts",
+          "app/e2e/tests/macro-editor-inventory.spec.ts",
+          "app/e2e/tests/macro-link-model.spec.ts"
+        ],
+        "diffSummary": "PRODUCT: a persist outcome describes the bytes it wrote, not the bytes on screen, so the live chip is now derived from the persister's own buffer-vs-store comparison at the moment the outcome lands and reads 'Saving...' while a later keystroke is still unstored. The same staleness had a destructive second face: a 'compiled' outcome replaced the buffer with the stored JavaScript even when the author had typed since, deleting those keystrokes and desynchronising the persister (setSource never reaches it); outcomes now carry the `input` they compiled FROM, the swap is skipped when the screen has moved on, and when it does happen the persister is told via a new `adopt`. HARNESS: retypeToken's six byte-identical copies (plus a seventh editorText and inline indicator locators) became one e2e/helpers/macroEditor.ts, whose failure message prints the chip state, the Monaco buffer and the stored source -- so the separating measurement is permanent instead of costing a 38-minute run.",
+        "validatedBy": [
+          "the reproduction FAILED before the fix (expected 'saving', received 'live') and passes after",
+          "the compile-on-a-moved-buffer detector was proved to fire by disabling its guard",
+          "extensions/ScriptableObjects: 254/254 vitest",
+          "npm run check-types, npm run lint:boundaries, tsc -p e2e/tsconfig.json: clean",
+          "NOT yet re-run live: --project=functional was deliberately not started while two other agents were editing app/src-tauri and app/extensions. The collapsed helper changes the input path of ~40 green tests and a full ordered run is owed."
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0026",
@@ -1081,12 +1123,28 @@
         "suggestedFixArea": "extensions/Slicer + the cascade announcement"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "NOT FIXED and DELIBERATELY NOT SUPPRESSED -- the oracle should keep failing loudly on this seed. Filed with a 3-action confirmed reproduction so it can be fixed and re-verified directly.",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/object_deps.rs (UiDomain, dependent_kind, cascade_domains, announce_cascade, delete_sheet/cascade_deleted_sources transitive fixes)",
+          "app/src-tauri/src/object_deps_census_tests.rs",
+          "app/src-tauri/src/undo_commands.rs (MutationDomain now aliases object_deps::UiDomain)",
+          "app/src-tauri/src/mcp/objects.rs, app/src-tauri/src/mcp/tools.rs",
+          "app/src/shell/bootstrap.ts (mutation:refresh bridged into MUTATION_DOMAIN_EVENTS)",
+          "app/src/api/__tests__/cascadeAnnouncementCensus.test.ts",
+          "app/extensions/Slicer/lib/slicerStore.ts, app/extensions/Slicer/handlers/selectionHandler.ts",
+          "app/extensions/TimelineSlicer/lib/timelineSlicerStore.ts"
+        ],
+        "diffSummary": "SLICER_DELETED was dispatched from deleteSlicerAsync alone -- the one route a user takes by hand -- so every backend cascade removed the slicer and told the UI nothing, and the contextual tab is a function of the selection. Fixed in the STORE, not at the call site: refreshCache diffs the id set it just read against the one it held and announces whatever vanished, which covers every route including ones that do not exist yet, prunes the leaked items cache by the same diff, and keeps a multi-selection's survivors. The identical defect in TimelineSlicer (never reported) and a partial one in Pivot are fixed with it. The direction nothing had covered: an MCP tool is not invoked BY the frontend, so four bespoke per-kind Tauri events -- one of which, sheets:refresh, had no listener anywhere in the app -- were replaced by one announce_cascade -> mutation:refresh bridged into the same MUTATION_DOMAIN_EVENTS fan-out. Deriving the domain list transitively from DEPENDENCY_MATRIX found three live backend orphans: delete_sheet never ran cascade_deleted_charts, cascade_deleted_sources never ran cascade_deleted_slicers, and neither pruned object scripts.",
+        "validatedBy": [
+          "cargo check --all-targets: 0 warnings in app/src-tauri and core",
+          "app-lib 1492 passed / 0 failed / 5 ignored; core 1339; test_pivot 56",
+          "vitest 759 files / 106329 passed",
+          "SABOTAGE, on the real crate, re-verified 2026-08-12 during the integration pass: commenting out announce_cascade in mcp::delete_table failed every_backend_initiated_cascade_announces_itself with 'mcp::delete_table: reaches the cascade `DeletedSource::table` and never calls announce_cascade'; restored, 38/38 green",
+          "SABOTAGE: renaming the mutation:refresh listener in bootstrap.ts failed cascadeAnnouncementCensus 'the backend announcement lands in the SAME translator'; restored",
+          "NOT re-run live: no E2E in this pass. The 3-action soak/invariant reproduction (table.create -> slicer.create -> table.delete) is owed a replay."
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0027",
@@ -1152,12 +1210,225 @@
         "suggestedFixArea": "test-capture-determinism"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "NOT FIXED. Re-recording them cold would only invert which condition fails; the fix is to make the capture deterministic (settle the highlight before capturing; force the icon assets to be resolved), which is a harness/product change rather than a re-record. The other 23 visual goldens and all 38 tests/ + 3 scenarios/ goldens re-recorded in this pass are unaffected -- the dpr and colour-profile findings were derived from the committed bytes and are independent of warm/cold.",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/webview2Args.mjs (--disable-accelerated-2d-canvas in DETERMINISTIC_CAPTURE_FLAGS)",
+          "app/e2e/captureEnvironment.ts (compositedCanvasLayers axis)",
+          "app/e2e/helpers/screenshots.ts (CDP LayerTree reader)",
+          "app/extensions/BuiltIn/HomeTab/components/useHomeTabState.ts",
+          "app/e2e/visual/workflow-visual.spec.ts",
+          "5 goldens re-recorded: core-empty-grid, ribbon-core-default-ribbon, menu-file-open, menu-edit-open, workflow-multisheet-sheet1"
+        ],
+        "diffSummary": "TWO defects, and 'warmth' was neither time nor fonts. (a) The three menu-* goldens differ by TEXT ANTIALIASING, decided per composited layer: an accelerated 2D canvas is its own layer, an overlay that overlaps it is composited too, and Chromium refuses LCD text on a layer it cannot prove opaque. The app de-accelerates its own canvas through GridCanvas.captureRange, so 'warm' meant 'some earlier suite exercised the capture seam'. Measured on one cold app: 7 layers and 0 chromatic pixels before 120 getImageData calls, 5 layers and 1575 after. Fixed with --disable-accelerated-2d-canvas, which pins every golden to the side it was already recorded on (zero re-records for that axis) rather than --disable-lcd-text, which would have turned all 89 goldens grey. (b) core-empty-grid was a PRODUCT bug: useHomeTabState keyed its style read on the selection alone and returned without clearing when getCell resolved to null, so an empty cell inherited the previous cell's ribbon state and File > New / undo / Clear-Formats never re-read at all.",
+        "validatedBy": [
+          "cold --project=visual verification runs 1 and 2: 18/18 each, agreeing test by test",
+          "the new compositedCanvasLayers axis caught its own first version -- 16 of 18 tests failed loudly on 'the layer tree could not be read' rather than capturing unverified",
+          "vitest 759 files / 106329; e2e harness tier green",
+          "RESIDUE FOUND 2026-08-12 during the integration pass and filed as BUG-0029: the product half of this fix invalidated a golden in the functional project, which was not re-run"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0029",
+      "status": "fixed",
+      "discovered": "2026-08-12",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "integration pass over BUG-0026 / BUG-0028 / BUG-0025, golden-corpus product-state census"
+      },
+      "violation": {
+        "oracleId": "visual-golden",
+        "message": "tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png photographs a product state the build no longer produces. BUG-0028's product fix (useHomeTabState clears the ribbon when getCell resolves to null) was verified by re-recording five goldens in the VISUAL project; the FUNCTIONAL project was not re-run and still holds a capture of the same brand-new workbook, through the same resetToNewWorkbook helper, with the Center-Vertically toggle latched. Measured off the committed bytes: 546 pressed-accent pixels where the re-recorded sibling core-empty-grid.png measures 36. A pixel-for-pixel fit of the two 1280x800 captures leaves 2,173 differing pixels of which 590 are exactly this box (510 of 221,245,237 -> 255,255,255 plus 80 of its 128,217,188 border) inside x 128..441 / y 69..94. The comparator budget is min(200, 0.0005 * 1,024,000) = 200, so it cannot pass.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run --project=functional after the BUG-0028 product fix; 'empty grid renders correctly with headers and gridlines' fails on its second capture. No run is needed to see it: app/e2e/__tests__/goldenCorpus.test.ts now reads the state off the committed bytes, and removing the BUG-0029 entry from STALE_PRODUCT_STATE_GOLDENS fails 'shows an UNLIT Home tab on every golden taken on a brand-new workbook' naming the file and the count.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.97,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "A product fix invalidates goldens in EVERY project that photographs the affected surface, and the tree had no way to say which. Both existing corpus censuses ask which MACHINE took the picture (device pixel ratio, colour profile); neither can see which BUILD did. Added as a third axis rather than a note: readPressedAccentFill recovers 'was a Home-tab toggle latched' from a golden's bytes, EMPTY_DOCUMENT_GOLDENS declares the population and is checked against the SPEC source so it cannot claim a populated capture is empty, and STALE_PRODUCT_STATE_GOLDENS is a two-sided quarantine that expires the moment the file is re-recorded.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png",
+          "app/e2e/goldenCorpus.ts",
+          "app/e2e/__tests__/goldenCorpus.test.ts"
+        ],
+        "diffSummary": "Re-recorded on a COLD app inside a full ordered --project=functional run with --update-snapshots=changed, which rewrote exactly three files and nothing else. THE PREDICTION WAS EXACT: the live comparator reported 2,173 differing pixels, the same 2,173 computed off the committed bytes with no run, and decoding the pair gives 510 of the predicted 221,245,237 fill against a 200-pixel budget. The file now measures 36 pressed-accent pixels, the same 36 its re-recorded sibling core-empty-grid.png holds. The STALE_PRODUCT_STATE_GOLDENS quarantine then did what it was built to do: it requires its entry to STILL measure 546, so re-recording the file correctly turned the census RED on its own entry rather than letting it rot. The entry is deleted and the array is empty. One detector self-test that used this file as its LIT example failed with it, correctly, and now uses sheets-default-tabs.png, which is lit legitimately (its capture follows a setCellValue) and will still be a valid example next year.",
+        "validatedBy": [
+          "--project=functional cold verification run: 543 passed / 0 failed / 11 skipped",
+          "app/e2e/__tests__/goldenCorpus.test.ts (36/36)"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0030",
+      "discovered": "2026-08-12",
+      "source": {
+        "kind": "e2e",
+        "seed": null,
+        "runId": "first live --project=functional run under BUG-0028 --disable-accelerated-2d-canvas flag"
+      },
+      "violation": {
+        "oracleId": "visual-golden",
+        "message": "tests/__screenshots__/ribbon-tabs.spec.ts/ribbon-ribbon-tab-insert.png and tests/__screenshots__/tables.spec.ts/grid-tables-after-create.png were recorded BEFORE BUG-0028 --disable-accelerated-2d-canvas pin and hold the OTHER side of it. ribbon-ribbon-tab-insert: 1,145 differing pixels against a 200-pixel budget, every top transition a neutral grey mapping to a chromatic one (153,153,154 -> 193,153,97; 110,110,110 -> 37,98,156) -- the golden holds GRAYSCALE-antialiased text, the pinned build paints LCD. grid-tables-after-create: a 199x88 crop whose budget is min(200, 0.0005*17512) = 8.75 px; 36 pixels cross the YIQ gate and the actual is systematically about 1 unit lighter (mean signed delta R +1.44 G +1.07 B +0.57, max 28), which is the GPU-vs-CPU 2D canvas rasterizer. Both diffs are BYTE-IDENTICAL across two independent cold runs.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run --project=functional from a cold app with the flag on. Deterministic: identical diffs on two independent cold runs (532/11/11, then 540/3/11 after the BUG-0033 fix). No run is needed to see the ribbon half: e2e/__tests__/goldenCorpus.test.ts now measures it off the committed bytes -- the ribbon-strip cohort other seven members sit at 3.8% mid-tone-neutral and this one at 44.8%, a ratio of 11.9x.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.97,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "BUG-0028 pinned a real axis with --disable-accelerated-2d-canvas and stated in webview2Args.mjs that the flag leaves every committed golden on the side it was recorded on, so it costs no re-record at all. That sentence was reached by measuring exactly ONE candidate golden (autocomplete-dropdown-visible) in the two projects that were not re-run. It is false: two functional goldens sit on the other side. This is the twin of BUG-0029 one axis over -- BUG-0029 is a PRODUCT fix invalidating goldens in projects nobody re-ran, this is an ENVIRONMENT pin doing the same. Both generalised from a single measured file.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/tests/__screenshots__/ribbon-tabs.spec.ts/ribbon-ribbon-tab-insert.png",
+          "app/e2e/tests/__screenshots__/tables.spec.ts/grid-tables-after-create.png",
+          "app/e2e/goldenCorpus.ts"
+        ],
+        "diffSummary": "Both re-recorded under the pin, on a COLD app, inside a full ordered run, and verified by a further cold run (543 passed / 0 failed / 11 skipped). A FOURTH corpus axis was built to catch the class ahead of a run and then DELETED, which is the more useful half of this entry. The reader restricted the denominator to mid-tone pixels (luminance 40..200, where glyph edges live) and compared inside a cohort of same-element captures; it separated 11.9x against the 4x margin, it fired on the real corpus naming the file, and then the re-record disproved it: the CORRECT recording measures 29.3% against its cohort's 3.8% and the stale one's 44.8%, i.e. 7.7x from its own cohort and only 1.5x from the defect it was meant to distinguish. Part of the Insert ribbon is composited for its own CONTENT reasons in the correctly-pinned build, so a cohort-agreement rule states something true that is not a corpus defect and would have been permanently red. The measurement, including the one number the earlier rejection could not have had (the same file recorded both ways), is written into goldenCorpus.ts so this is not attempted a third time. The guard for this class is a PROCESS rule, not a reader: when a capture pin changes, every project has to run.",
+        "validatedBy": [
+          "--project=functional cold verification run: 543 passed / 0 failed / 11 skipped"
+        ]
+      },
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0031",
+      "discovered": "2026-08-12",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "live BUG-0026 cascade reproduction"
+      },
+      "violation": {
+        "oracleId": "walker-action-catalog",
+        "message": "e2e/walker/actionCatalog.ts chart.create wrote the chart with a raw save_chart Tauri invoke and told the chart STORE nothing. Measured on a running app: get_charts answered 2 while __CALCULA_CHARTS__.getAllCharts() answered 0. The next two actions read the STORE, so chart.select -- whose entire job is to raise the Chart Design contextual tab -- selected nothing and returned successfully, chart.delete deleted nothing and returned successfully, and getCurrentChartId() stayed null throughout. Their preconditions are satisfied from the BACKEND count, so the generator kept issuing them and the walk kept reporting them executed.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "On a running app, invoke save_chart directly and then read __CALCULA_CHARTS__.getAllCharts(): backend 2, store 0. chart.select is then a no-op and no contextual tab ever appears.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.98,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The lesson table.delete had already learned in this same file (THE PRODUCT OWN DELETE, not a raw delete_table invoke) was never applied to charts. The consequence is the shape this program keeps deleting: the contextual-ribbon-tabs invariant -- the very invariant that found BUG-0026 -- could NEVER observe a chart tab, because nothing in the catalog could raise one. Section 3cd matrix lists Chart as already correct, which is a reading of the source; the walk that would have tested it was structurally unable to.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/walker/actionCatalog.ts",
+          "app/e2e/journeys/cascade-announcement-live.spec.ts"
+        ],
+        "diffSummary": "chart.create goes through the store own createChart (what Insert > Chart calls), which pushes into the store AND persists through the same save_chart, so the backend sees exactly what it saw before and the store is no longer blind. Proved live by the positive control in cascade-announcement-live.spec.ts: before the fix, the assertion that a selected chart must raise a chart contextual tab FAILED with Received: []; after it, the tab appears and the sheet-delete cascade removes it.",
+        "validatedBy": [
+          "app/e2e/journeys/cascade-announcement-live.spec.ts",
+          "--project=functional cold verification run: 543 passed / 0 failed / 11 skipped",
+          "--project=journey: 133 passed / 0 failed / 1 skipped"
+        ]
+      },
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0032",
+      "discovered": "2026-08-12",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "live BUG-0026 cascade reproduction"
+      },
+      "violation": {
+        "oracleId": "state-snapshot",
+        "message": "captureSnapshot().logical.activeSheet has been a CONSTANT 0 for the whole life of e2e/invariants/stateSnapshot.ts. It read gridState.activeSheet, which does not exist -- the grid state exposes sheetContext.activeSheetIndex -- so the ?? 0 defaulted every time. Probed on a running app sitting on Sheet2: sheetContext.activeSheetIndex was 1 and the field said 0.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Switch to any sheet other than the first and read captureSnapshot().logical.activeSheet. It answers 0.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 1.0,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "A defaulted read of a misspelled key is indistinguishable from a correct read of a true value, which is why it survived. The field appears in every soak and invariant failure bundle and in every minimized trace, so every triage that reasoned about which sheet was active was reasoning from a constant.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/invariants/stateSnapshot.ts",
+          "app/e2e/journeys/cascade-announcement-live.spec.ts"
+        ],
+        "diffSummary": "Falls back through sheetContext.activeSheetIndex, keeping the old key first so a rename in the other direction is picked up rather than silently zeroed. Asserted live: adding a sheet switches to it, and the journey spec requires snapshot.logical.activeSheet to equal the new index.",
+        "validatedBy": [
+          "app/e2e/journeys/cascade-announcement-live.spec.ts",
+          "--project=functional cold verification run: 543 passed / 0 failed / 11 skipped",
+          "--project=journey: 133 passed / 0 failed / 1 skipped"
+        ]
+      },
+      "status": "fixed"
+    },
+    {
+      "id": "BUG-0033",
+      "discovered": "2026-08-12",
+      "source": {
+        "kind": "e2e",
+        "seed": null,
+        "runId": "functional cold run: 532 passed / 11 failed / 11 skipped"
+      },
+      "violation": {
+        "oracleId": "functional-suite",
+        "message": "Three MCP specs asserted Tauri events that BUG-0026 DELETED -- tables:refresh, pivots:refresh, named-ranges:refresh -- so all three failed at step 3. Worse, mcp-create-table and mcp-create-pivot removed the object they created only in step 4 undo, INSIDE the try, after the assertion that threw; their finally blocks cleared the seeded cells and left the OBJECT. The AI-created table then sat at A1:B3 for the rest of the ordered run with its header fill, its banded rows and its Table Design contextual ribbon tab, and took later tests down with it -- paste-special x2 and scrolling photographed the blue table where their goldens hold white, and two ribbon-tabs goldens differed by exactly the 68x12 px of the extra tab label. Three root failures presented as eleven.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run --project=functional in its natural order after BUG-0026. Root-versus-cascade was proved by measurement rather than argument: fixing ONLY the three MCP specs took the same ordered cold run from 11 failures to 3.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.99,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "BUG-0026 replaced five bespoke per-kind Tauri announcements with one mutation:refresh carrying domains and source, fanned out by the Shell through MUTATION_DOMAIN_EVENTS. The PRODUCT is correct -- verified live: the backend announces the right domain and the Shell dispatches the feature event the extension consumes. The tests named a transport that no longer exists, and nothing unit-tier could see it, because the contract they assert is a live Tauri event. The cleanup half is independent and worse: a cleanup that runs only when the assertions passed is not a cleanup.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/tests/mcp-create-table.spec.ts",
+          "app/e2e/tests/mcp-create-pivot.spec.ts",
+          "app/e2e/tests/mcp-create-named-range.spec.ts"
+        ],
+        "diffSummary": "Each spec now asserts BOTH halves, and they fail for opposite reasons: that the BACKEND announced (a mutation:refresh arrived naming the domain ObjectKind maps to in object_deps::ui_domain -- objects / pivot / namedRanges), and that the UI HEARD IT (the Shell fanned out TABLE_DEFINITIONS_UPDATED / pivot:refresh / NAMED_RANGES_CHANGED, which is what actually decides whether the user sees the object). Naming the transport alone could never have distinguished a broken bridge from a silent backend. The table and the pivot are now removed BY NAME in finally, unconditionally.",
+        "validatedBy": [
+          "app/e2e/tests/mcp-create-table.spec.ts",
+          "app/e2e/tests/mcp-create-pivot.spec.ts",
+          "app/e2e/tests/mcp-create-named-range.spec.ts",
+          "--project=functional cold verification run: 543 passed / 0 failed / 11 skipped"
+        ]
+      },
+      "status": "fixed"
     }
   ]
 }

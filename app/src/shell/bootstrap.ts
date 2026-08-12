@@ -516,7 +516,15 @@ export function bootstrapShell(): void {
   const MUTATION_DOMAIN_EVENTS: Record<MutationDomain, string[]> = {
     styles: ["styles:refresh"],
     pivot: ["pivot:refresh"],
-    slicer: ["slicers:refresh"],
+    // TWO events, one domain. `ObjectKind::Slicer` and
+    // `ObjectKind::TimelineSlicer` both map to "slicer" in
+    // `app/src-tauri/src/object_deps.rs`, because a timeline whose pivot was
+    // deleted is the same ghost overlay a canvas slicer is — and they are two
+    // extensions with two caches. While this listed only the canvas slicer's
+    // event, the domain's promise was true by accident: every route that
+    // announced "slicer" happened to announce "pivot" as well, which is the
+    // only event the TimelineSlicer extension was listening to.
+    slicer: ["slicers:refresh", "timelineslicers:refresh"],
     ribbonFilter: ["filterpane:filters-refreshed"],
     paneControl: ["controlspane:controls-refreshed"],
     // "protection:refresh" is security-relevant, not cosmetic: the Protection
@@ -541,16 +549,45 @@ export function bootstrapShell(): void {
     // the rule LIST, not just the values it paints — the extension has to
     // re-read it, which is what CONDITIONAL_FORMATS_CHANGED asks for.
     conditionalFormats: [AppEvents.CONDITIONAL_FORMATS_CHANGED],
+    // The sheet COLLECTION changed (added / renamed / moved / deleted). TWO
+    // events: "sheets:refresh" reloads the tab bar's list, and SHEET_CHANGED is
+    // what every per-sheet extension cache (conditional formats, validations,
+    // annotations, controls, protection) already re-reads on -- and their entries
+    // were just remapped by `remap_sheet_keyed_stores` under them. Dispatched
+    // WITHOUT a detail, as every domain event is; each SHEET_CHANGED consumer
+    // guards on `typeof detail?.sheetIndex === "number"` before using it.
+    sheets: ["sheets:refresh", AppEvents.SHEET_CHANGED],
+    namedRanges: [AppEvents.NAMED_RANGES_CHANGED],
   };
-  onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
+  const fanOutDomains = (domains: readonly MutationDomain[] | undefined): void => {
     const fired = new Set<string>();
-    for (const domain of payload?.domains ?? []) {
+    for (const domain of domains ?? []) {
       for (const evt of MUTATION_DOMAIN_EVENTS[domain] ?? []) {
         if (fired.has(evt)) continue; // de-dupe if domains ever share an event
         fired.add(evt);
         window.dispatchEvent(new CustomEvent(evt));
       }
     }
+  };
+  onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
+    fanOutDomains(payload?.domains);
+  });
+
+  // §3cd: THE BACKEND-INITIATED HALF of the same announcement.
+  //
+  // A mutation the FRONTEND starts announces on the way back, and
+  // `cascadeAnnouncementCensus.test.ts` proves every delete route does. A
+  // mutation started INSIDE the backend — an MCP tool driven by an AI client,
+  // with no frontend call to return from — has nothing to hook that onto, so
+  // `object_deps::announce_cascade` emits the identical payload as a Tauri
+  // event and it lands in the SAME translator. One mapping from domains to
+  // feature events, reached from both directions; the alternative was the
+  // per-kind bespoke Tauri events that preceded this, one of which
+  // ("sheets:refresh") nothing had ever listened to.
+  void listenTauriEvent<MutationRefreshPayload>("mutation:refresh", (payload) => {
+    fanOutDomains(payload?.domains);
+  }).catch(() => {
+    // No Tauri runtime (test context) — nothing backend-initiated to bridge.
   });
 
   isBootstrapped = true;

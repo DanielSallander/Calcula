@@ -33,6 +33,14 @@ fn effect() -> crate::document_effect::DocumentEffect {
     crate::document_effect::test_seed_effect()
 }
 
+/// An empty workbook, for the cascades that must also prune the OBJECT SCRIPTS
+/// attached to what they delete (C10). Added with the transitive fix in 3cd:
+/// `cascade_deleted_sources` now runs the deleted slicers' and timelines' own
+/// cascades, and those reach `state.object_scripts`.
+fn app_state() -> crate::AppState {
+    crate::create_app_state()
+}
+
 fn slicer(name: &str, source_type: SlicerSourceType, cache: EntityId, connected: Vec<EntityId>) -> Slicer {
     Slicer {
         id: id(),
@@ -160,6 +168,7 @@ fn deleting_a_table_deletes_the_slicer_that_had_only_that_table() {
     slicer_state.slicers.write(&e).unwrap().insert(slicer_id, s);
 
     let cascade = cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -193,6 +202,7 @@ fn deleting_one_of_two_sources_repoints_the_slicer_instead_of_deleting_it() {
     slicer_state.slicers.write(&e).unwrap().insert(slicer_id, s);
 
     let cascade = cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -232,6 +242,7 @@ fn a_model_connection_slicer_is_untouched_by_a_table_delete() {
     slicer_state.slicers.write(&e).unwrap().insert(slicer_id, s);
 
     cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -262,6 +273,7 @@ fn a_pivot_slicer_is_untouched_by_a_table_delete_of_the_same_id() {
     slicer_state.slicers.write(&e).unwrap().insert(slicer_id, s);
 
     cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -289,6 +301,7 @@ fn deleting_a_pivot_deletes_the_timeline_that_had_only_that_pivot() {
     timeline_state.timelines.lock().unwrap().insert(tl_id, tl);
 
     let cascade = cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -314,6 +327,7 @@ fn a_timeline_with_a_surviving_pivot_is_repointed() {
     timeline_state.timelines.lock().unwrap().insert(tl_id, tl);
 
     cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -342,6 +356,7 @@ fn deleting_a_table_never_touches_a_timeline() {
     timeline_state.timelines.lock().unwrap().insert(tl_id, tl);
 
     cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -372,6 +387,7 @@ fn deleting_a_pivot_prunes_it_from_every_ribbon_filter_but_keeps_the_filter() {
     filter_state.filters.write(&e).unwrap().insert(filter_id, f);
 
     let cascade = cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -734,6 +750,7 @@ fn a_delete_with_no_dependents_reports_an_empty_cascade() {
     slicer_state.slicers.write(&e).unwrap().insert(s.id, s);
 
     let cascade = cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -765,6 +782,7 @@ fn the_cascade_description_names_the_objects_it_touched() {
     slicer_state.slicers.write(&e).unwrap().insert(s.id, s);
 
     let cascade = cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,
@@ -807,6 +825,7 @@ fn a_cascaded_slicer_delete_drops_its_computed_properties_too() {
     );
 
     cascade_deleted_sources(
+        &app_state(),
         &slicer_state,
         &timeline_state,
         &filter_state,

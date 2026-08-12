@@ -38,6 +38,7 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { liveState, retypeAndStore } from "../helpers/macroEditor";
 
 const NAME_PREFIX = "E2EVbaIdioms";
 const EDITOR_LABEL = "object-script-editor";
@@ -318,46 +319,8 @@ async function editorSurfaceText(editorPage: Page): Promise<string> {
   return editorPage.evaluate(() => document.body.innerText ?? "");
 }
 
-async function liveState(editorPage: Page): Promise<string | null> {
-  const el = editorPage.locator("[data-testid='module-live-indicator']");
-  if ((await el.count()) === 0) return null;
-  return el.first().getAttribute("data-live-state");
-}
-
 function toolbarButton(editorPage: Page, label: "Run" | "Debug" | "Stop") {
   return editorPage.locator("button.ose-btn").filter({ hasText: new RegExp(`^${label}$`) }).first();
-}
-
-/** Retype a value the way a person would: double-click the token, type over it. */
-async function retypeToken(editorPage: Page, from: string, to: string): Promise<void> {
-  const token = editorPage
-    .locator(".monaco-editor .view-lines span")
-    .filter({ hasText: new RegExp(`^["']?${from}["']?$`) })
-    .first();
-  await expect(token, `the token ${from} is on screen to be edited`).toBeVisible({
-    timeout: 20_000,
-  });
-  await token.dblclick();
-  await editorPage.waitForTimeout(120);
-  await editorPage.keyboard.type(to, { delay: 40 });
-}
-
-/** Retype + wait for the idle write-through, so what runs is what was typed. */
-async function retypeAndStore(
-  page: Page,
-  editorPage: Page,
-  macroId: string,
-  from: string,
-  to: string,
-): Promise<void> {
-  await retypeToken(editorPage, from, to);
-  await expect.poll(async () => liveState(editorPage), { timeout: 30_000 }).toBe("live");
-  const stored = await page.evaluate(async (id) => {
-    const tauri = (window as any).__TAURI__;
-    const script: any = await tauri.core.invoke("get_script", { id });
-    return String(script?.source ?? "");
-  }, macroId);
-  expect(stored, "the module store holds the typed edit").toContain(to);
 }
 
 async function withEditorConsole<T>(editorPage: Page, fn: () => Promise<T>): Promise<T> {

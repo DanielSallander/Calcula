@@ -50,6 +50,12 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import {
+  editorText,
+  liveIndicator,
+  liveState,
+  retypeToken,
+} from "../helpers/macroEditor";
 
 const SHEET = 0;
 
@@ -396,24 +402,6 @@ async function consoleText(editorPage: Page): Promise<string> {
   return lines.join("\n");
 }
 
-/** The module live-state chip that REPLACED the Save button for modules. */
-function liveIndicator(editorPage: Page) {
-  return editorPage.locator("[data-testid='module-live-indicator']");
-}
-
-/** "live" | "saving" | "deferred" | "error" — the chip's machine-readable state. */
-async function liveState(editorPage: Page): Promise<string | null> {
-  const el = liveIndicator(editorPage);
-  if ((await el.count()) === 0) return null;
-  return el.first().getAttribute("data-live-state");
-}
-
-/** The text Monaco is showing right now (these documents render in full). */
-async function editorText(editorPage: Page): Promise<string> {
-  const text = await editorPage.locator(".monaco-editor .view-lines").first().innerText();
-  return text.replace(/ /g, " ");
-}
-
 /**
  * Source text reduced to what survives a trip through Monaco's DOM: no trailing
  * whitespace, no blank lines. Enough to say "the buffer is the file again"
@@ -422,7 +410,7 @@ async function editorText(editorPage: Page): Promise<string> {
 function normalizeSource(text: string): string {
   return text
     .split("\n")
-    .map((l) => l.replace(/ /g, " ").trimEnd())
+    .map((l) => l.replace(/\u00a0/g, " ").trimEnd())
     .filter((l) => l.trim().length > 0)
     .join("\n");
 }
@@ -475,24 +463,6 @@ async function withEditorConsole<T>(
         `--- editor console ---\n${text}\n--- buffer ---\n${code}`,
     );
   }
-}
-
-/**
- * Retype a value the way a person would: double-click it to select the word,
- * then type the replacement. Real keystrokes through Monaco's own input path —
- * which is what the live-persist debounce is listening to.
- */
-async function retypeToken(editorPage: Page, from: string, to: string): Promise<void> {
-  const token = editorPage
-    .locator(".monaco-editor .view-lines span")
-    .filter({ hasText: new RegExp(`^["']?${from}["']?$`) })
-    .first();
-  await expect(token, `the value ${from} is on screen to be edited`).toBeVisible({
-    timeout: 20_000,
-  });
-  await token.dblclick();
-  await editorPage.waitForTimeout(120);
-  await editorPage.keyboard.type(to, { delay: 40 });
 }
 
 /**

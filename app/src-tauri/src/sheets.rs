@@ -1160,6 +1160,36 @@ pub fn delete_sheet(
         );
     }
 
+    // A CASCADE THAT DELETES AN OBJECT MUST RUN THAT OBJECT'S OWN CASCADE.
+    //
+    // Found by the transitive domain walk added in §3cd, not by anybody reading
+    // this function: `delete_chart` prunes the pane-control slider bound to the
+    // chart (`chart -> paneControl.config.chartParamTarget.chartId`), and the
+    // charts deleted a few lines above went out through a completely different
+    // path that had never run it. So deleting the SHEET a chart lived on left
+    // every slider still claiming to drive it -- the §3bn orphan exactly, on a
+    // path §3bt did not reach, because the census asked "does delete_chart run
+    // this?" and never "does anything ELSE that deletes a chart run it?".
+    //
+    // Object scripts go the same way and for the reason C10 gives: the
+    // instanceId IS the object id, so a script that outlives its chart is
+    // inherited by whatever is next minted at that id.
+    if !sheet_cascade.deleted_charts.is_empty() {
+        let dead_chart_ids: Vec<identity::EntityId> = sheet_cascade
+            .deleted_charts
+            .iter()
+            .map(|chart| chart.id)
+            .collect();
+        crate::object_deps::cascade_deleted_charts(&pane_control_state, &dead_chart_ids);
+        for id in &dead_chart_ids {
+            crate::scripting::object_script_commands::prune_scripts_for_instance(
+                &state,
+                &effect,
+                &id.to_string(),
+            );
+        }
+    }
+
     // Re-key tables for sheets above the deleted index (shift down by 1)
     let keys_to_shift: Vec<usize> = tables.keys().filter(|&&k| k > index).cloned().collect();
     for old_key in keys_to_shift {
@@ -1324,6 +1354,7 @@ pub fn delete_sheet(
     // deleting its SHEET must leave the same world behind as deleting the table.
     // Runs here because every guard the block held is released.
     let source_cascade = crate::object_deps::cascade_deleted_sources(
+        &state,
         &slicer_state,
         &timeline_state,
         &ribbon_filter_state,

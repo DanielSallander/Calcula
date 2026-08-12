@@ -45,8 +45,93 @@ async function assertCaptureEnvironment(page: Page): Promise<void> {
       viewport: { width: window.innerWidth, height: window.innerHeight },
     };
   });
-  const mismatch = describeCaptureEnvironmentMismatch(reading);
+  const compositedCanvasLayers = await readCompositedCanvasLayers(page);
+  const mismatch = describeCaptureEnvironmentMismatch({
+    ...reading,
+    compositedCanvasLayers,
+  });
   if (mismatch) throw new Error(mismatch);
+}
+
+/**
+ * How many composited layers carry the `Canvas` compositing reason.
+ *
+ * WHY THE COMPOSITOR AND NOT THE PAGE. Text antialiasing is decided per
+ * composited LAYER: Chromium will not use LCD (subpixel) text on a layer it
+ * cannot prove opaque, and an accelerated 2D canvas is a composited layer that
+ * drags every overlapping DOM overlay into one as well. Nothing in the page can
+ * see that -- `window`, `getComputedStyle` and the DOM are all identical on
+ * both sides -- so the reading has to come from CDP. It is the same shape as
+ * the dpr reading above: one number, once per run, compared against the
+ * constant the corpus declares.
+ *
+ * Returns null when the layer tree cannot be read, which
+ * `describeCaptureEnvironmentMismatch` reports as its own failure. A guard that
+ * cannot run is not a guard that passed.
+ *
+ * `LayerTree.enable` makes the compositor report the tree, and it is disabled
+ * again immediately so the suite does not pay for layer-tree bookkeeping on
+ * every subsequent paint.
+ *
+ * THE PROBE ELEMENT IS NOT OPTIONAL, and this is measured rather than assumed:
+ * `layerTreeDidChange` fires when the tree CHANGES, so on an idle page enabling
+ * the domain can produce no event at all and the read times out -- which is
+ * exactly what happened the first time this guard ran inside the suite (it
+ * worked in a hand-driven probe only because that probe opened a menu straight
+ * afterwards). A one-pixel `will-change: transform` div forces a new composited
+ * layer, so the event is guaranteed; it carries the `WillChangeTransform`
+ * reason, never `Canvas`, so it cannot affect the count it is here to obtain.
+ */
+async function readCompositedCanvasLayers(page: Page): Promise<number | null> {
+  const PROBE_ID = "__e2e-layer-probe";
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      const layers = await new Promise<Array<{ layerId: string }>>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("LayerTree.layerTreeDidChange never arrived")),
+          15_000,
+        );
+        cdp.on("LayerTree.layerTreeDidChange", (event: { layers?: Array<{ layerId: string }> }) => {
+          if (!event.layers || event.layers.length === 0) return;
+          clearTimeout(timer);
+          resolve(event.layers);
+        });
+        cdp
+          .send("LayerTree.enable")
+          .then(() =>
+            page.evaluate((id) => {
+              const probe = document.createElement("div");
+              probe.id = id;
+              probe.style.cssText =
+                "position:fixed;left:0;top:0;width:1px;height:1px;" +
+                "will-change:transform;pointer-events:none;opacity:0.01;";
+              document.body.appendChild(probe);
+            }, PROBE_ID),
+          )
+          .catch((e: unknown) => {
+            clearTimeout(timer);
+            reject(e as Error);
+          });
+      });
+      let canvasLayers = 0;
+      for (const layer of layers) {
+        const reasons = (await cdp.send("LayerTree.compositingReasons", {
+          layerId: layer.layerId,
+        })) as { compositingReasonIds?: string[] };
+        if ((reasons.compositingReasonIds ?? []).includes("Canvas")) canvasLayers++;
+      }
+      return canvasLayers;
+    } finally {
+      await page
+        .evaluate((id) => document.getElementById(id)?.remove(), PROBE_ID)
+        .catch(() => {});
+      await cdp.send("LayerTree.disable").catch(() => {});
+      await cdp.detach().catch(() => {});
+    }
+  } catch {
+    return null;
+  }
 }
 
 // ============================================================================

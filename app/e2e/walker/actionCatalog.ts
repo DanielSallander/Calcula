@@ -216,8 +216,6 @@ const chartCreate: ActionDef<{ title: string }> = {
     await grid.setCellValueDirect("AA3", "20");
 
     await page.evaluate(async (title: string) => {
-      const tauri = (window as any).__TAURI__;
-      const id = crypto.randomUUID();
       const spec = {
         mark: "bar",
         data: { sheetIndex: 0, startRow: 0, startCol: 25, endRow: 2, endCol: 26 },
@@ -227,9 +225,56 @@ const chartCreate: ActionDef<{ title: string }> = {
         series: [{ sourceIndex: 1, name: "Value", color: "#4472C4" }],
         title,
       };
-      await tauri.core.invoke("save_chart", {
-        entry: { id, sheetIndex: 0, specJson: JSON.stringify(spec) },
-      });
+
+      // THE PRODUCT'S OWN CREATE, not a raw `save_chart` invoke -- the same
+      // lesson `table.delete` below already learned, applied one object over.
+      //
+      // MEASURED LIVE 2026-08-12, on a running app, and it had been true of
+      // every walk ever run: a raw `save_chart` persists the chart and tells
+      // the chart STORE nothing. `get_charts` then answered 2 while
+      // `__CALCULA_CHARTS__.getAllCharts()` answered 0 -- and the store is what
+      // the next two actions read. So `chart.select`, whose entire job is to
+      // raise the Chart Design contextual tab, selected nothing and returned
+      // successfully; `chart.delete` deleted nothing and returned successfully;
+      // and `getCurrentChartId()` stayed null through both. Their preconditions
+      // are satisfied from the BACKEND count, so the generator went on issuing
+      // them and the walk went on reporting them executed.
+      //
+      // The consequence is the shape this program keeps deleting: the
+      // `contextual-ribbon-tabs` invariant could NEVER observe a chart tab,
+      // because nothing in the catalog could raise one. §3cd's matrix lists
+      // Chart as "already correct" -- which is a reading of the source, and the
+      // walk that would have tested it was structurally unable to.
+      //
+      // `createChart` is what the Insert > Chart command calls. It pushes into
+      // the store AND persists through the same `save_chart`, so the backend
+      // sees exactly what it saw before and the store is no longer blind.
+      const store = (await (window as any).__calcImport(
+        new URL("/extensions/Charts/lib/chartStore.ts", document.baseURI).href,
+      )) as {
+        createChart?: (spec: unknown, placement: Record<string, unknown>) => { chartId: string };
+        syncChartRegions?: () => void;
+      };
+      if (store?.createChart) {
+        store.createChart(spec, {
+          sheetIndex: 0,
+          x: 400,
+          y: 40,
+          width: 480,
+          height: 300,
+          name: title,
+        });
+        store.syncChartRegions?.();
+      } else {
+        const tauri = (window as any).__TAURI__;
+        await tauri.core.invoke("save_chart", {
+          entry: {
+            id: crypto.randomUUID(),
+            sheetIndex: 0,
+            specJson: JSON.stringify(spec),
+          },
+        });
+      }
     }, p.title);
     await page.waitForTimeout(300);
   },

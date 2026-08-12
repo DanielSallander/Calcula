@@ -10086,6 +10086,12 @@ and was not reduced, so it is recorded here and not ledgered.
 **Left failing on purpose.** Not suppressed, per §5a's rule — both seeds are recorded, both bundles
 are on disk with 3-action replay commands, and a walk that reaches it should keep saying so.
 
+> **CLOSED 2026-08-12 — §3cd.** The reading above was exactly right, and it was the smallest of four
+> defects wearing one symptom: the same gap existed on timeline slicers and (partially) on pivots,
+> the whole MCP tool surface announced no cascade at all, and deriving the announcement from the
+> dependency matrix found three live BACKEND orphans that the seventh census structurally could not
+> see. The event now comes from the store's own id diff, so it fires for every route.
+
 #### 7. A WALK HUNG FOR TWELVE MINUTES AND PRINTED NOTHING — `actionTimeout` was never set, and that is FIXED
 
 Found by running the known invariant seed `1786456498740`. The walk stopped at
@@ -10164,6 +10170,389 @@ change and not a re-record.
 **Filed, not papered over.** Had the two-cold-runs rule not been in the brief, this pass would have
 reported "visual 18/18" twice over and been wrong about four goldens — which is precisely the failure
 the rule exists to prevent, and it is worth noting that it caught the agent applying it.
+
+**CLOSED 2026-08-12 as BUG-0028 — see §3ce.** Both hypotheses in this entry are wrong and the
+measurements are there. The menu three are TEXT ANTIALIASING: an accelerated 2D canvas is its own
+composited layer, an overlay that overlaps one is composited too, and Chromium will not use LCD text
+on a layer it cannot prove opaque — so "warm" means "something has already read the grid canvas
+back, which de-accelerated it". Pinned with `--disable-accelerated-2d-canvas`, no re-record.
+`core-empty-grid` is the ribbon outliving the document (a product defect, fixed in
+`useHomeTabState`), and five goldens were re-recorded AFTER that fix. Two cold runs now agree at
+**18/18**.
+
+### 3cd. BUG-0026 CLOSED — and it was never one bug. A backend cascade told the UI nothing, on FOUR objects, in BOTH directions, and the transitive walk that proved it found three live orphans the seventh census structurally could not see (2026-08-12)
+
+**The reproduction, unchanged from §3cc.6:** `table.create -> slicer.create -> table.delete` leaves
+the contextual **Slicer** ribbon tab on a workbook with **zero slicers**. Two harnesses, two
+generators, the same three actions, verdict `confirmed` over 20 and 30 replays.
+
+**The cause, confirmed exactly as §3cc.6 read it.** `SlicerEvents.SLICER_DELETED` was dispatched
+from one place in the whole tree — `deleteSlicerAsync`, the route a user takes BY HAND. Every other
+way a slicer can disappear is a backend cascade (delete its table, delete its pivot, delete the
+sheet it sits on, or have an AI client do any of those over MCP), and not one of them emitted
+anything. The store re-read correctly; the SELECTION went on naming an id that no longer resolved,
+and the contextual tab is a function of the selection.
+
+#### 1. The fix is in the STORE, because adding it at the call site is what produced a one-caller event
+
+Announcing from the cascade path would have left the next cascade route needing a fourth
+announcement. **The refresh is the announcer**: `refreshCache` diffs the id set it just read against
+the one it held and dispatches `SLICER_DELETED` for whatever went away — so it tells the truth about
+every route at once, including routes that do not exist yet. `deleteSlicerAsync` no longer dispatches
+the event itself, and a census test pins that it must not start again.
+
+Three consequences fell out of the diff for free: the per-slicer **items cache** is pruned by it
+(only the by-hand delete had ever removed an entry, so a cascade-deleted slicer leaked its item list
+for the session), a **multi-selection keeps its survivors** (the old handler cleared the whole
+selection when any one member died; Excel keeps the rest), and the contextual tab comes down only
+when nothing is left to configure.
+
+#### 2. Treated as a class, mechanically — the object-deps census was the input, as the brief required
+
+The matrix in `object_deps.rs` already enumerates every (owner, dependent) pair. Taking the pairs
+whose policy DELETES the dependent, and intersecting them with the objects that drive a contextual
+ribbon tab (`addTaskPaneContextKey`, found by scanning the extension tree, not by a list), gives
+exactly five: **Slicer, TimelineSlicer, Table, Pivot, Chart**.
+
+| object | state before | what it does now |
+|---|---|---|
+| **Slicer** | BUG-0026. `SLICER_DELETED` from one route. | `refreshCache` diffs and announces; `dropSlicerFromSelection` drops one id and unregisters only when the selection empties. |
+| **TimelineSlicer** | **Identical defect, never reported.** `TIMELINE_DELETED` from one route; a timeline dies with its last pivot and with its sheet. | Same diff, same `dropTimelineFromSelection`. |
+| **Pivot** | **Partial.** `updateCachedRegions` closed the Analyze/Design tabs only when the sheet had NO pivots left — so "delete the last pivot" worked and "delete the one the cursor is in while another survives" did not. | Reconciles on the ACTIVE id. Both clauses kept: a freshly created pivot registers its tabs before any selection exists, so reconciling on "no active id" would kill the tabs of the pivot the user just made (that case is a test). |
+| **Table** | Already fixed, by the soak walk, seed 20260810 (`syncDesignTabToTables`). | Unchanged; now declared in the census so it cannot regress silently. |
+| **Chart** | Already correct, bluntly: `reloadCharts` deselects unconditionally before re-reading. | Unchanged; declared. |
+
+#### 3. The other direction, which nothing had ever covered: a mutation that STARTS in the backend
+
+A `#[tauri::command]` is invoked BY the frontend, so the frontend route announces on the way back.
+**An MCP tool is not.** An AI client drives those directly, and they had a scattering of bespoke
+per-kind Tauri events instead — `charts:refresh`, `tables:refresh`, `pivots:refresh`,
+`named-ranges:refresh`, `sheets:refresh` — none of which knew anything about cascades:
+
+* `delete_table` (AI) announced the table and **not** the slicers its cascade deleted — the §3bn
+  ghost overlay, reachable by an AI client on a workbook the user is looking at.
+* `delete_pivot` (AI) announced neither the slicers, the timelines nor the ribbon filters.
+* `delete_sheet` (AI) — the widest cascade in the workbook — announced `sheets:refresh` and
+  `grid:refresh`.
+* **`sheets:refresh` had NO listener anywhere in the app.** An AI adding, renaming, moving or
+  deleting a sheet changed the sheet tab bar not at all, in any build this event ever existed in.
+
+All five are replaced by ONE announcement, `object_deps::announce_cascade`, which emits a
+`mutation:refresh` Tauri event carrying the same `{ domains, source }` payload the frontend
+`MUTATION_REFRESH` uses. The Shell bridges it into the **same** `MUTATION_DOMAIN_EVENTS` fan-out, so
+there is one translator from domains to feature events reached from both directions, and the four
+now-dead per-extension bridges (Charts, Table, Pivot, DefinedNames) are deleted.
+
+Two new domains carry the previously-unreachable cases: **`sheets`** (fans out to a new
+`sheets:refresh` window event the tab bar listens to, plus `SHEET_CHANGED` for the per-sheet caches)
+and **`namedRanges`**. The frontend sheet routes announce `sheets` too — a SCRIPT calling
+`sheets.add` / `rename` / `delete` had the identical stale-tab-bar problem, since `SHEET_ADDED` was
+a lifecycle notification the tab bar never listened to.
+
+#### 4. The domain list is DERIVED from the matrix, and deriving it found three live backend orphans
+
+`announce_cascade` does not take a domain list; it takes an `ObjectKind` and walks
+`DEPENDENCY_MATRIX` **transitively** through a new `dependent_kind` field. Deleting a table deletes
+its slicers, and deleting a slicer prunes it out of every ribbon filter — so a table delete owes the
+ribbon-filter store, and nobody has to remember that.
+
+Running that walk is what exposed the real finding. **The seventh census asks "does `delete_chart`
+run the chart's cascade?" and never "does anything ELSE that deletes a chart run it?"** Three
+answers were no:
+
+1. **`delete_sheet` deletes the CHARTS on the sheet and never ran `cascade_deleted_charts`.** Every
+   pane-control slider bound to one kept claiming to drive a chart that no longer existed.
+2. **`cascade_deleted_sources` — the table AND pivot delete path — deletes SLICERS and never ran
+   `cascade_deleted_slicers`.** Deleting the table a slicer filtered left every ribbon filter still
+   cross-filtering against it. That is the §3bn orphan itself, one level down the tree, on the path
+   §3bt shipped.
+3. Neither path pruned the **object scripts** of what it deleted (C10: the instanceId IS the object
+   id, so the script is inherited by whatever is minted there next).
+
+All three are fixed inside the shared cascade helpers, so every caller gets them, and the
+ribbon-filter prune goes into the `SourceCascade` the existing `record_source_cascade_undo` already
+restores — one Ctrl+Z brings the cross-filter links back with the slicers.
+
+#### 5. And ONE vocabulary of domains, because the drift guard caught a second one being born
+
+`MutationDomain` was an enum in `undo_commands.rs`. The backend announcer needed the same names, and
+for an hour the crate had **two Rust enums naming the same wire strings** —
+`crossLayerConstantDrift.test.ts` reported `sheets` and `namedRanges` as TS domains "no Rust emitter
+produces", which was true of the enum it was reading and false of the crate. `undo_commands` now
+aliases `object_deps::UiDomain`, which is where the object-kind → domain mapping lives and therefore
+where the vocabulary belongs; the bitset widened from `u16` to `u32` because the shared vocabulary is
+16 members wide and `1u16 << 15` was the last representable bit. A test asserts there is exactly one
+Rust declaration.
+
+The frontend census's hand-written regex table (`DEPENDENT_TO_DOMAIN` + a list of prose excuses) is
+deleted with it: it now parses `ObjectKind::ui_domain` out of the Rust source, and that is an
+exhaustive `match`, so **the compiler forces an answer for every new object kind** instead of a
+checklist entry.
+
+#### 6. Made checkable — four detectors, each proved by breaking something real
+
+| detector | where | fires when |
+|---|---|---|
+| `every_backend_initiated_cascade_announces_itself` | `object_deps_census_tests.rs` | an MCP tool reaches a declared cascade and never calls `announce_cascade`. Scoped to functions holding an `AppHandle` (a helper with none structurally cannot announce), with the four object-destroying tools pinned as non-vacuity. |
+| `a_cascade_that_deletes_an_object_runs_that_objects_own_cascade` | same | the transitive rule of §4. One argued exemption (`delete_sheet` / `clear_table_auto_filter`: the AutoFilter is a sheet-keyed record already dropped wholesale, and unhiding rows that no longer exist is moot). |
+| the selection census | `cascadeAnnouncementCensus.test.ts` | a contextual tab exists for a cascade-deleted object with no reconciliation, or a reconciliation that never unregisters its panel, or a store refresh that no longer announces. |
+| `requiredDomainsFor` (transitive) | same | a frontend delete route misses a domain its cascade disturbs, now including two-hop ones. It is what demanded `paneControl` of `deleteSheet`, which is how orphan #1 above was found. |
+
+**Proved by sabotage, on the real crate, four times:** removing the `SLICER_DELETED` dispatch from
+`refreshCache` failed 5 reproduction tests AND 2 census tests; removing `announce_cascade` from
+`mcp::delete_table` failed the backend census by name; removing `cascade_deleted_slicers` from
+`cascade_deleted_sources` failed the transitive census on all three table/pivot delete paths;
+reverting the pivot reconciliation to the count check failed the pivot test. All four restored.
+
+#### 7. Numbers
+
+`cargo check --all-targets` **0 warnings** in `app/src-tauri` and in `core`. core **1,339** (exactly
+the baseline). app-lib **1,492** (baseline 1,479; +8 mine, the rest another agent's — the tree was
+NOT quiet, see §3bq). test_pivot **56**. vitest **759 files / 106,328** (baseline 755 / 106,284; +3
+test files mine). typings 39/736. `lint:boundaries` clean, `check-types` clean,
+`check:line-endings` clean.
+
+**One more thing the class review caught, and it is fixed too.** `contextual-ribbon-tabs` SKIPS a
+contextual tab whose label it does not recognise — deliberately, so a new feature cannot flood a
+fuzzer with false positives, but the cost is that a sixth contextual tab is invisible to the very
+walk that found BUG-0026. Each `SELECTION_OWNERS` row now names the label the walk knows it by, and
+the census fails if that label has no rule in `invariants.ts`. The census stays the stronger guard;
+the walk gets taught.
+
+### 3ce. BUG-0028 — the four warmth-dependent goldens. "Warm" is not elapsed time: it is whether anything has read the grid canvas back yet, and that decides how every OVERLAY's text is antialiased (2026-08-12)
+
+§3cc(8) filed four goldens that pass on a warm app and fail on a cold one, with the honest note that
+for the menu three "the likeliest reading is an icon font or an accent asset that is resolved only
+after the app has been exercised — but that is a hypothesis, and it is recorded as one". The
+hypothesis was wrong, and the diffs said so as soon as they were read rather than described.
+
+**Reproduced first, before anything was changed:** `--project=visual` from a cold launch, first suite
+on the instance — **14 passed / 4 failed**, exactly §3cc's numbers and exactly the same four files.
+
+It is **two unrelated defects** that answer to the same "cold" trigger. They are separated and fixed
+separately below.
+
+#### (a) The three `menu-*` goldens: TEXT ANTIALIASING, which is a property of the COMPOSITOR
+
+The diff is not iconography and not a recolouring. Every top transition maps a pixel whose three
+channels differ to a pixel whose three channels are equal:
+
+| expected (golden) | actual (cold) | px |
+|---|---|---|
+| `193,153,97` | `153,153,154` | 212 |
+| `37,98,156` | `110,110,110` | 194 |
+| `37,37,129` | `84,84,84` | 194 |
+| `96,37,38` | `65,65,66` | 187 |
+| `156,98,38` | `110,110,110` | 185 |
+
+Those expected values come in RGB-REVERSED PAIRS — `37,98,156` against `156,98,38`, `96,153,193`
+against `193,153,97`, `129,172,204` against `204,172,129` — which is the signature of **LCD
+(subpixel) antialiasing**: the two edges of a glyph stem take opposite channel ramps. The actual
+holds the same glyphs **grayscale-antialiased**.
+
+And it is not the page, it is one rectangle of it. Chromatic-pixel counts (max channel minus min
+>= 12), same frame, same run:
+
+| region | expected | actual |
+|---|---|---|
+| menu-bar strip, 400x27 | 1251 | **1251** |
+| ribbon strip, 400x60 | 1373 | **1373** |
+| the open File dropdown, 165x310 | 2914 | **0** |
+
+Everything painted into the root layer is bit-identical. Only the dropdown changed, and it changed
+completely.
+
+**The mechanism, read off the compositor and then driven on demand.** With the grid canvas
+GPU-accelerated, CDP `LayerTree` reports 7 layers:
+
+```
+2436x1084  compositingReasons = ["Canvas"]    <- the grid canvas, accelerated => its own layer
+ 572x736   compositingReasons = ["Overlap"]   <- the File dropdown, composited because it OVERLAPS one
+```
+
+Chromium will not use LCD text on a composited layer it cannot prove opaque — the dropdown has a
+`border-radius` and a `box-shadow` — so its text falls back to grayscale while the rest of the window
+keeps LCD. Chromium's expensive-canvas heuristic then **disables acceleration for a 2D canvas that is
+read back often**, and the app reads the grid canvas back itself: `GridCanvas.captureRange`, the
+`rendering` capture seam used by animation frame/GIF export, is the only `getImageData` on that
+canvas in the tree. Driven deliberately on one cold app, three seconds apart, with nothing else
+touched:
+
+| | layers | File dropdown text |
+|---|---|---|
+| before | 7 (`Canvas` + `Overlap` present) | **0** chromatic px — grayscale |
+| after 120 `getImageData` calls | 5 (both gone) | **1,575** chromatic px — LCD |
+
+That is the whole of "warm". Not elapsed time, not a font, not an icon cache: whether some earlier
+suite has exercised a feature that reads the canvas. The `visual` corpus was re-recorded on
+2026-08-11 on an instance that had already run functional, scenario and journey, so all three
+`menu-*` goldens hold the LCD side. So does the functional corpus's
+`autocomplete-dropdown-visible` — 22-28% chromatic pixels in its grey-text regions, measured off the
+committed bytes — which is the same class one project over, and the reason this cannot be fixed by
+re-recording the visual three.
+
+**FIXED by pinning the condition, not by re-recording:** `--disable-accelerated-2d-canvas` joins
+`--force-color-profile=sRGB` in `DETERMINISTIC_CAPTURE_FLAGS` (`e2e/webview2Args.mjs`). It removes
+step 1 of the chain — no accelerated canvas, no `Canvas` layer, no `Overlap` promotion, no
+antialiasing switch — for **every** overlay in the app, not only the three that happen to be
+photographed. Verified live: with the flag the layer tree holds 5 layers, `compositedCanvasLayers` is
+0, and the same dropdown region holds LCD text again.
+
+`--disable-lcd-text` pins the same axis one level lower and would be more robust still. It was
+rejected on cost, and the cost is stated rather than implied: it turns **every** golden in the tree
+grayscale — 89 files across three projects, including corpora this pass can neither re-record nor
+verify. The flag chosen leaves every committed golden on the side it was recorded on and therefore
+costs **no re-record at all** for this axis. The canvas's own pixels are unaffected, and the corpus
+is the evidence rather than the assurance: it was recorded with the canvas unaccelerated and its
+eight grid captures pass on a cold app with the canvas accelerated.
+
+> **BOTH SENTENCES IN THIS PARAGRAPH ARE FALSE, and the first live `--project=functional` run under
+> the flag proved it — §8f, BUG-0030.** "No re-record at all" was checked against exactly ONE
+> candidate golden (`autocomplete-dropdown-visible`) in the two projects that were not re-run; two
+> functional goldens sit on the other side of the pin, both reproducing byte-identically on two
+> independent cold runs. And "the canvas's own pixels are unaffected" holds only at the resolution
+> it was tested at: the eight grid captures cited carry a **200-pixel** budget, while
+> `grid-tables-after-create` is a 199x88 crop whose budget is **8.75**, and there the rasterizer
+> swap is plainly visible (mean signed delta R +1.44 / G +1.07 / B +0.57, 36 px over the YIQ gate).
+> The flag itself is right and stays. The lesson is a process one: **when a capture pin changes,
+> every project has to run — the bytes of one candidate file are not a substitute.**
+
+**The axis is now ASSERTED against the run.** `CAPTURE_ENVIRONMENT.compositedCanvasLayers` is 0, read
+off the compositor by `assertCaptureEnvironment` through a CDP `LayerTree` session, once per run, and
+reported with the mechanism, the ledger id and the remedy ("fix the launcher, do NOT re-record").
+Three new cases in `captureEnvironment.test.ts` drive it to failure, including the one that treats an
+**unreadable** layer tree as a failure rather than as agreement.
+
+That last arm earned itself immediately: the first version of the reader waited for
+`LayerTree.layerTreeDidChange` on an idle page, the event never came, and **16 of 18 tests failed on
+"the compositor's layer tree could not be read"** — loudly, by name, instead of capturing in an
+unverified environment. The reader now appends a 1px `will-change: transform` probe element to force
+a tree change, and removes it afterwards.
+
+#### (b) `core-empty-grid`: the RIBBON outlived the document — and the same bug is visible to users
+
+A different thing entirely, and half of it is a product defect.
+
+* A **30x26 button at (412,69)** is lit in the golden and dark in the cold capture. Resolved against
+  the running app: `data-testid="fmt-alignMiddle"`, "Center Vertically". Its two colours are exactly
+  `rgba(16,185,129,0.14)` over white (221,245,237, 510 px) and the 0.45 border over that fill
+  (128,217,188, 80 px) — `Button.tsx`'s pressed state, to the pixel.
+* A **33x9 and a 47x6 patch at (132..178, 78..86)** — the ribbon's font-name box, holding different
+  text on the two sides.
+
+`useHomeTabState` loaded the active cell's style in an effect keyed on `gridState.selection` alone,
+and when `getCell` resolved to **null** it did `if (cancelled || !cell) return;` — keeping whatever
+it had last read. Two consequences:
+
+* selecting an empty cell after a bold one left **Bold lit**, because `isActive` reads only
+  `currentStyle` and has no other source. Excel clears. That ships today;
+* File > New through the E2E `resetToNewWorkbook` helper (which calls `new_file` without the
+  product's full page reload), **undo**, Clear Formats and a script write all leave the selection
+  object untouched, so nothing re-read at all.
+
+That is why the golden showed `Calibri` and a lit Center-Vertically over a workbook that had just
+been emptied: it is a picture of the **previous run**. §3cb had already caught this exact pair on a
+warm app and dismissed it as residue — correctly — but the 2026-08-11 re-record was made warm, so
+the residue was written into the baseline.
+
+**FIXED in `useHomeTabState`:** the null branch clears `currentStyle`/`currentCellData`, and a
+`documentRevision` counter re-runs the read on `grid:refresh` / `styles:refresh` /
+`app:sheet-changed`, coalesced on a 120 ms timer so a burst of edits cannot put two IPC reads on the
+wire per keystroke. Pinned by
+`extensions/BuiltIn/HomeTab/__tests__/homeTabStyleFollowsDocument.test.tsx` (6 cases) and
+**sabotage-verified**: restoring the one-line `if (!cell) return;` fails 2 of them, on their own
+messages.
+
+This one DOES need its goldens re-recorded, and that is the correct order — the cause is fixed first,
+so the new baseline is a picture of the fresh workbook rather than of whichever run went before it.
+**Five files**, all of them showing the same ribbon box: `core-empty-grid`,
+`ribbon-core-default-ribbon`, `menu-file-open`, `menu-edit-open`, `workflow-multisheet-sheet1`. Each
+one measures **0** pixels of the pressed-accent tint afterwards; so does `menu-data-open`, which was
+never rewritten because it never held it.
+
+#### (c) Found while verifying: `workflow-visual.spec.ts` photographed six goldens' worth of data and verified none of it
+
+Two cold runs lost keystrokes in the real editor — one committed `ue` into B1 where `Value` was
+typed, another left `grid-workflow-table-complete` with C5 and D5 EMPTY and B5 holding `4450` (C5's
+total), one lost Enter shifting the whole totals row. Both produced a few hundred differing pixels in
+a text strip, which reads exactly like a rendering regression and is not one.
+
+`core-visual.spec.ts` had already learned this (`expectDataBlock`: "twelve backend reads turn that
+into a named failure at the point of the mistake"). `workflow-visual.spec.ts` had not. It now asserts
+every block it photographs through the backend before each capture — **one** `page.evaluate` for the
+whole block, not one per cell, because that test already sat at 22-23s against the project's 30s
+budget and the per-cell version timed out at 30.2s on the first cold run after it landed. That test
+now carries `test.setTimeout(90_000)` with the four measurements next to it.
+
+#### Verification — two cold runs that agree
+
+Every run below is a COLD app: the process killed and relaunched, CDP confirmed, the window brought
+to the foreground, `--project=visual` the first suite on the instance.
+
+| run | app | result |
+|---|---|---|
+| reproduction, before any change | cold | **14 passed / 4 failed** (the §3cc four) |
+| after the flag, before the re-record | cold | **13 passed / 5 failed** — the AA diffs GONE, every remaining failure the ribbon box (897/707/707/897 px, all inside `x 128..441, y 69..94`) plus one lost-keystroke flake |
+| re-record (`--update-snapshots`) | cold | 18 passed, **5 files rewritten** |
+| **cold verification 1** | cold | **18 / 18** |
+| **cold verification 2** | cold | **18 / 18** |
+
+`e2e` vitest tier **49/49** (up from 43: three capture-environment cases, six HomeTab cases, minus
+none removed), `npx tsc -p e2e/tsconfig.json` clean, `lint:boundaries` clean,
+`check-line-endings` clean. The golden-corpus census still reports every committed golden at dpr 2
+and under the sRGB pin.
+
+#### Why `goldenCorpus.ts` does NOT gain a third axis — measured, not assumed
+
+The brief asked whether the census that reads dpr and colour profile off the committed bytes could be
+extended to this. It was attempted and **rejected**, and the measurement is written into the head of
+`goldenCorpus.ts` so it is not attempted again.
+
+The two existing axes are properties of the WHOLE CAPTURE: a display has one scale factor and one
+colour profile, so counting exact constants over the file answers the question. **LCD text is a
+property of each composited LAYER**, so one capture holds both states at once — the region table in
+(a) is exactly that, in one frame. Over the whole 1280x800 image the two states differ by 195,201
+chromatic pixels against 193,272, about 1%, in a number that depends mostly on how much coloured
+chrome is in shot. Three candidate readers were tried against the real pair (chromatic pixels;
+monotone-channel pixels; chromatic pixels flanked by neutrals; plus one keyed to the exact
+`#252526` dropdown background) and the best separation any of them reached was **1.3x**, against the
+**4x** dominance margin the existing readers are held to. A reader at that margin returns verdicts it
+cannot support, which is the shape this program keeps deleting.
+
+If a future pass wants the axis in the corpus census, the population it can honestly serve is a
+capture whose ENTIRE FRAME is one overlay — a `takeDialogScreenshot` golden. There are none in the
+tree today, which is the other reason the reader is not there.
+
+#### The environment, stated rather than glossed
+
+The machine was **not** quiet. Two other agents held it for the whole pass: `object_deps.rs`,
+`pivot/commands.rs`, `sheets.rs` and `SheetTabs.tsx` were edited live, so `tauri dev` rebuilt and
+restarted the app roughly every ten minutes, and one of those rebuilds destroyed a run mid-suite.
+`check-types` also reports one error that belongs to that work (`extensions/Slicer/index.ts:519`,
+`Cannot find name 'dropSlicerFromSelection'`), not to this pass.
+
+Every measurement above therefore comes from a **pinned app**: `app.exe` and `app_lib.dll` copied to
+`%LOCALAPPDATA%\calcula-e2e-pin` and launched directly against the running Vite dev server on CDP
+**9223**, so a rebuild cannot restart the binary under a suite. That is worth keeping as a technique
+— it is the only reason two cold runs could be made to agree on a shared machine — but note the
+corollary: the pinned copy is a SNAPSHOT of the build, so it must be refreshed deliberately, and a
+run against it says nothing about Rust changes made after the copy.
+
+**Not re-run here, and named rather than implied:** the `functional`, `journey` and `scenario`
+projects. The flag is expected to cost them nothing — the only overlay-over-canvas golden in the
+functional corpus is `autocomplete-dropdown-visible`, which was measured off its own bytes as
+LCD-recorded and therefore stays on the side the flag pins — but that is a measurement of the bytes,
+not a run, and a full ordered functional pass on a machine being rebuilt every ten minutes would not
+have been evidence either way.
+
+> **The flag costs them nothing. The PRODUCT half does — §7c, BUG-0029.** The `useHomeTabState` fix
+> is a change to what the application paints, so it invalidates goldens in every project that
+> photographs the Home ribbon, not only the one that was re-recorded.
+> `tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png` captures the same
+> brand-new workbook through the same `resetToNewWorkbook` helper and still holds the latched toggle:
+> 546 pressed-accent pixels against the re-recorded sibling's 36, i.e. 590 differing pixels against a
+> 200-pixel budget. Read off the committed bytes, quarantined by name, and now guarded by a third
+> corpus axis that asks which BUILD took the picture rather than which machine.
 
 ## 4. OWNER DECISIONS — not work, product calls
 
@@ -11469,12 +11858,14 @@ divergence BUG-0015 describes:
 |---|---|
 | `create_pivot_from_bi_model` | **FIXED.** Created a pivot Ctrl+Z could not remove — the literal BUG-0015 symptom on the BI path. Now records `pivot_create` from the CLEAN pre-calc cache, as the grid-source path always did. |
 | `relocate_pivot` | **FIXED.** Moving a pivot was not undoable, so Ctrl+Z silently reverted whatever came before it instead. Records `pivot_definition`; the restore re-renders from the same cache, which is exactly right for a move. |
-| `update_bi_pivot_fields` | **OPEN — BUG-0021.** It re-queries the model and replaces the cache, so restoring the old definition against the NEW cache would render the wrong thing. Needs a definition+cache snapshot, i.e. the shape `pivot_create`/`pivot_delete` already use. |
-| `change_pivot_data_source` | **OPEN — BUG-0022.** Same shape: it rebuilds the cache from the new range. |
+| `update_bi_pivot_fields` | **FIXED 2026-08-12 (BUG-0021)** — see §6b. All FIVE of its mutating exits record one step now, and the snapshot grew an optional cache because this command replaces it. |
+| `change_pivot_data_source` | **FIXED 2026-08-12 (BUG-0022)** — see §6b. Same snapshot; it also SAVES the cells the repointed pivot overwrites instead of merely counting them. |
 | `refresh_pivot_cache` | **Correct as-is.** Excel does not undo a PivotTable refresh. |
 
-The two OPEN commands are deliberately **not** re-suppressed. A walk that reaches them should fail
-loudly and name them; a prefix that hides them buys silence at the price of the instrument.
+The two commands that were still open here were deliberately **not** re-suppressed — a walk that
+reaches a defect should fail loudly and name it, and a prefix that hides it buys silence at the price
+of the instrument. That is what kept them findable: both were closed on **2026-08-12** (§6b), and the
+oracle never had to be re-taught about them.
 
 **Proved live**, not only reasoned: `app/e2e/journeys/pivot-undo-fidelity.spec.ts` performs the
 create+configure sequence a user performs, asks the oracle's own question with `diffDigests` and no
@@ -11585,6 +11976,8 @@ Both sabotages were reverted and both suites re-run green afterwards.
 **Left OPEN and named, not suppressed:** BUG-0021 (`update_bi_pivot_fields`) and BUG-0022
 (`change_pivot_data_source`). Both need a definition+cache snapshot rather than the definition-only
 `pivot_definition` restore, because both replace the cache. Ledgered with repros.
+**Both CLOSED 2026-08-12 — §6b.** The diagnosis above held exactly, and the snapshot format was the
+part that had to move.
 
 **Found in passing, filed rather than fixed** (each is another owner's territory or a bigger job):
 
@@ -11606,3 +11999,715 @@ edits to `state_digest.rs` and `calp_commands.rs` with a `tauri dev` watcher res
 the measurements. Two probe runs were destroyed mid-measurement by a rebuild (visible as a document
 that reset to empty between two reads three seconds apart). Anything below a full re-run on a quiet
 machine should be re-verified rather than trusted.
+
+## 6. The macro-editor keystroke defect, and the last two pivot-undo gaps (2026-08-12)
+
+Three bugs were open on the ledger with reproductions but no fix — BUG-0025 in the editor, BUG-0021
+and BUG-0022 in pivot undo — and one, BUG-0024, was open on the *brief* while already being fixed on
+the tree. All four are closed here. Each had been left un-suppressed on purpose, and that is the only
+reason they were still findable: nothing in this pass had to be re-discovered.
+
+### 6a. BUG-0025 — the live indicator claimed the store held text it did not hold
+
+The filing named two hypotheses in different layers and, unusually, named the measurement that
+separates them: **read the Monaco buffer at the moment the assertion fails.** Buffer holds `A1` while
+the store holds `A` means the store read was stale (b); buffer holds `A` too means a keystroke was
+swallowed on the way in (a).
+
+**The measurement was taken deterministically rather than by chasing a 1-in-3 flake through a
+38-minute run.** The e2e failure is a race with a 400 ms window, and a race whose window is named can
+be reproduced on a bench instead of hunted in the field. `liveMacroEditing.test.tsx` mounts the real
+editor over a drivable buffer, so the sequence is expressible exactly:
+
+```
+hold the store write open        (a Tauri round-trip is not instantaneous; an instant mock skips
+                                  precisely the window the defect lives in)
+type ... "A" ...                 the idle window elapses -> the write starts, and blocks
+type ... "A1" ...                the second keystroke lands WHILE that write is in flight
+release the write
+```
+
+and the result, before any fix:
+
+| what | value |
+|---|---|
+| module store | `api.setCellValue(1, 1, "A")` |
+| Monaco buffer | `api.setCellValue(1, 1, "A1")` |
+| live chip | `live` |
+
+**Hypothesis (b), unambiguously.** No keystroke was lost, so this is NOT the grid's
+type-to-open-the-inline-editor defect reaching the macro editor — that one loses characters on the
+way in and leaves the buffer short. Here the input path was perfect and the *report* was wrong.
+
+Two independent facts corroborate it. `applyLiveOutcome` set the chip from the outcome of the pass
+that had just finished, and an outcome describes the bytes it WROTE — bytes that were current when
+that write STARTED. And the harness had already met this: **two of the six copies** of the helper's
+caller carried the comment *"the idle write-through can flush MID-TYPING (e.g. `3` of `350`), turn
+the chip Live, and only then flush the rest"* and worked around it by polling the store. Those two
+copies are green; the copy without the workaround is the flake. A defect had been observed, described
+correctly, and patched in a third of the places it applied.
+
+**The fix is in the layer that was wrong.** The chip is now derived from the persister's own
+buffer-vs-store comparison at the moment the outcome lands, not from the outcome:
+`liveStateFromOutcome(outcome, bufferStillUnsaved)` answers "Saving…" for any liveness-claiming
+outcome while a write is still owed. `hasUnsavedEdits` already existed and is the exact question the
+chip asks on the user's behalf; it simply was not being asked.
+
+**The same staleness had a second, destructive face, found while fixing the first.** A `compiled`
+outcome replaces the buffer with the stored JavaScript, because the author must be looking at the
+text that runs. Applied to a buffer that has moved since, that swap **deletes the keystrokes typed
+during the compile** — and silently, because `setSource` does not go through the change handler, so
+the persister is never told and goes on writing text that is no longer on screen. Outcomes now carry
+the `input` they were compiled FROM; the swap is skipped when the screen has moved on (rule 4's own
+principle: an author's moving text is not rewritten underneath them), and when the swap does happen
+the persister is told through a new `adopt`. That last part is load-bearing in the other direction:
+for a compiled write the buffer and the store never agree by construction, so without `adopt` a
+TypeScript module would be stranded on "Saving…" for the rest of the session.
+
+**`retypeToken`'s six copies became one.** The filing had deliberately not attempted the fix for
+exactly this reason: a helper that participates in a defect and exists six times gets fixed twice.
+`app/e2e/helpers/macroEditor.ts` is now the only definition of `retypeToken`, `retypeAndStore`,
+`liveState`, `liveIndicator`, `editorText` and `storedModuleSource` — the sweep also absorbed a
+seventh `editorText` in `macro-editor-inventory.spec.ts` and an inline indicator locator in
+`macro-link-model.spec.ts`. Its assertion **waits for the chip and then reads the store once**:
+polling the store until it agrees would re-hide this whole class, because a chip that lies is
+invisible to a poll that waits it out. Its failure message prints the chip state, the Monaco buffer
+and the stored source, so the separating measurement is permanent instead of costing a run to
+re-derive.
+
+Both detectors were sabotage-checked. Reverting the chip fix makes the reproduction fail with
+`expected "saving", received "live"`; forcing the compile swap unconditional makes the second test
+fail with the author's `v3` replaced by the stale compiled `v2`.
+
+**The one step NOT taken: a live `--project=functional` run.** Two of the six collapsed copies had
+been polling the store as a workaround and now rely on the honest chip instead, so the change touches
+the input path of ~40 currently-green tests — and only a full ordered run proves it, because
+`vba-idioms-wave3` alone is not a reproduction (it depends on sheets earlier specs create and fails
+at a different assertion entirely). That run was deliberately not started: two other agents were
+editing `app/src-tauri` and `app/extensions` throughout this pass, and an E2E run against a tree
+being rebuilt underneath it produces a result that means nothing — the same trap §3bq describes.
+**It is owed before this is called done**, and the failure it would report is now self-diagnosing:
+the helper prints the chip, the buffer and the stored bytes.
+
+### 6b. BUG-0021 / BUG-0022 — a pivot undo has to put the RECORDS back too, not only the definition
+
+Both were **still real**, and `update_bi_pivot_fields` said so about itself: its auto-fit branch
+carried the comment *"DELIBERATELY DISCARDED … this command records NO undo entry at all … The widths
+become undoable the moment this command becomes undoable."* That moment is now.
+
+The reason this could not be a one-line "record the definition" is the one the ledger already
+identified: `pivot_definition` restores a definition and re-renders it against **whatever cache is
+live**. For a field change that is right, and deliberately cheap — the records did not move, and
+cloning a cache per rename is a real cost. But these two commands REPLACE the cache (a new source
+range; a fresh model query), and an old definition rendered against new records is a view the user
+never saw: field indices that mean different columns, rows the old definition never had.
+
+* The snapshot grew an **optional** `cache`. `None` means "the records were not touched — leave them
+  alone", which keeps every existing caller cheap; `Some` is recorded only by the commands that
+  replace them. The inverse mirrors the shape, so redo is as complete as undo.
+* `update_bi_pivot_fields` has **five** mutating exits — the cosmetic fast path, the clear-to-empty
+  path, the no-measures save, the failed-query save, and the main path — and every one of them was
+  silent. All five record one step now, and the auto-fit widths finally ride in it.
+* `change_pivot_data_source` records one step, and now **saves** the cells the repointed pivot
+  overwrites rather than merely counting them: undo cannot put back what was only counted.
+
+**The payload had three authors and a fourth private reader.** `pivot/commands.rs` had a struct,
+`mcp/objects.rs` built the same shape as an untyped `json!` literal, `calp_commands.rs` kept its own
+copy of the struct, and `undo_pivot_overwrite` deserialised it through a *fourth* private struct that
+restored the definition without the cache. A field added to one of those authors is silently
+defaulted away in the others — which is exactly what would have happened to `cache`, leaving the
+cancel path restoring against the wrong records while every test passed. All four now go through one
+`encode_pivot_definition_snapshot` / `decode_pivot_definition_snapshot` in `undo_commands.rs`, beside
+the `encode_pivot_col_widths_snapshot` precedent, and the kind string is a constant rather than four
+literals.
+
+`pivot_undo_cache_tests.rs` pins it: the cache-carrying restore puts the old records back, a
+definition-only restore leaves the live cache strictly alone (so field changes never start cloning
+caches into the undo stack), each inverse mirrors its own shape, and the encoder/decoder round trip
+is asserted as the guard against a fifth author appearing.
+
+### 6c. BUG-0024 was already fixed — the filing outlived the defect
+
+The brief listed it as open. `goldenCorpus.readColourProfile` and `CAPTURE_ENVIRONMENT.colourProfile`
+are both on the tree and the ledger entry has read `fixed` since the re-record. There was nothing to
+do but say so — which is the point this register makes about itself: **a to-do list that outlives its
+items stops being read.** Re-triaged and annotated in the ledger rather than left to be investigated
+a third time.
+
+### 6d. What was NOT touched
+
+`BUG-0005` (undo is sheet-unaware across an added sheet), `BUG-0012` (sparkline groups lost across
+save/reload), `BUG-0026` (a contextual tab visible with nothing to contextualise) and `BUG-0028` (the
+warm/cold visual split) remain open and unsuppressed. BUG-0028 belongs to the visual corpus, which
+another agent holds this pass.
+
+> **Superseded, 2026-08-12.** BUG-0026 closed in §3cd and BUG-0028 in §3ce the same day; both were
+> still filed `open` on the ledger until §7b reconciled it. BUG-0005 and BUG-0012 remain open.
+
+**The machine was not quiet**, §3bq again: another agent was editing `object_deps.rs` and
+`object_deps_tests.rs` throughout. A mid-pass app-lib run therefore reported one failure in a census
+this pass never touched, and one sabotage check ran into a tree that would not compile for reasons
+unrelated to it — both cleared once that agent's edit settled. Counts taken on a contended machine
+are evidence; only the final one, taken after it settled, is the number. `npm run check-types` is
+**red at the close of this pass on one line that belongs to that other agent** —
+`extensions/Slicer/index.ts(519): Cannot find name 'dropSlicerFromSelection'`, a file this pass never
+opened. It is the only error in the project, and it was clean before their edit landed.
+
+**Verification.** `cargo check --all-targets` 0 warnings; **app-lib 1491 passed / 0 failed / 5
+ignored**, including the five new pivot-undo tests; `extensions/ScriptableObjects` 254/254 and the
+e2e harness tier 37/37 under vitest; `npm run check-types`, `npm run lint:boundaries` and
+`tsc -p e2e/tsconfig.json` all clean. Both new detectors were sabotage-checked and both fired on
+their own message — the pivot one with `left: 9, right: 4` under "the old definition is being
+rendered against the NEW records".
+
+## 7. INTEGRATION PASS — and the golden corpus turns out to be split on a THIRD axis, which is not a capture path at all (2026-08-12)
+
+Three passes landed within hours of each other on a machine none of them had to themselves —
+BUG-0026 (the cascade announcement), BUG-0028 (the warm/cold goldens) and BUG-0025/0021/0022 (the
+macro-editor keystroke and the pivot-undo caches). This pass re-measured all of it on a quiet tree,
+attacked the contracts rather than reading them, and found two things the three passes could not
+have found individually **because each is a consequence of one pass landing on another's surface**.
+
+### 7a. The baselines, re-measured — and the handover was wrong about one again
+
+The brief warned that three baselines had been mis-stated last time. Measured here, on a quiet tree,
+before touching anything:
+
+| suite | brief said | measured | note |
+|---|---|---|---|
+| vitest | 755 files / 106,284 | **759 files / 106,329** | the three passes' own additions; the brief's number predates them |
+| script typings | 39 / 736 | **39 / 736** | correct |
+| core (`cargo test --workspace`) | 1,339 | **1,339** | correct, and script-engine's **111** is one of its twelve binaries, not an addition |
+| app-lib | 1,479 | **1,492** | 1,479 + 5 (BUG-0021/0022) + 8 (BUG-0026) |
+| test_pivot | 56 | **56** | correct |
+| `cargo check --all-targets` | 0 warnings both | **0 warnings both** | correct |
+
+`npm run check-types` was **green** on arrival: the one error the BUG-0025 pass closed on
+(`Slicer/index.ts(519): Cannot find name 'dropSlicerFromSelection'`) was that agent's in-flight edit
+and had settled. Nothing to reconcile there.
+
+### 7b. Residue: the ledger said "open" about two bugs the tree had already fixed
+
+`tests/regression/bug-ledger.json` still carried `BUG-0026` and `BUG-0028` as `status: "open"` with
+empty `fix` blocks, hours after both were fixed, verified and written up **in this register**. Both
+pass reports say "register updated"; neither says "ledger updated", and the ledger is what the soak
+and regression runners read to decide whether a finding is new.
+
+Both entries are now `fixed`, each carrying the files, the mechanism and the validation — including
+the two sabotage checks re-run here on the real crate (7e). This is the failure mode §6c named from
+the other side: **a to-do list that outlives its items stops being read**, and one that lags its
+items gets a fix re-discovered.
+
+### 7c. THE FINDING — BUG-0029: a golden that photographs a build that no longer exists
+
+BUG-0028 was two defects, and the second was a **product** defect: `useHomeTabState` returned without
+clearing when `getCell` resolved to null, so the Home tab kept the previous cell's format state over
+a cell that holds nothing. Five goldens were re-recorded against the fixed build. All five are in the
+`visual` project. The pass says so plainly and says why — no E2E budget for the other projects.
+
+`tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png` is in the `functional`
+project. It photographs **the same brand-new workbook, through the same `resetToNewWorkbook`
+helper**, at the same 1280x800, and it still holds the latched Center-Vertically toggle.
+
+Measured off the committed bytes, no run involved:
+
+| | pressed-accent fill | recorded |
+|---|---|---|
+| `visual/.../core-empty-grid.png` (re-recorded against the fixed build) | **36** | 2026-08-12 09:06 |
+| `tests/.../empty-grid-full-window.png` (never re-run) | **546** | 2026-08-11 |
+
+A pixel-for-pixel fit of the two leaves 2,173 differing pixels, of which **590 are exactly this one
+box** — 510 of `221,245,237 -> 255,255,255` plus 80 of its `128,217,188` border — inside
+`x 128..441 / y 69..94`, which is where the running app resolves `fmt-alignMiddle`. The comparator
+budget is `min(200, 0.0005 * 1,024,000) = 200`. **It cannot pass**, and nothing had to be run to know
+that.
+
+The model is checkable in both directions, which is why this is a measurement and not a worry:
+
+* `menu-file-open` / `menu-edit-open` / `menu-data-open` reset to a new workbook and write nothing —
+  23/24/29, unlit, and they passed the two cold post-fix runs.
+* `sheets-default-tabs` and `core-formula-bar-display` sit in the **same** `visual` project at
+  **546** and also passed those runs — because their capture follows a `setCellValue`, so the cell
+  exists and the effective format genuinely is middle-aligned. The rule is not "no golden may show a
+  latched toggle"; it is "no golden taken on an EMPTY workbook may".
+* The six `ribbon-tabs` goldens hold 546 with a written `X10`, for the same reason, and are not at
+  risk.
+
+Filed as **BUG-0029**, `test-bug`, and deliberately NOT re-recorded: that needs a
+`--project=functional` run and this pass was scoped out of E2E. Re-recording it is one
+`--update-snapshots=changed` away, and the entry carries the arithmetic that says what the new bytes
+must look like.
+
+> **CLOSED, 2026-08-12 — §8d. The arithmetic above was exact.** The live comparator reported
+> **2,173** differing pixels, the same 2,173 computed here off the committed bytes with no run, and
+> **510** of them are the predicted `221,245,237` fill. Re-recorded on a cold app inside a full
+> ordered run; it now measures **36**, the number this section derived. The quarantine then expired
+> itself, exactly as designed — it requires the file to STILL measure 546, so the correct re-record
+> turned the census red on this entry rather than letting it rot. `STALE_PRODUCT_STATE_GOLDENS` is
+> now empty.
+
+#### The guard, because the class is bigger than the file
+
+Both existing corpus censuses ask **which machine took the picture** — device pixel ratio (§3cb),
+colour profile (§3cc). Neither can ask **which build did**, and that is the axis that broke here. A
+product fix invalidates goldens in every project that photographs the affected surface, and the tree
+had no way to say which.
+
+`e2e/goldenCorpus.ts` grows a third reader, on the same principle as the other two — recover the fact
+from the bytes, not from memory of which afternoon it was recorded on:
+
+* `readPressedAccentFill` counts `rgba(16,185,129,0.14)` over white — (222,245,237) — the fill a
+  latched Home-tab toggle paints. Measured across all 71 committed goldens, an **unlit** capture
+  holds 23..36 of them and a **lit** one holds 546 or more. Nothing sits between, so
+  `PRESSED_ACCENT_FLOOR = 200` is a measurement with an order of magnitude on each side rather than
+  a chosen number. The reader ignores the two hairline constants, white, and the accent at full
+  strength (that is an icon, not a fill) — pinned by its own case.
+* `EMPTY_DOCUMENT_GOLDENS` declares the population, and **the population is checked against the
+  spec source**: every entry must name a `test(...)` block that really calls `resetToNewWorkbook`
+  (its own, or its file's `beforeEach`) with no cell-writing call between that and the capture. So
+  the table cannot claim a populated capture is empty, and it fails rather than rots when a test is
+  rewritten to write a cell first.
+* `STALE_PRODUCT_STATE_GOLDENS` is the same two-sided quarantine as `MIS_RECORDED_CORPORA`: the
+  entry must still measure exactly `546`, so re-recording the file correctly makes the entry stale
+  and fails; and it must name a file the rule actually applies to, so it cannot be widened into a
+  blanket. A directory prefix is refused here for the same reason it is refused there.
+
+**Teeth, on the real corpus, not on a fixture:** deleting the BUG-0029 entry fails
+`shows an UNLIT Home tab on every golden taken on a brand-new workbook` with
+`tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png (546 pressed-accent px)`
+and the sentence about which BUILD took the picture. Restored, 37/37. Four synthetic cases pin the
+wording, the quarantine's selectivity, and the fact that a **lit golden outside the declared
+population is ignored** — the rule discriminates rather than always-failing.
+
+A NON-VACUITY case is included on purpose, because that is the exact hole the dpr axis had for a day:
+if nothing in the corpus ever measured LIT, the census would be passing over a reader that cannot see
+its own subject. It asserts more than five goldens are lit and that the two sides are separated by at
+least 4x.
+
+### 7d. The bug ledger would have re-issued BUG-0024 to the next soak finding
+
+Found while writing 7b. `tests/regression/bug-ledger.json` held **BUG-0024 through BUG-0028 above a
+`nextId` of 24**. All five were filed by hand — from e2e and review passes rather than from a soak
+run — and hand edits do not go through the allocator, so the counter never moved.
+
+The next soak finding would have been issued `BUG-0024` a second time. `updateBug` resolved an id
+with `.find`, so every later patch — triage, fix status, `validatedBy` — would have landed on the
+**first** entry carrying that id: a closed, unrelated bug rewritten in place, and the new one left
+permanently un-updatable. Silently, and in the one file that is supposed to be the record.
+
+Fixed in `tests/soak/bug-ledger.mjs`:
+
+* `nextFreeId(ledger)` derives the id from the **entries** and keeps `nextId` as a floor, so a
+  hand-edited ledger is safe by construction and ids still never go backwards after a deletion.
+* `updateBug` now **throws** on a duplicate id instead of patching the first match. Picking the first
+  is precisely how the wrong bug gets rewritten, and a duplicate means the allocator was bypassed —
+  which is a thing to stop on, not to guess through.
+
+The harness had **no unit tier at all**, which is the same gap that let the trace minimiser ship
+discarding its own answer. `app/e2e/__tests__/bugLedger.test.ts` (11 cases) is that tier: five on the
+allocator, three on `updateBug`, and three over the **committed** ledger. One of those three —
+"carries a counter above every id it already holds" — fails on the file as it was found, which is
+the teeth. The ledger is now `nextId: 30` with 29 entries and no duplicates.
+
+The third case, "agrees with itself about which bugs are fixed", is honest about what it cannot do:
+BUG-0026 and BUG-0028 had `status` and `fix.status` **agreeing with each other** and disagreeing with
+the tree. No file-local rule can see that.
+
+### 7e. Contract verdicts — attacked, on the real tree
+
+| contract | verdict | evidence |
+|---|---|---|
+| (a) a backend cascade that mutates a rendered object announces, and the census fires when an announcement is removed | **HELD, twice** | Commenting out `announce_cascade` in `mcp::delete_table` failed `every_backend_initiated_cascade_announces_itself` with `mcp::delete_table: reaches the cascade DeletedSource::table and never calls announce_cascade`. Renaming the `mutation:refresh` listener in `bootstrap.ts` failed the frontend census's "the backend announcement lands in the SAME translator". Both restored; 38/38 and 37/37 green after. |
+| (b) no golden was re-recorded in a state that does not reproduce cold | **HELD — and the corpus was re-measured to say so** | The five re-records sit on the SAME antialiasing side as the siblings nobody touched: `menu-file-open` 16,441 chromatic px and `menu-edit-open` 16,867 against `menu-data-open`'s 18,887, which was not re-recorded at all. `ribbon-core-default-ribbon` differs from its untouched twin `ribbon-home-tab-default` by 1,113 px, of which 590 are exactly the accent box the product fix removed — i.e. the re-record absorbed the product change and NOTHING ELSE. The `--disable-accelerated-2d-canvas` flag is on `DETERMINISTIC_CAPTURE_FLAGS` and pins the side every golden already held. |
+| (c) `retypeToken` is one implementation, not six | **HELD** | One definition, `e2e/helpers/macroEditor.ts`, alongside `retypeAndStore`, `liveState`, `liveIndicator`, `editorText`, `storedModuleSource`. Eight call sites across seven specs, zero local re-definitions. The one same-named local in `liveMacroEditing.test.tsx` is a jsdom DOM query in the vitest reproduction — a different medium, not a seventh copy. |
+| (d) all twelve census families still fire, each with a self-test | **HELD, and it is FOURTEEN now** | The twelve are: document-store reset, document-store field, reset delegation, xlsx loss, xlsx publish, recalculation, spill-map, spill-ref lock, crate-wide lock order, one-spill-decision, formula serialisation (five sub-detectors in one family), object-deps. BUG-0026 added two more with their own self-tests — `the_backend_announcement_detector_actually_fires` and `the_transitive_detector_actually_fires`. All fourteen ran green inside the 1,492. Two were additionally attacked on the REAL crate here: the announcement census (above) and the transitive one — removing `cascade_deleted_charts` from `delete_sheet` failed with `delete_sheet deletes a chart (sheet -> chart.sheetIndex), and a deleted chart owes cascade_deleted_charts ... which appears nowhere in its body`. Restored, 17/17. |
+| (e) nothing added a second implementation of anything already unified | **HELD** | ONE renderer (`expression_to_formula` delegates to `engine::ast_render::render_formula_raw`); ONE `apply_spill_decision` with exactly **6** call sites; ONE `minimizeTrace`; ONE `MutationDomain` type in TS with the Rust side **aliasing** `object_deps::UiDomain` rather than declaring a second enum (caught in flight by `crossLayerConstantDrift`, and the bitset widened u16->u32 because 16 members made `1u16 << 15` the last bit). The three readers in `goldenCorpus.ts` are three axes, not three copies: different populations, different remedies, and the module's own header records that a fourth (whole-image LCD-text separation) was **measured at 1.3x against a 4x margin and rejected**. |
+
+### 7f. What was NOT done, and what is owed
+
+* **No E2E was run**, by instruction. Three separate runs are therefore owed and all three are
+  already named: the `--project=functional` run the BUG-0025 helper collapse changed the input path
+  of (§6a), the `functional` / `journey` / `scenario` runs BUG-0028's flag and product fix touched
+  (§3ce), and the 3-action soak/invariant replay for BUG-0026. **BUG-0029 will fail the first of
+  these**, by design, and its fix is the re-record that run produces.
+* **BUG-0005** (undo is sheet-unaware across an added sheet) and **BUG-0012** (sparkline groups lost
+  across save/reload) remain open, unsuppressed and untouched — both need product work, not
+  reconciliation.
+
+  > **2026-08-12, §8j: all three owed runs were taken, and BUG-0012 turned out to need no product
+  > work at all.** It had already been fixed by one of the persistence passes and never closed —
+  > the third filing in this register to outlive its own defect. Proved by RUNNING it (a real
+  > group, a real `.cala`, a real reopen, the backend's own digest on both sides) rather than by
+  > reading `zip_io.rs`, which is the only reason it survived three handovers. **BUG-0005 is now
+  > the only open entry on the ledger.**
+* `model-engine-lib` still carries its pre-existing `cargo check --all-targets` warnings in test
+  targets, and this pass touched none of its source. Counted in 7g, since §3cb's figure no longer
+  matches. The "0 warnings both" contract covers `core` and `app`, and both are clean.
+* **No other agent was editing during this pass** — the first time in four passes that is true, so
+  §3bq's "counts on a contended machine are evidence, not numbers" does not apply to anything in 7g.
+  It does apply to two runs *this pass* started against itself; both are named there and both were
+  re-taken alone.
+
+### 7g. Verification — every suite, measured on a quiet tree
+
+| check | result |
+|---|---|
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| `tsc -p e2e/tsconfig.json` | clean |
+| `npm run check:script-typings` | `[OK] typings are current` — **39 interfaces verified, 736 members probed**, 356 carry generated broker policy |
+| `npm run check:line-endings` | `[OK] no mixed line endings` |
+| **vitest, full** | **760 files / 106,355 passed** (759/106,329 + 1 file and 26 cases added here) |
+| `cargo check --all-targets` (`app/src-tauri`) | **0 warnings** |
+| `cargo check --all-targets` (`core`) | **0 warnings** |
+| `cargo test --workspace` (`core`) | **1,339 passed / 0 failed**, of which script-engine's **111** is one binary |
+| app-lib | **1,492 passed / 0 failed / 5 ignored** |
+| `test_pivot` | **56 passed / 0 failed** |
+| `model-engine-lib` | **2,192 passed / 0 failed** = 2,156 unit+integration and **36 doctests** |
+
+**Every delta accounted for:**
+
+* vitest **+1 file, +26 cases**: `e2e/__tests__/bugLedger.test.ts` (11) and 15 new cases in
+  `e2e/__tests__/goldenCorpus.test.ts` (the product-state axis and its detector self-tests).
+* app-lib **1,479 -> 1,492**: +5 from BUG-0021/0022's `pivot_undo_cache_tests.rs`, +8 from
+  BUG-0026's object-deps census. Nothing added here — this pass wrote no Rust.
+* core, test_pivot, typings, both `cargo check`s: **unchanged**, as expected.
+
+**Two measurement traps hit on the way, both worth the next agent's time:**
+
+1. **A full vitest run taken WHILE a `model-engine-lib` cargo build was running reported
+   `2 failed / 756 files / 103,273`** — four load errors and 3,000 missing tests. The concurrent
+   linker in that same build failed with `LNK1102` (out of memory). Re-run alone: **760 /
+   106,355, zero failures.** Do not run the two together on this machine, and do not file a bug
+   from a contended run.
+2. **`model-engine-lib`'s doctests fail NON-DETERMINISTICALLY in parallel**, a different random
+   subset each time, always with `crate <X> required to be available in rlib format, but was not
+   found in this form` (`uuid`, `datafusion_optimizer`, `datafusion_functions_nested`, `libm`, ...).
+   Three runs gave 8, 3 and 4 failures over disjoint sets. `cargo test --workspace --doc --
+   --test-threads=1` is **36/36 green**, repeatably. It is an environment race, not a defect: no
+   source in that workspace was touched by this pass. `cargo build --workspace` beforehand does NOT
+   help (it is a no-op cache hit) — the thread count is the lever.
+
+`model-engine-lib`'s pre-existing `cargo check --all-targets` warnings are **15** by its own crate
+summaries (12 in `engine-core`'s `semijoin_tests`, 2 in `engine-query`'s lib test, 1 in
+`bi-engine`'s), all in test targets. §3cb recorded 18; the number moved without this pass touching
+that workspace, so treat the count as observed rather than pinned. The "0 warnings both" contract
+covers `core` and `app`, and both are clean.
+
+## 8. PROVED LIVE — and the two passes that verified a change in one project both cost a golden in another (2026-08-12)
+
+Every claim in §3cd, §3ce, §6 and §7 was carried on unit tests, sabotage checks and measurements
+taken off committed bytes. Not one of them had been **driven**. This pass drove all of them, on a
+real app, from cold, and the headline held: **BUG-0028's warm/cold split is dead, measured twice.**
+
+It also found five things, and four of them are the same shape — *a pass verified its change in the
+project it was looking at and reasoned about the others from a single file*. That is the sentence
+this section exists to make expensive.
+
+### 8a. BUG-0028 — the headline. Two cold runs, and they agree
+
+The defect was precisely that warm and cold disagreed: 18/18 warm, 14-15/18 cold. So a warm run
+proves nothing and the only evidence that counts is two independent COLD runs agreeing.
+
+| run | app | first suite on the instance | result |
+|---|---|---|---|
+| cold verification 1 | pid 12068, started 10:16:10 | yes | **18 passed (2.3m)** |
+| cold verification 2 | pid 10000, started 10:20:14 | yes | **18 passed (2.5m)** |
+
+Not just the same total — the same per-test list, with per-test timings within 0.3s of each other on
+every one of the eighteen. The launcher log confirms the pin actually reached the app rather than
+being explained in a file and discarded on the way (§3ce's own trap):
+
+```
+[launch] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222
+         --force-color-profile=sRGB --disable-accelerated-2d-canvas
+```
+
+`assertCaptureEnvironment` runs before every capture and asserts `compositedCanvasLayers === 0` off
+the live compositor, so 18/18 twice is also 18 live assertions twice that the flag did what it says.
+
+### 8b. BUG-0026 — driven, not described, and then sabotaged
+
+The three-action reproduction (`table.create -> slicer.create -> table.delete`) now runs as a
+journey, `app/e2e/journeys/cascade-announcement-live.spec.ts`, through the **same `WalkRunner`, the
+same catalog and the same `ALL_INVARIANTS`** that reported the violation originally — a fix checked
+only by the census added alongside it is checked by its own author.
+
+It asserts in two states, because "the Slicer tab is absent" is also what a broken tab reader and an
+app with no ribbon at all report: the tab must be **present** after `slicer.create` (positive
+control) and **absent** after `table.delete`, plus `slicers=0`, an empty slicer store, a null
+selection, zero `[data-slicer-id]` overlay nodes, and no console error or uncaught exception.
+
+**Teeth, on the running build.** `SlicerEvents.SLICER_DELETED` was removed from `refreshCache`'s diff
+in `app/extensions/Slicer/lib/slicerStore.ts` (sha256 `1e0c34c8…` recorded first). The reproduction
+failed with the ledger's original message, verbatim:
+
+```
+Invariant: contextual-ribbon-tabs
+Message: Contextual tab "Slicer" is visible but at least one slicer must exist.
+         Found: slicers=0, charts=0, tables=0, pivots=0, timelines=0, sparklines=0
+  tabLabel: "Slicer"   accentColor: "#548235"
+```
+
+Restored from the backup; `sha256sum -c` reports **OK** (byte-identical, 303 LF, 0 CRLF, 0 NUL); the
+reproduction is green again.
+
+**The second cascade pair** is in the same file and it is the one §3cd's transitive walk named as
+orphan #1: a chart on a **deleted sheet**. The generator structurally cannot build it — the catalog's
+`chart.create` hardcodes `sheetIndex: 0` and `sheet.delete` always deletes the LAST sheet — so it is
+driven by hand: add a sheet, create a chart on it, select it (positive control: a chart contextual
+tab must appear), delete the sheet, and require the tab, the chart, the store entry and the selection
+all gone, with the sheet tab bar agreeing. Green.
+
+### 8c. BUG-0025 — 45 call sites, in the ordered run that is the only reproduction
+
+§6a fixed it deterministically on a bench and said plainly that the live run was owed, because the
+helper collapse changed the input path of ~40 currently-green tests. `retypeAndStore` has **45 call
+sites** across the wave1-4 and wiring specs. Two full ordered `--project=functional` cold runs later,
+every one of them passes, including `vba-idioms-wave3` #5 — the exact test whose
+`const jump = "A"` was the ledgered failure. It is not in either run's failure list.
+
+### 8d. BUG-0029 — the arithmetic was exactly right, and the quarantine expired itself
+
+§7c predicted, off the committed bytes with no run: 2,173 differing pixels, of which 510 are the
+`221,245,237` fill, against a 200-pixel budget, so it cannot pass. The live comparator reported
+**2,173 differing pixels**, and decoding the pair gives **510** of exactly that transition. Same
+numbers.
+
+Re-recorded inside a full ordered cold run, and `--update-snapshots=changed` rewrote **exactly three
+files** — no bulk churn. It now measures **36** pressed-accent pixels, the same 36 its re-recorded
+sibling `core-empty-grid.png` holds, which is the number §7c derived.
+
+Then the guard did the thing it was built to do: `STALE_PRODUCT_STATE_GOLDENS` requires its entry to
+**still measure 546**, so re-recording the file correctly turned the census RED on its own author's
+entry rather than letting it rot. The entry is deleted and the array is empty. One case that used the
+BUG-0029 file as its "lit" example failed with it — correctly — and now uses
+`sheets-default-tabs.png`, which is lit *legitimately* (its capture follows a `setCellValue`, so the
+cell exists and the format genuinely is middle-aligned) and will therefore still be a valid example
+next year.
+
+### 8e. BUG-0033 — three root failures presenting as eleven, and the measurement that separated them
+
+The first ordered cold run came back **532 passed / 11 failed / 11 skipped**, against a baseline of
+542/1/11 whose single failure was BUG-0025 (now fixed), i.e. an expected 543/0/11.
+
+Three were root and eight were consequences of them.
+
+**The root.** `mcp-create-table`, `mcp-create-pivot` and `mcp-create-named-range` each listened for a
+Tauri event **by name** — `tables:refresh`, `pivots:refresh`, `named-ranges:refresh`. §3cd *deleted*
+all five per-kind announcements in favour of one `mutation:refresh`, and the tests were never
+updated. Nothing unit-tier could have said so: the contract they assert is a live Tauri event.
+
+**The product is fine, and that was verified before the tests were touched** — not assumed. Each spec
+now asserts BOTH halves, which fail for opposite reasons:
+
+* the **backend announced** — a `mutation:refresh` arrived naming the domain `ObjectKind` maps to in
+  `object_deps::ui_domain` (`objects` / `pivot` / `namedRanges`);
+* the **UI heard it** — the Shell fanned out `TABLE_DEFINITIONS_UPDATED` / `pivot:refresh` /
+  `NAMED_RANGES_CHANGED`, which is what actually decides whether the user sees the object.
+
+Only the first firing means the Shell bridge broke; only the second means something else dispatched
+it and the backend said nothing. The old assertion could distinguish neither.
+
+**The amplifier, which is a worse defect than the assertion.** `mcp-create-table` and
+`mcp-create-pivot` removed the object they created only in **step 4's undo — inside the `try`, after
+the assertion that threw**. Their `finally` blocks cleared the seeded *cells* and left the *object*.
+So an AI-created table sat at A1:B3 for the rest of the ordered run with its header fill, its banded
+rows and its **Table Design contextual ribbon tab**, and took six later tests with it: `paste-special`
+x2 and `scrolling` photographed the blue table where their goldens hold white (3,541 px of
+`255,255,255 -> 192,230,245` and 2,218 of `-> 68,114,196`, i.e. banded rows and header fill), and two
+`ribbon-tabs` goldens differed by exactly the 68x12 px box at `x 239..306 / y 13..24` where the extra
+tab's label paints.
+
+**A cleanup that runs only when the assertions passed is not a cleanup.** Both now delete BY NAME,
+unconditionally, in `finally`.
+
+Root-versus-cascade was then **proved by measurement rather than argued**: fixing only the three MCP
+specs took the same ordered cold run from **11 failures to 3**.
+
+### 8f. BUG-0030 — the environment pin costs the functional corpus too, and §3ce measured one file
+
+The three that survived are `empty-grid-full-window` (BUG-0029, expected) and two that nothing
+predicted. Both reproduce **byte-identically across two independent cold runs**, so neither is flake.
+
+`webview2Args.mjs` says of `--disable-accelerated-2d-canvas`:
+
+> This flag leaves every committed golden on the side it was recorded on, so it costs no re-record at
+> all.
+
+That sentence was reached by measuring **exactly one candidate golden** in the two projects that were
+not re-run. It is false.
+
+* **`ribbon-ribbon-tab-insert.png`** — 1,145 differing pixels against a 200-pixel budget, and every
+  top transition is a neutral grey mapping to a chromatic one (`153,153,154 -> 193,153,97`,
+  `110,110,110 -> 37,98,156`, `84,84,84 -> 37,37,129`). Those are §3ce's own LCD constants, read
+  backwards: the golden holds GRAYSCALE-antialiased text and the pinned build paints LCD.
+* **`grid-tables-after-create.png`** — a 199x88 region crop, so its budget is
+  `min(200, 0.0005 x 17,512) = 8.75 px`, and 36 cross the YIQ gate. The actual is systematically
+  lighter — mean signed delta **R +1.44 / G +1.07 / B +0.57** over the differing pixels, max 28 —
+  which is the GPU-versus-CPU 2D canvas rasterizer, not antialiasing. §3ce's evidence that "the
+  canvas's own pixels are unaffected" was the visual corpus's eight FULL-GRID captures, which carry a
+  200-pixel budget; this crop's budget is 8.75, and that is the whole difference.
+
+Both re-recorded under the pin, inside a full ordered cold run, and verified by a further cold run.
+This is BUG-0029's twin one axis over: BUG-0029 is *a PRODUCT fix invalidates goldens in projects
+nobody re-ran*; BUG-0030 is *an ENVIRONMENT pin does too*. **When a capture pin changes, every
+project has to run — the bytes of one candidate file are not a substitute.**
+
+#### The fourth corpus axis: built, fired on the real corpus, and then DELETED by its own re-record
+
+The obvious response was to teach `goldenCorpus.ts` this axis, which §3ce had measured at 1.3x and
+rejected with a note naming the population it could honestly serve. A better reader was found and it
+looked decisive. Instead of counting chromatic pixels over a whole frame, restrict the DENOMINATOR to
+**mid-tone** pixels (luminance 40..200 — glyph-edge territory, excluding the flat background and
+solid glyph cores that dominate a frame) and ask what fraction of those are neutral. Compared inside
+a cohort of same-element captures (the eight 1280x136 `[data-testid='ribbon']` goldens):
+
+```
+seven ribbon goldens         162 / 4287  =  3.8%
+ribbon-ribbon-tab-insert    2654 / 5920  = 44.8%     11.9x
+```
+
+It was written, wired to a cohort rule with five detector self-tests, and **it fired on the real
+corpus**, naming the file and the ratio. Then the file was re-recorded, and the re-record killed it:
+
+```
+ribbon-ribbon-tab-insert, STALE     2654 / 5920  = 44.8%
+ribbon-ribbon-tab-insert, CORRECT   1733 / 5908  = 29.3%    <-- still nowhere near the cohort
+the rest of the cohort               162 / 4287  =  3.8%
+```
+
+**The correct recording is 7.7x from its own cohort and only 1.5x from the stale one.** The reader
+separates COMPOSITED from NOT-COMPOSITED, and part of the Insert ribbon is composited for its own
+reasons in the current, correctly-pinned build — a property of that tab's CONTENT, not of the
+environment it was recorded in. A cohort rule over it states something true that is not a corpus
+defect, would have been permanently red, and could not have distinguished the stale file from the
+correct one anyway.
+
+So it was deleted, and §3ce's rejection stands with a sharper reason written into
+`goldenCorpus.ts` — including the one measurement §3ce could not have had, the same file recorded
+both ways. **The guard for this class is not a reader; it is the process rule in bold above.**
+
+### 8g. Three harness defects found while driving, each of which had been silently passing
+
+* **BUG-0031 — the walk could never see a chart contextual tab.** `chart.create` wrote the chart with
+  a raw `save_chart` invoke and told the chart STORE nothing. Measured on a running app: `get_charts`
+  answered **2** while `__CALCULA_CHARTS__.getAllCharts()` answered **0**. The next two actions read
+  the store, so `chart.select` — whose entire job is to raise the Chart Design tab — selected nothing
+  and returned successfully, `chart.delete` deleted nothing and returned successfully, and
+  `getCurrentChartId()` stayed null. Their preconditions come from the BACKEND count, so the
+  generator kept issuing them and the walk kept reporting them executed. §3cd's matrix lists Chart as
+  "already correct" — a reading of the source, by a walk that was structurally unable to test it. Now
+  goes through the store's own `createChart`, the same lesson `table.delete` in that file had already
+  learned for tables. The positive control in the new journey is the proof: it failed with
+  `Received: []` before, and passes now.
+* **BUG-0032 — `snapshot.logical.activeSheet` was a constant 0.** It read `gridState.activeSheet`,
+  which does not exist; the grid exposes `sheetContext.activeSheetIndex`, so the `?? 0` defaulted
+  every time. Probed live on Sheet2: the app said 1 and the field said 0. That field is in every soak
+  and invariant failure bundle and every minimized trace. A defaulted read of a misspelled key is
+  indistinguishable from a correct read of a true value, which is why it survived.
+* **One of my own, caught by the same discipline.** The first draft of the new journey asserted
+  `getSelectedChartId()`, which does not exist on `__CALCULA_CHARTS__` — it would have returned
+  `undefined` and passed against any product whatsoever. The probe now throws if the function is
+  missing, so the assertion cannot go vacuous silently.
+
+### 8h. The process failure of this pass, stated rather than glossed
+
+`launch-vba-batch.ps1` REFUSES to launch when something is already answering on CDP 9222, and §0a of
+that script explains at length that stealing a running app turns another suite into hundreds of
+1ms failures that look like product regressions. **I passed `-TakeOver` while my own re-record run
+was still going**, and so ran two Playwright suites against one app for nine minutes.
+
+The evidence is unambiguous and is kept here because the next agent will be tempted the same way: the
+re-record run's tests 492-511 all failed within seconds of the relaunch, and the verification run
+that started at the same moment produced `Expected "42", Received ""`, 25 of 200 typed characters,
+and a 71x28 crop arriving as 71x32. Three stray Playwright node processes were still alive when I
+looked. **Both runs were void and both were discarded**, not triaged — a suite that shares its app
+with another suite is not evidence of anything. The counts in §8i come from runs taken alone, with
+`@(Get-CimInstance Win32_Process | ? { $_.CommandLine -like '*playwright*' }).Count` confirmed at 0
+before the launch.
+
+The three re-recorded goldens are unaffected and were checked rather than assumed: all three were
+written at tests 27, ~430 and 466, before the collision began at 492, and the clean verification run
+re-asserts all three.
+
+### 8i. Verification — every project, every suite, measured
+
+Every E2E number below comes from a run taken ALONE, on a COLD app, with
+`@(Get-CimInstance Win32_Process | ? { $_.CommandLine -like '*playwright*' }).Count` confirmed at 0
+before the launch. Runs taken against a shared app are named in §8h and discarded, not reported.
+
+| project | invocation | baseline | measured |
+|---|---|---|---|
+| **visual, cold #1** | `--project=visual`, first suite on the instance | 14-15/18 cold | **18 passed (2.3m)** |
+| **visual, cold #2** | same, second cold instance | — | **18 passed (2.5m)** |
+| **functional** | `--project=functional` | 542 / 1 / 11 | **543 passed / 0 failed / 11 skipped (38.2m)**, exit 0 |
+| **journey** | `--project=journey` | 130 / 0 / 1 | **133 passed / 0 failed / 1 skipped (26.8m)**, exit 0 |
+| **scenario** | `--project=scenario` | 24 / 24 | **24 passed (1.3m)** |
+| **macro** | `--project=functional --grep "[Mm]acro"` | brief said 21/21 | **27 passed (5.5m)** — the brief's number was wrong; §7's 27 is right |
+
+The functional 543 is exactly the expected figure: the 542/1/11 baseline with BUG-0025's single
+failure now passing. Journey's 133 is the 130 baseline plus this pass's three new tests
+(`cascade-announcement-live` x2, `sparkline-persistence` x1).
+
+| check | result |
+|---|---|
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| `npm run check:line-endings` | `[OK] no mixed line endings` |
+| `npm run check:script-typings` | `[OK] 39 interfaces verified, 736 members probed, 356 carry generated broker policy` |
+| **vitest, full** | **760 files / 106,354 passed**, exit 0 |
+| `cargo check --all-targets` (`app/src-tauri`) | **0 warnings** |
+| `cargo check --all-targets` (`core`) | **0 warnings** |
+| `cargo test --workspace` (`core`) | **1,339 passed / 0 failed** |
+| app-lib | **1,492 passed / 0 failed / 5 ignored** |
+| `test_pivot` | **56 passed / 0 failed** |
+| `model-engine-lib` | **2,192 passed / 0 failed** = 2,156 unit+integration and **36 doctests** |
+
+**Every delta accounted for.** vitest is **106,354** against §7g's 106,355 — one case fewer, and it is
+the BUG-0029 quarantine's `it.each`, which had exactly one entry and now has none because the file
+was re-recorded. The four Rust numbers are **identical** to §7g, which is the expected result: this
+pass wrote no Rust at all.
+
+**Two environment notes worth carrying.** `cargo test` for the app crate fails while the app is
+RUNNING from the same `CARGO_TARGET_DIR` — the link step cannot replace artifacts the live process
+holds — so the Rust suites need the app stopped, exactly as the "kill the app before editing Rust"
+rule implies for building too. And `LIB` / `INCLUDE` must be exported from **PowerShell**, not from
+Git Bash: bash mangles a `;`-separated path-like variable, and the symptom is
+`LNK1181: cannot open input file 'legacy_stdio_definitions.lib'` with a stray CR in the name, which
+reads like a missing toolchain and is not one.
+
+### 8j. What remains — checked, not asserted
+
+* **BUG-0005 is now the ONLY open entry on the ledger** (33 entries, 32 fixed). Undo is sheet-unaware
+  across an added sheet; it needs Rust and a product decision. Its own triage already names the
+  Excel-parity answer — *"or (Excel parity) have sheet structural ops clear the undo stack"* — which
+  under the standing "Excel parity wins" rule is probably the call, but it is a call, and this pass
+  did not take it. Unsuppressed: `KNOWN_ISSUES` is still an empty array, so a walk that reaches it
+  fails loudly.
+* **BUG-0012 is closed and it never needed a fix.** Filed 2026-06-11, carried as open through three
+  handovers, and already repaired by one of the persistence passes. Proved by running it rather than
+  by reading `zip_io.rs`: a real group, a real `.cala`, a real reopen, the backend's own digest on
+  both sides, plus a direct read of the archive bytes to separate a writer defect from a reader one.
+  Third time this register has caught a filing that outlived its defect (BUG-0024, §6c; BUG-0026 and
+  BUG-0028 on the ledger, §7b).
+
+**What this pass did NOT examine, named rather than implied:**
+
+* **`model-engine-lib`** — its source was not touched. Its suite WAS run and is at baseline
+  (**2,192**), and §7g's doctest note is confirmed: `--test-threads=1` gives **36/36** repeatably.
+  Its `cargo check --all-targets` warnings were not re-counted; the "0 warnings both" contract
+  covers `core` and `app`, and both are clean.
+* **The `soak` and `invariant` projects were not run.** BUG-0026's reproduction was driven directly
+  through `WalkRunner` over its committed minimized trace, which is the same runner and the same
+  invariants, but a fresh randomized walk was not started. **BUG-0031 changes what such a walk can
+  reach** — `chart.select` and `chart.delete` were inert and are now live, so the next soak run
+  exercises a class of action that has never actually executed. That run is owed, and it is the one
+  place where a new finding is likely.
+* **BUG-0021 / BUG-0022** (the pivot-undo caches) are pinned by `pivot_undo_cache_tests.rs` and were
+  re-run there (inside the 1,492), but they have **no live E2E**: reaching
+  `update_bi_pivot_fields` / `change_pivot_data_source` end-to-end needs a BI model and a connection.
+  `pivot-undo-fidelity.spec.ts` covers the two *other* pivot-undo gaps, not these.
+* **The 11 skipped functional tests and the 1 skipped journey test** were not investigated; they are
+  at their baseline counts and were skipped before this pass too.
+* **`--force-device-scale-factor`** was not re-litigated; §3cb's measurement stands.

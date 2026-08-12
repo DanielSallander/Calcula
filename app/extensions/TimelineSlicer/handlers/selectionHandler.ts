@@ -95,6 +95,28 @@ export function deselectTimeline(): void {
   }
 }
 
+/**
+ * Drop ONE timeline out of the selection because it no longer exists.
+ *
+ * §3cd: the twin of `dropSlicerFromSelection`, and for the same reason — the
+ * contextual Timeline Options tab is a function of the selection, so an id
+ * whose timeline was cascade-deleted leaves the tab on screen with nothing to
+ * configure. One timeline, not the whole selection: Excel keeps the survivors
+ * of a multi-select.
+ */
+export function dropTimelineFromSelection(timelineId: number): void {
+  if (!selectedTimelineIds.delete(timelineId)) return;
+  if (selectedTimelineIds.size === 0) {
+    // Re-arm the guard `deselectTimeline` checks -- the delete above already
+    // emptied the set, and it returns early on an empty one.
+    selectedTimelineIds.add(timelineId);
+    deselectTimeline();
+    return;
+  }
+  broadcastSelectedTimelines();
+  requestOverlayRedraw();
+}
+
 export function getSelectedTimelineId(): number | null {
   if (selectedTimelineIds.size === 0) return null;
   let last: number | null = null;

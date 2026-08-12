@@ -71,13 +71,29 @@ export function updateCachedRegions(regions: PivotRegionData[]): void {
   // Regions arrived, so clear the just-created flag
   justCreatedPivot = false;
 
-  // When there are no pivot regions on the current sheet (e.g. after
-  // deleting a pivot sheet), unregister the contextual ribbon panels and
-  // close the task pane immediately. Without this, the tabs and pane
-  // linger because the selection handler's lastCheckedSelection cache
-  // may prevent re-evaluation.
-  if (cachedRegions.length === 0) {
+  // THE ACTIVE PIVOT MUST STILL EXIST. The contextual Analyze/Design tabs and
+  // the editor pane are a function of `activePivotId`, and `handleSelectionChange`
+  // only ever runs when the CURSOR moves -- it short-circuits on the cell it
+  // checked last. Deleting the pivot under a stationary cursor changes neither,
+  // so the tabs outlived the object they addressed.
+  //
+  // This used to fire only when the sheet had NO regions left, which covered
+  // "delete the last pivot" and missed "delete the one the user is in while
+  // another survives" -- the identical shape as BUG-0026 on the slicer, and the
+  // reason the check is now against the ACTIVE ID rather than the count (§3cd).
+  // A backend cascade reaches here the same way a frontend delete does: the
+  // `pivot` domain triggers `refreshPivotRegions`, which emits PIVOT_REGIONS_UPDATED.
+  //
+  // BOTH clauses, and the count one is NOT redundant: `activePivotId` is null
+  // whenever the cursor is outside every pivot, and a freshly created pivot
+  // registers its tabs (ensureDesignTabRegistered) BEFORE the selection handler
+  // has set the active id -- so reconciling on "no active id" alone would
+  // unregister the tabs of the pivot the user just made.
+  const activeGone =
+    activePivotId !== null && !cachedRegions.some((r) => r.pivotId === activePivotId);
+  if (cachedRegions.length === 0 || activeGone) {
     lastCheckedSelection = null;
+    activePivotId = null;
     if (analyzeTabRegistered) {
       unregisterPanel(PIVOT_ANALYZE_TAB_ID);
       analyzeTabRegistered = false;

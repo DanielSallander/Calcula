@@ -102,7 +102,19 @@ interface StoredModule {
   source: string;
 }
 const store = new Map<string, StoredModule>();
+/**
+ * Writes held open, so a test can watch the editor WHILE one is in flight.
+ *
+ * A store write is not instantaneous in the app — it is a Tauri round-trip —
+ * and the interesting window is exactly the one an instant mock skips: a
+ * keystroke that lands after the write started and before it finished.
+ */
+let heldWrites: Array<() => void> | null = null;
 const saveWorkbookScript = vi.fn(async (script: StoredModule) => {
+  if (heldWrites) {
+    const held = heldWrites;
+    await new Promise<void>((resolve) => held.push(resolve));
+  }
   store.set(script.id, { ...script });
 });
 vi.mock("@api/workbookScripts", () => ({
@@ -181,7 +193,14 @@ vi.mock("../lib/authoringLanguage", () => ({
             "Not saved — the script does not compile:\nLine 1:1 — ')' expected. (TS1005)\nYour edit is still in the editor.",
           message: "The script does not compile: ')' expected. (line 1)",
         }
-      : { ok: true as const, javascript: src, transformed: false },
+      : {
+          ok: true as const,
+          // ": Ctx" is this harness's stand-in for a TypeScript annotation:
+          // storing it means compiling it away, so the stored bytes are NOT the
+          // buffer bytes and the outcome is "compiled" rather than "saved".
+          javascript: src.replace(/: Ctx/g, ""),
+          transformed: src.includes(": Ctx"),
+        },
 }));
 
 // --- Debugger: a controllable session ----------------------------------------
@@ -316,6 +335,23 @@ async function idle(): Promise<void> {
   });
 }
 
+/** Hold every store write open from here on, so one can be caught in flight. */
+function holdWrites(): void {
+  heldWrites = [];
+}
+
+/** Complete every held write and let the outcomes land. */
+async function releaseWrites(): Promise<void> {
+  const held = heldWrites ?? [];
+  heldWrites = null;
+  await act(async () => {
+    for (const resolve of held.splice(0)) resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 async function clickRun(): Promise<void> {
   await act(async () => {
     (container.querySelector("[data-testid='run-button']") as HTMLButtonElement).click();
@@ -343,6 +379,7 @@ describe("Object Script Editor — a macro edit is live", () => {
     macroHandler = null;
     draftHandler = null;
     session = null;
+    heldWrites = null;
     store.clear();
     store.set(MACRO.id, { ...MACRO });
     objectScripts.length = 0;
@@ -465,6 +502,75 @@ describe("Object Script Editor — a macro edit is live", () => {
     await idle();
     expect(saveWorkbookScript).not.toHaveBeenCalled();
     expect(store.get(MACRO.id)!.source).toBe(MACRO.source);
+    expect(liveIndicator()!.getAttribute("data-live-state")).toBe("live");
+  });
+
+  // BUG-0025. THE OUTCOME OF A PASS IS ABOUT THE BYTES IT WROTE, NOT THE BYTES
+  // ON SCREEN. Typing "A1" over a token is two keystrokes; if the idle window
+  // happens to elapse between them (the machine is loaded, the run is 38 minutes
+  // long), the write of "A" is in flight when "1" arrives. When that write
+  // finishes it reports "saved" — and the chip used to turn Live on the strength
+  // of it, while the store was a whole keystroke behind and a second write was
+  // still armed. The chip is the ONLY answer to "does the store hold what I am
+  // looking at", so this is not a cosmetic flicker: it says yes when the answer
+  // is no. (It is also why one e2e spec read `const jump = "A"` back from the
+  // store after typing `A1`: it waited for the chip, and the chip lied.)
+  it("does not claim Live for a write a later keystroke has already overtaken", async () => {
+    await mountApp();
+    await deliverMacro();
+
+    // The first character lands and the idle window elapses: the write starts,
+    // and is held open inside the store exactly as a slow round-trip would be.
+    holdWrites();
+    await type('function macro1(api) { api.setCellValue(1, 1, "A"); }');
+    await idle();
+    expect(saveWorkbookScript).toHaveBeenCalledTimes(1);
+
+    // The SECOND character lands while that write is still in flight.
+    await type('function macro1(api) { api.setCellValue(1, 1, "A1"); }');
+    expect(liveIndicator()!.getAttribute("data-live-state")).toBe("saving");
+
+    // The stale write completes.
+    await releaseWrites();
+
+    // THE MEASUREMENT: the store is one keystroke behind the buffer...
+    expect(store.get(MACRO.id)!.source).toContain('"A"');
+    expect(buffer().value).toContain('"A1"');
+    // ...so the honest state is "a write is on its way", not "Live".
+    expect(liveIndicator()!.getAttribute("data-live-state")).toBe("saving");
+
+    // And the follow-up write does arrive, unprompted, as the feature promises.
+    await idle();
+    expect(store.get(MACRO.id)!.source).toContain('"A1"');
+    expect(liveIndicator()!.getAttribute("data-live-state")).toBe("live");
+  });
+
+  // The same staleness in its DESTRUCTIVE form. A "compiled" outcome rewrites
+  // the buffer to the stored JavaScript, because the author must be looking at
+  // the text that runs. Applied to a buffer that has moved since, that rewrite
+  // deletes the keystrokes typed during the compile — and silently, because
+  // setSource does not go through the change handler, so the persister is never
+  // told and keeps writing text that is no longer on screen.
+  it("keeps the author's newer text when a compile lands on a buffer that has moved", async () => {
+    await mountApp();
+    await deliverMacro();
+
+    holdWrites();
+    await type("function macro1(api: Ctx) { /* v2 */ }");
+    await clickRun(); // an explicit gesture: compile and store
+    expect(saveWorkbookScript).toHaveBeenCalledTimes(1);
+
+    // Typed while the compile+write is in flight.
+    await type("function macro1(api: Ctx) { /* v3 */ }");
+    await releaseWrites();
+
+    expect(buffer().value).toContain("v3");
+    expect(consoleText()).toContain("you have typed since");
+
+    // ...and the follow-up pass stores v3 and only THEN shows the compiled text.
+    await idle();
+    expect(store.get(MACRO.id)!.source).toBe("function macro1(api) { /* v3 */ }");
+    expect(buffer().value).toBe("function macro1(api) { /* v3 */ }");
     expect(liveIndicator()!.getAttribute("data-live-state")).toBe("live");
   });
 
@@ -614,6 +720,7 @@ describe("Object Script Editor — an object script applies on gesture, not on a
   beforeEach(() => {
     vi.useFakeTimers();
     session = null;
+    heldWrites = null;
     store.clear();
     objectScripts.length = 0;
     objectScripts.push({ ...SCRIPT });

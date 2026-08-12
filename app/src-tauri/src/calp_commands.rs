@@ -13931,14 +13931,9 @@ pub fn calp_reset_subscription(
     };
 
     // Snapshot the CURRENT pivot definitions (for undo) before replacing them.
-    // Same "pivot_definition" payload shape the pivot system records itself.
-    #[derive(serde::Serialize)]
-    struct PivotDefinitionSnapshot {
-        pivot_id: pivot_engine::PivotId,
-        definition: pivot_engine::PivotDefinition,
-        overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
-        dest_sheet_idx: usize,
-    }
+    // The payload is built by `undo_commands`, which owns its shape — a local
+    // copy of the struct was a second source of truth for a format with exactly
+    // one reader.
     let current_pivot_snapshots: Vec<Vec<u8>> = {
         let pivot_tables = pivot_state
             .pivot_tables
@@ -13947,16 +13942,20 @@ pub fn calp_reset_subscription(
         published_pivots
             .iter()
             .filter_map(|(pid, _)| {
-                let (current_def, _) = pivot_tables.get(pid)?;
+                let (current_def, current_cache) = pivot_tables.get(pid)?;
                 let dest_sheet_idx =
                     crate::pivot::operations::resolve_dest_sheet_index(&state, current_def);
-                serde_json::to_vec(&PivotDefinitionSnapshot {
-                    pivot_id: *pid,
-                    definition: current_def.clone(),
-                    overwritten_cells: Vec::new(),
+                Some(crate::undo_commands::encode_pivot_definition_snapshot(
+                    *pid,
+                    current_def.clone(),
+                    Vec::new(),
                     dest_sheet_idx,
-                })
-                .ok()
+                    // A reset REPLACES the published definitions, and a
+                    // republished pivot can carry a different source: the cache
+                    // travels so the undo cannot render the old definition
+                    // against the reset's records.
+                    Some(current_cache.clone()),
+                ))
             })
             .collect()
     };
@@ -13973,7 +13972,11 @@ pub fn calp_reset_subscription(
         undo_stack.begin_transaction(&description);
         undo_stack.record_custom_restore("calp_reset".to_string(), data, &description);
         for pivot_snap in current_pivot_snapshots {
-            undo_stack.record_custom_restore("pivot_definition".to_string(), pivot_snap, &description);
+            undo_stack.record_custom_restore(
+                crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND.to_string(),
+                pivot_snap,
+                &description,
+            );
         }
         undo_stack.commit_transaction();
     }

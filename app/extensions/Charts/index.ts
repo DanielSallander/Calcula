@@ -147,7 +147,6 @@ import { chartIntersectsChanges } from "./lib/chartInvalidation";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
 import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
-import { listenTauriEvent } from "@api/backend";
 import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource, isDesignQueryDataSource } from "./types";
@@ -1463,14 +1462,11 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("charts:refresh", handleChartsRefresh);
   });
-  // Bridge the backend "charts:refresh" Tauri event (emitted after an MCP
-  // create_chart_from_spec, B8.C) to the window handler above, so an AI-created
-  // chart appears live without a file reopen.
-  let unlistenBackendCharts: (() => void) | undefined;
-  void listenTauriEvent("charts:refresh", () => {
-    window.dispatchEvent(new Event("charts:refresh"));
-  }).then((un) => { unlistenBackendCharts = un; });
-  cleanupFunctions.push(() => { unlistenBackendCharts?.(); });
+  // (§3cd) The backend no longer emits a bespoke "charts:refresh" Tauri event
+  // for an AI-created or AI-deleted chart. `object_deps::announce_cascade`
+  // announces the `objects` DOMAIN instead, and the Shell translator fans that
+  // out to this very handler -- one mapping from domains to feature events,
+  // reached from both the frontend and the backend direction.
 
   // Sandboxed chart marks (B8.D): a worker-rendered bitmap arrived after a cache
   // miss. Chart rasters are version-gated (not re-blit per frame like shapes), so

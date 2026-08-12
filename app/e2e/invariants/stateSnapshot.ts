@@ -385,7 +385,23 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
         cellCount: g.cells?.length ?? g.locationCells?.length ?? 1,
       })),
       selection,
-      activeSheet: gridState?.activeSheet ?? 0,
+      // MEASURED LIVE 2026-08-12: `gridState.activeSheet` DOES NOT EXIST. The
+      // grid state object exposes `sheetContext.activeSheetIndex`; the key read
+      // here has been `undefined` for the whole life of this file, so the `?? 0`
+      // made every snapshot -- and therefore every failure bundle, every
+      // minimized trace and every triage that reasoned from one -- report
+      // `activeSheet: 0` no matter which sheet was active. Probed on a running
+      // app sitting on Sheet2: `sheetContext.activeSheetIndex` was 1 and this
+      // field said 0.
+      //
+      // A defaulted read of a misspelled key is indistinguishable from a
+      // correct read of a true value, which is why it survived. The fallback
+      // chain keeps the old key first so a future rename in the other direction
+      // is picked up rather than silently zeroed.
+      activeSheet:
+        gridState?.activeSheet ??
+        gridState?.sheetContext?.activeSheetIndex ??
+        0,
       sheetCount: (sheetsResult as any)?.sheets?.length ?? 1,
       isEditing: gridState?.editing === true,
     };

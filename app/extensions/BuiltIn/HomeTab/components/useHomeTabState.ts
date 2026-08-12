@@ -38,23 +38,86 @@ export function useHomeTabState() {
     }
   }, [gridState.selection]);
 
-  // Load style of active cell when selection changes
+  /**
+   * Bumped whenever the DOCUMENT changes under a selection that did not move,
+   * so the read below runs again. See the effect for why this exists.
+   */
+  const [documentRevision, setDocumentRevision] = useState(0);
+  useEffect(() => {
+    // COALESCED, and not as a micro-optimisation. `grid:refresh` is dispatched
+    // per edit, and a burst of them (typing, a paste, a bulk format) would
+    // otherwise put two IPC reads on the wire per event, behind the same
+    // keystrokes the user is still sending. One read per quiet 120 ms answers
+    // every case this exists for -- File > New, undo, Clear Formats, a sheet
+    // switch -- because all of them end in a quiet moment.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bump = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => setDocumentRevision((n) => n + 1), 120);
+    };
+    // `grid:refresh`  - cell content/format changed (undo, redo, clear, paste,
+    //                   a script write, File > New via the E2E reset helper).
+    // `styles:refresh`- a named style or the style table changed.
+    // `app:sheet-changed` - a different sheet is now active, so A1 here is not
+    //                   the A1 the ribbon last read.
+    for (const name of ["grid:refresh", "styles:refresh", "app:sheet-changed"]) {
+      window.addEventListener(name, bump);
+    }
+    return () => {
+      if (timer) clearTimeout(timer);
+      for (const name of ["grid:refresh", "styles:refresh", "app:sheet-changed"]) {
+        window.removeEventListener(name, bump);
+      }
+    };
+  }, []);
+
+  /**
+   * Load the style of the active cell.
+   *
+   * THIS IS THE RIBBON'S ONLY SOURCE OF FORMATTING TRUTH, and it used to run on
+   * `gridState.selection` alone, keeping whatever it last read whenever that
+   * object did not change. Two consequences, both measured:
+   *
+   *  - AN EMPTY CELL INHERITED THE PREVIOUS CELL'S FORMATTING IN THE RIBBON.
+   *    `getCell` resolves to null for a cell that holds nothing, and the old
+   *    body did `if (cancelled || !cell) return;` -- so selecting a bold cell
+   *    and then an empty one left Bold lit, and `isActive` (which reads only
+   *    `currentStyle`) had no way to know. Excel clears.
+   *  - THE RIBBON SURVIVED THE DOCUMENT. Undo, Clear Formats, a script write
+   *    and File > New (through the E2E `resetToNewWorkbook` helper, which calls
+   *    `new_file` without the product's full page reload) all leave the
+   *    selection object untouched, so nothing re-read. That is what made
+   *    `core-empty-grid` a picture of the PREVIOUS run: the font box read
+   *    `Calibri` and Center-Vertically was lit on a workbook that had just been
+   *    emptied. Ledgered as BUG-0028 in docs/design/open-decisions-2026-08.md.
+   *
+   * Both are the same defect -- ribbon state that is not a function of the
+   * document -- so both are fixed here rather than at the call sites.
+   */
   useEffect(() => {
     const sel = gridState.selection;
     if (!sel) {
+      setCurrentCellData(null);
       setCurrentStyle(null);
       return;
     }
     let cancelled = false;
     getCell(sel.startRow, sel.startCol).then((cell) => {
-      if (cancelled || !cell) return;
+      if (cancelled) return;
+      if (!cell) {
+        // The cell holds nothing: the ribbon must say so, not keep the last
+        // cell that did.
+        setCurrentCellData(null);
+        setCurrentStyle(null);
+        return;
+      }
       setCurrentCellData(cell);
       return getStyle(cell.styleIndex).then((style) => {
         if (!cancelled) setCurrentStyle(style);
       });
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [gridState.selection]);
+  }, [gridState.selection, documentRevision]);
 
   // Get the rows/cols arrays for current selection
   const getSelectionRange = useCallback(() => {

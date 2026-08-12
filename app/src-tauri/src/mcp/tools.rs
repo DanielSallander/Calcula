@@ -726,10 +726,13 @@ pub fn create_chart_from_spec(
     // Undo snapshot (previous = None: this is a fresh insert), mirroring save_chart.
     crate::undo_commands::record_chart_undo(&state, chart_id, None, "Insert chart (AI)");
 
-    // Best-effort: prompt the frontend to reload charts so the new one renders
-    // without a file reopen (the Charts extension bridges this Tauri event to its
-    // window "charts:refresh" handler).
-    let _ = handle.emit("charts:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Chart,
+    );
 
     crate::scripting::commands::record_mcp_tool_action(
         &state,
@@ -756,9 +759,9 @@ pub fn create_chart_from_spec(
 }
 
 /// Create a NEW named range (AI). Creates it via the SAME undoable command the
-/// UI uses, then emits "named-ranges:refresh" so the new name appears live (the
-/// DefinedNames extension bridges that Tauri event to NAMED_RANGES_CHANGED).
-/// Gated on the same script-security setting as other mutations.
+/// UI uses, then announces the `namedRanges` domain so the new name appears live
+/// in the Name Manager / Name Box without a reopen. Gated on the same
+/// script-security setting as other mutations.
 pub fn create_named_range(
     handle: &AppHandle,
     name: &str,
@@ -796,7 +799,13 @@ pub fn create_named_range(
 
     // Live-refresh the NameBox / Name Manager for this out-of-band create; the
     // DefinedNames extension bridges this Tauri event to NAMED_RANGES_CHANGED.
-    let _ = handle.emit("named-ranges:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::NamedRange,
+    );
 
     crate::scripting::commands::record_mcp_tool_action(
         &handle.state::<AppState>(),
@@ -814,8 +823,8 @@ pub fn create_named_range(
 
 /// Create a NEW structured table over a cell range (AI). Reuses the SAME
 /// undoable create_table command the UI uses (table + autofilter wrapped in one
-/// undo transaction), gates on the script-security setting, then emits
-/// "tables:refresh" so it appears live (the Table extension bridges that event).
+/// undo transaction), gates on the script-security setting, then announces the
+/// table's cascade domains so it appears live.
 /// Created on the ACTIVE sheet (header names are read from the grid).
 pub fn create_table(
     handle: &AppHandle,
@@ -857,7 +866,13 @@ pub fn create_table(
             .unwrap_or_else(|| "Failed to create table".to_string()));
     }
 
-    let _ = handle.emit("tables:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Table,
+    );
 
     let table_name = result.table.map(|t| t.name).unwrap_or_else(|| "table".to_string());
     let range_label = format!(
@@ -902,8 +917,8 @@ fn parse_aggregation(s: &str) -> Result<pivot_engine::AggregationType, String> {
 
 /// Create a NEW pivot table configured with row + value fields in ONE undoable
 /// step (AI). Reuses create_pivot_inner (the same create path the UI uses) so the
-/// single "Create pivot table" undo reverts it; then emits "pivots:refresh" (the
-/// Pivot extension bridges that to a live refresh). v1 = row + value fields only.
+/// single "Create pivot table" undo reverts it; then announces the pivot's
+/// cascade domains so it renders live. v1 = row + value fields only.
 #[allow(clippy::too_many_arguments)]
 pub fn create_pivot(
     handle: &AppHandle,
@@ -958,7 +973,13 @@ pub fn create_pivot(
 
     // Live-refresh the pivot view for this out-of-band create; the Pivot
     // extension bridges this Tauri event to its window "pivot:refresh".
-    let _ = handle.emit("pivots:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Pivot,
+    );
 
     crate::scripting::commands::record_mcp_tool_action(
         &handle.state::<AppState>(),

@@ -1455,6 +1455,11 @@ export async function addSheet(name?: string): Promise<SheetsResult> {
   const before = await sheetNamesBefore();
   const result = await invoke<SheetsResult>("add_sheet", { name: name ?? null });
   announceSheetAdded(before, result, "new");
+  // The sheet COLLECTION changed (§3cd). SheetTabs reloads its list from the
+  // `sheets` domain; SHEET_ADDED above is a lifecycle notification that the tab
+  // bar has never listened to, so a script's `sheets.add` used to leave the tab
+  // bar showing the old list until something else happened to switch sheets.
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["sheets"], source: "commit" });
   // Recorded with the RESOLVED name/index: add_sheet auto-names when the caller
   // passes none, and a macro that replays "add a sheet called undefined" is
   // useless. Same name-diff the announcement uses (sheet names are unique).
@@ -1482,8 +1487,14 @@ export async function deleteSheet(index: number): Promise<SheetsResult> {
   // agree with the backend -- otherwise a slicer keeps painting on the sheet
   // that inherited its index. Core names DOMAINS, never features; the Shell
   // translator owns the mapping.
+  // "paneControl" is here because the cascade is TRANSITIVE and nobody had
+  // noticed: the sheet's CHARTS go with it, and a deleted chart clears the
+  // chart-parameter binding of every pane-control slider that drove it. The
+  // §3cd domain walk derives that from the matrix; the backend half of the
+  // same cascade was missing outright (cascade_deleted_charts was never run on
+  // this path), which is what made the announcement worth having.
   emitAppEvent(AppEvents.MUTATION_REFRESH, {
-    domains: ["slicer", "pivot", "ribbonFilter", "objects"],
+    domains: ["sheets", "slicer", "pivot", "ribbonFilter", "objects", "paneControl"],
     source: "commit",
   });
   recordGridEvent({ kind: "deleteSheet", index });
@@ -1495,6 +1506,9 @@ export async function renameSheet(index: number, newName: string): Promise<Sheet
   const oldName = before.find((s) => s.index === index)?.name ?? "";
   const result = await invoke<SheetsResult>("rename_sheet", { index, newName });
   emitAppEvent(AppEvents.SHEET_RENAMED, { sheetIndex: index, oldName, newName });
+  // Same reason as addSheet: the tab bar reads the sheet LIST, and a rename
+  // driven from a script or a macro never touched it (§3cd).
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["sheets"], source: "commit" });
   recordGridEvent({ kind: "renameSheet", index, newName });
   return result;
 }
@@ -1505,7 +1519,7 @@ export async function moveSheet(fromIndex: number, toIndex: number): Promise<She
   // delete does (§3bn) -- the backend re-anchors them, and the caches have to
   // re-read or they keep the pre-move index.
   emitAppEvent(AppEvents.MUTATION_REFRESH, {
-    domains: ["slicer", "pivot", "ribbonFilter", "objects"],
+    domains: ["sheets", "slicer", "pivot", "ribbonFilter", "objects"],
     source: "commit",
   });
   return result;
@@ -1521,7 +1535,7 @@ export async function copySheet(sourceIndex: number, newName?: string): Promise<
   // The insertion shifted every sheet at or above it up by one, and the backend
   // re-anchored the index-keyed object stores with it (§3bn).
   emitAppEvent(AppEvents.MUTATION_REFRESH, {
-    domains: ["slicer", "pivot", "ribbonFilter", "objects"],
+    domains: ["sheets", "slicer", "pivot", "ribbonFilter", "objects"],
     source: "commit",
   });
   return result;

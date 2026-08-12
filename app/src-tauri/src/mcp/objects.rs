@@ -300,7 +300,13 @@ pub fn update_chart(
     let summary = update_chart_core(&state, &effect, chart_id, spec, name, sheet_index, placement)?;
     drop(state);
 
-    let _ = handle.emit("charts:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Chart,
+    );
     mark_dirty(handle);
     audit(
         handle,
@@ -383,7 +389,13 @@ pub fn delete_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String
     drop(pane_control_state);
     drop(state);
 
-    let _ = handle.emit("charts:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Chart,
+    );
     audit(
         handle,
         "delete_chart",
@@ -573,7 +585,13 @@ pub fn update_named_range(
         }
     }
 
-    let _ = handle.emit("named-ranges:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::NamedRange,
+    );
     mark_dirty(handle);
     audit(
         handle,
@@ -618,7 +636,13 @@ pub fn delete_named_range(handle: &AppHandle, name: &str) -> Result<String, Stri
         .map(|nr| nr.refers_to.clone())
         .unwrap_or_default();
 
-    let _ = handle.emit("named-ranges:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::NamedRange,
+    );
     mark_dirty(handle);
     audit(
         handle,
@@ -706,7 +730,13 @@ pub fn update_table(
         ));
     }
 
-    let _ = handle.emit("tables:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Table,
+    );
     mark_dirty(handle);
     audit(
         handle,
@@ -755,7 +785,13 @@ pub fn delete_table(handle: &AppHandle, table_id: &str) -> Result<String, String
         .map(|t| t.name.clone())
         .unwrap_or_else(|| table_id.to_string());
 
-    let _ = handle.emit("tables:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Table,
+    );
     mark_dirty(handle);
     audit(
         handle,
@@ -878,13 +914,19 @@ fn record_pivot_definition_undo(
     dest_sheet_idx: usize,
     description: &str,
 ) {
-    let snapshot = serde_json::json!({
-        "pivot_id": pivot_id,
-        "definition": definition,
-        "overwritten_cells": [],
-        "dest_sheet_idx": dest_sheet_idx,
-    });
-    let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+    // Built by `undo_commands`, which owns the payload shape and is the only
+    // thing that reads it back. This used to be a hand-written `json!` literal:
+    // a field added to the struct would have been silently absent here and
+    // defaulted away on restore, which is precisely how a cache snapshot could
+    // have gone missing from this surface alone.
+    let data = crate::undo_commands::encode_pivot_definition_snapshot(
+        pivot_id,
+        definition.clone(),
+        Vec::new(),
+        dest_sheet_idx,
+        // The MCP pivot tools change the DEFINITION only; the records stay put.
+        None,
+    );
     let Ok(mut undo_stack) = state.undo_stack.lock() else {
         return;
     };
@@ -892,7 +934,11 @@ fn record_pivot_definition_undo(
     if opened {
         undo_stack.begin_transaction(description.to_string());
     }
-    undo_stack.record_custom_restore("pivot_definition".to_string(), data, description);
+    undo_stack.record_custom_restore(
+        crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND.to_string(),
+        data,
+        description,
+    );
     if opened {
         undo_stack.commit_transaction();
     }
@@ -1057,7 +1103,15 @@ pub fn update_pivot(
         applied.push(format!("moved to {}{}", col_letter(col), row + 1));
     }
 
-    let _ = handle.emit("pivots:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Pivot,
+    );
+    // The pivot's grid region was rewritten, which is a CELL change and not an
+    // object one -- no domain covers it.
     let _ = handle.emit("grid:refresh", ());
     mark_dirty(handle);
     audit(
@@ -1098,7 +1152,14 @@ pub fn delete_pivot(handle: &AppHandle, pivot_id: &str) -> Result<String, String
         id,
     )?;
 
-    let _ = handle.emit("pivots:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Pivot,
+    );
+    // The pivot's region was cleared: a CELL change, which no domain covers.
     let _ = handle.emit("grid:refresh", ());
     mark_dirty(handle);
     audit(
@@ -1161,7 +1222,13 @@ pub fn add_sheet(handle: &AppHandle, name: Option<&str>) -> Result<String, Strin
         .map(|s| (s.index, s.name.clone()))
         .unwrap_or((0, name.unwrap_or("Sheet").to_string()));
 
-    let _ = handle.emit("sheets:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Sheet,
+    );
     mark_dirty(handle);
     audit(
         handle,
@@ -1199,7 +1266,15 @@ pub fn rename_sheet(handle: &AppHandle, index: usize, new_name: &str) -> Result<
         new_name.to_string(),
     )?;
 
-    let _ = handle.emit("sheets:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Sheet,
+    );
+    // Every formula naming the sheet was repaired: a CELL change on top of the
+    // object one.
     let _ = handle.emit("grid:refresh", ());
     mark_dirty(handle);
     audit(
@@ -1241,7 +1316,15 @@ pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> 
         index,
     )?;
 
-    let _ = handle.emit("sheets:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Sheet,
+    );
+    // References to the deleted sheet became #REF! and the workbook
+    // recalculated: a CELL change on top of the object one.
     let _ = handle.emit("grid:refresh", ());
     mark_dirty(handle);
     audit(
@@ -1282,7 +1365,13 @@ pub fn move_sheet(handle: &AppHandle, from_index: usize, to_index: usize) -> Res
         to_index,
     )?;
 
-    let _ = handle.emit("sheets:refresh", ());
+    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+    // cascade's stores are named without anyone having to remember them.
+    crate::object_deps::announce_cascade(
+        handle,
+        crate::object_deps::ObjectKind::Sheet,
+    );
     mark_dirty(handle);
     audit(
         handle,

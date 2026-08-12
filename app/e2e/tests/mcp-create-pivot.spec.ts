@@ -4,12 +4,21 @@
  *
  * create_pivot routes through create_pivot_inner (the same create path the UI
  * uses) with row + value fields configured UP FRONT, so it is a SINGLE undoable
- * step; it emits "pivots:refresh" (the Pivot extension bridges that to a live
- * refresh). list_pivots then shows the field detail (rows=[..] values=[..]),
- * exercising the field-detail enrichment too.
+ * step; it ANNOUNCES the mutation so the Pivot extension refreshes live.
+ * list_pivots then shows the field detail (rows=[..] values=[..]), exercising
+ * the field-detail enrichment too.
  *
  * Asserts: (1) create succeeds, (2) list_pivots shows the pivot WITH its
- * rows/values fields, (3) pivots:refresh fired, (4) a single undo removes it.
+ * rows/values fields, (3) the announcement reached the UI, (4) a single undo
+ * removes it.
+ *
+ * (3) USED TO NAME THE TAURI EVENT `"pivots:refresh"`, which §3cd (BUG-0026)
+ * deleted along with the other four bespoke per-kind announcements, replacing
+ * them with one `mutation:refresh` that the Shell fans out through
+ * `MUTATION_DOMAIN_EVENTS`. The product is fine; the test was naming a dead
+ * transport, and the first live functional run after that change is what said
+ * so. It now asserts the backend's announcement AND the feature event the Pivot
+ * extension actually listens to — see mcp-create-table.spec.ts for why both.
  */
 import { test, expect } from "../fixtures";
 
@@ -49,9 +58,15 @@ test.describe("MCP create_pivot write tool + field-detail (C1)", () => {
       const api = await (window as any).__calcImport(
         new URL("/src/api/index.ts", document.baseURI).href,
       );
-      (window as any).__PIVOTS_REFRESH__ = false;
-      await api.listenTauriEvent("pivots:refresh", () => {
-        (window as any).__PIVOTS_REFRESH__ = true;
+      (window as any).__PIVOT_ANNOUNCED_DOMAINS__ = null;
+      (window as any).__PIVOT_UI_HEARD__ = false;
+      await api.listenTauriEvent("mutation:refresh", (payload: any) => {
+        const domains: string[] = payload?.domains ?? [];
+        const seen: string[] = (window as any).__PIVOT_ANNOUNCED_DOMAINS__ ?? [];
+        (window as any).__PIVOT_ANNOUNCED_DOMAINS__ = [...seen, ...domains];
+      });
+      window.addEventListener("pivot:refresh", () => {
+        (window as any).__PIVOT_UI_HEARD__ = true;
       });
       await tauri.core.invoke("mcp_start", {});
       const status: any = await tauri.core.invoke("mcp_status", {});
@@ -115,12 +130,30 @@ test.describe("MCP create_pivot write tool + field-detail (C1)", () => {
       expect(listText).toContain("rows=[Region]");
       expect(listText).toContain("values=[Sum of Revenue]");
 
-      // 3. pivots:refresh fired (live-refresh path).
-      const refreshFired = await page.evaluate(async () => {
+      // 3. The mutation was announced, and the announcement reached the UI.
+      const announced = await page.evaluate(async () => {
         await new Promise((r) => setTimeout(r, 300));
-        return (window as any).__PIVOTS_REFRESH__ === true;
+        return {
+          domains: (window as any).__PIVOT_ANNOUNCED_DOMAINS__ as string[] | null,
+          uiHeard: (window as any).__PIVOT_UI_HEARD__ === true,
+        };
       });
-      expect(refreshFired, "create_pivot must emit pivots:refresh").toBe(true);
+      expect(
+        announced.domains,
+        "create_pivot must announce the mutation (object_deps::announce_cascade " +
+          "-> the mutation:refresh Tauri event). Nothing arrived at all.",
+      ).not.toBeNull();
+      expect(
+        announced.domains,
+        "the announcement must name the `pivot` domain — that is what " +
+          "ObjectKind::Pivot maps to in object_deps::ui_domain",
+      ).toContain("pivot");
+      expect(
+        announced.uiHeard,
+        "the Shell must fan `pivot` out to the pivot:refresh window event — " +
+          "without it an AI-created pivot is invisible until something else " +
+          "redraws",
+      ).toBe(true);
 
       // 4. Undoable: a single undo removes the AI-created pivot (one create =
       //    one undo entry; the clean-cache snapshot deserializes so the
@@ -133,12 +166,27 @@ test.describe("MCP create_pivot write tool + field-detail (C1)", () => {
       });
       expect(namesAfterUndo).not.toContain(pivotName);
     } finally {
-      await page.evaluate(async () => {
+      // THE PIVOT IS REMOVED HERE, NOT ONLY BY STEP 4'S UNDO — a cleanup that
+      // runs only when the assertions passed is not a cleanup. See the note in
+      // mcp-create-table.spec.ts: the same shape there left an AI-created table
+      // in the shared workbook and turned three root failures into nine.
+      // Removed BY NAME so this cannot delete a pivot another spec owns.
+      await page.evaluate(async (name: string) => {
         const tauri = (window as any).__TAURI__;
         try {
           await tauri.core.invoke("mcp_stop", {});
         } catch {
           /* already stopped */
+        }
+        try {
+          const pivots: any[] = await tauri.core.invoke("get_all_pivot_tables");
+          for (const p of pivots ?? []) {
+            if (p?.name === name) {
+              await tauri.core.invoke("delete_pivot_table", { pivotId: p.pivotId ?? p.id });
+            }
+          }
+        } catch {
+          /* nothing to remove */
         }
         // Clear seeded cells + any pivot output.
         for (let row = 0; row <= 3; row++) {
@@ -146,7 +194,7 @@ test.describe("MCP create_pivot write tool + field-detail (C1)", () => {
             await tauri.core.invoke("update_cell", { row, col, value: "" });
           }
         }
-      });
+      }, pivotName);
     }
   });
 });

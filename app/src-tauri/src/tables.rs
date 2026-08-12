@@ -1030,6 +1030,7 @@ pub fn delete_table(
     // takes the slicer/timeline/filter locks and the undo lock must never be
     // held across a store lock.
     let cascade = crate::object_deps::cascade_deleted_sources(
+        &state,
         &slicer_state,
         &timeline_state,
         &ribbon_filter_state,
@@ -2581,6 +2582,7 @@ pub fn convert_to_range(
 
     // §3bn: slicers bound to a table that has stopped being a table.
     let cascade = crate::object_deps::cascade_deleted_sources(
+        &state,
         &slicer_state,
         &timeline_state,
         &ribbon_filter_state,

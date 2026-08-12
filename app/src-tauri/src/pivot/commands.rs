@@ -116,6 +116,13 @@ fn store_view(pivot_state: &PivotState, pivot_id: PivotId, view: &PivotView) {
 /// would make every field change cost the user two Ctrl+Z presses. Until this
 /// existed, `auto_fit_pivot_columns` recorded nothing at all and the widths
 /// simply never came back (BUG-0014).
+/// `cache` is the records the restored definition must be rendered against, and
+/// it is `None` for every command that leaves the cache alone (a field change, a
+/// collapse). Pass `Some` only when the command REPLACES the cache — a new
+/// source range, or a fresh BI query — because restoring an old definition
+/// against new records renders a view that was never on screen (BUG-0021 /
+/// BUG-0022). The payload itself is built by `undo_commands`, which owns the
+/// shape and is the only thing that reads it back.
 fn record_pivot_definition_undo(
     state: &AppState,
     pivot_id: PivotId,
@@ -123,22 +130,16 @@ fn record_pivot_definition_undo(
     overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
     dest_sheet_idx: usize,
     prev_col_widths: Vec<(u32, Option<f64>)>,
+    cache: Option<pivot_engine::PivotCache>,
     description: &str,
 ) {
-    #[derive(serde::Serialize)]
-    struct PivotDefinitionSnapshot {
-        pivot_id: PivotId,
-        definition: PivotDefinition,
-        overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
-        dest_sheet_idx: usize,
-    }
-    let snapshot = PivotDefinitionSnapshot {
+    let data = crate::undo_commands::encode_pivot_definition_snapshot(
         pivot_id,
         definition,
         overwritten_cells,
         dest_sheet_idx,
-    };
-    let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+        cache,
+    );
     // ONE critical section for the whole step. The width record is serialized
     // here rather than through `record_pivot_col_widths_undo` so the stack lock
     // is taken exactly once: releasing it between `begin_transaction` and the
@@ -148,7 +149,11 @@ fn record_pivot_definition_undo(
         crate::undo_commands::encode_pivot_col_widths_snapshot(dest_sheet_idx, prev_col_widths);
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.begin_transaction(description);
-    undo_stack.record_custom_restore("pivot_definition".to_string(), data, description);
+    undo_stack.record_custom_restore(
+        crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND.to_string(),
+        data,
+        description,
+    );
     if let Some(widths) = widths_data {
         undo_stack.record_custom_restore(
             crate::undo_commands::PIVOT_COL_WIDTHS_RESTORE_KIND.to_string(),
@@ -699,17 +704,13 @@ pub fn undo_pivot_overwrite(
     if let Some(txn) = transaction {
         for change in &txn.changes {
             if let crate::CellChange::CustomRestore { kind, data } = change {
-                if kind == "pivot_definition" {
-                    #[derive(serde::Deserialize)]
-                    struct PivotDefinitionSnapshot {
-                        pivot_id: PivotId,
-                        definition: PivotDefinition,
-                        #[serde(default)]
-                        overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
-                        #[serde(default)]
-                        dest_sheet_idx: usize,
-                    }
-                    if let Ok(snapshot) = serde_json::from_slice::<PivotDefinitionSnapshot>(data) {
+                if kind == crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND {
+                    // Decoded by `undo_commands`, which owns the shape. A local
+                    // copy of the struct here could not see a field the snapshot
+                    // grew — and it grew one (`cache`).
+                    if let Some(snapshot) =
+                        crate::undo_commands::decode_pivot_definition_snapshot(data)
+                    {
                         if snapshot.pivot_id == pivot_id {
                             let dest_sheet_idx = resolve_dest_sheet_index(&state, &snapshot.definition);
                             let destination = snapshot.definition.destination;
@@ -718,6 +719,12 @@ pub fn undo_pivot_overwrite(
                             let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
                             if let Some((def, cache)) = pivot_tables.get_mut(&pivot_id) {
                                 *def = snapshot.definition;
+                                // ...against the records it was written for. A
+                                // source change or a BI re-query replaced them,
+                                // and the snapshot carries the originals.
+                                if let Some(old_cache) = snapshot.cache {
+                                    *cache = old_cache;
+                                }
                                 let view = safe_calculate_pivot(def, cache);
                                 store_view(&pivot_state, pivot_id, &view);
                                 drop(pivot_tables);
@@ -1074,7 +1081,7 @@ pub async fn update_pivot_fields(
     // Record undo snapshot AFTER successful completion (not before, to avoid
     // stale entries when the operation is cancelled).
     // Include saved overwritten cells so undo_pivot_overwrite can restore them.
-    record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, prev_col_widths, "Pivot table field change");
+    record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, prev_col_widths, None, "Pivot table field change");
 
     log_perf!(
         "PIVOT",
@@ -1257,7 +1264,7 @@ pub fn toggle_pivot_group(
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
                 finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
-                record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), "Pivot expand/collapse");
+                record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!(
@@ -1292,7 +1299,7 @@ pub fn toggle_pivot_group(
             let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
             response.overwritten_cell_count = saved_cells.len() as u32;
             finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some((&*pane_control_state, &*ribbon_filter_state)));
-            record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), "Pivot expand/collapse");
+            record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
             log_perf!(
@@ -1327,7 +1334,7 @@ pub fn toggle_pivot_group(
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
-    record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, Vec::new(), "Pivot expand/collapse");
+    record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
@@ -1455,6 +1462,7 @@ pub fn delete_pivot_table(
     // slicers bind ONLY to it, and ribbon filters list it as a target. All three
     // used to survive the delete pointing at an id that resolved to nothing.
     let cascade = crate::object_deps::cascade_deleted_sources(
+        &state,
         &slicer_state,
         &timeline_state,
         &ribbon_filter_state,
@@ -1668,6 +1676,8 @@ pub fn relocate_pivot(
         Vec::new(),
         dest_sheet_idx,
         Vec::new(),
+        // A move does not touch the records, so no cache snapshot.
+        None,
         "Move pivot table",
     );
 
@@ -2663,11 +2673,18 @@ pub async fn change_pivot_data_source(
     }
 
     // Update definition and rebuild cache
-    let (definition, cache, dest_sheet_idx, destination) = {
+    let (old_definition, old_cache, definition, cache, dest_sheet_idx, destination) = {
         let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
-        let (definition, _cache) = pivot_tables
+        let (definition, existing_cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+        // BOTH HALVES ARE SNAPSHOTTED, and it has to be both: this command
+        // rebuilds the cache from a different range, so undoing it with the old
+        // definition alone would render that definition against the NEW records
+        // — a view the user never saw. (BUG-0022.)
+        let old_definition = definition.clone();
+        let old_cache = existing_cache.clone();
 
         // Update source range in definition
         definition.source_start = source_start;
@@ -2698,7 +2715,14 @@ pub async fn change_pivot_data_source(
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
         *cache = fresh_cache;
 
-        (definition.clone(), cache.clone(), dest_sheet_idx, destination)
+        (
+            old_definition,
+            old_cache,
+            definition.clone(),
+            cache.clone(),
+            dest_sheet_idx,
+            destination,
+        )
     };
 
     // Recalculate pivot
@@ -2708,9 +2732,12 @@ pub async fn change_pivot_data_source(
     ensure_children_indices(&mut view);
     store_view(&pivot_state, pivot_id, &view);
 
-    // Write to grid
+    // Write to grid. The cells the new (possibly larger) pivot is about to
+    // overwrite are SAVED, not merely counted — undo has to put them back, and
+    // a count cannot.
     emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
-    let overwritten = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+    let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+    let overwritten = saved_cells.len() as u32;
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     // Store updated cache
@@ -2728,6 +2755,22 @@ pub async fn change_pivot_data_source(
     };
     let mut response = view_to_response(&view, &definition, &mut final_cache);
     response.overwritten_cell_count = overwritten;
+
+    // Repointing a pivot at a different range is ONE undoable action, recorded
+    // after the work succeeded so a refusal leaves no stale entry (the shape
+    // `update_pivot_fields` already uses).
+    record_pivot_definition_undo(
+        &state,
+        pivot_id,
+        old_definition,
+        saved_cells,
+        dest_sheet_idx,
+        // This path never auto-fits (`finalize_pivot_update` does not), so
+        // there are no column widths riding along.
+        Vec::new(),
+        Some(old_cache),
+        "Change pivot data source",
+    );
 
     log_info!(
         "PIVOT",
@@ -5872,16 +5915,25 @@ pub async fn update_bi_pivot_fields(
     }
     let request = request; // placement stripped; immutable from here
 
-    // Save previous state for revert-on-cancel
-    {
+    // Save previous state for revert-on-cancel AND for undo.
+    //
+    // BOTH HALVES, because every path below either re-queries the model for a
+    // new cache or replaces it with an empty one: putting the old definition
+    // back on its own would render it against records it was never written for
+    // (BUG-0021). This is the same pair `previous_states` already keeps for the
+    // cancel path — undo just needs to outlive the command.
+    let (old_definition, old_cache) = {
         let pivot_tables = pivot_state.pivot_tables.read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
-        if let Some((def, cache)) = pivot_tables.get(&pivot_id) {
-            if let Ok(mut prev) = pivot_state.previous_states.lock() {
-                prev.insert(pivot_id, (def.clone(), cache.clone()));
-            }
+        let (def, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        let pair = (def.clone(), cache.clone());
+        if let Ok(mut prev) = pivot_state.previous_states.lock() {
+            prev.insert(pivot_id, pair.clone());
         }
-    }
+        pair
+    };
 
     // Fast path: if only custom_name changed on value fields (no structural
     // changes to dimensions, measures, filters, layout, etc.), skip the
@@ -5924,20 +5976,33 @@ pub async fn update_bi_pivot_fields(
                 let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
                 drop(pivot_tables);
 
-                response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+                let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+                response.overwritten_cell_count = saved_cells.len() as u32;
                 update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
-                if auto_fit {
-                    // DELIBERATELY DISCARDED, and it is a known gap, not an
-                    // oversight: `update_bi_pivot_fields` records NO undo entry
-                    // at all (register §2as-BI), so there is no transaction for
-                    // the width record to join. Recording it on its own would be
-                    // worse than not recording it — Ctrl+Z would resize the
-                    // columns back while leaving the pivot changed. The widths
-                    // become undoable the moment this command becomes undoable.
-                    let _ = auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
-                }
+                // The widths this fit overwrites now ride in the SAME undo step
+                // as the change that caused them, exactly as the non-BI path
+                // does. They used to be discarded because this command recorded
+                // no step for them to join.
+                let prev_col_widths = if auto_fit {
+                    auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view)
+                } else {
+                    Vec::new()
+                };
                 update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
                 recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
+
+                // A cosmetic change renders the SAME records, so no cache
+                // snapshot is needed (and one would be a large clone per rename).
+                record_pivot_definition_undo(
+                    &state,
+                    pivot_id,
+                    old_definition,
+                    saved_cells,
+                    dest_sheet_idx,
+                    prev_col_widths,
+                    None,
+                    "Pivot table field change",
+                );
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!("PIVOT", "update_bi_pivot_fields (cosmetic) pivot_id={} | TOTAL={:.1}ms", pivot_id, total_ms);
@@ -5997,6 +6062,18 @@ pub async fn update_bi_pivot_fields(
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
         finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+        // The cache was REPLACED with an empty one, so the old records travel
+        // with the old definition or the undo renders an empty pivot.
+        record_pivot_definition_undo(
+            &state,
+            pivot_id,
+            old_definition,
+            Vec::new(),
+            dest_sheet_idx,
+            Vec::new(),
+            Some(old_cache),
+            "Pivot table field change",
+        );
         return Ok(response);
     }
 
@@ -6057,6 +6134,17 @@ pub async fn update_bi_pivot_fields(
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
         finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+        // Same as the branch above: an empty cache replaced the records.
+        record_pivot_definition_undo(
+            &state,
+            pivot_id,
+            old_definition,
+            Vec::new(),
+            dest_sheet_idx,
+            Vec::new(),
+            Some(old_cache),
+            "Pivot table field change",
+        );
         return Ok(response);
     }
 
@@ -6584,6 +6672,19 @@ pub async fn update_bi_pivot_fields(
 
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+                // The query failed but the FIELDS were still written, so this is
+                // a real document change and gets a real undo step — with the
+                // cache, which was replaced by an empty one.
+                record_pivot_definition_undo(
+                    &state,
+                    pivot_id,
+                    old_definition,
+                    Vec::new(),
+                    dest_sheet_idx,
+                    Vec::new(),
+                    Some(old_cache),
+                    "Pivot table field change",
+                );
                 return Ok(response);
             }
             return Err(crate::bi::commands::friendly_bi_query_error("BI query failed", &e));
@@ -7173,14 +7274,16 @@ pub async fn update_bi_pivot_fields(
 
     // Update grid (clear old region + write new)
     let t_grid = Instant::now();
-    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+    let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = saved_cells.len() as u32;
     update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view);
-    if auto_fit {
-        // Discarded for the same reason as the cosmetic branch above: this
-        // command records no undo entry, so there is no step for the resize to
-        // belong to. See the note there.
-        let _ = auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view);
-    }
+    // Carried into the undo step below, like the non-BI path: Excel undoes a
+    // pivot change and the column resize it caused as ONE press.
+    let prev_col_widths = if auto_fit {
+        auto_fit_pivot_columns(&state, &effect, dest_sheet_idx, destination, &view)
+    } else {
+        Vec::new()
+    };
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
@@ -7223,6 +7326,20 @@ pub async fn update_bi_pivot_fields(
             meta.lookup_columns = request.lookup_columns.into_iter().collect();
         }
     }
+
+    // ONE undo step for the whole field change, recorded after the work
+    // succeeded. The cache travels with it: this path re-queried the model, so
+    // the old definition means nothing against the new records (BUG-0021).
+    record_pivot_definition_undo(
+        &state,
+        pivot_id,
+        old_definition,
+        saved_cells,
+        dest_sheet_idx,
+        prev_col_widths,
+        Some(old_cache),
+        "Pivot table field change",
+    );
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     let payload_bytes = serde_json::to_string(&response).map(|s| s.len()).unwrap_or(0);

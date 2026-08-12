@@ -73,9 +73,63 @@
 // which fails one capture with a sentence instead of failing forty with a
 // mystery.
 
+// ============================================================================
+// --disable-accelerated-2d-canvas
+//   THE THIRD AXIS, and the one that made four goldens a function of how long
+//   the app had been running (BUG-0028). It is not about the canvas's own
+//   pixels. It is about TEXT ANTIALIASING IN EVERY DOM OVERLAY DRAWN OVER THE
+//   GRID.
+//
+//   The chain, measured end to end on 2026-08-12 with CDP `LayerTree` and a
+//   pixel census of the capture:
+//
+//     1. A GPU-accelerated 2D canvas is its own COMPOSITED LAYER. With the grid
+//        canvas accelerated the layer tree holds 7 layers, one of them
+//        2436x1084 with compositing reason `Canvas`.
+//     2. Any DOM overlay that OVERLAPS a composited layer must be composited
+//        too. The open File menu appears as a second layer, 572x736, reason
+//        `Overlap`.
+//     3. Chromium does not use LCD (subpixel) text on a composited layer it
+//        cannot prove opaque -- the dropdown has a border-radius and a
+//        box-shadow -- so the overlay's text falls back to GRAYSCALE
+//        antialiasing while every other pixel in the window keeps LCD.
+//     4. Chromium's expensive-canvas heuristic DISABLES acceleration for a 2D
+//        canvas that is read back often (`getImageData`). The app does exactly
+//        that through the `rendering` capture seam -- `GridCanvas.captureRange`,
+//        used by animation frame/GIF export -- so a suite that exercises it
+//        moves the app to the other side for the rest of the session.
+//
+//   Driven deliberately, on a cold app: 120 `getImageData` calls on the grid
+//   canvas took the layer tree from 7 layers to 5 (both the `Canvas` and the
+//   `Overlap` layer gone), and the File dropdown's text went from 0 chromatic
+//   pixels (grayscale) to 1575 (LCD) in the same 165x310 region. That is the
+//   whole of "warm": it is not time, it is whether something has read the
+//   canvas back yet.
+//
+//   The three `menu-*` goldens and the functional corpus's
+//   `autocomplete-dropdown-visible` were all recorded on the LCD side (measured
+//   off the committed bytes: 22-28% chromatic pixels in their grey-text
+//   regions), and cold they render grayscale -- ~2,900 differing pixels against
+//   a 200-pixel budget, with nothing about the product changed.
+//
+//   This flag removes step 1, and with it the whole chain, for every overlay in
+//   the app rather than for the three that happened to be photographed. The
+//   canvas's OWN pixels are unaffected: the visual corpus was recorded with the
+//   canvas unaccelerated and its eight grid captures pass on a cold app with it
+//   accelerated, which is the corpus itself measuring that the two rasterizer
+//   paths agree.
+//
+//   NOT `--disable-lcd-text`. That pins the same axis one level lower and would
+//   be more robust still, but it turns EVERY golden in the tree grayscale --
+//   all 89, across three projects, including corpora this pass cannot re-record
+//   or verify. This flag leaves every committed golden on the side it was
+//   recorded on, so it costs no re-record at all.
+// ============================================================================
+
 /** The flags that make a screenshot reproducible. Order is not significant. */
 export const DETERMINISTIC_CAPTURE_FLAGS = [
   "--force-color-profile=sRGB",
+  "--disable-accelerated-2d-canvas",
 ];
 
 /**

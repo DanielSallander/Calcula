@@ -34,6 +34,7 @@ import {
   getSelectedSlicerIds,
   isSlicerSelected,
   deselectSlicer,
+  dropSlicerFromSelection,
   broadcastSelectedSlicers,
 } from "./handlers/selectionHandler";
 
@@ -501,16 +502,22 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
-  // Slicer deleted: deselect the deleted slicer so the contextual ribbon tab
-  // is removed. Without this, deleting a selected slicer leaves the Options
-  // tab visible with no slicer to configure.
+  // Slicer deleted: drop it out of the selection so the contextual ribbon tab
+  // goes away with the last selected slicer. Without this, deleting a selected
+  // slicer leaves the Options tab visible with no slicer to configure.
+  //
+  // §3cd: the event now comes from `refreshCache`'s id diff rather than from
+  // the frontend delete route, so it fires for a BACKEND CASCADE too -- delete
+  // the table a slicer filters and this is what takes the tab down. BUG-0026
+  // was exactly that gap: three actions (table.create, slicer.create,
+  // table.delete) left the Slicer tab on a workbook with zero slicers.
   // -----------------------------------------------------------------------
 
   const handleSlicerDeleted = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     const deletedId = detail?.slicerId as string | undefined;
-    if (deletedId != null && isSlicerSelected(deletedId)) {
-      deselectSlicer();
+    if (deletedId != null) {
+      dropSlicerFromSelection(deletedId);
     }
   };
   window.addEventListener(SlicerEvents.SLICER_DELETED, handleSlicerDeleted);

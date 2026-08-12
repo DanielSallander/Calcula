@@ -248,6 +248,62 @@ describe("LiveModulePersister — the idle pass never rewrites the author's text
     expect(outcome.status).toBe("compiled");
     expect(outcomeWroteNewBytes(outcome)).toBe(true);
     expect(h.store.get("m1")).toBe("function f(a) {}");
+    // The outcome names BOTH ends of the pass: the bytes stored, and the buffer
+    // they were compiled FROM. Without the second, a caller cannot tell whether
+    // the text it is about to replace on screen is still the text that was read
+    // — which is how a compile landing on a moved buffer eats keystrokes.
+    expect(outcome.status === "compiled" && outcome.input).toBe("function f(a: string) {}");
+  });
+
+  it("says which buffer it wrote even when nothing was compiled", async () => {
+    const h = harness();
+    h.persister.track("m1", "Macro", "v0");
+    h.persister.note("m1", "Macro", "v1");
+
+    const outcome = await h.persister.flush("m1");
+    expect(outcome.status === "saved" && outcome.input).toBe("v1");
+    expect(outcome.status === "saved" && outcome.stored).toBe("v1");
+  });
+});
+
+describe("LiveModulePersister — a buffer replaced on the author's behalf", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("adopting the stored text ends the unsaved state and disarms the write", async () => {
+    const h = harness();
+    h.persister.track("m1", "Macro", "stored");
+    h.persister.note("m1", "Macro", "typed");
+    expect(h.persister.hasUnsavedEdits("m1")).toBe(true);
+
+    // The editor put the stored text back on screen (a compile's JavaScript).
+    h.persister.adopt("m1", "stored");
+
+    expect(h.persister.hasUnsavedEdits("m1")).toBe(false);
+    await vi.advanceTimersByTimeAsync(LIVE_PERSIST_DEBOUNCE_MS + 1);
+    expect(h.writes).toEqual([]);
+  });
+
+  it("adopting text that is NOT stored keeps the write that is still owed", async () => {
+    const h = harness();
+    h.persister.track("m1", "Macro", "stored");
+    h.persister.note("m1", "Macro", "typed");
+
+    h.persister.adopt("m1", "replaced");
+
+    expect(h.persister.hasUnsavedEdits("m1")).toBe(true);
+    await vi.advanceTimersByTimeAsync(LIVE_PERSIST_DEBOUNCE_MS + 1);
+    expect(h.writes).toEqual(["replaced"]);
+  });
+
+  it("ignores an adoption for a document it does not follow", () => {
+    const h = harness();
+    expect(() => h.persister.adopt("gone", "text")).not.toThrow();
+    expect(h.persister.tracks("gone")).toBe(false);
   });
 });
 

@@ -29,19 +29,52 @@ export function saveLedger(ledger) {
   fs.writeFileSync(LEDGER_MD, renderMarkdown(ledger), "utf8");
 }
 
+/**
+ * The next free id, derived from the ENTRIES rather than from the counter.
+ *
+ * `nextId` is a hint, not the authority. Entries filed by hand -- BUG-0024
+ * through BUG-0028 all were, from e2e and review passes rather than from a
+ * soak run -- never bump it, so on 2026-08-12 the file held five bugs above a
+ * `nextId` of 24. The next soak finding would have been issued "BUG-0024" a
+ * second time, and `updateBug` resolves an id with `.find`, so every later
+ * patch would have silently landed on the FIRST entry with that id: a triaged,
+ * fixed, already-closed bug rewritten by an unrelated one.
+ *
+ * Deriving from the maximum makes a hand-edited ledger safe by construction and
+ * keeps the counter as a floor, so ids still never go backwards even if an
+ * entry is deleted.
+ */
+export function nextFreeId(ledger) {
+  const highest = (ledger.bugs ?? []).reduce((max, b) => {
+    const m = /^BUG-(\d+)$/.exec(b?.id ?? "");
+    return m ? Math.max(max, Number(m[1])) : max;
+  }, 0);
+  return Math.max(ledger.nextId ?? 1, highest + 1);
+}
+
 /** Add a bug; returns the assigned id (e.g. "BUG-0003"). */
 export function addBug(ledger, bug) {
-  const id = `BUG-${String(ledger.nextId).padStart(4, "0")}`;
-  ledger.nextId += 1;
+  const n = nextFreeId(ledger);
+  const id = `BUG-${String(n).padStart(4, "0")}`;
+  ledger.nextId = n + 1;
   ledger.bugs.push({ id, status: "open", ...bug });
   return id;
 }
 
 export function updateBug(ledger, id, patch) {
-  const bug = ledger.bugs.find((b) => b.id === id);
-  if (!bug) throw new Error(`Unknown bug id: ${id}`);
-  Object.assign(bug, patch);
-  return bug;
+  const matches = (ledger.bugs ?? []).filter((b) => b.id === id);
+  if (matches.length === 0) throw new Error(`Unknown bug id: ${id}`);
+  if (matches.length > 1) {
+    // Never patch one of several: a duplicate id means the allocator was
+    // bypassed, and picking the first is exactly how the wrong bug gets
+    // rewritten. Fail loudly instead.
+    throw new Error(
+      `Duplicate bug id ${id}: ${matches.length} entries share it. The ledger ` +
+        `has been edited by hand past its allocator; renumber before writing.`,
+    );
+  }
+  Object.assign(matches[0], patch);
+  return matches[0];
 }
 
 /** Find an existing open/triaged bug matching an oracle + diff-path profile

@@ -66,7 +66,7 @@
 //! timeline pointing at a deleted pivot renders nothing and eats clicks
 //! exactly like the slicer did.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use identity::EntityId;
 use tauri::State;
@@ -186,6 +186,61 @@ impl ObjectKind {
         ObjectKind::ObjectTemplate,
         ObjectKind::BiConnection,
     ];
+
+    /// The frontend refresh domain that makes this kind's cached copy agree
+    /// with the backend again.
+    ///
+    /// EVERY VARIANT IS ANSWERED, and the compiler enforces that — the whole
+    /// point of putting the mapping here instead of in a lookup table on the
+    /// frontend, where it was a list of regexes that a new object kind could
+    /// simply miss.
+    ///
+    /// [`UiDomain::None`] is a claim that no frontend store holds this kind by
+    /// id in a way an announcement could repair, and each one is argued:
+    ///
+    /// * `Report`, `Script`, `ObjectScript`, `CellBehavior`, `ObjectTemplate`,
+    ///   `PivotLayout`, `ComputedProperty` — script-side or list-side records.
+    ///   They paint nothing on the grid and claim no rectangle, so a stale one
+    ///   is a failed lookup, never a swallowed click.
+    /// * `AutoFilter` — the extension reads row visibility from the backend on
+    ///   every repaint; it holds no object cache that can outlive the delete.
+    /// * `BiConnection` — `WarnAndKeep`: nothing is deleted, so nothing goes
+    ///   stale.
+    pub fn ui_domain(self) -> UiDomain {
+        match self {
+            // Table definitions ride the `objects` domain, which fans out to
+            // TABLE_DEFINITIONS_UPDATED among others.
+            ObjectKind::Table | ObjectKind::TableColumn => UiDomain::Objects,
+            ObjectKind::Pivot => UiDomain::Pivot,
+            // Charts and sparklines are index-anchored floating objects and
+            // share the `objects` domain with the table definitions.
+            ObjectKind::Chart | ObjectKind::Sparkline => UiDomain::Objects,
+            // ONE domain for both slicer families. They are two extensions, so
+            // the Shell translator fans `slicer` out to BOTH refresh events --
+            // a timeline whose pivot was deleted is the same ghost overlay a
+            // canvas slicer is.
+            ObjectKind::Slicer | ObjectKind::TimelineSlicer => UiDomain::Slicer,
+            ObjectKind::RibbonFilter => UiDomain::RibbonFilter,
+            ObjectKind::PaneControl => UiDomain::PaneControl,
+            ObjectKind::FloatingControl => UiDomain::Controls,
+            ObjectKind::Sheet => UiDomain::Sheets,
+            ObjectKind::ConditionalFormat => UiDomain::ConditionalFormats,
+            ObjectKind::DataValidation => UiDomain::Validations,
+            ObjectKind::NamedStyle => UiDomain::Styles,
+            ObjectKind::Comment | ObjectKind::Note => UiDomain::Annotations,
+            ObjectKind::Hyperlink => UiDomain::Hyperlinks,
+            ObjectKind::NamedRange => UiDomain::NamedRanges,
+            ObjectKind::Report
+            | ObjectKind::Script
+            | ObjectKind::ObjectScript
+            | ObjectKind::CellBehavior
+            | ObjectKind::AutoFilter
+            | ObjectKind::PivotLayout
+            | ObjectKind::ComputedProperty
+            | ObjectKind::ObjectTemplate
+            | ObjectKind::BiConnection => UiDomain::None,
+        }
+    }
 }
 
 /// What deleting the owner does to a dependent.
@@ -243,6 +298,18 @@ pub struct DependencyRule {
     /// What points at it — a human-readable "kind.field" so the row names the
     /// EDGE, not just the type (a slicer points at a table two different ways).
     pub dependent: &'static str,
+    /// The WORKBOOK OBJECT the dependent edge lives on, when the dependent is
+    /// an object at all. `None` for the rows whose dependent is a formula, a
+    /// grid cell, a scheduler job or a capability grant — things that paint
+    /// nothing of their own.
+    ///
+    /// This is what makes the cascade TRANSITIVE and therefore derivable:
+    /// deleting a table deletes its slicers, and deleting a slicer prunes it
+    /// out of every ribbon filter, so a table delete disturbs the ribbon-filter
+    /// store too. [`cascade_domains`] walks exactly this field, so the domain
+    /// list an announcement owes is computed from the matrix instead of being
+    /// remembered by whoever wrote the announcement.
+    pub dependent_kind: Option<ObjectKind>,
     pub policy: DeletePolicy,
     /// The symbol the census greps for in the owner's delete command, or "" for
     /// the policies that need no code. For a cascade that runs inside a shared
@@ -250,6 +317,95 @@ pub struct DependencyRule {
     /// delegation, exactly as the save-source census does.
     pub implemented_by: &'static str,
     pub note: &'static str,
+}
+
+// ===========================================================================
+// THE UI HALF: which frontend store goes stale, and how it is told
+// ===========================================================================
+
+/// A frontend refresh DOMAIN — the change CLASS an announcement names.
+///
+/// One-for-one with the `MutationDomain` union in `app/src/api/events.ts`, and
+/// pinned to it by `cascadeAnnouncementCensus.test.ts`, which reads these wire
+/// names out of this file and looks each one up in the Shell translator's
+/// `MUTATION_DOMAIN_EVENTS`. A domain the translator does not know is dropped
+/// on the floor in silence, so the two lists must not drift.
+///
+/// Domains, never feature events: the backend must not know that "slicer"
+/// means `slicers:refresh`, for the same reason an extension must not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UiDomain {
+    /// Nothing on the frontend caches this kind in a way an announcement could
+    /// repair. Argued per kind in [`ObjectKind::ui_domain`].
+    None,
+    Styles,
+    Pivot,
+    Slicer,
+    RibbonFilter,
+    PaneControl,
+    Objects,
+    /// Row/column VISIBILITY. The one domain with no wire name: it drives a
+    /// dimension re-read (`hiddenChanged` on the undo result), not a store
+    /// refresh, and the frontend `MutationDomain` union does not contain it.
+    Hidden,
+    Sheets,
+    NamedRanges,
+    Outline,
+    Hyperlinks,
+    Validations,
+    Annotations,
+    Controls,
+    ConditionalFormats,
+}
+
+impl UiDomain {
+    /// Every domain, in DECLARATION ORDER — which is the iteration order of a
+    /// `MutationDomains` set, so a workbook announces identically on every run.
+    ///
+    /// Hand-maintained (a Rust enum cannot enumerate itself on stable), and
+    /// checked against the exhaustive `wire_name` match by
+    /// `every_ui_domain_is_in_all` — a variant missing from here would be
+    /// silently dropped from every undo announcement.
+    pub const ALL: &'static [UiDomain] = &[
+        UiDomain::None,
+        UiDomain::Styles,
+        UiDomain::Pivot,
+        UiDomain::Slicer,
+        UiDomain::RibbonFilter,
+        UiDomain::PaneControl,
+        UiDomain::Objects,
+        UiDomain::Hidden,
+        UiDomain::Sheets,
+        UiDomain::NamedRanges,
+        UiDomain::Outline,
+        UiDomain::Hyperlinks,
+        UiDomain::Validations,
+        UiDomain::Annotations,
+        UiDomain::Controls,
+        UiDomain::ConditionalFormats,
+    ];
+
+    /// The exact string the `MutationDomain` union uses, or `None`.
+    pub fn wire_name(self) -> Option<&'static str> {
+        match self {
+            UiDomain::None => None,
+            UiDomain::Styles => Some("styles"),
+            UiDomain::Pivot => Some("pivot"),
+            UiDomain::Slicer => Some("slicer"),
+            UiDomain::RibbonFilter => Some("ribbonFilter"),
+            UiDomain::PaneControl => Some("paneControl"),
+            UiDomain::Objects => Some("objects"),
+            UiDomain::Hidden => None,
+            UiDomain::Sheets => Some("sheets"),
+            UiDomain::NamedRanges => Some("namedRanges"),
+            UiDomain::Outline => Some("outline"),
+            UiDomain::Hyperlinks => Some("hyperlinks"),
+            UiDomain::Validations => Some("validations"),
+            UiDomain::Annotations => Some("annotations"),
+            UiDomain::Controls => Some("controls"),
+            UiDomain::ConditionalFormats => Some("conditionalFormats"),
+        }
+    }
 }
 
 /// THE TABLE. Every pair, its policy, and where the policy is executed.
@@ -262,34 +418,38 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Table,
         dependent: "slicer.cacheSourceId / slicer.connectedSources",
+        dependent_kind: Some(ObjectKind::Slicer),
         policy: DeletePolicy::CascadeOrRebind,
         implemented_by: "cascade_deleted_sources",
         note: "Excel removes a table's slicers with the table; a slicer with a \
-               surviving Report Connection is repointed instead of deleted.",
+                surviving Report Connection is repointed instead of deleted.",
     },
     DependencyRule {
         owner: ObjectKind::Table,
         dependent: "autoFilter (the one the table installed)",
+        dependent_kind: Some(ObjectKind::AutoFilter),
         policy: DeletePolicy::Cascade,
         implemented_by: "clear_table_auto_filter",
         note: "A sheet-level AutoFilter with no visible owner used to survive \
-               with rows still hidden by it.",
+                with rows still hidden by it.",
     },
     DependencyRule {
         owner: ObjectKind::Table,
         dependent: "formula.structuredReference (Table1[Col])",
+        dependent_kind: None,
         policy: DeletePolicy::Repair,
         implemented_by: "rewrite_table_refs_to_ranges",
         note: "Excel freezes the specifier into the absolute rectangle the \
-               table covered, so the VALUES do not move.",
+                table covered, so the VALUES do not move.",
     },
     DependencyRule {
         owner: ObjectKind::Table,
         dependent: "objectScript.instanceId",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "object_scripts",
         note: "C10: instanceId == the table id; a script left behind would be \
-               inherited by the next object minted at that id.",
+                inherited by the next object minted at that id.",
     },
     // -----------------------------------------------------------------------
     // PIVOT
@@ -297,6 +457,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Pivot,
         dependent: "slicer.cacheSourceId / slicer.connectedSources",
+        dependent_kind: Some(ObjectKind::Slicer),
         policy: DeletePolicy::CascadeOrRebind,
         implemented_by: "cascade_deleted_sources",
         note: "Same rule as the table case — one implementation, both owners.",
@@ -304,29 +465,34 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Pivot,
         dependent: "timelineSlicer.sourceId / connectedPivotIds",
+        dependent_kind: Some(ObjectKind::TimelineSlicer),
         policy: DeletePolicy::CascadeOrRebind,
         implemented_by: "cascade_deleted_sources",
-        note: "A timeline can only be sourced from a pivot, so a timeline whose \
-               last pivot is gone has nothing to render.",
+        note: "A timeline can only be sourced from a pivot, so a timeline \
+                whose last pivot is gone has nothing to render.",
     },
     DependencyRule {
         owner: ObjectKind::Pivot,
         dependent: "ribbonFilter.connectedPivots / crossFilterTargets",
+        dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_sources",
-        note: "The filter's own source is a model connection, not the pivot: it \
-               survives, minus the dead target.",
+        note: "The filter's own source is a model connection, not the pivot: \
+                it survives, minus the dead target.",
     },
     DependencyRule {
         owner: ObjectKind::Pivot,
         dependent: "grid cells in the pivot's region",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "recalc_after_active_sheet_bulk_rewrite",
-        note: "Formulas reading the cleared block drop to 0 at once, as in Excel.",
+        note: "Formulas reading the cleared block drop to 0 at once, as in \
+                Excel.",
     },
     DependencyRule {
         owner: ObjectKind::Pivot,
         dependent: "objectScript.instanceId",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "prune_scripts_for_instance",
         note: "C10.",
@@ -337,14 +503,16 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Chart,
         dependent: "paneControl.config.chartParamTarget.chartId",
+        dependent_kind: Some(ObjectKind::PaneControl),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_charts",
         note: "The slider survives with its value; it simply stops driving a \
-               chart. Deleting a chart must not delete the control.",
+                chart. Deleting a chart must not delete the control.",
     },
     DependencyRule {
         owner: ObjectKind::Chart,
         dependent: "objectScript.instanceId",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "prune_scripts_for_instance",
         note: "C10.",
@@ -352,10 +520,11 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Chart,
         dependent: "formula.cellsInSourceRange",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "The edge runs the other way — a chart READS cells. Nothing in \
-               the grid reads a chart.",
+                the grid reads a chart.",
     },
     // -----------------------------------------------------------------------
     // SLICER
@@ -363,14 +532,16 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Slicer,
         dependent: "ribbonFilter.crossFilterSlicerTargets",
+        dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_slicers",
         note: "A filter listing a dead slicer re-evaluated cross-filter \
-               candidacy against it on every item fetch.",
+                candidacy against it on every item fetch.",
     },
     DependencyRule {
         owner: ObjectKind::Slicer,
         dependent: "slicer.computedProperties",
+        dependent_kind: Some(ObjectKind::ComputedProperty),
         policy: DeletePolicy::Cascade,
         implemented_by: "drop_slicer_computed_properties",
         note: "Owned outright by the slicer, with its own dependency edges.",
@@ -378,6 +549,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Slicer,
         dependent: "objectScript.instanceId",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "prune_scripts_for_instance",
         note: "C10.",
@@ -388,6 +560,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::TimelineSlicer,
         dependent: "objectScript.instanceId",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "prune_scripts_for_instance",
         note: "C10. Nothing else points at a timeline.",
@@ -398,19 +571,21 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::RibbonFilter,
         dependent: "ribbonFilter.crossFilterTargets (siblings)",
+        dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_filters",
-        note: "Cross-filter targets are filter ids; a deleted filter left every \
-               sibling listing an id that resolves to nothing.",
+        note: "Cross-filter targets are filter ids; a deleted filter left \
+                every sibling listing an id that resolves to nothing.",
     },
     DependencyRule {
         owner: ObjectKind::RibbonFilter,
         dependent: "formula.GET.CONTROLVALUE(name)",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "frontend:filterPaneStore.deleteFilterAsync",
-        note: "Excel-parity with a deleted name: the formula keeps its text and \
-               re-evaluates to an error rather than being rewritten. The \
-               recalc is what makes the stale VALUE go away.",
+        note: "Excel-parity with a deleted name: the formula keeps its text \
+                and re-evaluates to an error rather than being rewritten. The \
+                recalc is what makes the stale VALUE go away.",
     },
     // -----------------------------------------------------------------------
     // PANE CONTROL
@@ -418,6 +593,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::PaneControl,
         dependent: "formula.GET.CONTROLVALUE(name)",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "frontend:controlsPaneStore.deleteControlAsync",
         note: "Same rule as the ribbon-filter case.",
@@ -425,10 +601,11 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::PaneControl,
         dependent: "objectScript.instanceId (\"pane-\" + id)",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "prune_scripts_for_instance",
         note: "Was frontend-only (ControlsPane's CONTROL_DELETED handler). A \
-               script that outlives its control keeps running headless.",
+                script that outlives its control keeps running headless.",
     },
     // -----------------------------------------------------------------------
     // FLOATING (ON-GRID) CONTROL
@@ -436,17 +613,20 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::FloatingControl,
         dependent: "objectScript.instanceId (control-<sheet>-<row>-<col>)",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "frontend:Controls.deleteFloatingControl",
-        note: "The instanceId derives from the ANCHOR, so a surviving script is \
-               INHERITED by the next control created there (§1a).",
+        note: "The instanceId derives from the ANCHOR, so a surviving script \
+                is INHERITED by the next control created there (§1a).",
     },
     DependencyRule {
         owner: ObjectKind::FloatingControl,
         dependent: "formula.GET.CONTROLVALUE(name)",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "frontend:Controls.deleteFloatingControl",
-        note: "Named on-grid controls are in the GET.CONTROLVALUE snapshot too.",
+        note: "Named on-grid controls are in the GET.CONTROLVALUE snapshot \
+                too.",
     },
     // -----------------------------------------------------------------------
     // NAMED RANGE
@@ -454,14 +634,16 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::NamedRange,
         dependent: "formula.NamedRef",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "recalc_after_name_change",
         note: "EXCEL'S BEHAVIOUR, DELIBERATELY: the formula keeps saying RATE \
-               and shows #NAME?. Not rewritten, not blanked.",
+                and shows #NAME?. Not rewritten, not blanked.",
     },
     DependencyRule {
         owner: ObjectKind::NamedRange,
         dependent: "objectScript.instanceId",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
         implemented_by: "object_scripts",
         note: "C10; instanceId == the name, matched case-insensitively.",
@@ -471,58 +653,97 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     // -----------------------------------------------------------------------
     DependencyRule {
         owner: ObjectKind::Sheet,
-        dependent: "table / pivot on the sheet",
+        dependent: "table on the sheet",
+        dependent_kind: Some(ObjectKind::Table),
         policy: DeletePolicy::Cascade,
-        implemented_by: "pivots_to_delete",
-        note: "Both are removed with the sheet; their OWN dependents then \
-               cascade through cascade_deleted_sources.",
+        implemented_by: "DeletedSource::table",
+        note: "Removed with the sheet, and its OWN dependents then cascade \
+                through cascade_deleted_sources. SPLIT FROM THE PIVOT ROW so \
+                dependent_kind can name one kind: the transitive walk in \
+                cascade_domains is only as good as the kind on the row.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,
-        dependent: "slicer.sheetIndex / timelineSlicer.sheetIndex",
+        dependent: "pivot on the sheet",
+        dependent_kind: Some(ObjectKind::Pivot),
+        policy: DeletePolicy::Cascade,
+        implemented_by: "pivots_to_delete",
+        note: "Same as the table row: removed with the sheet, dependents \
+                cascade after.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Sheet,
+        dependent: "slicer.sheetIndex",
+        dependent_kind: Some(ObjectKind::Slicer),
         policy: DeletePolicy::Cascade,
         implemented_by: "cascade_sheet_removed",
         note: "Two defects in one: a slicer ON the deleted sheet survived \
-               invisibly, and every slicer ABOVE it kept an index that now \
-               names a DIFFERENT sheet — so it painted over the wrong one.",
+                invisibly, and every slicer ABOVE it kept an index that now \
+                names a DIFFERENT sheet — so it painted over the wrong one.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,
-        dependent: "chart.sheetIndex / sparkline.sheetIndex",
+        dependent: "timelineSlicer.sheetIndex",
+        dependent_kind: Some(ObjectKind::TimelineSlicer),
         policy: DeletePolicy::Cascade,
         implemented_by: "cascade_sheet_removed",
-        note: "Same two defects. A chart is index-anchored exactly like a slicer.",
+        note: "Same two defects as the slicer row; a timeline is \
+                index-anchored the same way.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Sheet,
+        dependent: "chart.sheetIndex",
+        dependent_kind: Some(ObjectKind::Chart),
+        policy: DeletePolicy::Cascade,
+        implemented_by: "cascade_sheet_removed",
+        note: "Same two defects. A chart is index-anchored exactly like a \
+                slicer.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Sheet,
+        dependent: "sparkline.sheetIndex",
+        dependent_kind: Some(ObjectKind::Sparkline),
+        policy: DeletePolicy::Cascade,
+        implemented_by: "cascade_sheet_removed",
+        note: "Same two defects; sparkline groups are keyed by sheet index.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,
         dependent: "ribbonFilter.connectedSheets",
+        dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_sheet_removed",
         note: "bySheet mode resolves its targets from these indices; a stale \
-               one silently retargets the filter at another sheet's pivots.",
+                one silently retargets the filter at another sheet's pivots.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,
         dependent: "formula.crossSheetReference / definedName.refersTo",
+        dependent_kind: None,
         policy: DeletePolicy::Repair,
         implemented_by: "repair_all_formulas",
         note: "References to the deleted sheet become #REF!, and the whole \
-               workbook recalculates so no stale value survives.",
+                workbook recalculates so no stale value survives.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,
         dependent: "sheet-index-keyed stores (CF, DV, comments, protection, ...)",
+        dependent_kind: None,
         policy: DeletePolicy::Prune,
         implemented_by: "remap_sheet_keyed_stores",
-        note: "Drop the deleted sheet's entries, shift the rest down one.",
+        note: "Drop the deleted sheet's entries, shift the rest down one. \
+                dependent_kind is None deliberately: these stores are re-read \
+                whenever the sheet changes, and the sheet switch IS the \
+                refresh.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,
         dependent: "report.sheetIndex",
+        dependent_kind: Some(ObjectKind::Report),
         policy: DeletePolicy::Prune,
         implemented_by: "remap_report_sheets",
         note: "Otherwise the next refresh materializes a deleted-sheet report \
-               onto whichever sheet inherited its index.",
+                onto whichever sheet inherited its index.",
     },
     // -----------------------------------------------------------------------
     // REPORT
@@ -530,6 +751,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Report,
         dependent: "grid cells in the report's region",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "recalculate_sheet_formulas",
         note: "The region is cleared, so formulas over it must re-evaluate.",
@@ -540,28 +762,31 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Script,
         dependent: "control.properties.macroRef",
+        dependent_kind: None,
         policy: DeletePolicy::WarnAndKeep,
         implemented_by: "",
-        note: "The link model is deliberate — the user may re-point the button. \
-               list_controls_referencing_macro NAMES every button in the \
-               confirm, so the orphan is never silent.",
+        note: "The link model is deliberate — the user may re-point the \
+                button. list_controls_referencing_macro NAMES every button in \
+                the confirm, so the orphan is never silent.",
     },
     DependencyRule {
         owner: ObjectKind::Script,
         dependent: "scheduler job.scriptId",
+        dependent_kind: None,
         policy: DeletePolicy::Cascade,
         implemented_by: "remove_script_jobs",
         note: "A scheduled job whose module is gone woke up on its timer \
-               forever and failed to resolve, every time.",
+                forever and failed to resolve, every time.",
     },
     DependencyRule {
         owner: ObjectKind::Script,
         dependent: "capability grants (net origins, capabilities)",
+        dependent_kind: None,
         policy: DeletePolicy::Cascade,
         implemented_by: "revoke_script",
-        note: "A grant outliving its script is a standing authorisation with no \
-               code attached — and script ids are author-chosen, so a NEW \
-               script created with the same id would inherit it.",
+        note: "A grant outliving its script is a standing authorisation with \
+                no code attached — and script ids are author-chosen, so a NEW \
+                script created with the same id would inherit it.",
     },
     // -----------------------------------------------------------------------
     // OBJECT SCRIPT / CELL BEHAVIOR
@@ -569,18 +794,20 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::ObjectScript,
         dependent: "cellBehavior.scriptId",
+        dependent_kind: Some(ObjectKind::CellBehavior),
         policy: DeletePolicy::WarnAndKeep,
         implemented_by: "",
-        note: "The binding carries an `orphaned` flag by design: it survives so \
-               undo can restore it and the panel can offer a re-target.",
+        note: "The binding carries an `orphaned` flag by design: it survives \
+                so undo can restore it and the panel can offer a re-target.",
     },
     DependencyRule {
         owner: ObjectKind::CellBehavior,
         dependent: "objectScript (objectType \"range\")",
+        dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::WarnAndKeep,
         implemented_by: "",
         note: "Documented on remove_cell_behavior: script lifecycle belongs to \
-               the script UI, not to the binding.",
+                the script UI, not to the binding.",
     },
     // -----------------------------------------------------------------------
     // LEAVES — nothing in the workbook can point at these
@@ -588,6 +815,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::ConditionalFormat,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "A CF rule READS cells; nothing holds a CF rule id.",
@@ -595,6 +823,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::DataValidation,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "Same shape as conditional formatting.",
@@ -602,47 +831,52 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Sparkline,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "Sparklines are keyed by sheet and read a range; nothing refers \
-               to a sparkline group.",
+                to a sparkline group.",
     },
     DependencyRule {
         owner: ObjectKind::AutoFilter,
         dependent: "row visibility + table.autoFilterId",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "recalc_visibility_after_row_change_from_handle",
         note: "Removing the filter must unhide the rows it hid, or they stay \
-               hidden with nothing left to explain them. The owning table's \
-               `auto_filter_id` is cleared in the same breath \
-               (relink_autofilter_owner) -- a stale id made Data > Filter \
-               off/on permanently orphan every table's link.",
+                hidden with nothing left to explain them. The owning table's \
+                `auto_filter_id` is cleared in the same breath \
+                (relink_autofilter_owner) -- a stale id made Data > Filter \
+                off/on permanently orphan every table's link.",
     },
     DependencyRule {
         owner: ObjectKind::NamedStyle,
         dependent: "cells carrying the style",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "NOT a reference: a cell stores a `style_index` into the style \
-               registry, never the style NAME, so deleting the name cannot \
-               dangle. FLAGGED AS A FIDELITY GAP, not a bug: Excel reverts \
-               cells using a deleted style to Normal and Calcula leaves their \
-               resolved formatting in place. Leaving it is the safe option \
-               (nothing the user can see changes and no formatting is lost); \
-               reverting would silently restyle cells across the workbook. \
-               Product call, recorded in section 3bn.",
+                registry, never the style NAME, so deleting the name cannot \
+                dangle. FLAGGED AS A FIDELITY GAP, not a bug: Excel reverts \
+                cells using a deleted style to Normal and Calcula leaves their \
+                resolved formatting in place. Leaving it is the safe option \
+                (nothing the user can see changes and no formatting is lost); \
+                reverting would silently restyle cells across the workbook. \
+                Product call, recorded in section 3bn.",
     },
     DependencyRule {
         owner: ObjectKind::PivotLayout,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "A saved layout is a template applied by value; no pivot points \
-               back at it.",
+                back at it.",
     },
     DependencyRule {
         owner: ObjectKind::Comment,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "Cell-anchored annotation; nothing holds a comment id.",
@@ -650,6 +884,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Note,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "Cell-anchored annotation.",
@@ -657,6 +892,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::Hyperlink,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "Cell-anchored; the link points OUT, nothing points in.",
@@ -664,26 +900,29 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::ComputedProperty,
         dependent: "computed-prop dependency edges",
+        dependent_kind: None,
         policy: DeletePolicy::Prune,
         implemented_by: "clear_prop_dependencies",
         note: "The cell -> property reverse index must lose the entry or it \
-               re-evaluates a property that no longer exists.",
+                re-evaluates a property that no longer exists.",
     },
     DependencyRule {
         owner: ObjectKind::TableColumn,
         dependent: "formula.structuredReference (Table1[ThatColumn])",
+        dependent_kind: None,
         policy: DeletePolicy::Recalculate,
         implemented_by: "recalc_after_table_change",
         note: "The specifier stays and resolves to #REF! — the same answer \
-               Excel gives, and the same rule as a deleted name.",
+                Excel gives, and the same rule as a deleted name.",
     },
     DependencyRule {
         owner: ObjectKind::ObjectTemplate,
         dependent: "-",
+        dependent_kind: None,
         policy: DeletePolicy::NoDependents,
         implemented_by: "",
         note: "A template is copied into a script at instantiation; the copy \
-               keeps no link back.",
+                keeps no link back.",
     },
     // -----------------------------------------------------------------------
     // BI (MODEL) CONNECTION -- the one owner whose dependents are deliberately
@@ -693,15 +932,143 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     DependencyRule {
         owner: ObjectKind::BiConnection,
         dependent: "ribbonFilter.connectionId / biPivot / report.dataSourceId",
+        dependent_kind: None,
         policy: DeletePolicy::WarnAndKeep,
         implemented_by: "",
-        note: "Excel keeps a PivotTable whose connection is gone -- it fails to                REFRESH and says so. Cascading would delete the user's laid-out                pivots and their formatting because a connection string went                stale, which is unrecoverable; leaving them is recoverable by                re-creating the connection. So the objects stay and the delete                NAMES them first: list_object_dependents(biConnection, id) feeds                the confirm, the same standard list_controls_referencing_macro                set for macros.",
+        note: "Excel keeps a PivotTable whose connection is gone -- it fails \
+                to REFRESH and says so. Cascading would delete the user's \
+                laid-out pivots and their formatting because a connection \
+                string went stale, which is unrecoverable; leaving them is \
+                recoverable by re-creating the connection. So the objects stay \
+                and the delete NAMES them first: \
+                list_object_dependents(biConnection, id) feeds the confirm, the \
+                same standard list_controls_referencing_macro set for macros.",
     },
 ];
 
 /// Look up every declared rule for one owner.
 pub fn rules_for(owner: ObjectKind) -> impl Iterator<Item = &'static DependencyRule> {
     DEPENDENCY_MATRIX.iter().filter(move |r| r.owner == owner)
+}
+
+// ===========================================================================
+// THE ANNOUNCEMENT — §3cd, the other half of §3bn
+// ===========================================================================
+//
+// §3bn made the cascade CORRECT. It did not make it VISIBLE. Every object this
+// matrix cascades into lives in a frontend store that caches its own objects
+// and paints its own overlay, so a slicer the backend deleted goes on
+// rendering -- and on claiming the pointer events over the cells underneath --
+// until that store re-reads.
+//
+// Where the deletion is started BY the frontend, the deleting route announces
+// on the way back and `cascadeAnnouncementCensus.test.ts` proves it does. This
+// module answers the other direction: a mutation started INSIDE the backend
+// (an MCP tool driven by an AI client, with no frontend call to return from)
+// has nothing to hook an announcement onto, so it must emit one itself.
+//
+// The domain list is DERIVED from the matrix rather than remembered. That is
+// the whole reason `dependent_kind` exists: `table.delete` disturbs the ribbon
+// filter store, and the only way to know that without being told is to notice
+// that a table cascades into slicers and a slicer cascades into ribbon filters.
+
+/// The Tauri event a backend-initiated mutation emits. Bridged in
+/// `app/src/shell/bootstrap.ts` into the SAME `MUTATION_DOMAIN_EVENTS` fan-out
+/// the frontend `MUTATION_REFRESH` announcement uses, so there is one
+/// translator from domains to feature events and not two.
+pub const MUTATION_REFRESH_EVENT: &str = "mutation:refresh";
+
+/// Payload of [`MUTATION_REFRESH_EVENT`] — the wire twin of
+/// `MutationRefreshPayload` in `app/src/api/events.ts`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationRefreshEvent {
+    pub domains: Vec<String>,
+    /// Always `"commit"` from the backend: undo and redo are driven from the
+    /// frontend, which reports its own source.
+    pub source: String,
+}
+
+/// Does this policy actually REMOVE the dependent object, so that the
+/// dependent's own dependents cascade in turn?
+fn deletes_the_dependent(policy: DeletePolicy) -> bool {
+    matches!(policy, DeletePolicy::Cascade | DeletePolicy::CascadeOrRebind)
+}
+
+/// Does this policy change the dependent at all, so that its store is stale?
+fn disturbs_the_dependent(policy: DeletePolicy) -> bool {
+    matches!(
+        policy,
+        DeletePolicy::Cascade | DeletePolicy::CascadeOrRebind | DeletePolicy::Prune
+    )
+}
+
+/// Every frontend refresh domain that deleting `owner` leaves stale, INCLUDING
+/// the owner's own store, sorted and de-duplicated.
+///
+/// TRANSITIVE, and that is the point. Deleting a table deletes its slicers
+/// (`CascadeOrRebind`), and deleting a slicer prunes it out of every ribbon
+/// filter (`Prune`), so a table delete owes the ribbon-filter domain as well.
+/// Nobody has to remember that: the walk reads it off `dependent_kind`.
+///
+/// Recursion follows only the policies that DELETE the dependent — a pruned
+/// ribbon filter survives, so its own dependents are untouched — while the
+/// domain is collected for every policy that disturbs it at all.
+pub fn cascade_domains(owner: ObjectKind) -> Vec<&'static str> {
+    let mut domains: BTreeSet<&'static str> = BTreeSet::new();
+    let mut visited: HashSet<&'static str> = HashSet::new();
+    let mut queue: Vec<ObjectKind> = vec![owner];
+    if let Some(name) = owner.ui_domain().wire_name() {
+        domains.insert(name);
+    }
+    while let Some(kind) = queue.pop() {
+        if !visited.insert(kind.wire_name()) {
+            continue;
+        }
+        for rule in rules_for(kind) {
+            if !disturbs_the_dependent(rule.policy) {
+                continue;
+            }
+            let Some(dependent) = rule.dependent_kind else {
+                continue;
+            };
+            if let Some(name) = dependent.ui_domain().wire_name() {
+                domains.insert(name);
+            }
+            if deletes_the_dependent(rule.policy) {
+                queue.push(dependent);
+            }
+        }
+    }
+    domains.into_iter().collect()
+}
+
+/// Tell the frontend that a BACKEND-INITIATED mutation of `owner` just ran.
+///
+/// Call it from every surface that mutates the document without a frontend
+/// command call to return from — today that is the MCP tool surface, which an
+/// AI client drives directly. `mcp_announce_census` in
+/// `object_deps_census_tests.rs` fails the build for an MCP function that
+/// reaches a declared cascade without calling this.
+///
+/// Emitted unconditionally: a refresh with nothing to refresh is one cache
+/// re-read, while a missed one is a ghost overlay that eats clicks.
+pub fn announce_cascade(handle: &tauri::AppHandle, owner: ObjectKind) {
+    use tauri::Emitter;
+    let domains: Vec<String> = cascade_domains(owner)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if domains.is_empty() {
+        return;
+    }
+    let _ = handle.emit(
+        MUTATION_REFRESH_EVENT,
+        MutationRefreshEvent {
+            domains,
+            source: "commit".to_string(),
+        },
+    );
 }
 
 // ===========================================================================
@@ -827,6 +1194,7 @@ impl SourceCascade {
 /// `BiConnection` slicers are untouched: their `cache_source_id` names a model
 /// connection, not a table or a pivot, so a matching id would be a coincidence.
 pub fn cascade_deleted_sources(
+    state: &AppState,
     slicer_state: &SlicerState,
     timeline_state: &TimelineSlicerState,
     ribbon_filter_state: &RibbonFilterState,
@@ -939,6 +1307,44 @@ pub fn cascade_deleted_sources(
             if let Some(tl) = timelines.remove(&id) {
                 out.deleted_timelines.push(tl);
             }
+        }
+    }
+
+    // --- THE DELETED SLICERS' AND TIMELINES' OWN CASCADES ------------------
+    //
+    // A CASCADE THAT DELETES AN OBJECT MUST RUN THAT OBJECT'S OWN CASCADE, and
+    // this is where §3bt stopped one step short. `delete_slicer` prunes the
+    // slicer out of every ribbon filter's `cross_filter_slicer_targets` and
+    // prunes the object script attached to its id -- and the slicers deleted a
+    // few lines above went out through this path instead, which ran neither. So
+    // deleting the TABLE a slicer filtered left every ribbon filter still
+    // cross-filtering against a slicer that no longer existed: the same orphan
+    // §3bn opened for, one level further down the tree.
+    //
+    // Found by the transitive walk added in §3cd (`cascade_domains`), not by
+    // reading this function: the old census asked "does `delete_slicer` run the
+    // slicer's cascade?" and never "does anything ELSE that deletes a slicer
+    // run it?".
+    {
+        let dead_slicers: Vec<EntityId> = out.deleted_slicers.iter().map(|s| s.id).collect();
+        let pruned = cascade_deleted_slicers(ribbon_filter_state, effect, &dead_slicers);
+        // Into `rebound_filters`, which is exactly what
+        // `record_source_cascade_undo` already restores -- so one Ctrl+Z brings
+        // the cross-filter links back with the slicers.
+        out.rebound_filters.extend(pruned);
+        for id in dead_slicers {
+            crate::scripting::object_script_commands::prune_scripts_for_instance(
+                state,
+                effect,
+                &id.to_string(),
+            );
+        }
+        for tl in &out.deleted_timelines {
+            crate::scripting::object_script_commands::prune_scripts_for_instance(
+                state,
+                effect,
+                &tl.id.to_string(),
+            );
         }
     }
 
@@ -1198,6 +1604,31 @@ pub fn cascade_sheet_removed(
             }
         }
         *sparklines = kept;
+    }
+
+    // THE DELETED SLICERS' AND TIMELINES' OWN CASCADES, for the same reason
+    // `cascade_deleted_sources` runs them (§3cd): a slicer removed with its
+    // sheet is still named in every ribbon filter's cross-filter target list,
+    // and still owns an object script keyed on its id. The charts removed here
+    // are handled by the caller, which is the one holding `PaneControlState`.
+    {
+        let dead_slicers: Vec<EntityId> = out.deleted_slicers.iter().map(|s| s.id).collect();
+        out.previous_filters
+            .extend(cascade_deleted_slicers(ribbon_filter_state, effect, &dead_slicers));
+        for id in dead_slicers {
+            crate::scripting::object_script_commands::prune_scripts_for_instance(
+                state,
+                effect,
+                &id.to_string(),
+            );
+        }
+        for tl in &out.deleted_timelines {
+            crate::scripting::object_script_commands::prune_scripts_for_instance(
+                state,
+                effect,
+                &tl.id.to_string(),
+            );
+        }
     }
 
     {

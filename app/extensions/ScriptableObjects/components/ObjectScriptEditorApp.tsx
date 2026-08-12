@@ -372,8 +372,23 @@ export function liveStateLabel(live: LiveDocState | undefined): string {
   }
 }
 
-/** Turn a persist outcome into what the author is shown. */
-export function liveStateFromOutcome(outcome: LivePersistOutcome): LiveDocState {
+/**
+ * Turn a persist outcome into what the author is shown.
+ *
+ * `bufferStillUnsaved` is the persister's own comparison of the buffer against
+ * the bytes the store holds, taken at the moment the outcome lands — and it is
+ * NOT redundant with the outcome. An outcome describes the pass that has just
+ * finished, i.e. bytes that were current when the write STARTED; a keystroke
+ * that arrives while the write is in flight leaves the buffer ahead of it. A
+ * "saved" outcome is therefore not by itself evidence that the store holds what
+ * is on screen, and the chip is the only thing that answers that question — so
+ * while the buffer is ahead the honest answer is "Saving…", never "Live".
+ * (BUG-0025: a spec waited for "Live" and read a keystroke-old module back.)
+ */
+export function liveStateFromOutcome(
+  outcome: LivePersistOutcome,
+  bufferStillUnsaved = false,
+): LiveDocState {
   switch (outcome.status) {
     case "deferred":
       return { state: "deferred", message: outcome.message };
@@ -381,7 +396,7 @@ export function liveStateFromOutcome(outcome: LivePersistOutcome): LiveDocState 
     case "failed":
       return { state: "error", message: outcome.message };
     default:
-      return { state: "live" };
+      return bufferStillUnsaved ? { state: "saving" } : { state: "live" };
   }
 }
 
@@ -573,11 +588,29 @@ export function ObjectScriptEditorApp(): React.ReactElement {
    *  keeps failing on the same broken line does not fill the console with it. */
   const lastLiveErrorRef = useRef<Map<string, string>>(new Map());
 
+  /** The live-persist engine. The ref is declared HERE, above the handler that
+   *  applies its outcomes, because that handler has to ask it what the buffer
+   *  looks like NOW — an outcome only knows what it wrote. Constructed further
+   *  down, where its options can close over the rest of this component. */
+  const persisterRef = useRef<LiveModulePersister | null>(null);
+
   const applyLiveOutcome = useCallback(
     (docId: string, outcome: LivePersistOutcome) => {
-      setLiveStates((prev) => ({ ...prev, [docId]: liveStateFromOutcome(outcome) }));
+      // THE CHIP IS SET LAST, NOT FIRST. It answers "does the store hold what I
+      // am looking at", which is a question about the buffer as it is NOW — and
+      // the buffer can still be adopted further down (a compile puts the stored
+      // JavaScript on screen). Asking the persister before that would report the
+      // moment before the swap and leave the chip a lie until the next write.
+      const showChip = () => {
+        const bufferStillUnsaved = persisterRef.current?.hasUnsavedEdits(docId) ?? false;
+        setLiveStates((prev) => ({
+          ...prev,
+          [docId]: liveStateFromOutcome(outcome, bufferStillUnsaved),
+        }));
+      };
 
       if (outcome.status === "invalid" || outcome.status === "failed") {
+        showChip();
         const detail = outcome.status === "invalid" ? outcome.detail : outcome.message;
         if (lastLiveErrorRef.current.get(docId) !== detail) {
           lastLiveErrorRef.current.set(docId, detail);
@@ -591,7 +624,10 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         return;
       }
       lastLiveErrorRef.current.delete(docId);
-      if (!outcomeWroteNewBytes(outcome)) return;
+      if (!outcomeWroteNewBytes(outcome)) {
+        showChip();
+        return;
+      }
 
       const stored = outcome.stored;
       const isActive = activeDocIdRef.current === docId;
@@ -616,17 +652,40 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       if (isActive) setIsDirty(sourceRef.current !== stored);
 
       if (outcome.status === "compiled" && isActive) {
-        // The stored bytes are not the buffer bytes, so show what was stored:
-        // the author must never be looking at text other than the text that
-        // runs, is hashed for consent and is read by a reviewer.
-        setSource(stored);
-        setLanguage("javascript");
-        reportToConsole(
-          "TypeScript compiled to JavaScript. The stored module is the JavaScript now shown.",
-          docId,
-          "info",
-        );
+        if (sourceRef.current !== outcome.input) {
+          // THE SAME STALENESS, IN ITS DESTRUCTIVE FORM. The author kept typing
+          // while the compile ran, so what is on screen is no longer the text
+          // that was compiled — and swapping it for `stored` would silently
+          // delete those keystrokes. Rule 4 already says an author's moving text
+          // is not rewritten underneath them: keep it, let the write that is
+          // already armed catch up, and let the next gesture do the compile.
+          // (`input` is compared, not "does the buffer differ from the store":
+          // for a TypeScript module those bytes NEVER agree, which is the whole
+          // reason this branch exists.)
+          reportToConsole(
+            "TypeScript compiled to JavaScript, but you have typed since — your text is " +
+              "kept and is not yet stored. Press Ctrl+S (or Run) to compile and store it.",
+            docId,
+            "info",
+          );
+        } else {
+          // The stored bytes are not the buffer bytes, so show what was stored:
+          // the author must never be looking at text other than the text that
+          // runs, is hashed for consent and is read by a reviewer. The persister
+          // is TOLD about the swap — it is the mirror of what is on screen, and
+          // a programmatic setSource never reaches it through the change handler.
+          setSource(stored);
+          setLanguage("javascript");
+          persisterRef.current?.adopt(docId, stored);
+          reportToConsole(
+            "TypeScript compiled to JavaScript. The stored module is the JavaScript now shown.",
+            docId,
+            "info",
+          );
+        }
       }
+
+      showChip();
 
       // AN OPEN SESSION IS NOT HOT-SWAPPED. It keeps its instrumented snapshot;
       // the next Run/Debug is what picks the new source up.
@@ -637,7 +696,6 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const applyLiveOutcomeRef = useRef(applyLiveOutcome);
   applyLiveOutcomeRef.current = applyLiveOutcome;
 
-  const persisterRef = useRef<LiveModulePersister | null>(null);
   if (!persisterRef.current) {
     persisterRef.current = new LiveModulePersister({
       // The SAME gate the Save button always used. An auto-persist is still a

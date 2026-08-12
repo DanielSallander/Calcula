@@ -29,6 +29,7 @@
  */
 import type { Page, Locator } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { liveIndicator } from "../helpers/macroEditor";
 import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
@@ -558,9 +559,7 @@ test.describe("Macro link model", () => {
         // Macro mode is unmistakable: a module has NO Save button (its edits are
         // live, exactly as in the VBE) — it carries the live-state indicator
         // instead — and the document dropdown shows the macro under its name.
-        await expect(
-          editorPage!.locator("[data-testid='module-live-indicator']"),
-        ).toBeVisible({ timeout: 30_000 });
+        await expect(liveIndicator(editorPage!)).toBeVisible({ timeout: 30_000 });
         await expect(
           editorPage!.locator("button").filter({ hasText: /^Save Macro$/ }),
         ).toHaveCount(0);
