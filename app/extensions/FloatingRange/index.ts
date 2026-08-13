@@ -25,6 +25,7 @@ import {
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 import { confirmAsync, promptAsync } from "@api/dialogs";
+import { onDesignModeChange } from "@api/designMode";
 import { getGridStateSnapshot, rowHeaderGutter, colHeaderGutter } from "@api/grid";
 import {
   isGlobalFormulaMode,
@@ -695,6 +696,17 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("keydown", handleFrKeyDown, true);
   cleanupFns.push(() =>
     window.removeEventListener("keydown", handleFrKeyDown, true),
+  );
+
+  // 3b. Design mode gates move/resize (the BUTTON rule — see
+  // syncFloatingRangeRegions). The flags live on the published regions, so a
+  // toggle must re-publish them or the change waits for the next unrelated
+  // sync; the redraw repaints the frames so any design-only chrome follows.
+  cleanupFns.push(
+    onDesignModeChange(() => {
+      syncFloatingRangeRegions();
+      requestOverlayRedraw();
+    }),
   );
 
   // 4. Insert menu.

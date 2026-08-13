@@ -31,6 +31,7 @@ vi.mock("@api/floatingRanges", () => ({
 
 import { updateFloatingRange, type FloatingRangeInfo } from "@api/floatingRanges";
 import { getGridRegions } from "@api/gridOverlays";
+import { setDesignMode } from "@api/designMode";
 import {
   fromInfo,
   toInfo,
@@ -194,9 +195,35 @@ describe("syncFloatingRangeRegions", () => {
       frId: "c",
       rows: 2,
       cols: 3,
-      movable: true,
-      resizable: true,
     });
+  });
+
+  it("gates move/resize on DESIGN MODE — the button rule, not the shape rule", () => {
+    // In run mode a floating range is a working surface: cells select and
+    // edit, but a drag that relocates the object is layout work. Core
+    // consults these two flags before starting either gesture, so this IS
+    // the gate (owner decision 2026-08-13).
+    upsertFromInfo(
+      makeInfo({ id: "d", name: "Float1", hostSheetIndex: 0, rowCount: 1, colCount: 1 }),
+    );
+    setFrActiveSheetIndex(0);
+    try {
+      setDesignMode(false);
+      syncFloatingRangeRegions();
+      expect(getGridRegions().find((r) => r.id === "fr-d")!.data).toMatchObject({
+        movable: false,
+        resizable: false,
+      });
+
+      setDesignMode(true);
+      syncFloatingRangeRegions();
+      expect(getGridRegions().find((r) => r.id === "fr-d")!.data).toMatchObject({
+        movable: true,
+        resizable: true,
+      });
+    } finally {
+      setDesignMode(false);
+    }
   });
 
   it("honors per-column width overrides in the derived width", () => {

@@ -74,20 +74,36 @@ export function listFloatingRanges(): Promise<FloatingRangeInfo[]> {
 }
 
 /**
+ * The floating range ROW STORE changed (create / delete / geometry / window):
+ * announced at the WRAPPER, like every backend-state refresh family, so any
+ * route through these bindings — the extension's own menus, a test, a future
+ * tool — keeps the FloatingRange extension's cached rows honest. The Shell
+ * translator fans the domain out to FLOATING_RANGES_CHANGED + grid:refresh.
+ */
+function announceFloatingRangeRowsChanged(): void {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["floatingRanges"],
+    source: "commit",
+  });
+}
+
+/**
  * Create a 1x1 floating range on the ACTIVE sheet at sheet-pixel (x, y).
  * Omitted name auto-mints "Float1", "Float2", … in the shared sheet namespace.
  * Keeps undo history (pure append).
  */
-export function createFloatingRange(
+export async function createFloatingRange(
   x: number,
   y: number,
   name?: string | null,
 ): Promise<FloatingRangeInfo> {
-  return invokeBackend<FloatingRangeInfo>("create_floating_range", {
+  const created = await invokeBackend<FloatingRangeInfo>("create_floating_range", {
     name: name ?? null,
     x,
     y,
   });
+  announceFloatingRangeRowsChanged();
+  return created;
 }
 
 /**
@@ -95,11 +111,13 @@ export function createFloatingRange(
  * UNDOABLE backend-side; bounds 1..1000 rows, 1..256 cols; a no-op patch
  * records nothing.
  */
-export function updateFloatingRange(
+export async function updateFloatingRange(
   id: string,
   patch: FloatingRangePatch,
 ): Promise<FloatingRangeInfo> {
-  return invokeBackend<FloatingRangeInfo>("update_floating_range", { id, patch });
+  const info = await invokeBackend<FloatingRangeInfo>("update_floating_range", { id, patch });
+  announceFloatingRangeRowsChanged();
+  return info;
 }
 
 /**
@@ -134,11 +152,13 @@ export async function updateFloatingRangeCell(
  * Rename the FR (validated against the shared sheet namespace; repairs every
  * formula that referenced the old name). ENDS the undo history.
  */
-export function renameFloatingRange(
+export async function renameFloatingRange(
   id: string,
   newName: string,
 ): Promise<FloatingRangeInfo> {
-  return invokeBackend<FloatingRangeInfo>("rename_floating_range", { id, newName });
+  const info = await invokeBackend<FloatingRangeInfo>("rename_floating_range", { id, newName });
+  announceFloatingRangeRowsChanged();
+  return info;
 }
 
 /**
@@ -148,6 +168,7 @@ export function renameFloatingRange(
  */
 export async function deleteFloatingRange(id: string): Promise<void> {
   await invokeBackend<void>("delete_floating_range", { id });
+  announceFloatingRangeRowsChanged();
   refreshGridData();
   emitAppEvent(AppEvents.CELLS_UPDATED);
 }

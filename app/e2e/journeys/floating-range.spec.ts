@@ -76,8 +76,28 @@ interface FrInfo {
 
 const listFrs = (page: Page) => invoke<FrInfo[]>(page, "list_floating_ranges");
 
+/** Mutations go through the @api WRAPPER module — the product's own route,
+ *  which announces the change so the extension reloads and PAINTS. A raw
+ *  invoke would mutate the backend and draw nothing (proven live by this
+ *  spec's own first run). */
+async function frApi<T = unknown>(page: Page, fn: string, args: unknown[]): Promise<T> {
+  return page.evaluate(
+    async ({ fn, args }) => {
+      const mod = await (window as unknown as {
+        __calcImport: (u: string) => Promise<Record<string, (...a: unknown[]) => Promise<unknown>>>;
+      }).__calcImport(new URL("/src/api/floatingRanges.ts", document.baseURI).href);
+      return (await mod[fn](...args)) as unknown;
+    },
+    { fn, args },
+  ) as Promise<T>;
+}
+
 async function createFr(page: Page, name: string): Promise<FrInfo> {
-  return invoke<FrInfo>(page, "create_floating_range", { name, x: FR_X, y: FR_Y });
+  return frApi<FrInfo>(page, "createFloatingRange", [FR_X, FR_Y, name]);
+}
+
+async function deleteFr(page: Page, id: string): Promise<void> {
+  await frApi(page, "deleteFloatingRange", [id]);
 }
 
 async function setFrCell(page: Page, id: string, row: number, col: number, value: string) {
@@ -141,9 +161,9 @@ async function eventually<T>(
 async function patchMean(page: Page, x: number, y: number, w = 24, h = 12): Promise<number> {
   return page.evaluate(
     ({ x, y, w, h }) => {
-      const canvas = document.querySelector(
-        "[data-grid-canvas-layer] canvas",
-      ) as HTMLCanvasElement | null;
+      // The FIRST canvas is the grid (the shapes-hometab probe's idiom — the
+      // canvas layer wrapper carries no data attribute of its own).
+      const canvas = document.querySelector("canvas") as HTMLCanvasElement | null;
       if (!canvas) throw new Error("grid canvas not found");
       const ctx = canvas.getContext("2d")!;
       const dpr = window.devicePixelRatio || 1;
@@ -173,7 +193,7 @@ async function frTitlePatch(page: Page): Promise<{ x: number; y: number }> {
 // ---------------------------------------------------------------------------
 
 test.describe.serial("floating ranges, live", () => {
-  test("create paints a floating frame over the grid; delete unpaints it", async ({ page }) => {
+  test("create paints a floating frame over the grid; delete unpaints it", async ({ appPage: page }) => {
     const { x, y } = await frTitlePatch(page);
     const before = await patchMean(page, x, y);
 
@@ -185,7 +205,7 @@ test.describe.serial("floating ranges, live", () => {
         "the floating frame never painted (patch unchanged)",
       );
     } finally {
-      await invoke(page, "delete_floating_range", { id: fr.id });
+      await deleteFr(page, fr.id);
     }
     await eventually(
       () => patchMean(page, x, y),
@@ -195,13 +215,13 @@ test.describe.serial("floating ranges, live", () => {
     expect(await listFrs(page)).toEqual([]);
   });
 
-  test("references live in all three directions, through real edits", async ({ page }) => {
+  test("references live in all three directions, through real edits", async ({ appPage: page }) => {
     const a = await createFr(page, "FloatE2E");
     const b = await createFr(page, "FloatE2Eb");
     try {
       // grid -> float
       await setGridCell(page, P.row, P.col, "5");
-      await setFrCell(page, a.id, 0, 0, "=CA41*2");
+      await setFrCell(page, a.id, 0, 0, "=Sheet1!CA41*2");
       await eventually(
         () => frCell(page, a.id, 0, 0),
         (v) => v === 10,
@@ -237,14 +257,14 @@ test.describe.serial("floating ranges, live", () => {
       );
     } finally {
       for (const fr of await listFrs(page)) {
-        await invoke(page, "delete_floating_range", { id: fr.id });
+        await deleteFr(page, fr.id);
       }
       await setGridCell(page, P.row, P.col, "");
       await setGridCell(page, P.row + 1, P.col, "");
     }
   });
 
-  test("deleting the range turns its references into #REF!", async ({ page }) => {
+  test("deleting the range turns its references into #REF!", async ({ appPage: page }) => {
     const fr = await createFr(page, "FloatE2E");
     await setFrCell(page, fr.id, 0, 0, "3");
     await setGridCell(page, P.row + 2, P.col, "=FloatE2E!A1");
@@ -254,7 +274,7 @@ test.describe.serial("floating ranges, live", () => {
       "precondition: the reference evaluated",
     );
 
-    await invoke(page, "delete_floating_range", { id: fr.id });
+    await deleteFr(page, fr.id);
     await eventually(
       () => gridCell(page, P.row + 2, P.col),
       (v) => typeof v === "string" && v.includes("REF"),
@@ -264,13 +284,13 @@ test.describe.serial("floating ranges, live", () => {
   });
 
   test("a saved, wiped and reopened document still recalculates its floating range (§2z)", async ({
-    page,
+    appPage: page,
   }) => {
     const fr = await createFr(page, "FloatE2E");
     let reopened = false;
     try {
       await setGridCell(page, P.row, P.col, "5");
-      await setFrCell(page, fr.id, 0, 0, "=CA41*2");
+      await setFrCell(page, fr.id, 0, 0, "=Sheet1!CA41*2");
       await eventually(() => frCell(page, fr.id, 0, 0), (v) => v === 10, "precondition");
 
       await invoke(page, "save_file", { path: SAVED_DOC });
@@ -298,14 +318,14 @@ test.describe.serial("floating ranges, live", () => {
     } finally {
       if (reopened) {
         for (const fr2 of await listFrs(page)) {
-          await invoke(page, "delete_floating_range", { id: fr2.id });
+          await deleteFr(page, fr2.id);
         }
         await setGridCell(page, P.row, P.col, "");
       }
     }
   });
 
-  test("undoing a cell edit restores the value without moving the user", async ({ page }) => {
+  test("undoing a cell edit restores the value without moving the user", async ({ appPage: page }) => {
     const fr = await createFr(page, "FloatE2E");
     try {
       await setFrCell(page, fr.id, 0, 0, "3");
@@ -323,7 +343,7 @@ test.describe.serial("floating ranges, live", () => {
       expect(activeAfter.activeIndex).toBe(activeBefore.activeIndex);
     } finally {
       for (const fr2 of await listFrs(page)) {
-        await invoke(page, "delete_floating_range", { id: fr2.id });
+        await deleteFr(page, fr2.id);
       }
     }
   });

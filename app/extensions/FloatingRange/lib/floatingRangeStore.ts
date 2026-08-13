@@ -17,6 +17,7 @@ import {
   updateFloatingRange,
   type FloatingRangeInfo,
 } from "@api/floatingRanges";
+import { getDesignMode } from "@api/designMode";
 import { frameWidth, frameHeight } from "./frDimensions";
 
 // ============================================================================
@@ -258,9 +259,19 @@ export function resetFloatingRangeStore(): void {
  * Publish overlay regions for the ACTIVE sheet's floating ranges (atomically —
  * replaceGridRegionsByType, one listener notification). Frame size is derived
  * here, never read from anywhere else.
+ *
+ * MOVE/RESIZE ARE DESIGN-MODE ACTS, the BUTTON rule rather than the shape
+ * rule (owner decision 2026-08-13): in run mode a floating range is a working
+ * surface — its cells select and edit — and a drag that relocates it is
+ * layout work. Core consults `data.movable`/`data.resizable` before starting
+ * either gesture, so gating the flags here gates the whole interaction; the
+ * DESIGN_MODE_CHANGED_EVENT listener in index.ts re-syncs so a toggle takes
+ * effect on the spot. Cell interaction (claimsBodyDrag over the cell area)
+ * stays live in both modes, exactly as a button still CLICKS in run mode.
  */
 export function syncFloatingRangeRegions(): void {
   const visible = entries.filter((e) => e.sheetIndex === activeSheetIndex);
+  const designing = getDesignMode();
 
   const regions: GridRegion[] = visible.map((entry) => ({
     id: `${FR_REGION_ID_PREFIX}${entry.id}`,
@@ -280,8 +291,8 @@ export function syncFloatingRangeRegions(): void {
       name: entry.name,
       rows: entry.rows,
       cols: entry.cols,
-      movable: true,
-      resizable: true,
+      movable: designing,
+      resizable: designing,
     },
   }));
 
