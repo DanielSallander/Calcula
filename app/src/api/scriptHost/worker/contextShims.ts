@@ -3020,6 +3020,44 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
      */
     deleteShape: (instanceId: string) =>
       call(rt, "api.deleteShape", [instanceId]) as Promise<void>,
+    /**
+     * Create a FLOATING RANGE on the ACTIVE sheet: a small movable grid of
+     * real cells whose values formulas reference as `Name!A1` from anywhere.
+     * Starts 1x1 unless `rows`/`cols` are given (window bounds 1..1000 x
+     * 1..256). Creation itself is NOT undoable; the cells you then write ARE.
+     */
+    createFloatingRange: (options?: {
+      name?: string;
+      x?: number;
+      y?: number;
+      rows?: number;
+      cols?: number;
+    }) => call(rt, "api.createFloatingRange", [options]),
+    /**
+     * Delete a floating range by the id api.listObjects("floatingRange")
+     * reports. Formulas referencing it show #REF!. NOT undoable — like
+     * deleting a sheet, it ENDS the undo history.
+     */
+    deleteFloatingRange: (id: string) =>
+      call(rt, "api.deleteFloatingRange", [id]) as Promise<void>,
+    /**
+     * Write a rectangular block of values/formulas into a floating range,
+     * starting at (startRow, startCol) inside its window. Strings beginning
+     * with "=" are formulas; numbers and booleans are typed writes. Undoable,
+     * and recalculates exactly like typing.
+     */
+    floatingRangeSetCells: (
+      id: string,
+      startRow: number,
+      startCol: number,
+      values: (string | number | boolean | null)[][],
+    ) => call(rt, "api.floatingRangeSetCells", [id, startRow, startCol, values]) as Promise<void>,
+    /** Read a floating range's cells (sparse: only cells that hold something). */
+    floatingRangeGetCells: (id: string) =>
+      call(rt, "api.floatingRangeGetCells", [id]),
+    /** Change the visible window (rows x cols). Shrinking hides, never deletes. */
+    floatingRangeResize: (id: string, rows: number, cols: number) =>
+      call(rt, "api.floatingRangeResize", [id, rows, cols]),
     createNamedRange: (
       name: string, refersTo: string,
       options?: { sheetIndex?: SheetRef | null; comment?: string },

@@ -71,6 +71,10 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if !workbook.charts.is_empty() {
         manifest.features.push("charts".to_string());
     }
+    // Feature id only, no version link — see the floating_ranges.json write.
+    if !workbook.floating_ranges.is_empty() {
+        manifest.features.push("floating_ranges".to_string());
+    }
     if !workbook.pivot_layouts.is_empty() {
         manifest.features.push("pivot_layouts".to_string());
     }
@@ -430,6 +434,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         let charts_json = serde_json::to_string_pretty(&workbook.charts)?;
         zip.start_file("charts.json", options.clone())?;
         zip.write_all(charts_json.as_bytes())?;
+    }
+
+    // Floating range object rows. A manifest FEATURE ID with NO format-version
+    // link (the media precedent): an older reader drops the rows and the
+    // backing sheets load as non-visible sheets with intact values — visible
+    // LOSS, not misinterpretation. The read below is unconditional
+    // (named_ranges/sparklines precedent) so bytes written by a build that
+    // forgot the id are still recovered.
+    if !workbook.floating_ranges.is_empty() {
+        let json = serde_json::to_string_pretty(&workbook.floating_ranges)?;
+        zip.start_file("floating_ranges.json", options.clone())?;
+        zip.write_all(json.as_bytes())?;
     }
 
     // Write named ranges (defined names) as a single named_ranges.json array.
@@ -1012,6 +1028,12 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         Vec::new()
     };
 
+    // Read floating range rows — UNCONDITIONALLY (the named_ranges/sparklines
+    // precedent): a build that wrote the section but forgot the feature id
+    // still gets its objects back.
+    let floating_ranges: Vec<persistence::SavedFloatingRange> =
+        read_optional_json(&mut archive, "floating_ranges.json")?.unwrap_or_default();
+
     // Read sparklines
     let sparklines: Vec<SavedSparkline> =
         read_optional_json::<Vec<SavedSparkline>>(&mut archive, "sparklines.json")?
@@ -1113,6 +1135,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         properties,
         charts,
         sparklines,
+        floating_ranges,
         named_ranges,
         pivot_layouts,
         pivot_definitions,

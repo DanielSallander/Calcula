@@ -171,6 +171,20 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
   if (aspect === "shape.setProperty") {
     return checkShapeSetProperty(aspectArgs);
   }
+  // Floating ranges are an enumerable kind (`api.listObjects`), so BOTH
+  // setState doors can name them — and the tail of this ladder is `return
+  // true` (the shape.setProperty lesson, one paragraph up). Every
+  // floatingRange.* aspect therefore refuses BY NAME: the object's whole
+  // mutation surface lives on dedicated allowlist rows with their own
+  // validators and consent sentences, and an aspect route would be a second,
+  // laxer door to the same state.
+  if (typeof aspect === "string" && aspect.startsWith("floatingRange.")) {
+    return (
+      "floating ranges are not addressed through setState aspects; use " +
+      "api.createFloatingRange / api.floatingRangeSetCells / " +
+      "api.floatingRangeResize / api.deleteFloatingRange"
+    );
+  }
   return true;
 };
 export const vDecl: Validator = ([decls]) =>
@@ -4128,6 +4142,113 @@ export const vCreatePicture: Validator = ([dataRef, anchor, options]) => {
     if (o[k] !== undefined && (!isFiniteNumber(o[k]) || (o[k] as number) < 10 || (o[k] as number) > 20_000)) {
       return `${k} must be a number between 10 and 20000 (pixels)`;
     }
+  }
+  return true;
+};
+
+// ============================================================================
+// Floating ranges (M9). The kind's whole mutation surface is these dedicated
+// rows — the setState aspect door refuses "floatingRange.*" by name (vSetState)
+// so this cannot be bypassed through a laxer path.
+// ============================================================================
+
+/** Window bounds — the Rust command enforces the same pair (MAX_FLOATING_RANGE_*
+ *  in floating_range.rs); repeated here so a typo fails with the accepted range
+ *  instead of a backend round-trip. */
+const MAX_FR_ROWS = 1000;
+const MAX_FR_COLS = 256;
+/** Total cells one setCells call may write. Bounds the per-cell IPC loop. */
+const MAX_FR_SET_CELLS = 10_000;
+/** Per-cell text bound — Excel's own cell-text cap. */
+const MAX_FR_CELL_CHARS = 32_767;
+
+function checkFrWindow(rows: unknown, cols: unknown): true | string {
+  if (!Number.isInteger(rows) || (rows as number) < 1 || (rows as number) > MAX_FR_ROWS) {
+    return `rows must be an integer between 1 and ${MAX_FR_ROWS}`;
+  }
+  if (!Number.isInteger(cols) || (cols as number) < 1 || (cols as number) > MAX_FR_COLS) {
+    return `cols must be an integer between 1 and ${MAX_FR_COLS}`;
+  }
+  return true;
+}
+
+/**
+ * `api.createFloatingRange` args: [options?] with {name?, x?, y?, rows?, cols?}.
+ * Like api.createShape there is no bytes/path/URL/source parameter to refuse —
+ * a caller names a NAME (validated against the shared sheet-name rules
+ * backend-side, where uniqueness lives) and a position. ACTIVE SHEET only,
+ * decided backend-side from the live active sheet, so no sheet argument exists.
+ */
+export const vCreateFloatingRange: Validator = ([options]) => {
+  if (options === undefined || options === null) return true;
+  if (!isPlainObject(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["name", "x", "y", "rows", "cols"], "floating range option");
+  if (known !== true) return known;
+  if (o.name !== undefined && (!isBoundedString(o.name, 31) || (o.name as string).length === 0)) {
+    return "name must be a string of 1..31 characters (it shares the sheet-name rules)";
+  }
+  for (const k of ["x", "y"] as const) {
+    if (o[k] !== undefined && (!isFiniteNumber(o[k]) || (o[k] as number) < 0 || (o[k] as number) > 1_000_000)) {
+      return `${k} must be a non-negative number of sheet pixels`;
+    }
+  }
+  if (o.rows !== undefined || o.cols !== undefined) {
+    return checkFrWindow(o.rows ?? 1, o.cols ?? 1);
+  }
+  return true;
+};
+
+/** `api.floatingRangeResize` args: [id, rows, cols]. */
+export const vFloatingRangeResize: Validator = ([id, rows, cols]) => {
+  if (!isBoundedString(id, 64) || (id as string).length === 0) {
+    return "expected the floating range id api.listObjects(\"floatingRange\") reports";
+  }
+  return checkFrWindow(rows, cols);
+};
+
+/**
+ * `api.floatingRangeSetCells` args: [id, startRow, startCol, values].
+ * `values` is a rectangular 2D array of primitives — string / number / boolean
+ * / null, exactly the vocabulary a cell can hold. Strings starting with "="
+ * are formulas, entered through the SAME undoable, recalculating write path as
+ * typing. Nothing here can carry an action: a formula is document content
+ * evaluated by the engine's own sandbox, not host code.
+ */
+export const vFloatingRangeSetCells: Validator = ([id, startRow, startCol, values]) => {
+  if (!isBoundedString(id, 64) || (id as string).length === 0) {
+    return "expected the floating range id api.listObjects(\"floatingRange\") reports";
+  }
+  if (!isCellCoord(startRow)) return "startRow must be a non-negative 0-based row index";
+  if (!isCellCoord(startCol)) return "startCol must be a non-negative 0-based column index";
+  if (!Array.isArray(values) || values.length === 0) {
+    return "values must be a non-empty 2D array of cell values";
+  }
+  const width = Array.isArray(values[0]) ? (values[0] as unknown[]).length : -1;
+  if (width < 1) return "values must be a non-empty 2D array of cell values";
+  let total = 0;
+  for (const rowVals of values as unknown[]) {
+    if (!Array.isArray(rowVals) || rowVals.length !== width) {
+      return "values must be RECTANGULAR (every row the same length)";
+    }
+    for (const v of rowVals) {
+      total += 1;
+      if (v === null || typeof v === "boolean") continue;
+      if (typeof v === "number") {
+        if (!Number.isFinite(v)) return "numbers must be finite";
+        continue;
+      }
+      if (typeof v === "string") {
+        if (v.length > MAX_FR_CELL_CHARS) {
+          return `cell text is limited to ${MAX_FR_CELL_CHARS} characters`;
+        }
+        continue;
+      }
+      return "cell values must be strings, numbers, booleans or null";
+    }
+  }
+  if (total > MAX_FR_SET_CELLS) {
+    return `one setCells call writes at most ${MAX_FR_SET_CELLS} cells (got ${total})`;
   }
   return true;
 };

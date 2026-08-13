@@ -538,6 +538,11 @@ fn compute_publish_report(
     let mut excluded: Vec<PublishReportItem> = Vec::new();
     item(&mut excluded, "workbookFiles", wb.user_files.len(),
         "workbook files (bookmarks, stored documents, filter state) are subscriber-local by policy");
+    item(&mut excluded, "floatingRanges",
+        wb.floating_ranges.iter().filter(|fr| published_sheet_ids.contains(&fr.host_sheet_id)).count(),
+        "floating range OBJECTS do not distribute yet; their backing cell-store \
+         sheets DO travel with the host sheet, so formulas referencing them stay \
+         live — the subscriber just sees no floating object");
     if !include_comments {
         item(&mut excluded, "comments", comment_threads,
             "comments stay private unless 'Include comments' is checked");
@@ -1655,11 +1660,43 @@ fn resolve_publish_sheet_indices(
     state: &State<AppState>,
     requested: Vec<usize>,
 ) -> Result<Vec<usize>, String> {
-    if !requested.is_empty() {
-        return Ok(requested);
+    let mut selected: Vec<usize> = if !requested.is_empty() {
+        requested
+    } else {
+        // "Every sheet" means every USER sheet: object-backed sheets are not
+        // selectable anywhere (no tab, no picker), so an explicit-selection
+        // publish never names them and the default must not either — they
+        // join below, through their owner, exactly like an explicit selection.
+        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+        let count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
+        (0..count)
+            .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
+            .collect()
+    };
+
+    // FLOATING RANGES TRAVEL WITH THEIR HOST SHEET: a published sheet that
+    // hosts one must carry its backing sheet, or the subscriber's pull shows
+    // an object whose every cell is #REF!. Expansion happens HERE — the one
+    // normalization both publish and preview share — so the dry-run report
+    // can never describe a different package than the publish.
+    let backing: Vec<usize> = {
+        let rows = state.floating_ranges.read().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        let selected_ids: std::collections::HashSet<identity::SheetId> = selected
+            .iter()
+            .filter_map(|&i| sheet_ids.get(i).copied())
+            .collect();
+        rows.iter()
+            .filter(|fr| selected_ids.contains(&fr.host_sheet_id))
+            .filter_map(|fr| sheet_ids.iter().position(|id| *id == fr.backing_sheet_id))
+            .collect()
+    };
+    for idx in backing {
+        if !selected.contains(&idx) {
+            selected.push(idx);
+        }
     }
-    let names = state.sheet_names.read().map_err(|e| e.to_string())?;
-    Ok((0..names.len()).collect())
+    Ok(selected)
 }
 
 /// Uppercased name-collision set for pulled pane controls: existing pane
@@ -5636,6 +5673,10 @@ pub fn calp_refresh_apply(
         if refreshed_indices.contains(&active) {
             crate::undo_commands::rebuild_all_dependencies(&state);
         }
+        // GAP B, materialization half (§2z's one-shared-installer rule): a
+        // pulled/refreshed package can carry floating ranges, whose backing
+        // sheets are never active and therefore never lazily re-edge.
+        crate::floating_range::register_object_sheet_edges(&state);
         for idx in refreshed_indices {
             crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
         }
@@ -14110,6 +14151,8 @@ pub fn calp_reset_subscription(
     if active_affected {
         crate::undo_commands::rebuild_all_dependencies(&state);
     }
+    // GAP B, reset half — same reasoning as the pull/refresh path above.
+    crate::floating_range::register_object_sheet_edges(&state);
 
     crate::log_info!(
         "CALP",
@@ -15014,6 +15057,7 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
     ("notebooks", "CARRIED: notebooks/{id}.json — execution output stripped"),
     ("charts", "CARRIED: charts.json, sheet ids remapped on pull"),
     ("sparklines", "CARRIED: sparklines.json, sheet ids remapped on pull"),
+    ("floating_ranges", "EXCLUDED: 'floatingRanges' — the OBJECT rows do not distribute yet (v1 scope cut); the backing cell-store sheets DO travel (resolve_publish_sheet_indices auto-includes them with their host), so subscriber formulas referencing Float1!A1 stay live and the loss is the floating object's chrome, which compute_publish_report says"),
     ("named_ranges", "CARRIED: in the signed version manifest"),
     ("ribbon_filters", "CARRIED: ribbon_filters.json (workbook-scoped)"),
     ("pane_controls", "CARRIED: pane_controls.json (workbook-scoped)"),

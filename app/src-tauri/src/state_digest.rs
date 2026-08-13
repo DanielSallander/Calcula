@@ -115,6 +115,10 @@ pub struct WorkbookStateDigest {
     pub charts: BTreeMap<String, Value>,
     /// Sheet index -> sorted sparkline groups_json strings.
     pub sparklines: BTreeMap<String, Vec<String>>,
+    /// Floating range id -> FloatingRange row (backing/host by stable SheetId,
+    /// geometry, window). The backing sheet's CELLS are digested by the
+    /// per-sheet block like any sheet's.
+    pub floating_ranges: BTreeMap<String, Value>,
     /// Pivot id -> PivotDefinition JSON (cache is derived state, excluded).
     pub pivots: BTreeMap<String, Value>,
     /// Sheet index -> conditional format definitions (rule order preserved).
@@ -571,6 +575,7 @@ pub(crate) fn build_workbook_state_digest(
         ribbon_filters: BTreeMap::new(),
         charts: BTreeMap::new(),
         sparklines: BTreeMap::new(),
+        floating_ranges: BTreeMap::new(),
         pivots: BTreeMap::new(),
         conditional_formats: BTreeMap::new(),
         data_validations: BTreeMap::new(),
@@ -627,6 +632,13 @@ pub(crate) fn build_workbook_state_digest(
             digest
                 .ribbon_filters
                 .insert(id_key(id), to_value_or_null(filter));
+        }
+    }
+    if let Ok(rows) = state.floating_ranges.read() {
+        for fr in rows.iter() {
+            digest
+                .floating_ranges
+                .insert(id_key(&fr.id), to_value_or_null(fr));
         }
     }
     if let Ok(charts) = state.charts.read() {

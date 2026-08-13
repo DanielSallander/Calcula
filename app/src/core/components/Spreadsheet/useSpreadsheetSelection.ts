@@ -55,7 +55,9 @@ import {
   updateConfig,
   setActiveSheet as setActiveSheetAction,
   setSelection as setSelectionAction,
+  clearFormulaReferences,
 } from "../../state/gridActions";
+import { getExternalFormulaTarget } from "../../lib/formulaEditTarget";
 import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
@@ -921,6 +923,52 @@ export function useSpreadsheetSelection({
     [extendToWithMergeExpansion]
   );
 
+  // External formula edit session routing (formulaEditTarget seam): while a
+  // registered external target is expecting a reference, grid picks go to it
+  // instead of the internal editor. The ref carries the ACTIVE sheet's name so
+  // the target can always produce a sheet-qualified reference (its formula
+  // lives outside this sheet's A1 space). The pending-reference preview that
+  // was synced into formulaReferences during the pick is cleared here because
+  // the internal insert (which normally replaces it) never runs.
+  const handleInsertReference = useCallback(
+    (row: number, col: number) => {
+      const externalTarget = getExternalFormulaTarget();
+      if (externalTarget?.isExpectingReference()) {
+        externalTarget.insertReference({
+          sheetName: sheetContext.activeSheetName,
+          startRow: row,
+          startCol: col,
+          endRow: row,
+          endCol: col,
+        });
+        dispatch(clearFormulaReferences());
+        return;
+      }
+      insertReference(row, col);
+    },
+    [insertReference, dispatch, sheetContext.activeSheetName]
+  );
+
+  const handleInsertRangeReference = useCallback(
+    (startRow: number, startCol: number, endRow: number, endCol: number) => {
+      const externalTarget = getExternalFormulaTarget();
+      if (externalTarget?.isExpectingReference()) {
+        // Normalized so targets need not care about drag direction
+        externalTarget.insertReference({
+          sheetName: sheetContext.activeSheetName,
+          startRow: Math.min(startRow, endRow),
+          startCol: Math.min(startCol, endCol),
+          endRow: Math.max(startRow, endRow),
+          endCol: Math.max(startCol, endCol),
+        });
+        dispatch(clearFormulaReferences());
+        return;
+      }
+      insertRangeReference(startRow, startCol, endRow, endCol);
+    },
+    [insertRangeReference, dispatch, sheetContext.activeSheetName]
+  );
+
   const {
     isDragging,
     isFormulaDragging,
@@ -956,9 +1004,9 @@ export function useSpreadsheetSelection({
     onExtendTo: handleExtendTo,  // FIX: Use merge-aware extension for drag selection
     onScroll: handleScrollUpdate,
     onDragEnd: handleDragEnd,
-    onInsertReference: insertReference,
+    onInsertReference: handleInsertReference,
     onInsertFormulaText: insertFormulaText,
-    onInsertRangeReference: insertRangeReference,
+    onInsertRangeReference: handleInsertRangeReference,
     onInsertColumnReference: insertColumnReference,
     onInsertColumnRangeReference: insertColumnRangeReference,
     onInsertRowReference: insertRowReference,

@@ -4242,6 +4242,50 @@ declare interface UnlockedAPI {
    */
   deleteShape(instanceId: string): Promise<void>;
   /**
+   * Create a FLOATING RANGE on the ACTIVE sheet: a small movable grid of real
+   * cells whose values formulas reference as `Name!A1` from anywhere — the
+   * grid, other floating ranges, everywhere a sheet reference works.
+   *
+   * Starts 1x1 unless `rows`/`cols` are given (window bounds 1..1000 rows,
+   * 1..256 cols). The default name is "Float1", "Float2", ...; names share
+   * the sheet-name rules and namespace. `x`/`y` are sheet pixels from A1.
+   *
+   * Creation itself is NOT undoable (like adding a sheet); the cells you then
+   * write ARE.
+   *
+   * ```js
+   * const fr = await api.createFloatingRange({ name: "Rates", rows: 3, cols: 2 });
+   * await api.floatingRangeSetCells(fr.id, 0, 0, [["USD", 10.4], ["EUR", 11.2], ["GBP", "=B1*1.25"]]);
+   * await api.setCellValue("A1", "=Rates!B2 * 100");
+   * ```
+   */
+  createFloatingRange(options?: { name?: string; x?: number; y?: number; rows?: number; cols?: number }): Promise<{ kind: "floatingRange"; id: string; name: string; sheetIndex: number; range?: string; rowCount?: number; columnCount?: number }>;
+  /**
+   * Delete a floating range by the id `api.listObjects("floatingRange")`
+   * reports. Formulas referencing it show #REF!.
+   *
+   * NOT UNDOABLE — and like deleting a sheet, it ENDS the undo history.
+   */
+  deleteFloatingRange(id: string): Promise<void>;
+  /**
+   * Write a rectangular block of values/formulas into a floating range,
+   * starting at (startRow, startCol) inside its window. Strings beginning
+   * with "=" are formulas; numbers and booleans are typed writes. Undoable,
+   * and recalculates exactly like typing (max 10,000 cells per call).
+   */
+  floatingRangeSetCells(id: string, startRow: number, startCol: number, values: (string | number | boolean | null)[][]): Promise<void>;
+  /**
+   * Read a floating range's cells. SPARSE: only cells that hold something are
+   * returned; fill the rectangle yourself from `rowCount`/`colCount`.
+   */
+  floatingRangeGetCells(id: string): Promise<{ rowCount: number; colCount: number; cells: { row: number; col: number; kind: string; value: unknown; formula?: string }[] }>;
+  /**
+   * Change the visible window (rows x cols, bounds 1..1000 x 1..256).
+   * Shrinking HIDES cells, it never deletes them — formulas can still read
+   * beyond the window, and regrowing shows the cells again. Undoable.
+   */
+  floatingRangeResize(id: string, rows: number, cols: number): Promise<{ kind: "floatingRange"; id: string; name: string; sheetIndex: number; range?: string; rowCount?: number; columnCount?: number }>;
+  /**
    * Create a named range. Omit `sheetIndex` (or pass null) for a
    * workbook-scoped name. `refersTo` is a formula: "=Sheet1!$A$1:$B$10".
    */

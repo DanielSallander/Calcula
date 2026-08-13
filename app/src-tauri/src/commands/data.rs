@@ -6628,6 +6628,20 @@ pub(crate) fn recalc_after_off_sheet_write(
     sheet_indices: &[usize],
 ) {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // OBJECT-BACKED SHEETS (floating range cell stores) join every off-sheet
+    // recalc pass. They are never the active sheet and never in a caller's
+    // touched list unless written directly — but their formulas read the
+    // sheets this pass is re-evaluating, and no sheet VISIT ever heals them
+    // (a backing sheet cannot be activated, so the lazy rebuild-on-switch
+    // that repairs ordinary sheets never runs for them). Their grids are
+    // window-sized, so the extra evaluations are cheap.
+    let object_sheets: Vec<usize> = {
+        let visibility = state.sheet_visibility.read().unwrap();
+        (0..visibility.len())
+            .filter(|&i| !crate::sheets::is_user_sheet(&visibility, i))
+            .filter(|i| !sheet_indices.contains(i))
+            .collect()
+    };
     // Cross-sheet cycle detection is memoised for this whole scope: the loop
     // below calls `recalculate_sheet_values` 2*(sheets+1) times and the answer
     // is a function of the ASTs, which recalculation never changes. Without
@@ -6635,7 +6649,7 @@ pub(crate) fn recalc_after_off_sheet_write(
     // calls. See calculation.rs `begin_circular_pass`.
     let _circular_pass = crate::calculation::begin_circular_pass();
     for _pass in 0..2 {
-        for &idx in sheet_indices {
+        for &idx in sheet_indices.iter().chain(object_sheets.iter()) {
             if idx == active_sheet {
                 continue;
             }
@@ -6655,6 +6669,27 @@ pub(crate) fn recalc_after_off_sheet_write(
             Some((pane_control_state, ribbon_filter_state)),
         );
     }
+}
+
+/// Replace the registered cross-sheet edges of ONE off-sheet cell (GAP A).
+/// Locks the two maps in the canonical order (`dependents` then
+/// `dependencies` — the `rebuild_all_dependencies_from_grid` order); callers
+/// may hold grid locks (the maps come after them crate-wide) but not these.
+fn register_off_sheet_cell_edges(
+    state: &AppState,
+    sheet_idx: usize,
+    row: u32,
+    col: u32,
+    new_refs: rustc_hash::FxHashSet<(String, u32, u32)>,
+) {
+    let mut dependents = state.cross_sheet_dependents.lock().unwrap();
+    let mut dependencies = state.cross_sheet_dependencies.lock().unwrap();
+    crate::update_cross_sheet_dependencies(
+        (sheet_idx, row, col),
+        new_refs,
+        &mut dependencies,
+        &mut dependents,
+    );
 }
 
 /// The recalc half of `update_cell_on_sheets`, callable on its own: the script
@@ -6708,6 +6743,42 @@ pub fn update_cell_on_sheets(
     pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    sheet_indices: Vec<usize>,
+    row: u32,
+    col: u32,
+    value: String,
+    invariant: Option<bool>,
+    recalc: Option<bool>,
+) -> Result<Vec<usize>, String> {
+    update_cell_on_sheets_inner(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        sheet_indices,
+        row,
+        col,
+        value,
+        invariant,
+        recalc,
+    )
+}
+
+/// Command body over plain references (the `hide_sheet_inner` split):
+/// `update_floating_range_cell` writes a floating range's cells through this
+/// exact path — the same protection/writeback/spill gates, the same GAP-A edge
+/// registration, the same off-sheet recalc — because a backing sheet IS a
+/// non-active sheet and a second write path would drift.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_cell_on_sheets_inner(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     sheet_indices: Vec<usize>,
     row: u32,
     col: u32,
@@ -6804,6 +6875,16 @@ pub fn update_cell_on_sheets(
                     undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
                     grids[sheet_idx].clear_cell(row, col);
                     undo_stack.commit_transaction();
+                    // GAP A (cross-sheet edges, clear half): a cleared formula's
+                    // registered cross-sheet edges must go with it, or the
+                    // cascade keeps re-evaluating a cell that no longer exists.
+                    register_off_sheet_cell_edges(
+                        &state,
+                        sheet_idx,
+                        row,
+                        col,
+                        rustc_hash::FxHashSet::default(),
+                    );
                 }
                 // A clear of an already-empty cell is still "handled": the
                 // caller asked for empty and empty is what the sheet holds, so
@@ -6868,6 +6949,30 @@ pub fn update_cell_on_sheets(
                 grids[sheet_idx].set_cell(row, col, cell);
                 undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
                 undo_stack.commit_transaction();
+
+                // GAP A: this command stored formulas for years WITHOUT
+                // registering their cross-sheet dependency edges, so an
+                // off-sheet `=Sheet1!A1*2` written by a script (or into a
+                // floating range) evaluated once and then went permanently
+                // stale when its precedents changed — the cascade had no edge
+                // to walk. Registered here for EVERY caller, through the same
+                // normalize-then-update pair `update_cell_impl` uses. A
+                // non-formula overwrite registers the empty set, which removes
+                // whatever the previous formula had registered.
+                let new_refs = if is_formula {
+                    if let Some(ref ast) = engine_ast {
+                        crate::normalize_cross_sheet_refs(
+                            &crate::extract_all_references(ast, &grids[sheet_idx])
+                                .cross_sheet_cells,
+                            &sheet_names,
+                        )
+                    } else {
+                        rustc_hash::FxHashSet::default()
+                    }
+                } else {
+                    rustc_hash::FxHashSet::default()
+                };
+                register_off_sheet_cell_edges(&state, sheet_idx, row, col, new_refs);
                 wrote.push(sheet_idx);
             }
             wrote
@@ -7865,6 +7970,14 @@ mod writeback_range_guard_wiring_tests {
 #[cfg(test)]
 #[path = "cross_sheet_recalc_tests.rs"]
 mod cross_sheet_recalc_tests;
+
+#[cfg(test)]
+#[path = "floating_range_lifecycle_tests.rs"]
+mod floating_range_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "floating_range_recalc_tests.rs"]
+mod floating_range_recalc_tests;
 
 /// §2c follow-on — bulk range commands that rewrite cells must seed the ONE
 /// shared cascade, and cycles must be detected across sheet boundaries. Also a

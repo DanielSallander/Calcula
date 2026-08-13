@@ -12,4 +12,16 @@ export {
   setGlobalCursorPosition,
   getGlobalCursorPosition,
   setChartSeriesRefMode,
+  insertTextIntoActiveFormula,
 } from "../core/hooks/useEditing";
+
+// External formula edit session seam: an extension-owned editor registers
+// itself to receive grid reference picks while it is expecting a reference.
+export {
+  registerExternalFormulaTarget,
+  getExternalFormulaTarget,
+} from "../core/lib/formulaEditTarget";
+export type {
+  ExternalFormulaTarget,
+  ExternalFormulaReference,
+} from "../core/lib/formulaEditTarget";

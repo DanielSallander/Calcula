@@ -2297,6 +2297,38 @@ export type {
 } from "./controlsService";
 
 // ============================================================================
+// Floating Ranges (typed backend bindings + the IoC seam — the FloatingRange
+// extension owns the store/regions/editor; @api owns only these contracts)
+// ============================================================================
+
+export {
+  listFloatingRanges,
+  createFloatingRange,
+  updateFloatingRange,
+  updateFloatingRangeCell,
+  renameFloatingRange,
+  deleteFloatingRange,
+  getFloatingRangeCells,
+  FLOATING_RANGE_MAX_ROWS,
+  FLOATING_RANGE_MAX_COLS,
+} from "./floatingRanges";
+
+export type { FloatingRangeInfo, FloatingRangePatch } from "./floatingRanges";
+
+export {
+  registerFloatingRangeProvider,
+  hasFloatingRangeProvider,
+  getFloatingRangeProvider,
+  requireFloatingRangeProvider,
+  resetFloatingRangeProvider,
+} from "./floatingRangeService";
+
+export type {
+  CreateFloatingRangeRequest,
+  FloatingRangeProvider,
+} from "./floatingRangeService";
+
+// ============================================================================
 // Macro Run Service (IoC: a button LINKS a macro; this runs it by id)
 // ============================================================================
 

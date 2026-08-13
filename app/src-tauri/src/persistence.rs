@@ -661,6 +661,7 @@ pub fn build_workbook_for_save(
     workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
     workbook.charts = collect_charts_for_save(state, &sheet_ids);
     workbook.sparklines = collect_sparklines_for_save(state, &sheet_ids);
+    workbook.floating_ranges = collect_floating_ranges_for_save(state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     // Content-addressed media (pictures). The FULL session store is attached
     // here so every workbook-building path carries it; the unreferenced ones are
@@ -1833,6 +1834,98 @@ fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppSt
     }
 }
 
+/// Collect floating range rows for saving. The rows already speak in stable
+/// SheetIds, so this is a field copy — sorted by id string for byte-determinism
+/// (the controls.json precedent: a save must not shuffle).
+pub(crate) fn collect_floating_ranges_for_save(
+    state: &AppState,
+) -> Vec<persistence::SavedFloatingRange> {
+    let rows = state.floating_ranges.read().unwrap();
+    let mut saved: Vec<persistence::SavedFloatingRange> = rows
+        .iter()
+        .map(|fr| persistence::SavedFloatingRange {
+            id: fr.id,
+            backing_sheet_id: fr.backing_sheet_id,
+            host_sheet_id: fr.host_sheet_id,
+            x: fr.x,
+            y: fr.y,
+            rotation: fr.rotation,
+            pin_to_grid: fr.pin_to_grid,
+            row_count: fr.row_count,
+            col_count: fr.col_count,
+            col_widths: fr.col_widths.clone(),
+            row_heights: fr.row_heights.clone(),
+        })
+        .collect();
+    saved.sort_by_key(|fr| fr.id.to_string());
+    saved
+}
+
+/// Restore floating range rows, with LOAD REPAIR: a row whose backing or host
+/// sheet is missing from the file is dropped (logged — it can render nothing
+/// and address nothing), and an object-visibility sheet no row claims is
+/// logged as an orphan (left in place: it is invisible everywhere and its
+/// cells keep evaluating, which is strictly less destructive than deleting
+/// user data on open).
+pub(crate) fn restore_floating_ranges(
+    saved: &[persistence::SavedFloatingRange],
+    state: &AppState,
+    workbook: &persistence::Workbook,
+) {
+    // Load path: rebuilding the store FROM the file is not an edit TO the document.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut rows = state.floating_ranges.write(&load).unwrap();
+    rows.clear();
+    for s in saved {
+        if sheet_id_to_index(workbook, s.backing_sheet_id).is_none() {
+            crate::log_warn!(
+                "FLOAT",
+                "dropping floating range {}: its backing sheet is not in the file",
+                s.id
+            );
+            continue;
+        }
+        if sheet_id_to_index(workbook, s.host_sheet_id).is_none() {
+            crate::log_warn!(
+                "FLOAT",
+                "dropping floating range {}: its host sheet is not in the file",
+                s.id
+            );
+            continue;
+        }
+        rows.push(crate::api_types::FloatingRange {
+            id: s.id,
+            backing_sheet_id: s.backing_sheet_id,
+            host_sheet_id: s.host_sheet_id,
+            x: s.x,
+            y: s.y,
+            rotation: s.rotation,
+            pin_to_grid: s.pin_to_grid,
+            row_count: s.row_count.max(1),
+            col_count: s.col_count.max(1),
+            col_widths: s.col_widths.clone(),
+            row_heights: s.row_heights.clone(),
+        });
+    }
+    // Orphan sweep (log only — see the doc comment).
+    let claimed: std::collections::HashSet<identity::SheetId> =
+        rows.iter().map(|fr| fr.backing_sheet_id).collect();
+    for sheet in &workbook.sheets {
+        if sheet.visibility == crate::sheets::OBJECT_SHEET_VISIBILITY
+            && !claimed.contains(&sheet.id)
+        {
+            crate::log_warn!(
+                "FLOAT",
+                "object-backed sheet '{}' has no floating range row (orphan); \
+                 it stays invisible and unowned",
+                sheet.name
+            );
+        }
+    }
+}
+
 // ============================================================================
 // PIVOT DEFINITION PERSISTENCE (save + load)
 // ============================================================================
@@ -2656,6 +2749,16 @@ pub fn open_file(
     }
 
     let active_idx = workbook.active_sheet.min(workbook.sheets.len() - 1);
+    // The restored active sheet must be one the user can LOOK at: not hidden,
+    // and never an object-backed sheet (a floating range's cell store). A file
+    // whose recorded active index names one — hand-edited, or written by a
+    // build with a defect — would otherwise reopen with the grid showing a
+    // sheet that has no tab. Same rule `delete_sheet` applies to its landing.
+    let active_idx = {
+        let visibilities: Vec<String> =
+            workbook.sheets.iter().map(|s| s.visibility.clone()).collect();
+        crate::sheets::nearest_visible_sheet(&visibilities, workbook.sheets.len(), active_idx)
+    };
 
     // THE OUTGOING DOCUMENT ENDS HERE. Every store the save path reads goes back
     // to its blank-document value before a single byte of the new one is
@@ -3302,6 +3405,11 @@ pub fn open_file(
     // Restore sparklines from workbook
     restore_sparklines(&workbook.sparklines, &state, &workbook);
 
+    // Restore floating range rows (with load repair). Runs BEFORE the
+    // dependency rebuild below; the GAP-B edge installer that follows it needs
+    // only the sheet visibility markers, which the sheet sections restored.
+    restore_floating_ranges(&workbook.floating_ranges, &state, &workbook);
+
     // Restore scripts and notebooks
     restore_scripts(&workbook.scripts, &script_state);
     restore_notebooks(&workbook.notebooks, &script_state);
@@ -3544,6 +3652,13 @@ pub fn open_file(
     // run here without touching a value or an edge.
     restamp_workbook_name_casing(&state, &load_effect);
     crate::undo_commands::rebuild_all_dependencies(&state);
+    // GAP B: the rebuild above registers cross-sheet edges for the ACTIVE
+    // sheet only; every other sheet gets its edges when it becomes active. A
+    // floating range's backing sheet never does, so its formulas would come
+    // back present and permanently dead (§2z). The installer scans the
+    // object-backed sheets and registers their edges through the shared
+    // normalizer. (Pinned by the_edge_installer_revives_a_loaded_floating_range.)
+    crate::floating_range::register_object_sheet_edges(&state);
 
     // DYNAMIC-ARRAY SPILL OWNERSHIP FOR THE WORKBOOK JUST READ (§2ab), and the
     // half `reset_document_scoped_stores` always assumed existed. It clears
@@ -3817,6 +3932,11 @@ pub(crate) fn reset_document_scoped_stores(
     state.media.write(effect).map_err(|e| e.to_string())?.clear();
     state.charts.write(effect).map_err(|e| e.to_string())?.clear();
     state.sparklines.write(effect).map_err(|e| e.to_string())?.clear();
+    // Floating range rows. Their backing SHEETS live in `grids`/`sheet_names`
+    // and are replaced wholesale by the load/new path like every other sheet;
+    // an un-cleared row here would point at a SheetId the next document does
+    // not contain — present, and permanently dead (§2z's defect class).
+    state.floating_ranges.write(effect).map_err(|e| e.to_string())?.clear();
 
     // ---- Computed properties (store + its dependency maps + id counter) ----
     state.computed_properties.write(effect).map_err(|e| e.to_string())?.clear();
@@ -4760,6 +4880,10 @@ pub fn xlsx_save_loss_report(
         "Slicers",
     );
     check(
+        !state.floating_ranges.read().map_err(|e| e.to_string())?.is_empty(),
+        "Floating ranges",
+    );
+    check(
         !ribbon_filter_state.filters.read().map_err(|e| e.to_string())?.is_empty(),
         "Ribbon filters",
     );
@@ -4918,6 +5042,7 @@ pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
     ("tables", "WRITTEN: as xlsx tables"),
     ("charts", "WRITTEN: as xlsx charts"),
     ("sparklines", "WRITTEN"),
+    ("floating_ranges", "REPORTED: 'Floating ranges' — xlsx has no floating-cell-range object; the rows are dropped and the backing sheets export as ordinary hidden-ish sheets"),
     ("named_ranges", "WRITTEN: as defined names"),
     ("properties", "WRITTEN on export (the READER ignores them, which is a separate one-way loss, S8)"),
     ("conditional_formats", "REPORTED: 'Conditional formatting'"),

@@ -573,6 +573,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         properties: crate::WorkbookProperties::default(),
         charts: Vec::new(),
         sparklines: Vec::new(),
+        floating_ranges: Vec::new(),
         named_ranges: Vec::new(),
         ribbon_filters: Vec::new(),
         pane_controls: Vec::new(),

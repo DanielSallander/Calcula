@@ -119,6 +119,11 @@ export const AppEvents = {
   // Named ranges
   NAMED_RANGES_CHANGED: "app:named-ranges-changed",
 
+  // Floating range OBJECT rows changed outside the FloatingRange extension's
+  // own calls (undo/redo, script writes, .calp materialization). The extension
+  // reloads its row store and re-syncs its overlay regions on this.
+  FLOATING_RANGES_CHANGED: "app:floating-ranges-changed",
+
   // Conditional-format DEFINITIONS changed by something OTHER than the CF
   // extension's own dialogs (today: the script rows api.*ConditionalFormat).
   // The CF extension re-reads its rule cache and repaints on this; its own
@@ -336,7 +341,11 @@ export type MutationDomain =
   // Conditional-formatting rule DEFINITIONS. Separate from a repaint for the
   // same reason "validations" is: the extension caches the rule LIST, and
   // grid:refresh only makes it re-evaluate that cache.
-  | "conditionalFormats";
+  | "conditionalFormats"
+  // Floating range object rows (geometry, window size, existence). The
+  // FloatingRange extension caches the row store and derives overlay regions
+  // from it; undo/redo of a move/resize must make it reload.
+  | "floatingRanges";
 
 /** Payload of AppEvents.MUTATION_REFRESH. */
 export interface MutationRefreshPayload {

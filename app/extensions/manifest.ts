@@ -73,6 +73,7 @@ import MacroRecorderExtension from "./MacroRecorder";
 
 // Batch 4: Complex extensions (migrated from Path B)
 import ChartExtension from "./Charts";
+import FloatingRangeExtension from "./FloatingRange";
 import AnimationExtension from "./Animation";
 import PivotExtension from "./Pivot";
 import TableExtension from "./Table";
@@ -199,6 +200,8 @@ export const builtInExtensions: ExtensionModule[] = [
   MacroRecorderExtension,
   // Complex extensions
   ChartExtension,
+  // Floating Ranges — free-floating cell-range objects (=Float1!A1)
+  FloatingRangeExtension,
   // Animation / Simulation playback — integrates with Charts, loads after it
   AnimationExtension,
   PivotExtension,

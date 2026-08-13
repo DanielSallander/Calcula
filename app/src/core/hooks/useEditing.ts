@@ -176,6 +176,32 @@ export function isEditingFormula(): boolean {
 }
 
 /**
+ * MODULE-LEVEL slot for the formula text inserter registered by the hook.
+ * Lets non-hook callers (via @api/editing) insert plain text into the active
+ * formula editor. Every useEditing() instance re-registers when its closure
+ * dependencies change; the closures are interchangeable because they act on
+ * the shared grid context, so last-write-wins is safe. Deliberately never
+ * nulled on unmount: a cleanup would clear a sibling instance's registration.
+ */
+let globalFormulaTextInserter: ((text: string) => boolean) | null = null;
+
+/** Register the formula text inserter. Used internally by the hook. */
+function setGlobalFormulaTextInserter(inserter: (text: string) => boolean): void {
+  globalFormulaTextInserter = inserter;
+}
+
+/**
+ * Insert plain text into the active formula editor at the cursor position.
+ * Only inserts while the editor is expecting a reference (same guard as
+ * clicking a cell in formula mode); no grid highlight is created. Dispatches
+ * formula:referenceInserted so the editor refocuses.
+ * @returns Whether the text was inserted.
+ */
+export function insertTextIntoActiveFormula(text: string): boolean {
+  return globalFormulaTextInserter ? globalFormulaTextInserter(text) : false;
+}
+
+/**
  * MODULE-LEVEL flag for chart series reference mode.
  * When a chart series is selected, the formula bar shows a SERIES formula
  * and the data ranges are highlighted with draggable handles.
@@ -577,8 +603,8 @@ export interface UseEditingReturn {
   clearError: () => void;
   /** Insert a cell reference into the current formula */
   insertReference: (row: number, col: number) => void;
-  /** Insert arbitrary formula text (e.g., GETPIVOTDATA) with optional cell highlight */
-  insertFormulaText: (text: string, highlightRow: number, highlightCol: number) => void;
+  /** Insert arbitrary formula text (e.g., GETPIVOTDATA); with highlight coords a FormulaReference is pushed, without them plain text goes in at the cursor. Returns whether it inserted */
+  insertFormulaText: (text: string, highlightRow?: number, highlightCol?: number) => boolean;
   /** Insert a range reference into the current formula */
   insertRangeReference: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
   /** Insert a column reference into the current formula (e.g., "A:A") */
@@ -1084,12 +1110,15 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Insert arbitrary formula text with an optional cell reference highlight.
-   * Used by formula reference interceptors (e.g., GETPIVOTDATA).
+   * Used by formula reference interceptors (e.g., GETPIVOTDATA) and, without
+   * highlight coordinates, by insertTextIntoActiveFormula: plain text goes in
+   * at the cursor and no FormulaReference is pushed.
+   * Returns whether the text was inserted (false when not expecting a reference).
    */
   const insertFormulaText = useCallback(
-    (text: string, highlightRow: number, highlightCol: number) => {
+    (text: string, highlightRow?: number, highlightCol?: number): boolean => {
       if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
-        return;
+        return false;
       }
 
       const cursorPos = globalCursorPosition;
@@ -1099,30 +1128,46 @@ export function useEditing(): UseEditingReturn {
       globalCursorPosition = cursorPos + text.length;
       dispatch(updateEditing(newValue));
 
-      const targetSheet = getTargetSheetName();
-      const color = pendingReference?.color || getNextReferenceColor();
-      const newRef: FormulaReference = {
-        startRow: highlightRow,
-        startCol: highlightCol,
-        endRow: highlightRow,
-        endCol: highlightCol,
-        color,
-        sheetName: targetSheet ?? undefined,
-      };
-      dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
-      setPendingReference(null);
+      if (highlightRow !== undefined && highlightCol !== undefined) {
+        const targetSheet = getTargetSheetName();
+        const color = pendingReference?.color || getNextReferenceColor();
+        const newRef: FormulaReference = {
+          startRow: highlightRow,
+          startCol: highlightCol,
+          endRow: highlightRow,
+          endCol: highlightCol,
+          color,
+          sheetName: targetSheet ?? undefined,
+        };
+        dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
+        setPendingReference(null);
 
-      // Set up arrow cursor state (no further arrow navigation for intercepted refs)
-      arrowRefCursor = { row: highlightRow, col: highlightCol };
-      arrowRefAnchor = { row: highlightRow, col: highlightCol };
-      arrowRefInsertIndex = cursorPos;
-      arrowRefSuffix = editing.value.substring(cursorPos);
-      arrowRefColor = color;
+        // Set up arrow cursor state (no further arrow navigation for intercepted refs)
+        arrowRefCursor = { row: highlightRow, col: highlightCol };
+        arrowRefAnchor = { row: highlightRow, col: highlightCol };
+        arrowRefInsertIndex = cursorPos;
+        arrowRefSuffix = editing.value.substring(cursorPos);
+        arrowRefColor = color;
+      } else {
+        // Plain text insert: not an arrow-navigable grid reference, so reset
+        // arrow state exactly like typing does.
+        resetArrowRefState();
+      }
 
       dispatchReferenceInsertedEvent();
+      return true;
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName]
   );
+
+  // Register the module-level inserter backing insertTextIntoActiveFormula.
+  // Every useEditing() instance registers; the closures are interchangeable
+  // (they act on shared context state), so the most recent registration serves
+  // all callers. See setGlobalFormulaTextInserter for why there is no
+  // unregister on unmount.
+  useEffect(() => {
+    setGlobalFormulaTextInserter((text: string) => insertFormulaText(text));
+  }, [insertFormulaText]);
 
   /**
    * Insert a range reference into the current formula.

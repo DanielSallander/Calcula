@@ -546,7 +546,21 @@ fn sheet_structure_commands_invalidate_the_undo_history() {
             .unwrap_or_else(|| {
                 panic!("`{command}` is not a free function in sheets.rs any more")
             });
-        if !body.contains(INVALIDATOR) {
+        // ONE level of delegation, same allowance as the object-deps census: a
+        // command split into a testable `_inner` / `_impl` body (the
+        // `hide_sheet_inner` pattern — `add_sheet` and `delete_sheet` took it
+        // for the floating-range work) carries its contract with it, provided
+        // the command actually calls that delegate and the delegate makes the
+        // call.
+        let delegated = ["_inner", "_impl"].iter().any(|suffix| {
+            let delegate = format!("{command}{suffix}");
+            body.contains(&format!("{delegate}("))
+                && bodies
+                    .iter()
+                    .find(|(name, _)| name == &delegate)
+                    .is_some_and(|(_, inner)| inner.contains(INVALIDATOR))
+        });
+        if !body.contains(INVALIDATOR) && !delegated {
             offenders.push(command);
         }
     }

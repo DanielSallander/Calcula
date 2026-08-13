@@ -35,6 +35,9 @@ import {
   vFileExport, vFileImport, MAX_FILE_TEXT_CHARS, MAX_FILE_NAME,
   vCreatePicture, MAX_MEDIA_BYTES, MAX_MEDIA_PIXELS,
   vCreateShape,
+  vCreateFloatingRange,
+  vFloatingRangeResize,
+  vFloatingRangeSetCells,
   vShortcutBind, vShortcutUnbind,
   vEvaluate, MAX_EVAL_EXPRESSIONS, MAX_EVAL_EXPRESSION_CHARS,
   vStatusBar, MAX_STATUS_BAR_CHARS, vBeginBatch, vRunMacro,
@@ -729,6 +732,24 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Draw a shape (rectangle, arrow, star and so on) on the sheet currently shown — NOT undoable: Ctrl+Z will not remove it" },
   "api.deleteShape":       { tier: "unlocked", class: "mutate", validate: vObjectId,
                              desc: "Delete a shape, button or picture from the sheet currently shown, along with any script attached to it — NOT undoable: Ctrl+Z will not bring it back" },
+  // ---- unlocked: FLOATING RANGES. A floating range is document content — a
+  //      movable object whose cells are a REAL (object-backed) sheet the
+  //      workbook references as `Name!A1` — so no capability, api.createShape's
+  //      bar. Creation lands on the sheet currently shown (the backend derives
+  //      the host from the live active sheet; no sheet argument exists). Cell
+  //      writes go through the ordinary undoable, recalculating edit path.
+  //      The setState aspect door refuses this kind by name (vSetState), so
+  //      these five rows are the object's entire script surface.
+  "api.createFloatingRange": { tier: "unlocked", class: "mutate", validate: vCreateFloatingRange,
+                             desc: "Create a floating range (a small movable grid of real cells, referenced from formulas as Name!A1) on the sheet currently shown — creation itself is NOT undoable: Ctrl+Z will not remove it" },
+  "api.deleteFloatingRange": { tier: "unlocked", class: "mutate", validate: vObjectId,
+                             desc: "Delete a floating range and its cells; formulas referencing it show #REF! — NOT undoable, and like deleting a sheet it ENDS the undo history" },
+  "api.floatingRangeSetCells": { tier: "unlocked", class: "mutate", validate: vFloatingRangeSetCells,
+                             desc: "Write values or formulas into a floating range's cells (undoable, recalculates like any cell edit)" },
+  "api.floatingRangeGetCells": { tier: "unlocked", class: "read", validate: vObjectId,
+                             desc: "Read a floating range's cell values and formulas" },
+  "api.floatingRangeResize": { tier: "unlocked", class: "mutate", validate: vFloatingRangeResize,
+                             desc: "Change how many rows and columns a floating range shows (shrinking hides cells, it never deletes them; undoable)" },
   "api.deletePivot":       { tier: "unlocked", class: "mutate", validate: vObjectId,
                              desc: "Delete a pivot table" },
   // Refresh-all is ONE row rather than a loop over api.pivot(id).refresh(): the

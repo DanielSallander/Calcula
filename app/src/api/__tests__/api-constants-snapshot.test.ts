@@ -57,7 +57,14 @@ describe('AppEvents', () => {
     // payload ({ canUndo, canRedo }) — unlike SHEET_DISPLAY_FLAGS_CHANGED,
     // because the payload IS the whole authority rather than a partial copy of
     // it, and the subscriber is a `disabled` attribute.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`74`);
+    //
+    // 75 since FLOATING_RANGES_CHANGED: the reload signal for floating range
+    // OBJECT rows (geometry / window / existence) when something other than
+    // the FloatingRange extension's own calls moved them — undo/redo (the
+    // "floatingRanges" MutationDomain fans out to it), script rows, a .calp
+    // pull. The extension re-reads list_floating_ranges and re-syncs its
+    // overlay regions on it.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`75`);
   });
 
   it('all values use the app: prefix', () => {

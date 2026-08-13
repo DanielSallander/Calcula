@@ -14422,3 +14422,66 @@ files and the measured mechanism; BUG-0052 (the paint-order tear) and BUG-0053 (
 scroll golden) are open, each with its measurement and its repro, and BUG-0052 with its committed
 probe. `EXCLUDED_UNTIL_FIXED` remains the empty array and no `KNOWN_ISSUES` entry was
 added for anything in this pass.
+
+
+---
+
+## 16. Floating Ranges ship their engine — cells that float, as object-backed sheets (2026-08-13)
+
+A new object type entered the workbook: the **Floating Range** — a movable, resizable object
+over the grid whose content is a REAL range of cells, referenced sheet-like (`=Float1!A1`,
+`=SUM(Float1!A1:B5)`) from anywhere, in every direction (grid→float, float→grid, float→float).
+Backend M1–M4 shipped (suite green at 1613, ~27 new tests); the frontend extension, script rows
+and E2E are landing behind it. The decisions worth registering:
+
+**The engine model is a HIDDEN BACKING SHEET, chosen adversarially.** Two full designs were
+built and judged: (A) every floating range is a real engine sheet marked
+`sheet_visibility == "object"` (a new visibility value), plus an EntityId-keyed row store for
+geometry and the visible window; (B) a separate address space — FR-owned grids outside `grids`,
+with a container-index encoding in the cross-sheet maps' values. Both judges took A, and the
+deciding evidence was measured, not argued: B's own "complete consumer inventory" of
+`CrossSheetDependentsMap` value consumers missed two production sites that destructure the
+tuples (`recalc_visibility_dependents_core`, the control-value twin) and would have PANICKED on
+the encoded index — the exact silent-consumer class §2z/BUG-0019 came from. Under A, the name
+lives in `sheet_names`, so parsing, `normalize_cross_sheet_refs`, the one shared cascade, F9's
+plan, `SetCell{sheet}` undo, spill, rename repair and sheet persistence work BY CONSTRUCTION —
+including at every future registration site.
+
+**The partition invariant replaced enumeration filtering.** User sheets are a contiguous
+prefix; object sheets sit at the tail. `add_sheet` is the one maintenance site (it rotates the
+new user sheet in front of the object tail and re-keys the shifted object sheets' cross-sheet
+edges through the existing remap machinery). Bought with that: 3D references can never span a
+backing sheet (`sheet_order` needs no filtering), and `build_sheet_list`'s filtered output has
+`sheets[i].index == i` — every positional consumer in the frontend stays correct with no sweep.
+
+**The undo doctrine extends §9's (BUG-0005) reasoning rather than its list.** FR CREATE keeps
+the history — a pure append renumbers nothing and rewrites nothing, so no queued entry is
+invalidated (pinned by test). FR DELETE and RENAME end it — they are sheet-structural with
+exactly the hazards the invalidator documents, and they run through `delete_sheet_impl` /
+`rename_sheet_inner` (the new `allow_object` splits), which call it. GEOMETRY/WINDOW changes
+are undoable via `obj_floating_range` — the payload is EntityId/SheetId-keyed and survives
+renumbering. One consequence was found before it shipped: the `sheet_tab_state` restore
+snapshots the whole visibility vector, and a snapshot recorded BEFORE a floating range existed
+would have resurrected its backing sheet as a visible tab on undo — the restore arm now
+re-asserts the object markers from the row store (the authority), pinned by test.
+
+**Two LIVE defects fell out of the work.** (GAP A) `update_cell_on_sheets` — the script host's
+off-sheet write path — had NEVER registered cross-sheet dependency edges: an off-sheet
+`=Sheet1!A1*2` written by a script evaluated once and went permanently stale. Fixed for ALL
+callers inside `update_cell_on_sheets_inner`, not just the floating-range door. (GAP B) the
+active-sheet-only edge rebuild means a sheet that is never activated never gets its cross-sheet
+edges after load — for backing sheets that is "present and permanently dead" (§2z's class);
+`register_object_sheet_edges` now runs on open, on `.calp` pull/refresh and on reset.
+
+**Persistence and distribution.** `floating_ranges.json` + manifest feature id
+`floating_ranges`, NO format-version bump (an older reader loses the objects; the backing
+sheets load as non-visible sheets with intact values — loss, not a lie). `.calp` v1: the OBJECT
+rows are EXCLUDED (reported, with the count) but the backing sheets AUTO-TRAVEL with their host
+(`resolve_publish_sheet_indices`), so a subscriber's `=Float1!A1` stays live; the floating
+chrome is what's lost. xlsx save REPORTS 'Floating ranges' as destroyed. Both classifications
+sit in the two coverage censuses.
+
+**Owner-decided v1 scope** (2026-08-11): sheet-like reference syntax; rotation deferred (field
+persisted, never rendered); v1 = core object + script API; data-driven row/col counts
+(computed_properties-style binding onto the plain u32 window fields), per-size-map UI, and
+`.calp` object carry are deferred and deliberately not precluded by the shapes above.

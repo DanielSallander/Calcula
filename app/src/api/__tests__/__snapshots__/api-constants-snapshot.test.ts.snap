@@ -36,6 +36,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "EDIT_STARTED": "app:edit-started",
   "FILL_COMPLETED": "app:fill-completed",
   "FIND": "app:find",
+  "FLOATING_RANGES_CHANGED": "app:floating-ranges-changed",
   "FREEZE_CHANGED": "app:freeze-changed",
   "GRID_REFRESH": "app:grid-refresh",
   "HYPERLINKS_CHANGED": "app:hyperlinks-changed",

@@ -761,8 +761,11 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
     // The sheet is the widest owner in the workbook.
     // The sheet reaches "paneControl" only through TWO hops (sheet -> chart ->
     // pane control), which is the edge the walk was written for and the one the
-    // backend cascade was missing entirely.
+    // backend cascade was missing entirely. "floatingRanges" joined when the
+    // Sheet → floatingRange.hostSheet Cascade row landed: a floating range
+    // dies with its host, and the extension caches the row store.
     expect([...requiredDomainsFor("Sheet", rows, domains)].sort()).toEqual([
+      "floatingRanges",
       "objects",
       "paneControl",
       "pivot",

@@ -17,7 +17,8 @@ export type ScriptObjectKind =
   | "pivot"
   | "namedRange"
   | "slicer"
-  | "shape";
+  | "shape"
+  | "floatingRange";
 
 /** The same set as a runtime guard (validators + host both consult it). */
 export const SCRIPT_OBJECT_KINDS: ReadonlySet<string> = new Set<ScriptObjectKind>([
@@ -27,6 +28,7 @@ export const SCRIPT_OBJECT_KINDS: ReadonlySet<string> = new Set<ScriptObjectKind
   "namedRange",
   "slicer",
   "shape",
+  "floatingRange",
 ]);
 
 /**
@@ -253,6 +255,34 @@ export function shapeToRef(row: ShapeRow): ScriptObjectRef {
     sheetIndex: row.sheetIndex,
     range: a1Rect(row.row, row.col, row.row, row.col),
     kindDetail: row.controlType,
+  };
+}
+
+/** A floating range row (a strict subset of @api FloatingRangeInfo). */
+export interface FloatingRangeRow {
+  id: string;
+  name: string;
+  /** The HOST sheet — where the object floats. Its cells live in a private
+   *  address space reached as `Name!A1`, not on any sheet index. */
+  hostSheetIndex: number;
+  rowCount: number;
+  colCount: number;
+}
+
+/**
+ * Floating range -> descriptor. `sheetIndex` is the HOST sheet (where the
+ * object is drawn); the cells are addressed through the object's NAME
+ * (`=Float1!A1`), which `range` spells out as the visible window.
+ */
+export function floatingRangeToRef(row: FloatingRangeRow): ScriptObjectRef {
+  return {
+    kind: "floatingRange",
+    id: row.id,
+    name: row.name || "",
+    sheetIndex: row.hostSheetIndex,
+    range: a1Rect(0, 0, Math.max(0, row.rowCount - 1), Math.max(0, row.colCount - 1)),
+    rowCount: row.rowCount,
+    columnCount: row.colCount,
   };
 }
 

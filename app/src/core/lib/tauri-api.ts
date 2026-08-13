@@ -1493,8 +1493,11 @@ export async function deleteSheet(index: number): Promise<SheetsResult> {
   // §3cd domain walk derives that from the matrix; the backend half of the
   // same cascade was missing outright (cascade_deleted_charts was never run on
   // this path), which is what made the announcement worth having.
+  // "floatingRanges" for the same transitive reason: floating ranges HOSTED
+  // on the deleted sheet die with it (Sheet → floatingRange.hostSheet,
+  // Cascade), and the FloatingRange extension caches the row store.
   emitAppEvent(AppEvents.MUTATION_REFRESH, {
-    domains: ["sheets", "slicer", "pivot", "ribbonFilter", "objects", "paneControl"],
+    domains: ["sheets", "slicer", "pivot", "ribbonFilter", "objects", "paneControl", "floatingRanges"],
     source: "commit",
   });
   recordGridEvent({ kind: "deleteSheet", index });

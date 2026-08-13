@@ -93,6 +93,11 @@ pub struct Workbook {
     pub charts: Vec<SavedChart>,
     /// Sparkline entries (opaque JSON blobs, one per sheet)
     pub sparklines: Vec<SavedSparkline>,
+    /// Floating range OBJECT rows. Each one's CELLS are an ordinary sheet in
+    /// `sheets` (visibility "object"); this row binds the stable ids to
+    /// geometry and the visible window. (The Workbook aggregate is never
+    /// serialized whole — the section file is read with `unwrap_or_default`.)
+    pub floating_ranges: Vec<SavedFloatingRange>,
     /// Named ranges / defined names
     pub named_ranges: Vec<SavedNamedRange>,
     /// Ribbon filter definitions (Filter Pane)
@@ -452,6 +457,36 @@ pub struct SavedChart {
     pub spec_json: String,
 }
 
+/// A floating range persisted in the workbook: the OBJECT row only. The cells
+/// live in an ordinary sheet section (visibility "object") and travel with the
+/// sheet list; sheets are referenced by STABLE ID so the row survives every
+/// index renumbering between save and load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedFloatingRange {
+    pub id: EntityId,
+    pub backing_sheet_id: SheetId,
+    pub host_sheet_id: SheetId,
+    /// Sheet pixels relative to the host sheet's A1 top-left corner.
+    pub x: f64,
+    pub y: f64,
+    /// RESERVED for tilt (always 0.0 today) — persisted from day one so adding
+    /// rotation later is not a format change.
+    #[serde(default)]
+    pub rotation: f32,
+    /// RESERVED for pin-to-grid anchoring (false today).
+    #[serde(default)]
+    pub pin_to_grid: bool,
+    /// The visible window (the sparse backing grid is unbounded).
+    pub row_count: u32,
+    pub col_count: u32,
+    /// Per-column/per-row size overrides in logical pixels.
+    #[serde(default)]
+    pub col_widths: HashMap<u32, f64>,
+    #[serde(default)]
+    pub row_heights: HashMap<u32, f64>,
+}
+
 /// A sparkline entry persisted in the workbook.
 /// Sparkline groups are stored as an opaque JSON string per sheet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +625,7 @@ impl Workbook {
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
+            floating_ranges: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pane_controls: Vec::new(),
@@ -633,6 +669,7 @@ impl Workbook {
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
+            floating_ranges: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pane_controls: Vec::new(),

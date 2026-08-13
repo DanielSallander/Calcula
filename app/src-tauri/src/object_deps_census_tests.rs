@@ -84,6 +84,7 @@ const DELETE_COMMANDS: &[(&str, ObjectKind)] = &[
     ("delete_named_range", ObjectKind::NamedRange),
     ("delete_named_style", ObjectKind::NamedStyle),
     ("delete_sheet", ObjectKind::Sheet),
+    ("delete_floating_range", ObjectKind::FloatingRange),
     ("delete_report", ObjectKind::Report),
     ("delete_script", ObjectKind::Script),
     ("delete_object_script", ObjectKind::ObjectScript),
@@ -435,8 +436,25 @@ pub(crate) fn body_with_one_hop(
     let Some(roots) = bodies.get(command) else {
         return String::new();
     };
-    let root = roots.join("
+    let mut root = roots.join("
 ");
+    // THE `_impl` / `_inner` SPLIT IS PART OF THE ROOT, not a hop. The house
+    // pattern for making a `State<T>` command testable is a one-line wrapper
+    // over `{command}_impl` / `{command}_inner` (hide_sheet_inner,
+    // delete_sheet_impl, add_sheet_inner) — counting that wrapper as the hop
+    // would leave zero hops for the cascades the body actually calls, and the
+    // census would fail every command the moment it gained a unit tier.
+    for suffix in ["_impl", "_inner"] {
+        let delegate = format!("{command}{suffix}");
+        if root.contains(&format!("{delegate}(")) {
+            if let Some(group) = bodies.get(&delegate) {
+                for body in group {
+                    root.push('\n');
+                    root.push_str(body);
+                }
+            }
+        }
+    }
     let mut text = root.clone();
     for (name, group) in bodies {
         if name == command {

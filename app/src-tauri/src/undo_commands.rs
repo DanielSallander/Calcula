@@ -1625,6 +1625,10 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         ("obj_cross_sheet_formulas", NONE),
         ("obj_controls", MutationDomains::of(Controls)),
         ("obj_style_tiers", NONE), ("obj_workbook_protection", NONE),
+        // Floating range geometry/window swaps. The FloatingRanges domain
+        // reloads the object store; the base OBJ (grid:refresh) repaints the
+        // overlay underneath it.
+        ("obj_floating_range", MutationDomains::of(FloatingRanges)),
     ] {
         let mut domains = OBJ;
         domains.extend(extra);
@@ -3665,6 +3669,16 @@ struct ExtensionDataObjSnapshot {
     previous: Option<serde_json::Value>,
 }
 
+/// Snapshot for the "obj_floating_range" CustomRestore — one floating range
+/// row's prior state (geometry + window). EntityId/SheetId-keyed: it carries
+/// NO sheet index, which is exactly why floating-range geometry can stay
+/// undoable while sheet-structural operations end the history.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct FloatingRangeObjSnapshot {
+    pub(crate) id: identity::EntityId,
+    pub(crate) previous: Option<crate::api_types::FloatingRange>,
+}
+
 fn push_obj_inverse<T: serde::Serialize>(
     inverse_transaction: &mut Transaction,
     kind: &str,
@@ -3702,6 +3716,24 @@ fn apply_object_swap_restore(
             });
             if let Some(prev) = snap.previous {
                 charts.push(prev);
+            }
+        }
+        "obj_floating_range" => {
+            let snap: FloatingRangeObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_floating_range snapshot: {}", e); return; }
+            };
+            let mut rows = state.floating_ranges.write(effect).unwrap();
+            let current = rows
+                .iter()
+                .position(|fr| fr.id == snap.id)
+                .map(|i| rows.remove(i));
+            push_obj_inverse(inverse_transaction, kind, &FloatingRangeObjSnapshot {
+                id: snap.id,
+                previous: current,
+            });
+            if let Some(prev) = snap.previous {
+                rows.push(prev);
             }
         }
         "obj_sparklines" => {
@@ -4524,6 +4556,9 @@ mod restore_registry_tests {
             ("obj_controls", true, obj_plus(Controls)),
             ("obj_style_tiers", true, OBJ),
             ("obj_workbook_protection", true, OBJ),
+            // FloatingRanges reloads the object row store; the base OBJ
+            // (grid:refresh) repaints the overlay and refetches cells.
+            ("obj_floating_range", true, obj_plus(FloatingRanges)),
             ("report_restore", true, OBJ),
             ("calp_reset", true, OBJ),
             // User hide/unhide: inline (only touches the user_hidden_* sublocks)
@@ -4571,14 +4606,14 @@ mod restore_registry_tests {
     fn every_ui_domain_is_in_all() {
         let names: std::collections::BTreeSet<Option<&'static str>> =
             MutationDomain::ALL.iter().map(|d| d.wire_name()).collect();
-        // 16 variants, 14 of which have a distinct wire name; `Hidden` and
+        // 17 variants, 15 of which have a distinct wire name; `Hidden` and
         // `None` share the absent one.
         assert_eq!(
             MutationDomain::ALL.len(),
-            15 + 1,
+            16 + 1,
             "UiDomain::ALL has fallen out of step with the enum"
         );
-        assert_eq!(names.len(), 14 + 1, "two domains share a wire name");
+        assert_eq!(names.len(), 15 + 1, "two domains share a wire name");
         // And every ObjectKind's answer is a member.
         for kind in crate::object_deps::ObjectKind::ALL {
             assert!(
@@ -5029,11 +5064,16 @@ pub(crate) fn apply_sheet_tab_state_restore(
         let mut visibility = state.sheet_visibility.write(effect).unwrap();
         let current = visibility.clone();
         *visibility = restored.clone();
-        // A queued entry cannot outlive a change to the sheet COUNT (every one
-        // of those ends the history), but "safe by a rule elsewhere" is how the
-        // sheet index became a hazard the first time.
+        // A queued entry can no longer outlive a REMOVAL or REORDER of sheets
+        // (every one of those ends the history), but it CAN predate a sheet:
+        // `create_floating_range` appends an object-backed sheet WITHOUT
+        // ending the history (a pure append invalidates nothing). The pad
+        // below would mark that sheet "visible" — a floating range's cell
+        // store surfacing on the tab bar — so the object markers are
+        // re-asserted from their authority, the floating-range store.
         visibility.truncate(sheet_count);
         crate::sheets::ensure_visibility_len(&mut visibility, sheet_count);
+        crate::floating_range::reassert_object_sheet_markers(state, &mut visibility);
         current
     });
     let previous_tab_colors = snap.tab_colors.as_ref().map(|restored| {

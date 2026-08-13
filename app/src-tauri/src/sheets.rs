@@ -62,7 +62,7 @@ pub struct SheetsResult {
 // Helper: build SheetInfo list from state vectors
 // ============================================================================
 
-fn build_sheet_list(
+pub(crate) fn build_sheet_list(
     sheet_names: &[String],
     freeze_configs: &[FreezeConfig],
     tab_colors: &[String],
@@ -71,6 +71,13 @@ fn build_sheet_list(
     sheet_names
         .iter()
         .enumerate()
+        // OBJECT-BACKED SHEETS ARE NOT IN THE LIST. Every `getSheets()` surface
+        // (tab bar, unhide dialog, sheet pickers, script/MCP enumerations)
+        // consumes this one builder, so filtering here is what keeps a floating
+        // range's backing sheet out of ALL of them at once. `index` stays the
+        // TRUE position in the state vectors — consumers must match by
+        // `s.index`, never by list position.
+        .filter(|(index, _)| is_user_sheet(sheet_visibility, *index))
         .map(|(index, name)| {
             let freeze = freeze_configs.get(index).cloned().unwrap_or_default();
             let vis = sheet_visibility.get(index).cloned().unwrap_or_else(|| "visible".to_string());
@@ -113,6 +120,51 @@ pub(crate) fn sheet_is_visible(sheet_visibility: &[String], index: usize) -> boo
         .get(index)
         .map(|v| v == "visible")
         .unwrap_or(true)
+}
+
+/// The visibility value marking a sheet as OBJECT-BACKED: a real engine sheet
+/// that exists only as the cell store of a workbook object (a Floating Range),
+/// never as a tab the user can visit.
+///
+/// It rides in `sheet_visibility` rather than a new parallel vector because
+/// every existing "is it visible" predicate (`sheet_is_visible`,
+/// `nearest_visible_sheet`, `visible_sheets_after_removing`, the tab bar's
+/// client-side filter, `next_sheet`/`previous_sheet`) already treats any
+/// non-`"visible"` string as unlandable — so an object sheet can never become
+/// the delete-landing target or the next/previous stop without a single new
+/// check. What DOES need a new predicate is the user-sheet boundary below.
+pub(crate) const OBJECT_SHEET_VISIBILITY: &str = "object";
+
+/// Is sheet `index` a USER sheet — one the user may activate, hide, move,
+/// rename, copy or delete through the sheet commands? Object-backed sheets
+/// (`OBJECT_SHEET_VISIBILITY`) are mutated only through their owning object's
+/// commands (`floating_range.rs`), so every sheet-lifecycle command and every
+/// user-facing enumeration filters through THIS predicate — one filter, not
+/// one per surface.
+pub(crate) fn is_user_sheet(sheet_visibility: &[String], index: usize) -> bool {
+    sheet_visibility
+        .get(index)
+        .map(|v| v != OBJECT_SHEET_VISIBILITY)
+        .unwrap_or(true)
+}
+
+/// The standard refusal for a sheet command aimed at an object-backed sheet.
+/// The message names the object system on purpose: the caller reached a real
+/// sheet index, and "out of range" would be a lie the log cannot act on.
+pub(crate) fn ensure_user_sheet(
+    sheet_visibility: &[String],
+    index: usize,
+    action: &str,
+) -> Result<(), String> {
+    if is_user_sheet(sheet_visibility, index) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot {} sheet {}: it is the backing store of a floating range object. \
+             Use the floating range commands instead.",
+            action, index
+        ))
+    }
 }
 
 /// How many sheets would still be VISIBLE if `removing` were deleted.
@@ -181,6 +233,18 @@ pub(crate) fn ensure_visibility_len(v: &mut Vec<String>, min_len: usize) {
 fn ensure_vec_len_with<T, F: Fn() -> T>(v: &mut Vec<T>, min_len: usize, make: F) {
     while v.len() < min_len {
         v.push(make());
+    }
+}
+
+/// Rotate an element in a Vec from `from` to `to`, shifting everything between
+/// by one. Shared by `move_sheet` and `add_sheet`'s partition-keeping branch.
+fn rotate_element<T>(v: &mut Vec<T>, from: usize, to: usize) {
+    if from < to {
+        // Move right: rotate left the subslice [from..=to]
+        v[from..=to].rotate_left(1);
+    } else {
+        // Move left: rotate right the subslice [to..=from]
+        v[to..=from].rotate_right(1);
     }
 }
 
@@ -844,6 +908,14 @@ pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsRes
         return Err(format!("Sheet index {} out of range", index));
     }
 
+    // An object-backed sheet can never be ACTIVE. The `state.grid` mirror, the
+    // active-sheet dependency maps, and the cascade's seeding all lean on that
+    // invariant — and every caller that switches sheets for the user's benefit
+    // (tab clicks, undo's switch-to-target, Find navigation) has a user sheet
+    // to land on instead. Callers that restore into a floating range go through
+    // `grids[backing]` directly and never activate it.
+    ensure_user_sheet(&sheet_visibility, index, "activate")?;
+
     while grids.len() <= index {
         grids.push(engine::grid::Grid::new());
     }
@@ -912,13 +984,129 @@ pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsRes
     Ok(result)
 }
 
+/// Append one sheet entry to EVERY per-sheet store, returning its index and
+/// freshly minted `SheetId`.
+///
+/// This is the single spelling of "a sheet now exists" — extracted from
+/// `add_sheet` so that `create_floating_range` (which appends an OBJECT-backed
+/// sheet, `OBJECT_SHEET_VISIBILITY`) cannot drift from it. A second copy of
+/// this push list is exactly how a per-sheet store gets forgotten and shows up
+/// as a save/reload digest diff or an index-out-of-bounds panic months later.
+///
+/// The caller holds the SEVEN outer write guards (canonical order: `grid`
+/// implied first by the caller, then `grids`, `sheet_names`, and the rest) and
+/// passes their `&mut` targets; the remaining per-sheet stores are acquired
+/// here in short nested scopes, exactly as `add_sheet` always has. Does NOT
+/// touch `active_sheet`, the `state.grid` mirror, or any stash/activate
+/// bookkeeping — appending a sheet and LOOKING at it are different acts, and
+/// an object-backed sheet is never looked at.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_sheet_stores(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    name: String,
+    visibility: &str,
+    sheet_names: &mut Vec<String>,
+    grids: &mut Vec<engine::Grid>,
+    freeze_configs: &mut Vec<FreezeConfig>,
+    tab_colors: &mut Vec<String>,
+    sheet_visibility: &mut Vec<String>,
+    all_column_widths: &mut Vec<HashMap<u32, f64>>,
+    all_row_heights: &mut Vec<HashMap<u32, f64>>,
+) -> (usize, identity::SheetId) {
+    // PAD-BEFORE-PUSH: a state seeded by a test, a legacy file, or a partial
+    // restore can hold per-sheet vectors SHORTER than the sheet list. A blind
+    // `push` onto a short vector lands the new sheet's entry on the wrong
+    // index — for `sheet_visibility` that would mark a DIFFERENT sheet as
+    // object-backed. Pad every vector to one-entry-per-existing-sheet first,
+    // with the same defaults `build_sheet_list` assumes for missing entries.
+    let existing = sheet_names.len();
+    ensure_vec_len_with(grids, existing, engine::grid::Grid::new);
+    ensure_vec_len(freeze_configs, existing);
+    ensure_tab_color_len(tab_colors, existing);
+    ensure_visibility_len(sheet_visibility, existing);
+    ensure_vec_len(all_column_widths, existing);
+    ensure_vec_len(all_row_heights, existing);
+
+    sheet_names.push(name);
+    grids.push(engine::grid::Grid::new());
+    freeze_configs.push(FreezeConfig::default());
+    {
+        let mut split_configs = state.split_configs.write(effect).unwrap();
+        ensure_vec_len(&mut split_configs, existing);
+        split_configs.push(SplitConfig::default());
+    }
+    {
+        let mut scroll_areas = state.scroll_areas.lock().unwrap();
+        ensure_vec_len(&mut scroll_areas, existing);
+        scroll_areas.push(None);
+    }
+    {
+        let mut sheet_zooms = state.sheet_zooms.write(effect).unwrap();
+        ensure_vec_len_with(&mut sheet_zooms, existing, || {
+            persistence::DEFAULT_SHEET_ZOOM_PERCENT
+        });
+        sheet_zooms.push(persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+    }
+    {
+        // Keep page_setups parallel to the sheet list — open_file
+        // materializes a default for every sheet, so a missing entry here
+        // shows up as a save/reload digest diff.
+        let mut page_setups = state.page_setups.write(effect).unwrap();
+        ensure_vec_len(&mut page_setups, existing);
+        page_setups.push(crate::api_types::PageSetup::default());
+    }
+    let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+    {
+        let mut sheet_ids = state.sheet_ids.write(effect).unwrap();
+        ensure_vec_len_with(&mut sheet_ids, existing, || {
+            identity::SheetId::from_bytes(identity::generate_uuid_v7())
+        });
+        sheet_ids.push(sheet_id);
+    }
+    tab_colors.push(String::new());
+    sheet_visibility.push(visibility.to_string());
+    // New sheet shows gridlines by default
+    {
+        let mut gridlines = state.show_gridlines.write(effect).unwrap();
+        ensure_vec_len_with(&mut gridlines, existing, || true);
+        gridlines.push(true);
+    }
+    {
+        let mut display_flags = state.sheet_display_flags.write(effect).unwrap();
+        ensure_vec_len(&mut display_flags, existing);
+        display_flags.push(crate::api_types::SheetDisplayFlags::default());
+    }
+    // New sheet gets empty dimensions and merged regions
+    all_column_widths.push(HashMap::new());
+    all_row_heights.push(HashMap::new());
+    crate::commands::dimensions::push_user_hidden_sheet(state, effect);
+    {
+        let mut all_merged = state.all_merged_regions.write(effect).unwrap();
+        ensure_vec_len(&mut all_merged, existing);
+        all_merged.push(HashSet::new());
+    }
+    (sheet_names.len() - 1, sheet_id)
+}
+
 #[tauri::command]
 pub fn add_sheet(
     state: State<AppState>,
     file_state: State<FileState>,
     name: Option<String>,
 ) -> Result<SheetsResult, String> {
-    crate::protection::check_workbook_structure(&state, "add a sheet")?;
+    add_sheet_inner(&state, &file_state, name)
+}
+
+/// Command body over plain references, so the partition-keeping branch has a
+/// unit tier (`State<T>` cannot be built in a test). Same split as
+/// `hide_sheet_inner` below.
+pub(crate) fn add_sheet_inner(
+    state: &AppState,
+    file_state: &FileState,
+    name: Option<String>,
+) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(state, "add a sheet")?;
     // Excel's rule, checked BEFORE the document is marked modified: a refused
     // name must not dirty the workbook. The uniqueness half needs the sheet
     // list and is checked under the lock below.
@@ -985,49 +1173,10 @@ pub fn add_sheet(
     all_column_widths[old_index] = std::mem::take(&mut *column_widths);
     all_row_heights[old_index] = std::mem::take(&mut *row_heights);
 
-    sheet_names.push(new_name);
-    let new_grid = engine::grid::Grid::new();
-    grids.push(new_grid.clone());
-    freeze_configs.push(FreezeConfig::default());
-    {
-        let mut split_configs = state.split_configs.write(&effect).unwrap();
-        split_configs.push(SplitConfig::default());
-    }
-    {
-        let mut scroll_areas = state.scroll_areas.lock().unwrap();
-        scroll_areas.push(None);
-    }
-    {
-        let mut sheet_zooms = state.sheet_zooms.write(&effect).unwrap();
-        sheet_zooms.push(persistence::DEFAULT_SHEET_ZOOM_PERCENT);
-    }
-    {
-        // Keep page_setups parallel to the sheet list — open_file
-        // materializes a default for every sheet, so a missing entry here
-        // shows up as a save/reload digest diff.
-        let mut page_setups = state.page_setups.write(&effect).unwrap();
-        page_setups.push(crate::api_types::PageSetup::default());
-    }
-    {
-        let mut sheet_ids = state.sheet_ids.write(&effect).unwrap();
-        sheet_ids.push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
-    }
-    tab_colors.push(String::new());
-    sheet_visibility.push("visible".to_string());
-    // New sheet shows gridlines by default
-    {
-        let mut gridlines = state.show_gridlines.write(&effect).unwrap();
-        gridlines.push(true);
-    }
-    {
-        let mut display_flags = state.sheet_display_flags.write(&effect).unwrap();
-        display_flags.push(crate::api_types::SheetDisplayFlags::default());
-    }
-    // New sheet gets empty dimensions and merged regions
-    all_column_widths.push(HashMap::new());
-    all_row_heights.push(HashMap::new());
+    // Stash the ACTIVE sheet's view state before switching to the new one —
+    // this is activation bookkeeping, deliberately outside `append_sheet_stores`
+    // (an appended object sheet is never activated, so it must not stash).
     crate::commands::dimensions::stash_active_user_hidden(&state, old_index);
-    crate::commands::dimensions::push_user_hidden_sheet(&state, &effect);
     {
         let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
         // Save current sheet's merged regions before switching
@@ -1036,12 +1185,114 @@ pub fn add_sheet(
             all_merged.push(HashSet::new());
         }
         all_merged[old_index] = std::mem::take(&mut *current_merged);
-        all_merged.push(HashSet::new());
     }
 
-    let new_index = sheet_names.len() - 1;
+    let (appended_at, _sheet_id) = append_sheet_stores(
+        &state,
+        &effect,
+        new_name,
+        "visible",
+        &mut sheet_names,
+        &mut grids,
+        &mut freeze_configs,
+        &mut tab_colors,
+        &mut sheet_visibility,
+        &mut all_column_widths,
+        &mut all_row_heights,
+    );
+
+    // PARTITION INVARIANT: user sheets are a contiguous PREFIX; object-backed
+    // sheets (floating range cell stores, `OBJECT_SHEET_VISIBILITY`) stay at
+    // the tail. This is what keeps two whole surface families correct with no
+    // filtering at all: (1) `MultiSheetContext.sheet_order` is `sheet_names`
+    // verbatim, so a 3D range with user-sheet endpoints can never span a
+    // backing sheet; (2) `build_sheet_list`'s filtered output has
+    // `sheets[i].index == i` for every user sheet, so no positional consumer
+    // anywhere in the frontend can drift. The invariant has exactly one
+    // maintenance site — this branch — because every other mutation preserves
+    // it: `copy_sheet` inserts at `source+1` with a user-sheet source,
+    // `move_sheet` refuses object endpoints, deletion preserves order, and
+    // `create_floating_range` appends to the tail.
+    let new_index = match sheet_visibility[..appended_at]
+        .iter()
+        .position(|v| v == OBJECT_SHEET_VISIBILITY)
+    {
+        None => appended_at,
+        Some(k) => {
+            // Rotate the just-appended user sheet from the tail into `k`; the
+            // object sheets in [k..appended_at) shift up by one.
+            rotate_element(&mut *sheet_names, appended_at, k);
+            rotate_element(&mut *grids, appended_at, k);
+            rotate_element(&mut *freeze_configs, appended_at, k);
+            rotate_element(&mut *tab_colors, appended_at, k);
+            rotate_element(&mut *sheet_visibility, appended_at, k);
+            rotate_element(&mut *all_column_widths, appended_at, k);
+            rotate_element(&mut *all_row_heights, appended_at, k);
+            {
+                let mut split_configs = state.split_configs.write(&effect).unwrap();
+                rotate_element(&mut *split_configs, appended_at, k);
+            }
+            {
+                let mut scroll_areas = state.scroll_areas.lock().unwrap();
+                rotate_element(&mut *scroll_areas, appended_at, k);
+            }
+            {
+                let mut sheet_zooms = state.sheet_zooms.write(&effect).unwrap();
+                rotate_element(&mut *sheet_zooms, appended_at, k);
+            }
+            {
+                let mut page_setups = state.page_setups.write(&effect).unwrap();
+                rotate_element(&mut *page_setups, appended_at, k);
+            }
+            {
+                let mut sheet_ids = state.sheet_ids.write(&effect).unwrap();
+                rotate_element(&mut *sheet_ids, appended_at, k);
+            }
+            {
+                let mut gridlines = state.show_gridlines.write(&effect).unwrap();
+                rotate_element(&mut *gridlines, appended_at, k);
+            }
+            {
+                let mut display_flags = state.sheet_display_flags.write(&effect).unwrap();
+                rotate_element(&mut *display_flags, appended_at, k);
+            }
+            {
+                let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+                rotate_element(&mut *all_merged, appended_at, k);
+            }
+            crate::commands::dimensions::rotate_user_hidden_sheet(
+                &state,
+                &effect,
+                appended_at,
+                k,
+                appended_at + 1,
+            );
+
+            // Re-key the sheet-index-keyed stores for the shifted object
+            // sheets. The new sheet (old index `appended_at`) has no entries
+            // anywhere yet, so the mapping only ever moves object-sheet
+            // entries — their cross-sheet dependency edges and spill maps in
+            // particular. The floating-object stores (slicers, charts,
+            // sparklines: `cascade_sheet_removed`), reports and protected
+            // regions are NOT re-keyed here on an argued exception: those
+            // objects live on user sheets only (they are created on the
+            // active sheet, and an object-backed sheet can never be active),
+            // and no user sheet changes index in this rotation.
+            let shift = |i: usize| -> Option<usize> {
+                if i >= k && i < appended_at {
+                    Some(i + 1)
+                } else {
+                    Some(i)
+                }
+            };
+            remap_sheet_keyed_stores(&state, &effect, shift);
+            remap_tables_store(&state, &effect, shift);
+            k
+        }
+    };
+
     *active_sheet = new_index;
-    *current_grid = new_grid;
+    *current_grid = engine::grid::Grid::new();
 
     SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
@@ -1074,7 +1325,40 @@ pub fn delete_sheet(
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     index: usize,
 ) -> Result<SheetsResult, String> {
-    crate::protection::check_workbook_structure(&state, "delete a sheet")?;
+    delete_sheet_impl(
+        &state,
+        &file_state,
+        &pivot_state,
+        &user_files_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
+        index,
+        false,
+    )
+}
+
+/// Command body over plain references, with the ONE parameterized gate:
+/// `delete_floating_range` removes its OBJECT-backed sheet through this exact
+/// machinery — the repairable pre-flight, the store removals, the `#REF!`
+/// repair, the cross-map re-keying, the workbook recalculation — because a
+/// backing sheet IS a sheet and a second copy of this walk would drift. Every
+/// other caller passes `allow_object = false` and object sheets are refused.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn delete_sheet_impl(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    index: usize,
+    allow_object: bool,
+) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(state, "delete a sheet")?;
 
     // PRE-FLIGHT, under READ locks, before the document is marked dirty and
     // before a single store is touched.
@@ -1117,11 +1401,16 @@ pub fn delete_sheet(
     }
 
     // Deleting a sheet rewrites persisted per-sheet stores.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     // Tables and pivots removed BECAUSE their sheet went, collected inside the
     // guarded block and cascaded after every lock is released (§3bn): objects on
     // OTHER sheets can be bound to them.
     let mut removed_sources: Vec<crate::object_deps::DeletedSource> = Vec::new();
+    // The deleted sheet's stable id, captured inside the guarded block (the
+    // vector entry is removed further down) and consumed after every lock is
+    // released: floating ranges HOSTED on this sheet die with it. Deferred
+    // init — every path that reaches the consumer passed the assignment.
+    let deleted_sheet_stable_id: Option<identity::SheetId>;
     let result = {
     // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
     // including `sheet_names`. The recalculation pass takes `sheet_names` only
@@ -1147,6 +1436,14 @@ pub fn delete_sheet(
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
+    }
+
+    // A floating range's backing sheet is deleted by `delete_floating_range`,
+    // which also removes the object row and knows what the delete owes the
+    // workbook. Reaching it through the sheet command would leave the object
+    // row behind, pointing at nothing.
+    if !allow_object {
+        ensure_user_sheet(&sheet_visibility, index, "delete")?;
     }
 
     // EXCEL PARITY: a workbook must keep at least one VISIBLE worksheet, and
@@ -1198,6 +1495,7 @@ pub fn delete_sheet(
     // (Read before the sheet_ids entry is removed further down.)
     {
         let deleted_sheet_id = state.sheet_ids.read().ok().and_then(|ids| ids.get(index).copied());
+        deleted_sheet_stable_id = deleted_sheet_id;
         if let Some(sid) = deleted_sheet_id {
             if let Ok(mut regions) = state.writeback_draft_regions.write(&effect) {
                 let before = regions.len();
@@ -1597,6 +1895,26 @@ pub fn delete_sheet(
         );
     }
 
+    // Floating ranges HOSTED on the deleted sheet die with it — the cascade
+    // declared in `object_deps::DEPENDENCY_MATRIX` (Sheet →
+    // floatingRange.hostSheet). Runs last, with every lock long released; each
+    // orphaned object deletes its own backing sheet back through THIS function
+    // (`allow_object = true`), and a backing sheet hosts nothing, so the
+    // recursion is depth one.
+    if let Some(host_id) = deleted_sheet_stable_id {
+        crate::floating_range::delete_floating_ranges_for_host(
+            state,
+            file_state,
+            pivot_state,
+            user_files_state,
+            pane_control_state,
+            ribbon_filter_state,
+            slicer_state,
+            timeline_state,
+            host_id,
+        );
+    }
+
     Ok(result)
 }
 
@@ -1607,7 +1925,23 @@ pub fn rename_sheet(
     index: usize,
     new_name: String,
 ) -> Result<SheetsResult, String> {
-    crate::protection::check_workbook_structure(&state, "rename a sheet")?;
+    rename_sheet_inner(&state, &file_state, index, new_name, false)
+}
+
+/// Command body over plain references (the `hide_sheet_inner` split), plus the
+/// ONE parameterized gate: `rename_floating_range` renames its OBJECT-backed
+/// sheet through this exact machinery — validation, the workbook-repairable
+/// gate, `repair_all_formulas`, cross-map re-keying, name-casing restamp —
+/// because a floating range's name IS its backing sheet's name. Every other
+/// caller passes `allow_object = false` and object sheets are refused.
+pub(crate) fn rename_sheet_inner(
+    state: &AppState,
+    file_state: &FileState,
+    index: usize,
+    new_name: String,
+    allow_object: bool,
+) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(state, "rename a sheet")?;
     // Same reason the grid pair below is `lock_pending`: the three validation
     // gates can still refuse, and this guard has to be held across them.
     let sheet_names = state.sheet_names.lock_pending().unwrap();
@@ -1625,6 +1959,13 @@ pub fn rename_sheet(
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
+    }
+
+    // A floating range's name is renamed through `rename_floating_range`, which
+    // shares this command's repair machinery but also owns the object's
+    // identity. The sheet-command door stays closed to object sheets.
+    if !allow_object {
+        ensure_user_sheet(&sheet_visibility, index, "rename")?;
     }
 
     // EXCEL'S RULE, at the one place a user names a sheet (register F6, product
@@ -1979,6 +2320,12 @@ pub fn move_sheet(
     if to_index >= count {
         return Err(format!("Target sheet index {} out of range", to_index));
     }
+    // Object-backed sheets have no tab, so they can be neither the sheet being
+    // moved nor the position moved onto. (Moving a USER sheet across one is
+    // fine: the rotate below renumbers the object sheet with everything else,
+    // and its owning object row is SheetId-keyed, not index-keyed.)
+    ensure_user_sheet(&sheet_visibility, from_index, "move")?;
+    ensure_user_sheet(&sheet_visibility, to_index, "move onto")?;
     if from_index == to_index {
         return Ok(SheetsResult {
             sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
@@ -1998,17 +2345,6 @@ pub fn move_sheet(
     }
     if old_active < all_row_heights.len() {
         all_row_heights[old_active] = std::mem::take(&mut *row_heights);
-    }
-
-    // Helper: rotate an element in a Vec from `from` to `to`
-    fn rotate_element<T>(v: &mut Vec<T>, from: usize, to: usize) {
-        if from < to {
-            // Move right: rotate left the subslice [from..=to]
-            v[from..=to].rotate_left(1);
-        } else {
-            // Move left: rotate right the subslice [to..=from]
-            v[to..=from].rotate_right(1);
-        }
     }
 
     // Ensure all per-sheet vecs are long enough
@@ -2243,6 +2579,12 @@ pub fn copy_sheet(
     if source_index >= count {
         return Err(format!("Source sheet index {} out of range", source_index));
     }
+
+    // A floating range's backing sheet cannot be copied as a sheet: the copy
+    // would be an object sheet with no owning object row (invisible everywhere,
+    // reachable by nothing). Duplicating a floating range is its own object
+    // operation, when it exists.
+    ensure_user_sheet(&sheet_visibility, source_index, "copy")?;
 
     // Sync active grid
     let old_active = *active_sheet;
@@ -2502,6 +2844,15 @@ pub(crate) fn hide_sheet_inner(
             return Err(format!("Invalid visibility level '{}'. Use 'hidden' or 'veryHidden'.", hide_level));
         }
 
+        // An object-backed sheet is not on any tab and cannot change visibility
+        // level: overwriting its `"object"` marker would orphan the floating
+        // range that owns it. (Checked with a plain read before the effect is
+        // constructed — a refused hide must not dirty.)
+        {
+            let sheet_visibility = state.sheet_visibility.read().unwrap();
+            ensure_user_sheet(&sheet_visibility, index, "hide")?;
+        }
+
         // Past the structure gate and both validations. `sheet.visibility` is persisted.
         // The last-visible-sheet check below can still refuse; it is a pure read of the
         // store, so a refused hide leaves the data untouched but the flag set -- a false
@@ -2608,6 +2959,15 @@ pub(crate) fn unhide_sheet_inner(
 
         if index >= sheet_names.len() {
             return Err(format!("Sheet index {} out of range", index));
+        }
+
+        // Unhiding an object-backed sheet would put a floating range's cell
+        // store on the tab bar as if it were a worksheet. Its visibility
+        // belongs to the owning object, not to this command. (Plain read
+        // before the effect — a refusal must not dirty.)
+        {
+            let sheet_visibility = state.sheet_visibility.read().unwrap();
+            ensure_user_sheet(&sheet_visibility, index, "unhide")?;
         }
 
         // Past the range check; `sheet.visibility` is persisted.
@@ -3326,7 +3686,8 @@ mod tables_remap_tests {
         // `delete_sheet` does it inline, in the pass that also drops the
         // deleted sheet's names out of `table_names`. Pinned by its own shape
         // rather than by the helper's name.
-        let delete_body = body_of("pub fn delete_sheet(");
+        // The command's body lives in the `_impl` testability split.
+        let delete_body = body_of("pub(crate) fn delete_sheet_impl(");
         assert!(
             delete_body.contains("table.sheet_index = new_key"),
             "`delete_sheet` no longer re-stamps table sheet indices."
@@ -3341,3 +3702,7 @@ mod hidden_active_sheet_tests;
 #[cfg(test)]
 #[path = "sheet_tab_state_undo_tests.rs"]
 mod sheet_tab_state_undo_tests;
+
+#[cfg(test)]
+#[path = "object_sheet_tests.rs"]
+mod object_sheet_tests;

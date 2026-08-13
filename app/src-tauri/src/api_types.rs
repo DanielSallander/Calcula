@@ -2304,6 +2304,72 @@ pub struct SparklineEntry {
     pub groups_json: String,
 }
 
+// ============================================================================
+// Floating Ranges
+// ============================================================================
+
+/// A FLOATING RANGE: a shape-like object floating over the grid whose content
+/// is a real range of cells, backed by an OBJECT-VISIBILITY engine sheet
+/// (`sheets::OBJECT_SHEET_VISIBILITY`). The object's NAME is not stored here —
+/// it IS `sheet_names[backing]`, which is what makes `=Float1!A1` parse,
+/// normalize, cascade and rename-repair through the ordinary sheet machinery.
+///
+/// Sheets are referenced by STABLE ID, never index: indices renumber on every
+/// sheet add/delete/move and this row must survive all of them untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FloatingRange {
+    pub id: identity::EntityId,
+    pub backing_sheet_id: identity::SheetId,
+    pub host_sheet_id: identity::SheetId,
+    /// Sheet pixels relative to the host sheet's A1 top-left corner.
+    pub x: f64,
+    pub y: f64,
+    /// RESERVED for tilt: persisted from day one so adding rotation later is
+    /// not a format change. Always 0.0 in v1; nothing renders tilted.
+    #[serde(default)]
+    pub rotation: f32,
+    /// RESERVED for pin-to-grid anchoring (Controls semantics). v1: false.
+    #[serde(default)]
+    pub pin_to_grid: bool,
+    /// The visible window: the backing grid is sparse and unbounded, these
+    /// are how many rows/columns the object SHOWS (and its frame derives its
+    /// size from). Shrinking hides but never deletes cells.
+    pub row_count: u32,
+    pub col_count: u32,
+    /// Per-column width / per-row height overrides (logical px); missing
+    /// entries use the grid defaults. No UI in v1; carried for v2.
+    #[serde(default)]
+    pub col_widths: std::collections::HashMap<u32, f64>,
+    #[serde(default)]
+    pub row_heights: std::collections::HashMap<u32, f64>,
+}
+
+/// What the frontend needs to render/address a floating range: the persisted
+/// row plus the LIVE resolutions of its stable ids (object name = the backing
+/// sheet's name; indices valid only until the next sheet operation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FloatingRangeInfo {
+    #[serde(flatten)]
+    pub range: FloatingRange,
+    pub name: String,
+    pub backing_sheet_index: usize,
+    pub host_sheet_index: usize,
+}
+
+/// Partial update for `update_floating_range`: geometry and window size in one
+/// command (one `generate_handler!` slot — the dispatch frame's stack budget is
+/// finite). Absent fields are left unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FloatingRangePatch {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub row_count: Option<u32>,
+    pub col_count: Option<u32>,
+}
+
 /// Default row height and column width for the workbook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -169,6 +169,7 @@ pub fn get_sheet_summary(
     let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let grids = state.grids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let sheet_visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
@@ -184,8 +185,14 @@ pub fn get_sheet_summary(
     // Hidden formulas are withheld from the AI context exactly like every
     // other read path. Canonical lock order allows sheet_protection last.
     let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
+    // Object-backed sheets (floating range cell stores) are not presented as
+    // worksheets — the AI would read them as mystery sheets with no tab. They
+    // surface through the floating-range inventory instead.
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
     for (i, name) in sheet_names.iter().enumerate() {
+        if !crate::sheets::is_user_sheet(&sheet_visibility, i) {
+            continue;
+        }
         if i == active_sheet {
             sheet_inputs.push(SheetInput {
                 name,
@@ -215,6 +222,7 @@ pub fn get_sheet_summary(
     drop(grids);
     drop(styles);
     drop(sheet_names);
+    drop(sheet_visibility);
 
     // Fold in a chart inventory so the AI knows what charts exist (mirrors how
     // list_charts renders them). Appended at the MCP host layer — the pure
@@ -229,6 +237,32 @@ pub fn get_sheet_summary(
         }
     }
     drop(charts);
+
+    // Floating ranges: their backing sheets were withheld from the per-sheet
+    // serialization above (no tab, they would read as mystery sheets), so THIS
+    // is where the AI learns they exist — name, window, host — and that
+    // `=Name!A1` addresses them. Same host-layer pattern + char-budget guard.
+    {
+        let rows = crate::floating_range::list_floating_ranges_inner(&state);
+        if !rows.is_empty() {
+            let mut lines = String::new();
+            for info in &rows {
+                lines.push_str(&format!(
+                    "- {} ({} rows x {} cols, floating over sheet {}; reference its cells as {}!A1)\n",
+                    info.name,
+                    info.range.row_count,
+                    info.range.col_count,
+                    info.host_sheet_index,
+                    info.name
+                ));
+            }
+            let section = format!("\n\n## Floating Ranges\n{}", lines.trim_end());
+            let limit = max_chars as usize;
+            if limit == 0 || summary.len() + section.len() <= limit {
+                summary.push_str(&section);
+            }
+        }
+    }
 
     // Fold in a named-range inventory (C1b) — workbook-global names like
     // "TaxRate = 0.25" the AI would otherwise have to guess. Same host-layer

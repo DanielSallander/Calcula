@@ -558,6 +558,11 @@ export function bootstrapShell(): void {
     // guards on `typeof detail?.sheetIndex === "number"` before using it.
     sheets: ["sheets:refresh", AppEvents.SHEET_CHANGED],
     namedRanges: [AppEvents.NAMED_RANGES_CHANGED],
+    // Floating range object rows (geometry/window/existence). The extension
+    // reloads its row store on the CHANGED event; grid:refresh repaints the
+    // overlay (and refetches cells — an undone resize can reveal cells the
+    // cache never held).
+    floatingRanges: [AppEvents.FLOATING_RANGES_CHANGED, "grid:refresh"],
   };
   const fanOutDomains = (domains: readonly MutationDomain[] | undefined): void => {
     const fired = new Set<string>();

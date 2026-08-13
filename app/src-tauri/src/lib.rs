@@ -73,6 +73,7 @@ pub mod commands;
 pub mod formula;
 pub mod logging;
 pub mod sheets;
+pub mod floating_range;
 /// The ONE rule for what a sheet may be called (register F6, product half).
 pub mod sheet_names;
 pub mod undo_commands;
@@ -532,6 +533,11 @@ pub struct AppState {
     pub calculate_before_save: Mutex<bool>,
     /// Chart entries: persisted chart definitions (opaque JSON)
     pub charts: document_effect::Persisted<Vec<api_types::ChartEntry>>,
+    /// Floating ranges: shape-like objects whose cells live in OBJECT-backed
+    /// engine sheets (`sheets::OBJECT_SHEET_VISIBILITY`). The row is pure
+    /// object state (stable ids + geometry + window); the cells themselves are
+    /// ordinary sheets in `grids`. PERSISTED (`floating_ranges.json`).
+    pub floating_ranges: document_effect::Persisted<Vec<api_types::FloatingRange>>,
     /// Sparkline entries: persisted sparkline groups per sheet (opaque JSON)
     pub sparklines: document_effect::Persisted<Vec<api_types::SparklineEntry>>,
     /// Scroll area restriction per sheet (A1-style range like "A1:Z100", or None for unrestricted).
@@ -783,6 +789,7 @@ pub fn create_app_state() -> AppState {
         precision_as_displayed: Mutex::new(false),
         calculate_before_save: Mutex::new(true),
         charts: document_effect::Persisted::new(Vec::new()),
+        floating_ranges: document_effect::Persisted::new(Vec::new()),
         sparklines: document_effect::Persisted::new(Vec::new()),
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
@@ -4929,6 +4936,13 @@ pub fn run() {
             sheets::add_sheet,
             sheets::delete_sheet,
             sheets::rename_sheet,
+            floating_range::create_floating_range,
+            floating_range::list_floating_ranges,
+            floating_range::update_floating_range,
+            floating_range::update_floating_range_cell,
+            floating_range::get_floating_range_cells,
+            floating_range::rename_floating_range,
+            floating_range::delete_floating_range,
             sheets::set_freeze_panes,
             sheets::get_freeze_panes,
             sheets::set_split_window,

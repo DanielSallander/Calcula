@@ -181,9 +181,9 @@ describe("shapeToRef", () => {
 });
 
 describe("SCRIPT_OBJECT_KINDS", () => {
-  it("is exactly the six enumerable kinds", () => {
+  it("is exactly the seven enumerable kinds", () => {
     expect([...SCRIPT_OBJECT_KINDS].sort()).toEqual(
-      ["chart", "namedRange", "pivot", "shape", "slicer", "table"],
+      ["chart", "floatingRange", "namedRange", "pivot", "shape", "slicer", "table"],
     );
   });
 });

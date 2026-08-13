@@ -372,10 +372,12 @@ fn the_landing_sheet_skips_a_hidden_preference() {
 #[test]
 fn delete_sheet_asks_both_questions() {
     // The pure functions are only worth something if the command calls them.
+    // The command's body lives in `delete_sheet_impl` (the `hide_sheet_inner`
+    // testability split); the wrapper above it is a one-line delegation.
     let src = include_str!("sheets.rs");
     let at = src
-        .find("pub fn delete_sheet(")
-        .expect("delete_sheet was renamed — re-derive this census");
+        .find("pub(crate) fn delete_sheet_impl(")
+        .expect("delete_sheet_impl was renamed — re-derive this census");
     let open = src[at..].find('{').expect("no body") + at;
     let bytes = src.as_bytes();
     let mut depth = 0usize;

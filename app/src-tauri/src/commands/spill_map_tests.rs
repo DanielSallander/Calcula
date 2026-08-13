@@ -1310,7 +1310,9 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("commands/data.rs", "sort_range"),
         ("commands/data.rs", "fill_range"),
         ("commands/data.rs", "remove_duplicates"),
-        ("commands/data.rs", "update_cell_on_sheets"),
+        // The command's writing body (testability split — the `update_cell_on_sheets`
+        // wrapper itself writes nothing).
+        ("commands/data.rs", "update_cell_on_sheets_inner"),
         ("undo_commands.rs", "apply_changes"),
     ] {
         assert!(

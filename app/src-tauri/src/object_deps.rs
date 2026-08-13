@@ -117,6 +117,7 @@ pub enum ObjectKind {
     TableColumn,
     ObjectTemplate,
     BiConnection,
+    FloatingRange,
 }
 
 impl ObjectKind {
@@ -151,6 +152,7 @@ impl ObjectKind {
             ObjectKind::TableColumn => "tableColumn",
             ObjectKind::ObjectTemplate => "objectTemplate",
             ObjectKind::BiConnection => "biConnection",
+            ObjectKind::FloatingRange => "floatingRange",
         }
     }
 
@@ -185,6 +187,7 @@ impl ObjectKind {
         ObjectKind::TableColumn,
         ObjectKind::ObjectTemplate,
         ObjectKind::BiConnection,
+        ObjectKind::FloatingRange,
     ];
 
     /// The frontend refresh domain that makes this kind's cached copy agree
@@ -223,6 +226,7 @@ impl ObjectKind {
             ObjectKind::RibbonFilter => UiDomain::RibbonFilter,
             ObjectKind::PaneControl => UiDomain::PaneControl,
             ObjectKind::FloatingControl => UiDomain::Controls,
+            ObjectKind::FloatingRange => UiDomain::FloatingRanges,
             ObjectKind::Sheet => UiDomain::Sheets,
             ObjectKind::ConditionalFormat => UiDomain::ConditionalFormats,
             ObjectKind::DataValidation => UiDomain::Validations,
@@ -356,6 +360,7 @@ pub enum UiDomain {
     Annotations,
     Controls,
     ConditionalFormats,
+    FloatingRanges,
 }
 
 impl UiDomain {
@@ -383,6 +388,7 @@ impl UiDomain {
         UiDomain::Annotations,
         UiDomain::Controls,
         UiDomain::ConditionalFormats,
+        UiDomain::FloatingRanges,
     ];
 
     /// The exact string the `MutationDomain` union uses, or `None`.
@@ -404,6 +410,7 @@ impl UiDomain {
             UiDomain::Annotations => Some("annotations"),
             UiDomain::Controls => Some("controls"),
             UiDomain::ConditionalFormats => Some("conditionalFormats"),
+            UiDomain::FloatingRanges => Some("floatingRanges"),
         }
     }
 }
@@ -689,6 +696,33 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         implemented_by: "cascade_sheet_removed",
         note: "Same two defects as the slicer row; a timeline is \
                 index-anchored the same way.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Sheet,
+        dependent: "floatingRange.hostSheetId",
+        dependent_kind: Some(ObjectKind::FloatingRange),
+        policy: DeletePolicy::Cascade,
+        implemented_by: "delete_floating_ranges_for_host",
+        note: "A floating range floats OVER its host sheet; the host gone, \
+                there is nothing to float over. Each orphaned object deletes \
+                its own OBJECT-backed cell-store sheet back through \
+                delete_sheet_impl, so references into it become #REF! exactly \
+                like any sheet delete. SheetId-keyed, so the host's index \
+                remap never touches the rows.",
+    },
+    DependencyRule {
+        owner: ObjectKind::FloatingRange,
+        dependent: "formula.crossSheetRef",
+        dependent_kind: None,
+        policy: DeletePolicy::Repair,
+        implemented_by: "delete_sheet_impl",
+        note: "=Float1!A1 anywhere in the workbook becomes #REF! when the \
+                floating range is deleted — the object's cells ARE a sheet \
+                (OBJECT_SHEET_VISIBILITY), and its delete runs the sheet \
+                delete's own all-formula repair and workbook recalculation. \
+                Pinned by formula_serialisation_tests's cross-sheet #REF! \
+                test for ordinary sheets; the floating-range delete goes \
+                through the identical delete_sheet_impl walk.",
     },
     DependencyRule {
         owner: ObjectKind::Sheet,

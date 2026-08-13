@@ -148,6 +148,7 @@ import { getControlsProvider } from "../controlsService";
 import type { ChartPlacement } from "../componentStoreRegistry";
 import {
   chartToRef,
+  floatingRangeToRef,
   namedRangeToRef,
   pivotToRef,
   shapeToRef,
@@ -4002,6 +4003,124 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       }
       await announceObjectsChanged();
       return undefined;
+    }
+    // ---- FLOATING RANGES. Id-addressed straight at the backend (the backend
+    //      resolves the backing sheet from the stable id — the script layer
+    //      never sees a sheet index for the cells). Writes ride the ordinary
+    //      undoable, recalculating off-sheet edit path; delete ends the undo
+    //      history exactly like deleting a sheet, which the row's desc says.
+    //      The setState aspect door refuses this kind by name (vSetState).
+    case "api.createFloatingRange": {
+      const [options] = args as [
+        { name?: string; x?: number; y?: number; rows?: number; cols?: number } | undefined,
+      ];
+      const { invokeBackend } = await import("../backend");
+      const created = await invokeBackend<FloatingRangeWire>("create_floating_range", {
+        name: options?.name ?? null,
+        x: options?.x ?? 40,
+        y: options?.y ?? 40,
+      });
+      if (!created) {
+        throw new BrokerError("HostError", "create_floating_range returned nothing");
+      }
+      let info = created;
+      const rows = options?.rows ?? 1;
+      const cols = options?.cols ?? 1;
+      if (rows > 1 || cols > 1) {
+        info =
+          (await invokeBackend<FloatingRangeWire>("update_floating_range", {
+            id: created.id,
+            patch: { rowCount: rows, colCount: cols },
+          })) ?? created;
+      }
+      announceFloatingRangesChanged();
+      return floatingRangeToRef({
+        id: info.id,
+        name: info.name,
+        hostSheetIndex: info.hostSheetIndex,
+        rowCount: info.rowCount,
+        colCount: info.colCount,
+      });
+    }
+    case "api.deleteFloatingRange": {
+      const [id] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      await invokeBackend("delete_floating_range", { id });
+      announceFloatingRangesChanged();
+      return undefined;
+    }
+    case "api.floatingRangeResize": {
+      const [id, rows, cols] = args as [string, number, number];
+      const { invokeBackend } = await import("../backend");
+      const info = await invokeBackend<FloatingRangeWire>("update_floating_range", {
+        id,
+        patch: { rowCount: rows, colCount: cols },
+      });
+      if (!info) throw new BrokerError("ValidationError", `No floating range with id "${id}"`);
+      announceFloatingRangesChanged();
+      return floatingRangeToRef({
+        id: info.id,
+        name: info.name,
+        hostSheetIndex: info.hostSheetIndex,
+        rowCount: info.rowCount,
+        colCount: info.colCount,
+      });
+    }
+    case "api.floatingRangeSetCells": {
+      const [id, startRow, startCol, values] = args as [
+        string,
+        number,
+        number,
+        (string | number | boolean | null)[][],
+      ];
+      const { invokeBackend } = await import("../backend");
+      // Per-cell through the ONE write door (the same command the in-app editor
+      // commits through), values in invariant (canonical US) form — the split
+      // update_cells_batch makes for every script-typed write.
+      for (let r = 0; r < values.length; r++) {
+        for (let c = 0; c < values[r].length; c++) {
+          const v = values[r][c];
+          const text =
+            v === null ? "" : typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : String(v);
+          await invokeBackend("update_floating_range_cell", {
+            id,
+            row: startRow + r,
+            col: startCol + c,
+            value: text,
+            invariant: true,
+          });
+        }
+      }
+      announceFloatingRangesChanged();
+      return undefined;
+    }
+    case "api.floatingRangeGetCells": {
+      const [id] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      const rows = await invokeBackend<FloatingRangeWire[]>("list_floating_ranges", {});
+      const info = (rows ?? []).find((fr) => fr.id === id);
+      if (!info) throw new BrokerError("ValidationError", `No floating range with id "${id}"`);
+      const cells = await invokeBackend<
+        Array<{ row: number; col: number; kind: string; value: unknown; formula?: string | null }>
+      >("get_floating_range_cells", {
+        id,
+        startRow: 0,
+        startCol: 0,
+        endRow: Math.max(0, info.rowCount - 1),
+        endCol: Math.max(0, info.colCount - 1),
+      });
+      return {
+        rowCount: info.rowCount,
+        colCount: info.colCount,
+        // SPARSE, exactly as the backend answers: only cells that exist.
+        cells: (cells ?? []).map((c) => ({
+          row: c.row,
+          col: c.col,
+          kind: c.kind,
+          value: c.value,
+          formula: c.formula ?? undefined,
+        })),
+      };
     }
     case "api.deleteTable": {
       const [tableId] = args as [string];
@@ -10414,6 +10533,26 @@ async function announceObjectsChanged(): Promise<void> {
   (await import("../grid")).refreshGridData();
 }
 
+/** Floating range rows over the wire (api_types::FloatingRangeInfo, flattened). */
+interface FloatingRangeWire {
+  id: string;
+  name: string;
+  hostSheetIndex: number;
+  backingSheetIndex: number;
+  rowCount: number;
+  colCount: number;
+  x: number;
+  y: number;
+}
+
+/** A floating range changed (created / deleted / resized / cells written):
+ *  the same feature-neutral fan-out shape as announceObjectsChanged, through
+ *  the "floatingRanges" domain the Shell translator maps to the extension's
+ *  reload event plus grid:refresh (grid formulas reading the range refetch). */
+function announceFloatingRangesChanged(): void {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["floatingRanges"] });
+}
+
 /**
  * An object that OTHER objects point at was deleted, so the backend ran a
  * CASCADE (§3bt's `DEPENDENCY_MATRIX`): the slicers bound to it are gone, the
@@ -10593,6 +10732,22 @@ async function listWorkbookObjects(kind: ScriptObjectKind): Promise<ScriptObject
     }
     case "slicer":
       return (getSlicerStoreService()?.listSlicers() ?? []).map(slicerToRef);
+    case "floatingRange": {
+      // Straight from the backend row store: the object exists whether or not
+      // its extension is loaded, and for a READ an empty workbook and a
+      // missing extension are the same honest answer.
+      const { invokeBackend } = await import("../backend");
+      const rows = await invokeBackend<FloatingRangeWire[]>("list_floating_ranges", {});
+      return (rows ?? []).map((fr) =>
+        floatingRangeToRef({
+          id: fr.id,
+          name: fr.name,
+          hostSheetIndex: fr.hostSheetIndex,
+          rowCount: fr.rowCount,
+          colCount: fr.colCount,
+        }),
+      );
+    }
     case "shape": {
       // Controls are stored per sheet and anchored to a cell, so the whole-
       // workbook view is the union over every sheet.

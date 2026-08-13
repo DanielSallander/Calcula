@@ -32,6 +32,7 @@ import { createOverlayMoveHandlers, type OverlayMoveHandlers, type OverlayMoveSt
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
 import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
 import { isGlobalFormulaMode, isEditingFormula, isChartSeriesRefMode, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
+import { getExternalFormulaTarget } from "../../lib/formulaEditTarget";
 import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
 import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
@@ -476,7 +477,11 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // The isFormulaMode prop might be stale if the user just typed "+" and
       // React hasn't re-rendered yet. isGlobalFormulaMode() checks the actual
       // current editing value synchronously.
-      const isCurrentlyFormulaMode = isFormulaMode || isGlobalFormulaMode();
+      // An external formula edit session (registered via formulaEditTarget)
+      // that is expecting a reference also counts: grid clicks then pick
+      // references for it instead of moving the selection.
+      const isCurrentlyFormulaMode = isFormulaMode || isGlobalFormulaMode() ||
+        getExternalFormulaTarget()?.isExpectingReference() === true;
 
       // FIX: Check if we're editing ANY formula (for reference dragging)
       // This is separate from isCurrentlyFormulaMode which checks if expecting a reference
