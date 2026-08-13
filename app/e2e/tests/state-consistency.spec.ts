@@ -35,6 +35,7 @@ import {
   createTraceSource,
   deepResetForWalk,
   formatWalkReport,
+  parseCategoryWeights,
   writeFailureBundle,
 } from "../walker";
 import type { ActionTrace, WalkResult } from "../walker";
@@ -72,6 +73,16 @@ const SHRINK_BUDGET_MS = Number(
 );
 const NO_SHRINK = process.env.INVARIANT_NO_SHRINK === "1";
 
+/**
+ * Family weight boost, e.g. INVARIANT_CATEGORY_WEIGHTS="chart:8".
+ * Part of what the seed means — see the replay commands below.
+ */
+const CATEGORY_WEIGHTS_SPEC = process.env.INVARIANT_CATEGORY_WEIGHTS ?? "";
+const CATEGORY_WEIGHTS = parseCategoryWeights(CATEGORY_WEIGHTS_SPEC);
+const WEIGHTS_ENV = CATEGORY_WEIGHTS_SPEC
+  ? `INVARIANT_CATEGORY_WEIGHTS="${CATEGORY_WEIGHTS_SPEC}" `
+  : "";
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -89,10 +100,13 @@ test.describe("State consistency (invariant monkey testing)", () => {
     await appPage.waitForTimeout(500);
 
     const seed = BASE_SEED;
-    console.log(`\n  Invariant walk seed: ${seed}`);
+    console.log(
+      `\n  Invariant walk seed: ${seed}` +
+        `${CATEGORY_WEIGHTS_SPEC ? ` weights=${CATEGORY_WEIGHTS_SPEC}` : ""}`
+    );
 
     const runner = new WalkRunner(appPage, grid, {
-      source: createGeneratorSource({ seed }),
+      source: createGeneratorSource({ seed, categoryWeights: CATEGORY_WEIGHTS }),
       invariants: ALL_INVARIANTS,
       oracleBattery: new OracleBattery({
         tmpDir: path.join(RESULTS_DIR, "tmp"),
@@ -118,12 +132,16 @@ test.describe("State consistency (invariant monkey testing)", () => {
       harness: "invariant",
       seed,
       replayCommand:
-        `E2E_MANUAL=1 INVARIANT_SEED=${seed} npx playwright test ` +
+        `E2E_MANUAL=1 INVARIANT_SEED=${seed} ${WEIGHTS_ENV}npx playwright test ` +
         `--project=invariant --grep "random action sequence"`,
       replay: NO_SHRINK ? null : makeReplayFn(appPage, grid, RESULTS_DIR),
       shrinkMaxReplays: SHRINK_MAX_REPLAYS,
       shrinkTimeBudgetMs: SHRINK_BUDGET_MS,
-      extra: { maxActions: ACTIONS_PER_RUN, settleTimeMs: SETTLE_MS },
+      extra: {
+        maxActions: ACTIONS_PER_RUN,
+        settleTimeMs: SETTLE_MS,
+        categoryWeights: CATEGORY_WEIGHTS ?? null,
+      },
     });
 
     test.info().annotations.push({
@@ -151,10 +169,17 @@ test.describe("State consistency (invariant monkey testing)", () => {
     // `+ 1` keeps the two tests on different walks when a seed is given, so
     // replaying one does not replay the other.
     const seed = BASE_SEED + 1;
-    console.log(`\n  Rapid-fire walk seed: ${seed}`);
+    console.log(
+      `\n  Rapid-fire walk seed: ${seed}` +
+        `${CATEGORY_WEIGHTS_SPEC ? ` weights=${CATEGORY_WEIGHTS_SPEC}` : ""}`
+    );
 
     const runner = new WalkRunner(appPage, grid, {
-      source: createGeneratorSource({ seed, rapidFireProbability: 0.5 }),
+      source: createGeneratorSource({
+        seed,
+        rapidFireProbability: 0.5,
+        categoryWeights: CATEGORY_WEIGHTS,
+      }),
       invariants: ALL_INVARIANTS,
       oracleBattery: new OracleBattery({
         tmpDir: path.join(RESULTS_DIR, "tmp"),
@@ -184,7 +209,7 @@ test.describe("State consistency (invariant monkey testing)", () => {
       // that actually drove the generator and a command that would produce a
       // different walk is how a bundle lies to the next reader.
       replayCommand:
-        `E2E_MANUAL=1 INVARIANT_SEED=${seed - 1} npx playwright test ` +
+        `E2E_MANUAL=1 INVARIANT_SEED=${seed - 1} ${WEIGHTS_ENV}npx playwright test ` +
         `--project=invariant --grep "rapid create-delete"`,
       replay: NO_SHRINK ? null : makeReplayFn(appPage, grid, RESULTS_DIR),
       shrinkMaxReplays: SHRINK_MAX_REPLAYS,
@@ -194,6 +219,7 @@ test.describe("State consistency (invariant monkey testing)", () => {
         settleTimeMs: SETTLE_MS,
         rapidFireProbability: 0.5,
         derivedSeed: `INVARIANT_SEED + 1 = ${seed}`,
+        categoryWeights: CATEGORY_WEIGHTS ?? null,
       },
     });
 

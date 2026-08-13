@@ -238,6 +238,67 @@ async function emitChartSelectionEvent(): Promise<void> {
 }
 
 // ============================================================================
+// Chart deletion — ONE recipe
+// ============================================================================
+
+/**
+ * THE chart delete. Every route that removes a chart goes through here: the
+ * Delete key, the context menu, the script/MCP `api.deleteChart` broker call,
+ * and the E2E bridge.
+ *
+ * THERE WERE TWO RECIPES AND THEY HAD DRIFTED. The UI path (the old local
+ * `performChartDelete`) deselected first and then cleared the render cache with
+ * `removeChartFromCache`; the component-store registry's `deleteChart` — the
+ * one reached by object scripts, the MCP tools and `api.deleteChart` — did
+ * neither. Three consequences, all live:
+ *
+ *   1. Deleting the SELECTED chart from a script left the contextual "Chart
+ *      Design" ribbon tab on screen with zero charts in the workbook, and
+ *      `getCurrentChartId()` still returning the dead id — so every Chart
+ *      Design command was then aimed at a chart that no longer existed. Found
+ *      by the invariant walker (`contextual-ribbon-tabs`) on 2026-08-12, on
+ *      two independent seeds, each minimized to the same confirmed three
+ *      actions: chart.create -> chart.select -> chart.delete. It is the first
+ *      finding that invariant has ever produced for charts, because until
+ *      BUG-0031 and BUG-0035 the walker's chart actions were silent no-ops.
+ *   2. Nothing emitted CHART_SELECTION_CHANGED, so the FormulaBar/NameBox kept
+ *      showing the deleted chart's name.
+ *   3. `invalidateChartCache` only BUMPS A VERSION COUNTER; it was standing in
+ *      for `removeChartFromCache`, which is what actually drops the
+ *      OffscreenCanvas, the parsed data, the point selection and the widget
+ *      values. A script-deleted chart therefore leaked all four for the life of
+ *      the session, keyed by an id nothing could ever reach again.
+ *
+ * This is the Seam Rule's own lesson one object over: a copied recipe is a
+ * second source of truth that drifts on the owner's first change. `deleteChart`
+ * in `lib/chartStore.ts` is an internal persistence primitive — store + backend
+ * and nothing else — and is not a delete anyone outside this module may call.
+ *
+ * The deselect is CONDITIONAL, which the UI recipe's unconditional version was
+ * not: deleting chart A while chart B is selected must leave B selected, as it
+ * does in Excel. The old code only ever reached that path with the selected
+ * chart via the Delete key, but the context-menu route could already pass
+ * another chart's id.
+ *
+ * @returns false when there is no such chart (the registry's contract).
+ */
+function performChartDelete(chartId: string): boolean {
+  if (!getChartById(chartId)) return false;
+
+  if (getCurrentChartId() === chartId) {
+    deselectChart();
+    void emitChartSelectionEvent();
+  }
+
+  deleteChart(chartId);
+  removeChartFromCache(chartId);
+  syncChartRegions();
+  emitAppEvent(ChartEvents.CHART_DELETED, { chartId });
+  emitAppEvent(AppEvents.GRID_REFRESH);
+  return true;
+}
+
+// ============================================================================
 // Activation
 // ============================================================================
 
@@ -309,15 +370,11 @@ function activate(context: ExtensionContext): void {
       return chart.chartId;
     },
     deleteChart(chartId: string) {
-      if (!getChartById(chartId)) return false;
-      // The module-scope store function, NOT a recursive call: an object-literal
-      // method's name is not a binding inside its own body.
-      deleteChart(chartId);
-      invalidateChartCache(chartId);
-      syncChartRegions();
-      emitAppEvent(ChartEvents.CHART_DELETED, { chartId });
-      emitAppEvent(AppEvents.GRID_REFRESH);
-      return true;
+      // THE one delete (see performChartDelete). This method used to inline its
+      // own copy of the recipe, which had drifted from the UI's in three ways:
+      // no deselect, no selection announcement, and a cache INVALIDATE where a
+      // cache REMOVE was needed.
+      return performChartDelete(chartId);
     },
     updateChartSpec(chartId: string, specUpdates: Record<string, unknown>) {
       // Deep-merge the patch onto the live spec WITHOUT committing, validate the
@@ -1647,15 +1704,9 @@ function activate(context: ExtensionContext): void {
   // Delete: Delete key on selected chart + delete requests from the context menu
   // -----------------------------------------------------------------------
 
-  const performChartDelete = (chartId: string) => {
-    deselectChart();
-    void emitChartSelectionEvent();
-    deleteChart(chartId);
-    removeChartFromCache(chartId);
-    syncChartRegions();
-    window.dispatchEvent(new CustomEvent(ChartEvents.CHART_DELETED));
-    context.events.emit(AppEvents.GRID_REFRESH);
-  };
+  // The recipe itself is `performChartDelete` at module scope — the SAME one the
+  // component-store registry (scripts/MCP) and the E2E bridge now call. It used
+  // to be a second copy here, and the two copies had drifted.
 
   const handleDeleteKey = (e: KeyboardEvent) => {
     if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -1687,11 +1738,19 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener(ChartEvents.CHART_DELETE_REQUEST, handleDeleteRequest),
   );
 
-  // Expose lifecycle functions for E2E invariant testing
+  // Expose lifecycle functions for E2E invariant testing.
+  //
+  // `deleteChart` here is THE PRODUCT'S DELETE (`performChartDelete`), not the
+  // store primitive of the same name. The bridge used to hand out the raw store
+  // function, so a walk that "deleted a chart" skipped the deselect, the cache
+  // removal and the announcements — it exercised a path no user can take, which
+  // is the same mistake `chart.create` had made by invoking `save_chart`
+  // directly (BUG-0031). A harness that drives a private primitive tests the
+  // primitive, not the product.
   (window as any).__CALCULA_CHARTS__ = {
     getAllCharts,
     getChartById,
-    deleteChart,
+    deleteChart: performChartDelete,
     selectChart,
     deselectChart,
     getCurrentChartId,

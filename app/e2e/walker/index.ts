@@ -12,14 +12,20 @@ export {
 export type { ActionInstance, ActionTrace } from "./trace";
 export { createTrace, saveTrace, loadTrace, subTrace } from "./trace";
 export type { ActionSource, GeneratorSourceOptions, TraceReplayLog } from "./sources";
-export { createGeneratorSource, createTraceSource, mulberry32 } from "./sources";
+export {
+  actionFamilies,
+  createGeneratorSource,
+  createTraceSource,
+  mulberry32,
+  parseCategoryWeights,
+} from "./sources";
 export type {
   ActionTiming,
   CheckpointTiming,
   WalkOptions,
   WalkResult,
 } from "./walkRunner";
-export { WalkRunner, formatWalkReport } from "./walkRunner";
+export { WalkRunner, formatWalkReport, summarizeCoverage } from "./walkRunner";
 export type {
   ReplayFn,
   ReplayOutcome,

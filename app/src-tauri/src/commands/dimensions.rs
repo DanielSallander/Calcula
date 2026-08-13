@@ -19,6 +19,10 @@ pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, co
     // The protection gate above is the only thing that can still refuse, so the
     // effect is minted here: constructing it dirties the workbook immediately.
     let effect = DocumentEffect::mutates(&file_state);
+    // The sheet this resize is being recorded ON. `column_widths` is the ACTIVE
+    // sheet's mirror, so the change is only meaningful against that sheet — and
+    // the user can be looking at a different one by the time they undo.
+    let recorded_on = *state.active_sheet.read().unwrap();
     let mut widths = state.column_widths.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -32,7 +36,7 @@ pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, co
     }
 
     // Record undo
-    undo_stack.record_column_width_change(col, previous_width);
+    undo_stack.record_column_width_change(recorded_on, col, previous_width);
 
     Ok(())
 }
@@ -63,6 +67,8 @@ pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row:
         crate::protection::check_sheet_action(&state, active_sheet, "formatRows", "resize rows")?;
     }
     let effect = DocumentEffect::mutates(&file_state);
+    // See `set_column_width`: the sheet this resize belongs to.
+    let recorded_on = *state.active_sheet.read().unwrap();
     let mut heights = state.row_heights.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -76,7 +82,7 @@ pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row:
     }
 
     // Record undo
-    undo_stack.record_row_height_change(row, previous_height);
+    undo_stack.record_row_height_change(recorded_on, row, previous_height);
 
     Ok(())
 }

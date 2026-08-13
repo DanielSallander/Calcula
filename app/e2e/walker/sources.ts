@@ -45,6 +45,62 @@ export interface GeneratorSourceOptions {
   catalog?: AnyActionDef[];
   /** Probability of queueing a create -> immediate delete pair. Default 0.15 */
   rapidFireProbability?: number;
+  /**
+   * Per-family multipliers applied to the catalog's base weights, so a walk
+   * can be aimed at a surface without editing the catalog.
+   *
+   * WHY THIS EXISTS. The catalog's weights are flat by design — every one of
+   * the 59 actions gets a comparable share, so a 75-action walk spends about
+   * four actions on any given family and a whole surface can go unvisited for
+   * a dozen walks running. That is exactly how `chart.create` shipped for the
+   * entire programme talking to the backend and never to the chart store
+   * (BUG-0031): the walks that would have caught it were statistically thin on
+   * charts AND the actions were no-ops when they did fire, so nothing showed.
+   * A boost makes "explore THIS surface hard" a run parameter rather than an
+   * edit, and the trace stays exactly as replayable because replay reads the
+   * recorded action list, not the weights.
+   *
+   * A key matches an action if it equals the action's `category` OR the part
+   * of its id before the first dot — `{chart: 8}` therefore also lifts
+   * `chart.deselect`, whose category is the cross-feature "deselect".
+   */
+  categoryWeights?: Record<string, number>;
+}
+
+/**
+ * Parse a `"chart:8,table:2"` family-boost spec (the env-var form).
+ * Returns null for empty/absent input so callers can pass it straight through.
+ */
+export function parseCategoryWeights(
+  spec: string | undefined | null
+): Record<string, number> | undefined {
+  if (!spec) return undefined;
+  const out: Record<string, number> = {};
+  for (const part of spec.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.lastIndexOf(":");
+    if (idx <= 0) {
+      throw new Error(
+        `Bad category weight "${trimmed}" — expected "<family>:<multiplier>"`
+      );
+    }
+    const key = trimmed.slice(0, idx).trim();
+    const value = Number(trimmed.slice(idx + 1).trim());
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `Bad multiplier for "${key}" in "${trimmed}" — expected a finite number >= 0`
+      );
+    }
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The family keys a boost spec may name, for an action. */
+export function actionFamilies(def: AnyActionDef): string[] {
+  const prefix = def.id.split(".")[0];
+  return prefix === def.category ? [def.category] : [def.category, prefix];
 }
 
 export function createGeneratorSource(options: GeneratorSourceOptions): ActionSource {
@@ -52,8 +108,18 @@ export function createGeneratorSource(options: GeneratorSourceOptions): ActionSo
   const rng = mulberry32(seed);
   const catalog = options.catalog ?? ACTION_CATALOG;
   const rapidFireProb = options.rapidFireProbability ?? 0.15;
+  const categoryWeights = options.categoryWeights ?? {};
 
   let pendingRapidFireDelete: AnyActionDef | null = null;
+
+  function familyMultiplier(def: AnyActionDef): number {
+    let m = 1;
+    for (const family of actionFamilies(def)) {
+      const v = categoryWeights[family];
+      if (v !== undefined) m *= v;
+    }
+    return m;
+  }
 
   function pickWeighted(snapshot: StateSnapshot): AnyActionDef {
     const eligible = catalog.filter((a) => a.precondition(snapshot));
@@ -63,7 +129,7 @@ export function createGeneratorSource(options: GeneratorSourceOptions): ActionSo
 
     // Context-aware weight adjustments (same heuristics as v1)
     const weights = eligible.map((a) => {
-      let w = a.weight;
+      let w = a.weight * familyMultiplier(a);
       const totalObjects =
         snapshot.logical.slicers.length +
         snapshot.logical.charts.length +
@@ -146,7 +212,9 @@ export function createTraceSource(
         log?.skipped.push(index - 1);
         continue;
       }
-      if (!def.precondition(snapshot)) {
+      // The RECORDED parameters are handed to the precondition here — this is
+      // the replay path, and it is the only place they exist. See ActionDef.
+      if (!def.precondition(snapshot, instance.params)) {
         log?.skipped.push(index - 1);
         continue;
       }

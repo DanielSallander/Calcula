@@ -158,25 +158,43 @@ pub struct UserFilesState {
 // Table <-> SavedTable conversion
 // ============================================================================
 
-/// Map a sheet index to a SheetId using the provided slice.
-/// If the index is out of range, mints a fresh ID as a fallback.
-fn sheet_index_to_id(sheet_ids: &[SheetId], index: usize) -> SheetId {
-    sheet_ids.get(index).copied().unwrap_or_else(|| {
-        SheetId::from_bytes(identity::generate_uuid_v7())
-    })
+/// Map a sheet index to a SheetId, or `None` when no such sheet exists.
+///
+/// # An orphan is reported, never invented (BUG-0041)
+///
+/// This used to mint a fresh random `SheetId` for an out-of-range index. That
+/// turned a DETECTABLE inconsistency -- per-sheet state naming a sheet that is
+/// gone -- into an undetectable one: the object was written under an id that
+/// matched no sheet in the file, and [`sheet_id_to_index`] (which answered 0 for
+/// an id it could not find) then landed it on the FIRST SHEET on reload.
+///
+/// End to end that is data appearing on the wrong sheet, silently, with a clean
+/// save and a clean load. It was found as a sparkline drawn on a sheet that was
+/// then deleted, reappearing on Sheet1 after a reopen, but nothing about the
+/// mechanism was sparkline-specific: every per-sheet store on the save path
+/// routes through this one function, sheet PROTECTION and data validation among
+/// them.
+///
+/// So both directions now say "no such sheet" and every caller DROPS the
+/// orphan. Dropping state that names a deleted sheet is what the cascades
+/// already do in memory; this makes the file agree with them.
+fn sheet_index_to_id(sheet_ids: &[SheetId], index: usize) -> Option<SheetId> {
+    sheet_ids.get(index).copied()
 }
 
-/// Find the sheet index for a given SheetId by searching the workbook sheets.
-/// Falls back to 0 if not found.
-fn sheet_id_to_index(workbook: &persistence::Workbook, sheet_id: SheetId) -> usize {
-    workbook.sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0)
+/// Find the sheet index for a given SheetId, or `None` when the workbook has no
+/// such sheet. See [`sheet_index_to_id`] for why this is not `unwrap_or(0)`.
+fn sheet_id_to_index(workbook: &persistence::Workbook, sheet_id: SheetId) -> Option<usize> {
+    workbook.sheets.iter().position(|s| s.id == sheet_id)
 }
 
-fn table_to_saved(table: &Table, sheet_ids: &[SheetId]) -> SavedTable {
-    SavedTable {
+/// `None` when the table names a sheet that no longer exists -- see
+/// [`sheet_index_to_id`]. An orphan is dropped, not filed under an invented id.
+fn table_to_saved(table: &Table, sheet_ids: &[SheetId]) -> Option<SavedTable> {
+    Some(SavedTable {
         id: table.id,
         name: table.name.clone(),
-        sheet_id: sheet_index_to_id(sheet_ids, table.sheet_index),
+        sheet_id: sheet_index_to_id(sheet_ids, table.sheet_index)?,
         start_row: table.start_row,
         start_col: table.start_col,
         end_row: table.end_row,
@@ -202,11 +220,12 @@ fn table_to_saved(table: &Table, sheet_ids: &[SheetId]) -> SavedTable {
             show_filter_button: table.style_options.show_filter_button,
         },
         style_name: table.style_name.clone(),
-    }
+    })
 }
 
-fn saved_to_table(saved: &SavedTable, workbook: &persistence::Workbook) -> Table {
-    saved_table_to_table_at(saved, sheet_id_to_index(workbook, saved.sheet_id))
+/// `None` when the saved table names a sheet this workbook does not have.
+fn saved_to_table(saved: &SavedTable, workbook: &persistence::Workbook) -> Option<Table> {
+    Some(saved_table_to_table_at(saved, sheet_id_to_index(workbook, saved.sheet_id)?))
 }
 
 /// Convert a SavedTable into a live Table at an explicit sheet index. Used by
@@ -284,7 +303,9 @@ fn collect_tables_for_save(
     let mut saved = Vec::new();
     for sheet_tables in tables.values() {
         for table in sheet_tables.values() {
-            saved.push(table_to_saved(table, sheet_ids));
+            if let Some(t) = table_to_saved(table, sheet_ids) {
+                saved.push(t);
+            }
         }
     }
     saved
@@ -299,7 +320,7 @@ fn restore_tables(
     let mut table_names: TableNameRegistry = HashMap::new();
 
     for saved in saved_tables {
-        let table = saved_to_table(saved, workbook);
+        let Some(table) = saved_to_table(saved, workbook) else { continue };
         table_names.insert(table.name.to_uppercase(), (table.sheet_index, table.id));
         tables
             .entry(table.sheet_index)
@@ -683,9 +704,10 @@ fn collect_cf_dv_for_save(
             if defs.is_empty() {
                 continue;
             }
+            let Some(sheet_id) = sheet_index_to_id(sheet_ids, *idx) else { continue };
             if let Ok(rules) = serde_json::to_value(defs) {
                 conditional_formats.push(persistence::SavedSheetConditionalFormats {
-                    sheet_id: sheet_index_to_id(sheet_ids, *idx),
+                    sheet_id,
                     rules,
                 });
             }
@@ -697,9 +719,10 @@ fn collect_cf_dv_for_save(
             if ranges.is_empty() {
                 continue;
             }
+            let Some(sheet_id) = sheet_index_to_id(sheet_ids, *idx) else { continue };
             if let Ok(value) = serde_json::to_value(ranges) {
                 data_validations.push(persistence::SavedSheetDataValidations {
-                    sheet_id: sheet_index_to_id(sheet_ids, *idx),
+                    sheet_id,
                     ranges: value,
                 });
             }
@@ -736,9 +759,10 @@ fn collect_comments_scenarios_outlines_for_save(
             // cell order for deterministic bytes.
             let mut threads: Vec<&crate::comments::Comment> = sheet_comments.values().collect();
             threads.sort_by_key(|c| (c.row, c.col));
+            let Some(sheet_id) = sheet_index_to_id(sheet_ids, idx) else { continue };
             if let Ok(value) = serde_json::to_value(&threads) {
                 comments.push(persistence::SavedSheetComments {
-                    sheet_id: sheet_index_to_id(sheet_ids, idx),
+                    sheet_id,
                     comments: value,
                 });
             }
@@ -753,9 +777,10 @@ fn collect_comments_scenarios_outlines_for_save(
             if sheet_scenarios.is_empty() {
                 continue;
             }
+            let Some(sheet_id) = sheet_index_to_id(sheet_ids, idx) else { continue };
             if let Ok(value) = serde_json::to_value(sheet_scenarios) {
                 scenarios.push(persistence::SavedSheetScenarios {
-                    sheet_id: sheet_index_to_id(sheet_ids, idx),
+                    sheet_id,
                     scenarios: value,
                 });
             }
@@ -770,9 +795,10 @@ fn collect_comments_scenarios_outlines_for_save(
             if outline.row_groups.is_empty() && outline.column_groups.is_empty() {
                 continue;
             }
+            let Some(sheet_id) = sheet_index_to_id(sheet_ids, idx) else { continue };
             if let Ok(value) = serde_json::to_value(outline) {
                 outlines.push(persistence::SavedSheetOutline {
-                    sheet_id: sheet_index_to_id(sheet_ids, idx),
+                    sheet_id,
                     outline: value,
                 });
             }
@@ -987,12 +1013,23 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     if let Ok(named_ranges) = state.named_ranges.read() {
         workbook.named_ranges = named_ranges
             .values()
-            .map(|nr| SavedNamedRange {
-                name: nr.name.clone(),
-                refers_to: nr.refers_to.clone(),
-                sheet_id: nr.sheet_index.map(|idx| sheet_index_to_id(sheet_ids, idx)),
-                comment: nr.comment.clone(),
-                folder: nr.folder.clone(),
+            .filter_map(|nr| {
+                // A SHEET-SCOPED name whose sheet is gone is DROPPED, never
+                // quietly promoted to workbook scope. Flattening the two
+                // Options would do exactly that: `Some(idx)` that no longer
+                // resolves would collapse to `None`, and a name that was local
+                // to one sheet would come back visible to the whole workbook.
+                let sheet_id = match nr.sheet_index {
+                    Some(idx) => Some(sheet_index_to_id(sheet_ids, idx)?),
+                    None => None,
+                };
+                Some(SavedNamedRange {
+                    name: nr.name.clone(),
+                    refers_to: nr.refers_to.clone(),
+                    sheet_id,
+                    comment: nr.comment.clone(),
+                    folder: nr.folder.clone(),
+                })
             })
             .collect();
     }
@@ -1092,15 +1129,18 @@ pub fn attach_pending_recalc_for_save(
 /// the whole reason it was persisted as an id rather than an index.
 pub fn restore_pending_recalc_on_load(state: &AppState, workbook: &persistence::Workbook) {
     if let Ok(mut pending) = state.pending_recalc.lock() {
-        *pending = workbook.pending_recalc.as_ref().map(|p| {
-            crate::eval_budget::PendingRecalc {
-                sheet_index: sheet_id_to_index(workbook, p.sheet_id),
+        // `and_then`, not `map`: a staleness marker naming a sheet this
+        // workbook does not have is dropped. Landing it on sheet 0 would warn
+        // the user that a fully-calculated sheet is stale.
+        *pending = workbook.pending_recalc.as_ref().and_then(|p| {
+            Some(crate::eval_budget::PendingRecalc {
+                sheet_index: sheet_id_to_index(workbook, p.sheet_id)?,
                 cells: p
                     .cells
                     .iter()
                     .map(|c| crate::eval_budget::PendingCell { row: c.row, col: c.col })
                     .collect(),
-            }
+            })
         });
         if let Some(p) = pending.as_ref() {
             crate::log_warn!(
@@ -1161,11 +1201,13 @@ fn collect_protection_for_save(
 
     let sheet_protections = per_sheet
         .into_iter()
-        .map(
-            |(idx, (protection, cell_protection))| persistence::SavedSheetProtection {
-                sheet_id: sheet_index_to_id(sheet_ids, idx),
-                protection,
-                cell_protection,
+        .filter_map(
+            |(idx, (protection, cell_protection))| {
+                Some(persistence::SavedSheetProtection {
+                    sheet_id: sheet_index_to_id(sheet_ids, idx)?,
+                    protection,
+                    cell_protection,
+                })
             },
         )
         .collect();
@@ -1189,8 +1231,8 @@ fn collect_slicers_for_save(
     let computed_props = slicer_state.computed_properties.read().unwrap();
     slicers
         .values()
-        .map(|s| {
-            let mut saved = slicer_to_saved(s, sheet_ids);
+        .filter_map(|s| {
+            let mut saved = slicer_to_saved(s, sheet_ids)?;
             // Attach computed properties for this slicer
             if let Some(props) = computed_props.get(&s.id) {
                 saved.computed_properties = props
@@ -1202,17 +1244,18 @@ fn collect_slicers_for_save(
                     })
                     .collect();
             }
-            saved
+            Some(saved)
         })
         .collect()
 }
 
-fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> persistence::SavedSlicer {
-    persistence::SavedSlicer {
+/// `None` when the slicer names a sheet that no longer exists.
+fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> Option<persistence::SavedSlicer> {
+    Some(persistence::SavedSlicer {
         id: slicer.id,
         name: slicer.name.clone(),
         header_text: slicer.header_text.clone(),
-        sheet_id: sheet_index_to_id(sheet_ids, slicer.sheet_index),
+        sheet_id: sheet_index_to_id(sheet_ids, slicer.sheet_index)?,
         x: slicer.x,
         y: slicer.y,
         width: slicer.width,
@@ -1259,11 +1302,12 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> per
                 source_id: c.source_id,
             }
         }).collect(),
-    }
+    })
 }
 
-fn saved_to_slicer(saved: &persistence::SavedSlicer, workbook: &persistence::Workbook) -> crate::slicer::Slicer {
-    saved_slicer_to_slicer_at(saved, sheet_id_to_index(workbook, saved.sheet_id))
+/// `None` when the saved slicer names a sheet this workbook does not have.
+fn saved_to_slicer(saved: &persistence::SavedSlicer, workbook: &persistence::Workbook) -> Option<crate::slicer::Slicer> {
+    Some(saved_slicer_to_slicer_at(saved, sheet_id_to_index(workbook, saved.sheet_id)?))
 }
 
 /// Convert one SavedSlicer to the live entity at an explicit LOCAL sheet
@@ -1431,7 +1475,7 @@ pub(crate) fn restore_slicers(
     rev_deps.clear();
 
     for saved in saved_slicers {
-        let slicer = saved_to_slicer(saved, workbook);
+        let Some(slicer) = saved_to_slicer(saved, workbook) else { continue };
         let slicer_id = slicer.id;
         let sheet_index = slicer.sheet_index;
         slicers.insert(slicer.id, slicer);
@@ -1713,11 +1757,11 @@ pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[Shee
     let charts = state.charts.read().unwrap();
     charts
         .iter()
-        .map(|c| persistence::SavedChart {
+        .filter_map(|c| Some(persistence::SavedChart {
             id: c.id,
-            sheet_id: sheet_index_to_id(sheet_ids, c.sheet_index),
+            sheet_id: sheet_index_to_id(sheet_ids, c.sheet_index)?,
             spec_json: c.spec_json.clone(),
-        })
+        }))
         .collect()
 }
 
@@ -1728,9 +1772,10 @@ fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>, wo
     let mut charts = state.charts.write(&load).unwrap();
     charts.clear();
     for s in saved {
+        let Some(sheet_index) = sheet_id_to_index(workbook, s.sheet_id) else { continue };
         charts.push(crate::api_types::ChartEntry {
             id: s.id,
-            sheet_index: sheet_id_to_index(workbook, s.sheet_id),
+            sheet_index,
             spec_json: s.spec_json.clone(),
         });
     }
@@ -1741,10 +1786,10 @@ pub(crate) fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[
     let sparklines = state.sparklines.read().unwrap();
     sparklines
         .iter()
-        .map(|s| persistence::SavedSparkline {
-            sheet_id: sheet_index_to_id(sheet_ids, s.sheet_index),
+        .filter_map(|s| Some(persistence::SavedSparkline {
+            sheet_id: sheet_index_to_id(sheet_ids, s.sheet_index)?,
             groups_json: s.groups_json.clone(),
-        })
+        }))
         .collect()
 }
 
@@ -1755,8 +1800,9 @@ fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppSt
     let mut sparklines = state.sparklines.write(&load).unwrap();
     sparklines.clear();
     for s in saved {
+        let Some(sheet_index) = sheet_id_to_index(workbook, s.sheet_id) else { continue };
         sparklines.push(crate::api_types::SparklineEntry {
-            sheet_index: sheet_id_to_index(workbook, s.sheet_id),
+            sheet_index,
             groups_json: s.groups_json.clone(),
         });
     }
@@ -2962,6 +3008,15 @@ pub fn open_file(
     if let Ok(mut named_ranges) = state.named_ranges.write(&load_effect) {
         named_ranges.clear();
         for nr in &workbook.named_ranges {
+            // Mirror of the save side: a SHEET-SCOPED name whose sheet is not in
+            // this workbook is dropped, not flattened into a workbook-scoped one.
+            let sheet_index = match nr.sheet_id {
+                Some(id) => match sheet_id_to_index(&workbook, id) {
+                    Some(idx) => Some(idx),
+                    None => continue,
+                },
+                None => None,
+            };
             // The map is keyed by the UPPERCASED name (case-insensitive lookup
             // invariant shared with create/update/rename/delete + the BI insert);
             // the struct keeps the original-case name for display.
@@ -2969,7 +3024,7 @@ pub fn open_file(
                 nr.name.to_uppercase(),
                 crate::named_ranges::NamedRange {
                     name: nr.name.clone(),
-                    sheet_index: nr.sheet_id.map(|id| sheet_id_to_index(&workbook, id)),
+                    sheet_index,
                     refers_to: nr.refers_to.clone(),
                     comment: nr.comment.clone(),
                     folder: nr.folder.clone(),
@@ -2987,7 +3042,7 @@ pub fn open_file(
         store.clear();
         let mut max_id: u64 = 0;
         for entry in &workbook.conditional_formats {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             if let Ok(defs) = serde_json::from_value::<
                 Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
             >(entry.rules.clone())
@@ -3007,7 +3062,7 @@ pub fn open_file(
     if let Ok(mut store) = state.data_validations.write(&load_effect) {
         store.clear();
         for entry in &workbook.data_validations {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             if let Ok(ranges) = serde_json::from_value::<
                 Vec<crate::data_validation::ValidationRange>,
             >(entry.ranges.clone())
@@ -3027,7 +3082,7 @@ pub fn open_file(
     if let Ok(mut sheet_prot) = state.sheet_protection.write(&load_effect) {
         sheet_prot.clear();
         for entry in &workbook.sheet_protections {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             if let Some(ref v) = entry.protection {
                 if let Ok(p) =
                     serde_json::from_value::<crate::protection::SheetProtection>(v.clone())
@@ -3056,7 +3111,7 @@ pub fn open_file(
         let mut grids = state.grids.write(&load_effect).unwrap();
         let mut styles = state.style_registry.write(&load_effect).unwrap();
         for entry in &workbook.sheet_protections {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             let Some(ref v) = entry.cell_protection else { continue };
             let Some(entries) = v.as_array() else { continue };
             let Some(grid) = grids.get_mut(idx) else { continue };
@@ -3118,7 +3173,7 @@ pub fn open_file(
         crate::controls::materialize_saved_controls(
             &workbook.controls,
             &mut controls,
-            |sid| Some(sheet_id_to_index(&workbook, sid)),
+            |sid| sheet_id_to_index(&workbook, sid),
         );
 
         // Restore content-addressed media, then migrate the LEGACY corpus: every
@@ -3151,7 +3206,7 @@ pub fn open_file(
         crate::cell_types::materialize_saved_cell_types(
             &workbook.cell_types,
             &mut cell_types,
-            |sid| Some(sheet_id_to_index(&workbook, sid)),
+            |sid| sheet_id_to_index(&workbook, sid),
         );
     }
 
@@ -3161,7 +3216,7 @@ pub fn open_file(
         crate::cell_behaviors::materialize_saved_cell_behaviors(
             &workbook.cell_behaviors,
             &mut behaviors,
-            |sid| Some(sheet_id_to_index(&workbook, sid)),
+            |sid| sheet_id_to_index(&workbook, sid),
         );
     }
 
@@ -3172,7 +3227,7 @@ pub fn open_file(
     if let Ok(mut store) = state.comments.write(&load_effect) {
         store.clear();
         for entry in &workbook.comments {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             if let Ok(threads) =
                 serde_json::from_value::<Vec<crate::comments::Comment>>(entry.comments.clone())
             {
@@ -3189,7 +3244,7 @@ pub fn open_file(
     if let Ok(mut store) = state.scenarios.write(&load_effect) {
         store.clear();
         for entry in &workbook.scenarios {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             if let Ok(mut scenarios) =
                 serde_json::from_value::<Vec<crate::api_types::Scenario>>(entry.scenarios.clone())
             {
@@ -3207,7 +3262,7 @@ pub fn open_file(
     if let Ok(mut store) = state.outlines.write(&load_effect) {
         store.clear();
         for entry in &workbook.outlines {
-            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(idx) = sheet_id_to_index(&workbook, entry.sheet_id) else { continue };
             if let Ok(outline) =
                 serde_json::from_value::<crate::grouping::SheetOutline>(entry.outline.clone())
             {
@@ -5752,3 +5807,7 @@ mod default_geometry_and_sheet_view_tests {
         assert!(splits[0].split_row.is_none() && splits[0].split_col.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "orphaned_sheet_state_tests.rs"]
+mod orphaned_sheet_state_tests;

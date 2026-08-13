@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "seed": 90040001,
+  "startedAt": "2026-08-12T16:42:53.141Z",
+  "actions": [
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_38"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "B15"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "G4"
+      }
+    }
+  ]
+}

@@ -145,6 +145,66 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const overlayResizeStateRef = useRef<{ region: import("../../lib/gridRenderer/core").GridRegion; currentEndRow: number; currentEndCol: number } | null>(null);
   const overlayMoveStateRef = useRef<OverlayMoveState | null>(null);
 
+  /**
+   * A `mouseup` that arrived before React had committed the drag it ends.
+   *
+   * THE RACE, MEASURED 2026-08-12. `handleGlobalMouseUp` is always attached,
+   * but it reads `isDragging` / `isSelectionDragging` / ... from the CLOSURE of
+   * the render it was attached in. A mousedown calls `setIsDragging(true)` and
+   * returns; if the matching mouseup is dispatched in the same task — before
+   * React re-renders and re-attaches the handler with the new closure — the
+   * still-attached handler sees every flag `false` and ends nothing. The flag
+   * then stays `true` forever, and the `mousemove` listener (which IS attached
+   * on the next render, because its effect is conditional on the flags)
+   * proceeds to extend the selection on every subsequent pointer MOVE, with no
+   * button held.
+   *
+   * Live measurement on the running app, clicking one cell and then only
+   * moving the mouse:
+   *
+   *   hold 0ms  -> selection follows the pointer forever   (STUCK)
+   *   hold 5ms  -> correct
+   *   hold 20ms and up -> correct
+   *
+   * A physical mouse never produces a 0 ms click, which is why no human has
+   * reported this. `element.click()` always does — so every synthetic click
+   * leaves the grid dragging: macro replay, object scripts, MCP-driven
+   * interaction, OS-synthesized touch/pen taps. For a product whose entire
+   * premise is user automation, "the grid enters an unending drag when a
+   * script clicks a cell" is a real defect, not a test artifact.
+   *
+   * It surfaced as an inverted selection ({startRow:14 ... endRow:3}) caught by
+   * the `selection-in-bounds` invariant on a walk that clicked a cell and then
+   * a chart: the chart's overlay consumed the second mousedown, so nothing
+   * re-anchored the phantom drag and the malformed range survived to be seen.
+   *
+   * The fix is to LATCH the missed event rather than to duplicate the teardown:
+   * the flag is set by the global mouseup handler when nothing is committed, and
+   * an effect that runs once the drag state HAS committed replays
+   * `handleGlobalMouseUp` — the same single teardown recipe, one render later,
+   * with a consistent closure.
+   *
+   * The latch is cleared by a NATIVE window `mousedown` listener, NOT at the
+   * top of `handleMouseDown`, and that distinction was measured rather than
+   * guessed. The first attempt put the clear in `handleMouseDown` and the fix
+   * did not work; instrumenting the real app printed the handlers in this order
+   * for a 0 ms click:
+   *
+   *   up   (all flags false, latch true)
+   *   down (latchWas true)   <-- AFTER the mouseup
+   *
+   * `handleMouseDown` is `async` and reached through React's delegated
+   * dispatch, so it runs after the window mouseup listener. Clearing the latch
+   * there erases the very mouseup it was meant to preserve. A plain window
+   * listener runs during the mousedown dispatch, which always completes before
+   * the mouseup is dispatched — that is the property being relied on.
+   *
+   * Capture phase is belt-and-braces rather than load-bearing: re-running the
+   * regression spec with `false` here still passes, but capture cannot be
+   * defeated by a `stopPropagation()` added anywhere in the tree later.
+   */
+  const pendingMouseUpRef = useRef(false);
+
   // -------------------------------------------------------------------------
   // Side Effects
   // -------------------------------------------------------------------------
@@ -920,6 +980,16 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
    * Global mouse up handler to catch mouse releases outside the component.
    */
   useEffect(() => {
+    const anyDragActive =
+      isResizing ||
+      isOverlayResizing ||
+      isOverlayMoving ||
+      isRefDragging ||
+      isRefResizing ||
+      isSelectionDragging ||
+      isFormulaDragging ||
+      isDragging;
+
     const handleGlobalMouseUp = () => {
       if (isResizing) {
         resizeHandlers.handleResizeMouseUp();
@@ -944,14 +1014,49 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         headerDragRef.current = null;
         lastMousePosRef.current = null;
         onDragEnd?.();
+      } else {
+        // No drag is committed YET. Either there is genuinely nothing to end
+        // (a click that started no drag — the common case, and this costs one
+        // boolean write), or a drag was started by a mousedown whose state
+        // update React has not committed, and this is its mouseup arriving
+        // early. Latch it; the effect below replays it the moment the drag
+        // becomes visible. See `pendingMouseUpRef` for the measurement.
+        pendingMouseUpRef.current = true;
+        return;
       }
+      pendingMouseUpRef.current = false;
     };
+
+    // A drag that IS committed cannot also be holding a stale latch: the
+    // mousedown that started it happened after any earlier mouseup.
+    if (anyDragActive && pendingMouseUpRef.current) {
+      pendingMouseUpRef.current = false;
+      handleGlobalMouseUp();
+    }
 
     window.addEventListener("mouseup", handleGlobalMouseUp);
     return () => {
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
   }, [isDragging, isFormulaDragging, isResizing, isRefDragging, isRefResizing, isSelectionDragging, isOverlayResizing, isOverlayMoving, handleMouseUp, resizeHandlers, overlayResizeHandlers, overlayMoveHandlers, stopAutoScroll, onDragEnd]);
+
+  /**
+   * A new press invalidates any latched mouseup: that one belonged to a gesture
+   * that is already finished and must never end THIS one.
+   *
+   * Capture phase, on `window`, with empty deps — see `pendingMouseUpRef` for
+   * why no other position works. This listener holds no state, so it is
+   * registered once for the life of the hook.
+   */
+  useEffect(() => {
+    const clearLatch = () => {
+      pendingMouseUpRef.current = false;
+    };
+    window.addEventListener("mousedown", clearLatch, true);
+    return () => {
+      window.removeEventListener("mousedown", clearLatch, true);
+    };
+  }, []);
 
   /**
    * Global mouse move handler for tracking mouse during drag outside component.

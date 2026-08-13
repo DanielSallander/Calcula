@@ -1683,6 +1683,16 @@ export interface UndoState {
   undoSeqs: number[];
   /** How many transactions the cap has dropped over this document's life. */
   evictedTotal: number;
+  /**
+   * How many transactions a WHOLESALE clear has discarded over this document's
+   * life — i.e. how much history a workbook-STRUCTURE change ended.
+   *
+   * A remembered id can go missing for three reasons and only one of them is a
+   * product defect: the cap dropped it (`evictedTotal` moved), a sheet was
+   * added / deleted / renamed / moved / copied and Excel-parity ended the
+   * history (this moved), or the caller undid past it (neither moved).
+   */
+  clearedTotal: number;
   /** The history cap (Excel keeps 100 too). */
   historyLimit: number;
 }

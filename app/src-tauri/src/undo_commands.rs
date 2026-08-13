@@ -159,8 +159,214 @@ pub struct UndoState {
     /// How many transactions the size cap has dropped over this document's
     /// lifetime. The only evidence eviction leaves.
     pub evicted_total: u64,
+    /// How many transactions a WHOLESALE clear has discarded over this
+    /// document's lifetime.
+    ///
+    /// A remembered id can go missing for three different reasons and only one
+    /// of them is ever a product defect, so the three have to be tellable
+    /// apart: the cap dropped it (`evicted_total` moved), a workbook-STRUCTURE
+    /// change ended the history (this moved — Excel parity, BUG-0005), or the
+    /// caller itself undid past it (neither moved). Without this counter the
+    /// undo-round-trip oracle read the second case as the third and reported
+    /// "the walk undid past the checkpoint" about a sheet insert.
+    pub cleared_total: u64,
     /// The history cap (Excel keeps 100 too).
     pub history_limit: usize,
+}
+
+/// A geometry restore whose sheet is NOT the active one.
+///
+/// The four changes below carried no sheet dimension at all until BUG-0005's
+/// sweep: they were implicitly "the active sheet", which is true when they are
+/// RECORDED and need not be true when they are RESTORED. A user resizes a
+/// column on Sheet2, switches to Sheet1 and presses Ctrl+Z, and the restore
+/// landed on Sheet1 — silently, with the sheet that was actually edited left
+/// alone. `RestoreSnapshot` was the same defect with the whole grid at stake.
+///
+/// They are queued rather than applied in place because `apply_changes` holds
+/// the ACTIVE sheet's mirrors (`column_widths`, `row_heights`,
+/// `merged_regions`) for its whole pass, and an off-sheet restore needs the
+/// `all_*` stores instead. `set_active_sheet` takes mirror-then-all in every
+/// case, so taking them the other way round here would close a deadlock cycle
+/// — and std's locks are not reentrant, so even the same-store case would hang.
+/// The deferred pass runs after every guard is released.
+#[derive(Debug)]
+pub(crate) enum OffSheetGeometry {
+    ColumnWidth { sheet: usize, col: u32, previous: Option<f64> },
+    RowHeight { sheet: usize, row: u32, previous: Option<f64> },
+    /// `was_added` records which DIRECTION the original change was, not what
+    /// to do now: the apply direction is `is_undo`, exactly as for the
+    /// active-sheet arms (storing the opposite variant AND flipping on
+    /// `is_undo` was the double negation of BUG-0009).
+    Merge { sheet: usize, region: UndoMergeRegion, was_added: bool },
+    Snapshot(GridSnapshot),
+}
+
+/// What an off-sheet geometry restore changed, for the caller's flags.
+#[derive(Default)]
+pub(crate) struct OffSheetGeometryOutcome {
+    pub merge_changed: bool,
+    pub structural_restore: bool,
+}
+
+/// Apply one off-sheet geometry restore. Runs in `apply_changes`'s DEFERRED
+/// phase, with every grid/width/height/merge guard released, and takes its
+/// locks in `apply_sheet_structural_restore`'s order so the two cannot
+/// deadlock against each other.
+pub(crate) fn apply_off_sheet_geometry(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    item: &OffSheetGeometry,
+    is_undo: bool,
+    inverse_transaction: &mut Transaction,
+    report: &mut RestoreReport,
+) -> OffSheetGeometryOutcome {
+    let mut outcome = OffSheetGeometryOutcome::default();
+    match item {
+        OffSheetGeometry::ColumnWidth { sheet, col, previous } => {
+            let mut all = state.all_column_widths.write(effect).unwrap();
+            while all.len() <= *sheet {
+                all.push(HashMap::new());
+            }
+            let current = all[*sheet].get(col).copied();
+            inverse_transaction.add_change(CellChange::SetColumnWidth {
+                sheet: *sheet,
+                col: *col,
+                previous: current,
+            });
+            match previous {
+                Some(width) => { all[*sheet].insert(*col, *width); }
+                None => { all[*sheet].remove(col); }
+            }
+        }
+        OffSheetGeometry::RowHeight { sheet, row, previous } => {
+            let mut all = state.all_row_heights.write(effect).unwrap();
+            while all.len() <= *sheet {
+                all.push(HashMap::new());
+            }
+            let current = all[*sheet].get(row).copied();
+            inverse_transaction.add_change(CellChange::SetRowHeight {
+                sheet: *sheet,
+                row: *row,
+                previous: current,
+            });
+            match previous {
+                Some(height) => { all[*sheet].insert(*row, *height); }
+                None => { all[*sheet].remove(row); }
+            }
+        }
+        OffSheetGeometry::Merge { sheet, region, was_added } => {
+            inverse_transaction.add_change(if *was_added {
+                CellChange::AddMergeRegion { sheet: *sheet, region: region.clone() }
+            } else {
+                CellChange::RemoveMergeRegion { sheet: *sheet, region: region.clone() }
+            });
+            // `was_added == is_undo` means "take it away": undoing an add, or
+            // redoing a remove. The other two combinations put it back.
+            let remove = *was_added == is_undo;
+            crate::report::with_sheet_merges_mut(state, effect, *sheet, |merged| {
+                if remove {
+                    merged.remove(&to_api_region(region));
+                } else {
+                    merged.insert(to_api_region(region));
+                }
+            });
+            outcome.merge_changed = true;
+        }
+        OffSheetGeometry::Snapshot(snapshot) => {
+            let idx = snapshot.sheet;
+            report.wrote_sheet(idx);
+
+            // Cells BEFORE the swap, for the subscriber override layer. Undoing
+            // an edit on a subscribed sheet must update or remove the matching
+            // override, or the next refresh re-applies the stale one and
+            // resurrects the undone edit. The active-sheet arm has always done
+            // this; an off-sheet restore that skipped it would be a new gap.
+            let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> =
+                Vec::new();
+
+            let mut inverse = {
+                // Same order as `apply_sheet_structural_restore`: mirror,
+                // grids, then the all- stores. The mirror is taken even though
+                // this branch never writes it, so the two functions can never
+                // acquire the pair in opposite orders.
+                let _mirror = state.grid.write(effect).unwrap();
+                let mut grids = state.grids.write(effect).unwrap();
+                let mut all_cw = state.all_column_widths.write(effect).unwrap();
+                let mut all_rh = state.all_row_heights.write(effect).unwrap();
+                if idx >= grids.len() {
+                    return outcome;
+                }
+                while all_cw.len() <= idx {
+                    all_cw.push(HashMap::new());
+                }
+                while all_rh.len() <= idx {
+                    all_rh.push(HashMap::new());
+                }
+
+                {
+                    let keys: std::collections::HashSet<(u32, u32)> = grids[idx]
+                        .cells
+                        .keys()
+                        .chain(snapshot.cells.keys())
+                        .copied()
+                        .collect();
+                    for (row, col) in keys {
+                        let pre = grids[idx].cells.get(&(row, col));
+                        let post = snapshot.cells.get(&(row, col));
+                        if cell_value_differs(pre, post) {
+                            override_edits.push((row, col, pre.cloned(), post.cloned()));
+                        }
+                    }
+                }
+
+                let inverse = GridSnapshot {
+                    sheet: idx,
+                    cells: grids[idx].cells.clone(),
+                    row_heights: all_rh[idx].clone(),
+                    column_widths: all_cw[idx].clone(),
+                    merged_regions: std::collections::HashSet::new(), // filled below
+                    max_row: grids[idx].max_row,
+                    max_col: grids[idx].max_col,
+                    row_styles: grids[idx].row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+                    column_styles: grids[idx].column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+                };
+
+                grids[idx].cells = snapshot.cells.clone();
+                grids[idx].max_row = snapshot.max_row;
+                grids[idx].max_col = snapshot.max_col;
+                grids[idx].row_styles = snapshot.row_styles.iter().map(|(k, v)| (*k, *v)).collect();
+                grids[idx].column_styles =
+                    snapshot.column_styles.iter().map(|(k, v)| (*k, *v)).collect();
+                all_cw[idx] = snapshot.column_widths.clone();
+                all_rh[idx] = snapshot.row_heights.clone();
+                inverse
+            };
+
+            inverse.merged_regions =
+                crate::report::with_sheet_merges_mut(state, effect, idx, |merged| {
+                    let prev: std::collections::HashSet<UndoMergeRegion> =
+                        merged.iter().map(to_undo_region).collect();
+                    merged.clear();
+                    for r in &snapshot.merged_regions {
+                        merged.insert(to_api_region(r));
+                    }
+                    prev
+                });
+
+            crate::calp_commands::record_subscription_override_edits(
+                state,
+                effect,
+                idx,
+                &override_edits,
+            );
+
+            inverse_transaction.add_change(CellChange::RestoreSnapshot(inverse));
+            outcome.merge_changed = true;
+            outcome.structural_restore = true;
+        }
+    }
+    outcome
 }
 
 /// Convert engine::UndoMergeRegion to api_types::MergedRegion
@@ -419,6 +625,7 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
         transaction_open: undo_stack.has_open_transaction(),
         undo_seqs: undo_stack.undo_seqs(),
         evicted_total: undo_stack.evicted_total(),
+        cleared_total: undo_stack.cleared_total(),
         history_limit: undo_stack.max_size(),
     }
 }
@@ -479,6 +686,23 @@ pub(crate) fn apply_changes(
     // Deferred custom restores that need to run AFTER grid locks are released
     // (pivot/slicer/ribbon_filter restores acquire their own locks and may need grid access)
     let mut deferred_restores: Vec<(String, Vec<u8>)> = Vec::new();
+
+    // OFF-SHEET geometry restores, deferred for exactly the reason above.
+    //
+    // `column_widths`, `row_heights` and `merged_regions` are the ACTIVE
+    // sheet's mirrors, and this pass holds all three. An off-sheet restore has
+    // to reach `all_column_widths` / `all_row_heights` / `all_merged_regions`
+    // instead, which are locks this pass does NOT hold and must not take here:
+    // `set_active_sheet` takes the mirror before the all- store in every case,
+    // so taking them the other way round closes a cycle, and std's locks are
+    // not reentrant anyway. The deferred pass runs with every guard above
+    // released — the same contract the pivot column-width restore learned the
+    // hard way (it deadlocked against its own caller, and the harness reported
+    // it as "the application went away").
+    //
+    // The ACTIVE-sheet path is untouched by all of this: when the change's
+    // sheet is the active one it is applied inline exactly as before.
+    let mut deferred_geometry: Vec<OffSheetGeometry> = Vec::new();
 
     // (row, col, pre, post) per restored cell, for subscriber override
     // maintenance: undoing an edit on a subscribed sheet must update/remove
@@ -596,57 +820,112 @@ pub(crate) fn apply_changes(
                     }
                 }
             }
-            CellChange::SetColumnWidth { col, previous } => {
-                let current = column_widths.get(col).copied();
-                inverse_transaction.add_change(CellChange::SetColumnWidth {
-                    col: *col,
-                    previous: current,
-                });
-                match previous {
-                    Some(width) => { column_widths.insert(*col, *width); }
-                    None => { column_widths.remove(col); }
+            CellChange::SetColumnWidth { sheet, col, previous } => {
+                // `column_widths` is the ACTIVE sheet's mirror. A resize
+                // recorded on another sheet has to reach that sheet's entry in
+                // `all_column_widths`, which needs a lock this pass must not
+                // take while holding the mirror -- so it is deferred.
+                if *sheet != active_sheet {
+                    deferred_geometry.push(OffSheetGeometry::ColumnWidth {
+                        sheet: *sheet,
+                        col: *col,
+                        previous: *previous,
+                    });
+                } else {
+                    let current = column_widths.get(col).copied();
+                    inverse_transaction.add_change(CellChange::SetColumnWidth {
+                        sheet: *sheet,
+                        col: *col,
+                        previous: current,
+                    });
+                    match previous {
+                        Some(width) => { column_widths.insert(*col, *width); }
+                        None => { column_widths.remove(col); }
+                    }
                 }
             }
-            CellChange::SetRowHeight { row, previous } => {
-                let current = row_heights.get(row).copied();
-                inverse_transaction.add_change(CellChange::SetRowHeight {
-                    row: *row,
-                    previous: current,
-                });
-                match previous {
-                    Some(height) => { row_heights.insert(*row, *height); }
-                    None => { row_heights.remove(row); }
+            CellChange::SetRowHeight { sheet, row, previous } => {
+                if *sheet != active_sheet {
+                    deferred_geometry.push(OffSheetGeometry::RowHeight {
+                        sheet: *sheet,
+                        row: *row,
+                        previous: *previous,
+                    });
+                } else {
+                    let current = row_heights.get(row).copied();
+                    inverse_transaction.add_change(CellChange::SetRowHeight {
+                        sheet: *sheet,
+                        row: *row,
+                        previous: current,
+                    });
+                    match previous {
+                        Some(height) => { row_heights.insert(*row, *height); }
+                        None => { row_heights.remove(row); }
+                    }
                 }
             }
             // The inverse keeps the SAME change variant; the apply direction
             // (is_undo) decides the operation. Storing the opposite variant
             // AND flipping on is_undo was a double negation: redo after undo
             // REMOVED the merge instead of restoring it (BUG-0009).
-            CellChange::AddMergeRegion(region) => {
-                inverse_transaction.add_change(CellChange::AddMergeRegion(region.clone()));
-                if is_undo {
-                    // Undo adding = remove it
-                    merged_regions.remove(&to_api_region(region));
+            CellChange::AddMergeRegion { sheet, region } => {
+                if *sheet != active_sheet {
+                    deferred_geometry.push(OffSheetGeometry::Merge {
+                        sheet: *sheet,
+                        region: region.clone(),
+                        was_added: true,
+                    });
                 } else {
-                    // Redo adding = add it back
-                    merged_regions.insert(to_api_region(region));
+                    inverse_transaction.add_change(CellChange::AddMergeRegion {
+                        sheet: *sheet,
+                        region: region.clone(),
+                    });
+                    if is_undo {
+                        // Undo adding = remove it
+                        merged_regions.remove(&to_api_region(region));
+                    } else {
+                        // Redo adding = add it back
+                        merged_regions.insert(to_api_region(region));
+                    }
+                    merge_changed = true;
                 }
-                merge_changed = true;
             }
-            CellChange::RemoveMergeRegion(region) => {
-                inverse_transaction.add_change(CellChange::RemoveMergeRegion(region.clone()));
-                if is_undo {
-                    // Undo removing = add it back
-                    merged_regions.insert(to_api_region(region));
+            CellChange::RemoveMergeRegion { sheet, region } => {
+                if *sheet != active_sheet {
+                    deferred_geometry.push(OffSheetGeometry::Merge {
+                        sheet: *sheet,
+                        region: region.clone(),
+                        was_added: false,
+                    });
                 } else {
-                    // Redo removing = remove it
-                    merged_regions.remove(&to_api_region(region));
+                    inverse_transaction.add_change(CellChange::RemoveMergeRegion {
+                        sheet: *sheet,
+                        region: region.clone(),
+                    });
+                    if is_undo {
+                        // Undo removing = add it back
+                        merged_regions.insert(to_api_region(region));
+                    } else {
+                        // Redo removing = remove it
+                        merged_regions.remove(&to_api_region(region));
+                    }
+                    merge_changed = true;
                 }
-                merge_changed = true;
+            }
+            CellChange::RestoreSnapshot(snapshot) if snapshot.sheet != active_sheet => {
+                // THE SEVERE ONE. This variant REPLACES a whole grid, and it
+                // used to replace the active sheet's whichever sheet it was
+                // taken from: insert a row on Sheet2, switch to Sheet1, undo,
+                // and Sheet1's entire cell map became Sheet2's saved one.
+                // Deferred for the same lock reason as the geometry above -- an
+                // off-sheet whole-grid swap needs `all_column_widths` /
+                // `all_row_heights` / `all_merged_regions`.
+                deferred_geometry.push(OffSheetGeometry::Snapshot(snapshot.clone()));
             }
             CellChange::RestoreSnapshot(snapshot) => {
                 // Save current state as inverse snapshot
                 let current_snapshot = GridSnapshot {
+                    sheet: active_sheet,
                     cells: grid.cells.clone(),
                     row_heights: row_heights.clone(),
                     column_widths: column_widths.clone(),
@@ -743,6 +1022,17 @@ pub(crate) fn apply_changes(
     // Keep subscriber overrides in step with the restored cells (no-op when
     // the active sheet isn't subscribed).
     crate::calp_commands::record_subscription_override_edits(state, &effect, active_sheet, &override_edits);
+
+    // OFF-SHEET geometry, now that every guard above is released. Before this
+    // existed, each of these landed on the ACTIVE sheet instead of the one it
+    // was recorded on — a wrong column width at best, and at worst a whole
+    // grid replaced by another sheet's.
+    for item in &deferred_geometry {
+        let outcome =
+            apply_off_sheet_geometry(state, &effect, item, is_undo, &mut inverse_transaction, &mut report);
+        merge_changed |= outcome.merge_changed;
+        structural_restore |= outcome.structural_restore;
+    }
 
     // Process deferred pivot/slicer/ribbon_filter restores (now safe to acquire locks)
     for (kind, data) in deferred_restores {
@@ -2741,6 +3031,21 @@ struct TableObjSnapshot {
 struct AutoFilterObjSnapshot {
     sheet_index: usize,
     previous: Option<crate::autofilter::AutoFilter>,
+    /// Tables whose `show_filter_button` moved WITH this filter, and the value
+    /// to put back.
+    ///
+    /// For a table, "has an AutoFilter" and "shows filter buttons" are ONE
+    /// state (Excel's `ListObject.ShowAutoFilter`), so removing the filter
+    /// clears the flag — see `remove_auto_filter_inner`. The flag is persisted
+    /// and the filter's ownership is re-derived FROM it, so an undo that put
+    /// the filter back without the flag would restore an orphan: the filter
+    /// would exist, `relink_autofilter_owner` would refuse to give it to a
+    /// table that no longer advertises buttons, and the table's own filter
+    /// would have stopped being the table's.
+    ///
+    /// Empty for every filter operation that only touches criteria.
+    #[serde(default)]
+    filter_buttons: Vec<(identity::EntityId, bool)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3015,7 +3320,12 @@ pub(crate) fn autofilter_snapshot_bytes(
     sheet_index: usize,
     previous: Option<crate::autofilter::AutoFilter>,
 ) -> Vec<u8> {
-    serde_json::to_vec(&AutoFilterObjSnapshot { sheet_index, previous }).unwrap_or_default()
+    serde_json::to_vec(&AutoFilterObjSnapshot {
+        sheet_index,
+        previous,
+        filter_buttons: Vec::new(),
+    })
+    .unwrap_or_default()
 }
 
 /// Serialized "script_grid_cells" snapshot bytes (same in-open-transaction
@@ -3220,17 +3530,13 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_autofilter snapshot: {}", e); return; }
             };
-            let restored_filter = {
+            let (restored_filter, displaced_filter) = {
                 let mut auto_filters = state.auto_filters.write(effect).unwrap();
                 let current = auto_filters.remove(&snap.sheet_index);
-                push_obj_inverse(inverse_transaction, kind, &AutoFilterObjSnapshot {
-                    sheet_index: snap.sheet_index,
-                    previous: current,
-                });
                 if let Some(prev) = snap.previous {
                     auto_filters.insert(snap.sheet_index, prev);
                 }
-                auto_filters.get(&snap.sheet_index).cloned()
+                (auto_filters.get(&snap.sheet_index).cloned(), current)
             };
             // OWNERSHIP IS DERIVED, AND UNDO IS ONE OF THE PLACES THAT HAS TO
             // RE-DERIVE IT.
@@ -3252,14 +3558,36 @@ fn apply_object_swap_restore(
             // lock at a time. `Persisted<T>` is a Mutex, not an RwLock, so every
             // pair held simultaneously is another edge in a graph that has
             // deadlocked this app repeatedly; this arm adds none.
+            //
+            // THE FILTER BUTTONS TRAVEL WITH THE FILTER. `show_filter_button`
+            // is persisted and ownership is re-derived from it, so restoring
+            // the filter alone would restore an ORPHAN: `relink_autofilter_owner`
+            // refuses to hand a filter to a table that does not advertise
+            // buttons. The inverse records the CURRENT values of the same
+            // tables, so redo is exact rather than approximately right.
+            let mut displaced_buttons: Vec<(identity::EntityId, bool)> = Vec::new();
             if let Ok(mut tables) = state.tables.write(effect) {
                 if let Some(sheet_tables) = tables.get_mut(&snap.sheet_index) {
+                    for (table_id, want) in &snap.filter_buttons {
+                        if let Some(t) = sheet_tables.get_mut(table_id) {
+                            displaced_buttons.push((*table_id, t.style_options.show_filter_button));
+                            t.style_options.show_filter_button = *want;
+                        }
+                    }
                     crate::tables::relink_autofilter_owner(
                         sheet_tables,
                         restored_filter.as_ref(),
                     );
                 }
             }
+            // Pushed LAST, once both halves of the previous state are known —
+            // and after every guard is released, so the inverse can never be
+            // built while a lock this arm took is still held.
+            push_obj_inverse(inverse_transaction, kind, &AutoFilterObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: displaced_filter,
+                filter_buttons: displaced_buttons,
+            });
         }
         "obj_validation" => {
             let snap: ValidationObjSnapshot = match serde_json::from_slice(data) {
@@ -3770,7 +4098,23 @@ pub(crate) fn record_autofilter_undo(
     previous: Option<crate::autofilter::AutoFilter>,
     description: &str,
 ) {
-    let snap = AutoFilterObjSnapshot { sheet_index, previous };
+    record_autofilter_undo_with_buttons(state, sheet_index, previous, Vec::new(), description)
+}
+
+/// As `record_autofilter_undo`, but also restores the `show_filter_button` flag
+/// of the tables named in `filter_buttons`.
+///
+/// Only the REMOVAL path needs this: it is the one operation that changes a
+/// table's advertised filter buttons along with the filter itself, because for
+/// a table the two are one state. See `AutoFilterObjSnapshot::filter_buttons`.
+pub(crate) fn record_autofilter_undo_with_buttons(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Option<crate::autofilter::AutoFilter>,
+    filter_buttons: Vec<(identity::EntityId, bool)>,
+    description: &str,
+) {
+    let snap = AutoFilterObjSnapshot { sheet_index, previous, filter_buttons };
     record_object_undo(state, "obj_autofilter", serde_json::to_vec(&snap).unwrap_or_default(), description);
 }
 
@@ -4634,6 +4978,14 @@ mod sheet_tagged_restore_tests {
 #[cfg(test)]
 #[path = "undo_sheet_domain_tests.rs"]
 mod undo_sheet_domain_tests;
+
+#[cfg(test)]
+#[path = "undo_sheet_structure_tests.rs"]
+mod undo_sheet_structure_tests;
+
+#[cfg(test)]
+#[path = "autofilter_table_button_tests.rs"]
+mod autofilter_table_button_tests;
 
 #[cfg(test)]
 #[path = "undo_s12_soak_leak_tests.rs"]

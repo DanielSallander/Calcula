@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "seed": 1786446166374,
+  "startedAt": "2026-08-12T21:56:01.609Z",
+  "actions": [
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "filter.remove",
+      "params": {}
+    }
+  ]
+}

@@ -681,7 +681,11 @@ fn a_delete_that_does_touch_the_formula_still_produces_a_ref_error() {
 ///    thirty other functions -- and every census reading it reported THEIR
 ///    contents under ITS name. A census that names the wrong function is worse
 ///    than no census: the offender it prints does not contain the offence.
-fn free_function_bodies(text: &str) -> Vec<(String, String)> {
+/// `pub(crate)` so a census in another test module reuses THIS walker rather
+/// than growing a second one. The two defects recorded above are the reason:
+/// both were in the walking, not in the question being asked, so every copy of
+/// the walker is a copy of the bugs waiting to be re-found.
+pub(crate) fn free_function_bodies(text: &str) -> Vec<(String, String)> {
     const PREFIXES: [&str; 8] = [
         "fn ",
         "async fn ",

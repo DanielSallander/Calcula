@@ -12711,3 +12711,750 @@ reads like a missing toolchain and is not one.
 * **The 11 skipped functional tests and the 1 skipped journey test** were not investigated; they are
   at their baseline counts and were skipped before this pass too.
 * **`--force-device-scale-factor`** was not re-litigated; §3cb's measurement stands.
+
+---
+
+## 9. BUG-0005 closed, and the family it belonged to (2026-08-12, Rust + unit tests only)
+
+**The ledger is now 34 entries and NONE of them is open.** BUG-0005 was the last one; closing it
+turned up a second, more severe defect in the same family, which was fixed in the same pass and
+filed as BUG-0034 rather than left as prose.
+
+### 9a. The root, stated once: an index is not an identity
+
+This is the **third** appearance of one missing dimension, and the shape is now unmistakable.
+
+| # | Where | What could not be expressed |
+|---|---|---|
+| 1 | `EvalContext.hidden_rows` | a flat set applied inside a per-sheet function, so `SUBTOTAL(109, Sheet2!A1:A10)` would have filtered Sheet2 by Sheet1's hidden rows |
+| 2 | `CellChange::SetCell` | no sheet at all, so a restore issued after a sheet switch landed on whatever sheet was in front of the user |
+| 3 | **this pass** | `SetCell` HAS a sheet — and it is an **INDEX**. An index is a POSITION. Delete, move or copy a sheet and every index after it is renumbered, so the entry silently comes to describe a different sheet |
+
+And the half nobody had looked at: **four `CellChange` variants had no sheet dimension at all** —
+`SetColumnWidth`, `SetRowHeight`, `AddMergeRegion`/`RemoveMergeRegion` and `RestoreSnapshot`. They
+were implicitly "the active sheet", which is true when they are RECORDED and need not be true when
+they are RESTORED. That is BUG-0034 below.
+
+Two hazards in the first group are not about indices at all, which is why the partial remap that
+already existed (`visit_custom_restores`, over `CustomRestore` payloads only) was never going to be
+a complete answer:
+
+* a **rename** shifts no index, but rewrites every formula in the workbook. The `previous` cells
+  queued in the undo stack still hold ASTs spelling the OLD sheet name, so undoing across a rename
+  re-introduces a reference to a sheet that no longer answers to it;
+* the four sheet-less variants above cannot be aimed by any amount of remapping.
+
+### 9b. What Excel actually does — checked, not assumed
+
+The product call was framed as "Excel applies an undo to the sheet the action happened on, and
+switches to that sheet to show you". Both halves were verified rather than taken on trust, and the
+second half turned out to make the first one moot for this bug:
+
+* **Excel keeps ONE undo stack across all open documents and SWITCHES to the document the action
+  happened in.** ("if you make edits in one workbook, then switch to another workbook and attempt to
+  undo, Excel will switch back to Workbook 1 and revert the last change there" — ablebits, corroborated
+  by a second source.) The same rule applies to sheets inside a workbook.
+* **A change to the workbook's STRUCTURE is not undoable and ends the history.** Deleting a
+  worksheet is the documented case — Excel warns that deleting sheets cannot be undone, and the Undo
+  command goes unavailable — and no undo entry exists for inserting, renaming, moving or copying one
+  either. Microsoft's own "Undo, redo, or repeat an action" page lists the general exemptions;
+  the sheet-delete case is universally reported and is by design.
+
+Under the standing **"Excel parity wins any design question"** rule, the second bullet settles
+BUG-0005: **a sheet structural operation ends the undo history.** It also answers, *without
+inventing anything*, the question the brief flagged — what an undo should do when its target sheet
+has since been DELETED. **The question cannot arise**, because the delete ended the history that
+could have asked it. That is Excel's answer, not ours.
+
+> The product had already been **claiming** this. `mcp::add_sheet` returns "Sheet structure changes
+> are NOT undoable"; `delete_sheet`, `rename_sheet` and `move_sheet` each end with "NOT undoable".
+> All four were telling an AI caller something the implementation did not do. It does now.
+
+### 9c. The fix, and where it lives
+
+**ONE choke point.** `sheets::invalidate_undo_history_for_sheet_structure(&state, action)` clears
+both stacks and the open transaction. All five structural commands call it — `add_sheet`,
+`delete_sheet`, `rename_sheet`, `move_sheet`, `copy_sheet` — after the last gate that can still
+refuse (a refused operation must not cost the user their history) and **with no other state lock
+held**. `set_active_sheet`, `hide_sheet` and `set_tab_color` deliberately do NOT call it: none of
+them renumbers a sheet or rewrites a formula, and Excel keeps its history across all three.
+
+**The re-aim is gone, deliberately.** `remap_sheet_keyed_stores` no longer rewrites queued
+`CustomRestore` sheet indices, and `UndoStack::visit_custom_restores` is deleted. Re-aiming says
+"this entry is still valid, elsewhere"; ending the history says "this entry is gone". The two
+contradict, and keeping both would leave a second mechanism asserting an invariant the product no
+longer holds — one that only ever covered `CustomRestore` and never the `SetCell` indices beside it.
+
+**It also removed a live lock-order inversion.** That re-aim took `undo_stack` while `move_sheet`
+and `copy_sheet` held the grid pair — the exact reverse of `undo_commands::apply_changes`, which
+takes `undo_stack` first. Both new call sites release every guard (one `drop((..))`) before touching
+the history, and a source census asserts that ordering.
+
+**Three guards, each with teeth exercised on the REAL crate:**
+
+| guard | attacked how | result |
+|---|---|---|
+| `sheet_structure_commands_invalidate_the_undo_history` | removed the call from `add_sheet` | failed naming `add_sheet`; restored, 16/16 |
+| `the_two_commands_that_hold_their_guards_release_them_before_ending_the_history` | moved the call above `drop((..))` in `move_sheet` | failed naming `move_sheet`; restored |
+| `the_undo_stack_is_no_longer_re_aimed_when_sheet_indices_shift` | — | reads `sheets.rs` for `visit_custom_restores` |
+
+The census reuses `formula_serialisation_tests::free_function_bodies` (made `pub(crate)`) rather
+than growing a second source walker: that walker's own header records two defects it has already
+had, and every copy of it is a copy of those bugs waiting to be re-found.
+
+### 9d. The instrument was wrong too, and that is how the bug was FILED
+
+The soak oracle could not distinguish **three** reasons a remembered transaction id goes missing,
+and only one of them is ever a product defect:
+
+1. the cap dropped it — `evictedTotal` moved;
+2. **a workbook-structure change ended the history** — nothing moved, so it was indistinguishable;
+3. the walk undid past its own checkpoint — nothing moved.
+
+So seed 424242's `sheet.add` at action 35 came back as *"undo-all did not restore the checkpoint: 14
+digest differences"* — a report about undo, produced by an action Excel does not let you undo at
+all. `UndoStack` now counts wholesale clears (`cleared_total`) separately from evictions,
+`get_undo_state` reports it, and `stepsBackToBaseline` asks about it FIRST and names the right
+cause. Nine vitest cases pin the decision table, including the two negatives that matter: it must
+not accuse the walk of undoing past its checkpoint, and a baseline written before the counter
+existed must not silently disable the guard (`undefined - 0` is `NaN`, and `NaN > 0` is false).
+
+The battery already treats `undo-history-unreachable` as **undecided** rather than as a violation,
+so no product report changes shape — but the `undecided` list is now the only signal that a walk
+which reaches `sheet.add` often is testing undo less than its green report suggests.
+
+### 9e. BUG-0034 — found while sweeping the family, and worse than the bug that led to it
+
+**Three ordinary actions: insert a row on Sheet2, click the Sheet1 tab, press Ctrl+Z. Sheet1's
+entire cell map is replaced by Sheet2's saved one.** `CellChange::RestoreSnapshot` replaces a WHOLE
+grid and had no sheet dimension, so it replaced whichever grid happened to be active. Silently, with
+no error and no way back. The same defect in milder form applied to column widths, row heights and
+merge regions.
+
+No sheet structural operation is involved, so BUG-0005's fix does not reach it.
+
+The four variants now carry their sheet, exactly as `SetCell` does. **When that sheet IS the active
+one the arms behave byte-identically to before** — which is what makes this safe to land without a
+live run — and when it is not, the restore is queued into `apply_changes`'s existing DEFERRED phase
+and applied to `all_column_widths` / `all_row_heights` / `all_merged_regions` / `grids[sheet]`
+there. Deferred rather than inline for a reason the crate has already paid for once: the pass holds
+the active mirrors for its whole duration, `set_active_sheet` takes mirror-then-`all_` in every
+case, and std's locks are not reentrant — the pivot column-width restore deadlocked against its own
+caller on exactly this, and the harness reported it as "the application went away".
+
+The off-sheet snapshot path also runs `record_subscription_override_edits` for its own sheet, so it
+does not inherit the gap the JSON-payload `sheet_structural_snapshot` path has.
+
+Sabotage: disabling all four off-sheet guards failed all four new tests — the snapshot one reporting
+Sheet1's grid replaced — while `the_active_sheet_path_is_unchanged_by_the_off_sheet_one` still
+passed, which is the evidence that only the previously-broken branch changed.
+
+### 9f. Still open, named rather than implied
+
+* **Undo does not ACTIVATE the sheet it restores.** Excel switches to the sheet the action happened
+  on so the user can see the change; Calcula now restores the right sheet but says nothing, so an
+  undo of an off-sheet edit is invisible. Verified Excel behaviour (9b, first bullet). Not fixed
+  here because it needs the frontend to follow a backend-initiated sheet switch, and this pass was
+  Rust-and-unit-tests only — a backend switch without the frontend following would show Sheet1's tab
+  over Sheet2's data, which is worse than the current silence. The design is ready: give
+  `apply_changes`'s caller the transaction's target sheet, refactor `sheets::set_active_sheet` into a
+  `&AppState` impl the command delegates to, add `activeSheetIndex` to `UndoResult`, and have
+  `useSpreadsheetSelection` follow it the way `announceSheetsChanged` already does in the script host.
+* **`SetCell` still carries an INDEX, not a `SheetId`.** It is now SAFE, because no sheet operation
+  can renumber it — the history ends first — but it is safe by a rule every current AND future
+  sheet-mutating code path has to keep, which the census enforces only over `sheets.rs`. A stable
+  `SheetId` would make a stale entry resolve to "sheet gone" and be skipped rather than misapplied.
+  Not done: `core/engine` does not depend on `core/identity`, and the parity fix removes the live
+  hazard, so this is hardening rather than repair.
+* **No E2E was run**, by instruction. Owed: a soak replay of
+  `tests/regression/repros/BUG-0005.trace.json`, which should now report `undo-history-unreachable`
+  (undecided, with the workbook-structure reason) instead of an undo-round-trip violation; and a
+  `--project=functional` run, whose only plausible interaction is `journeys/census-followon.spec.ts`
+  — it reads `undoDepth` after an `addSheetViaUI` but compares it RELATIVELY, so it should still
+  pass, and its regression guard actually gets sharper against a stack that starts at zero.
+* **`model-engine-lib` was not touched** and its suite was not run this pass.
+
+### 9g. Verification — measured on a quiet tree
+
+| check | result |
+|---|---|
+| `cargo check --all-targets` (core) | **0 warnings** |
+| `cargo check --all-targets` (app/src-tauri) | **0 warnings** |
+| core tests | **1,342** (baseline 1,339: +4 `structural_clear_tests`, −1 for the deleted `visit_custom_restores` test) |
+| app-lib | **1,513 passed / 0 failed / 5 ignored** (baseline 1,492: +16 `undo_sheet_structure_tests`, +5 GAP-4) |
+| `test_pivot` | **56** |
+| vitest, full | **761 files / 106,363 passed** |
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| `tsc -p e2e/tsconfig.json` | clean |
+| `npm run check:line-endings` | `[OK] no mixed line endings` |
+
+> **One handover figure was one high.** The brief's vitest baseline of **106,355** was re-measured on
+> this tree with the new file removed and is **106,354** (760 files). The Rust baselines all
+> reconciled exactly. Stated because "measure, do not trust" only works if the correction is written
+> down.
+
+---
+
+## 10. The oracles reach charts for the first time — and one suppression had outlived its bug by a whole programme (2026-08-12)
+
+The brief for this pass named charts as the highest-probability ground for a new finding, on the
+reasoning that BUG-0031 had just stopped `chart.create` from talking only to the backend, so no walk
+in the programme's history had ever explored the surface. That reasoning was right and it was not
+strong enough: **the walker could not explore charts even after BUG-0031**, and it could not explore
+sheets either, for a completely different reason. Both were fixed before the sweep, and the sweep
+then produced a confirmed three-action product defect on its first two seeds.
+
+### 10a. `EXCLUDED_UNTIL_FIXED` had outlived BUG-0005 — four actions, one whole surface
+
+`walker/actionCatalog.ts` keeps a list of actions withheld from GENERATION while a ledgered bug makes
+every walk using them fail identically. The mechanism is right. Its lifetime was not: each entry
+carried a `ledgerId` STRING, and **nothing in the tree ever compared that string to
+`tests/regression/bug-ledger.json`.**
+
+The list still held `sheet.add`, `sheet.switch`, `sheet.rename` and `sheet.delete` against BUG-0005.
+BUG-0005 was closed the same day, together with BUG-0034, by a pass that **rewrote the sheet/undo
+surface** — so the four actions covering the freshly-rewritten code were exactly the four the walker
+was forbidden to generate. Every green walk report since was silently a report about a workbook that
+never had a second sheet.
+
+This is the *third* instance of a suppression outliving its reason (§5 records two on the undo
+oracle, which had blinded it to all pivot divergence and all column-width divergence since
+2026-06-11). The pattern only stops when a suppression is made to prove its justification is still
+live, so `app/e2e/__tests__/walkerExclusions.test.ts` now reads the ledger and fails when an entry
+names a bug that is not `open` — or that does not exist at all. Closing a bug turns its suppression
+red on the next unit run. The list is empty as of this pass; the four sheet actions generate again.
+
+### 10b. The walker could still not explore charts — BUG-0035
+
+The first chart-weighted walk (seed 90010001, 46 chart actions) PASSED. Probing the live app
+afterwards: `get_charts` answered **nine**, and `__CALCULA_CHARTS__.getCurrentChartId()` was **null**.
+Nothing had ever been selected and nothing had ever been deleted, across 46 chart actions.
+
+A stored `ChartDefinition` keys its identity as **`chartId`**; the backend's `ChartEntry` is the one
+that calls it `id`. `chart.select`, `chart.delete` and — worse — `deepResetForWalk` all read
+`charts[0].id`, which is `undefined`, and every one of those functions takes a chart id as its only
+argument. So all three returned successfully having done nothing, and charts accumulated across every
+walk of a session in the one routine whose entire stated purpose is deterministic replay fidelity.
+
+BUG-0031 fixed the CREATE half and left the SELECT/DELETE half reading a key that does not exist.
+That is not a coincidence of two similar bugs; it is the same missing guarantee twice, and
+`table.delete` was the same shape a third time. **A walker action that silently no-ops is
+indistinguishable from one that works** — the walk logs it, the trace records it, the report counts
+it, and every oracle downstream compares an unchanged workbook to an unchanged workbook and passes.
+
+So the fix is not the key. The fix is `app/e2e/soak/walker-action-effects.spec.ts`, which drives the
+catalog's OWN `ActionDef` objects against a live app and asserts the observable effect each one
+claims: create raises both counts and yields a usable id, select raises the **Chart Design**
+contextual tab AND sets `getCurrentChartId`, deselect clears it, delete lowers both counts and drops
+the tab, `deepResetForWalk` really empties the store, and a generic net checks create-raises /
+delete-lowers for chart, table, slicer and sparkline. No unit test can catch any of this: all three
+instances lived in the seam between the harness and a live extension.
+
+### 10c. What the sweep then found immediately — BUG-0036, three actions, three seeds
+
+With select and delete working, the very next chart-weighted walks failed:
+
+> Contextual tab "Chart Design" is visible but at least one chart must exist.
+> Found: slicers=0, charts=0, tables=1, pivots=0, timelines=0, sparklines=0
+
+Seeds 90010001, 90010002 and 90010003 each minimized to the SAME three actions, `verdict=confirmed`:
+
+```
+1. chart.create
+2. chart.select
+3. chart.delete
+```
+
+**There were two chart-delete recipes and they had drifted.** The UI path (Delete key / context menu)
+deselected and cleared the render cache with `removeChartFromCache`. The component-store registry's
+`deleteChart` — the route used by object scripts, the MCP tools and the broker's `api.deleteChart` —
+did neither. Three consequences, all live:
+
+1. Deleting the SELECTED chart from a script left the contextual **Chart Design** tab on screen over
+   a workbook with zero charts, with `getCurrentChartId()` still returning the dead id — so every
+   Chart Design command was then aimed at a chart that no longer existed.
+2. Nothing emitted `CHART_SELECTION_CHANGED`, so the FormulaBar/NameBox kept the deleted chart's name.
+3. `invalidateChartCache` only BUMPS A VERSION COUNTER. It was standing in for `removeChartFromCache`,
+   which is what drops the `OffscreenCanvas`, the parsed data cache, the point selection and the
+   widget values — so a script-deleted chart leaked all four for the life of the session, under an id
+   nothing could ever reach again.
+
+This is the Seam Rule's own lesson one object over: *a copied recipe is a second source of truth that
+drifts on the owner's first change*. The two copies could not be compared because neither was
+reachable from the other — `performChartDelete` was a closure inside `activate()`.
+
+**Fixed as ONE delete.** `performChartDelete(chartId): boolean` is hoisted to module scope in
+`Charts/index.ts` and is now the only implementation. The registry method delegates to it (so
+scripts/MCP get the whole recipe), the Delete key and context menu delegate to it, and the E2E bridge
+`__CALCULA_CHARTS__.deleteChart` now hands out the PRODUCT'S delete instead of the raw `chartStore`
+primitive — the correction `chart.create` needed in BUG-0031, applied to its sibling.
+`chartStore.deleteChart` stays what it always was: an internal store+backend persistence primitive
+with no external callers.
+
+The deselect is **conditional**, which the old UI copy was not. Deleting chart A while chart B is
+selected must leave B selected, as Excel does; the old code only ever reached that path with the
+selected chart via the Delete key, but the context-menu route could already pass another chart's id.
+A named case pins it, because "always deselect" would otherwise pass both of the other cases and
+quietly break the context menu.
+
+### 10d. Two instruments the sweep needed, and did not have
+
+* **Family weighting.** The catalog's 59 actions carry flat weights, so a 75-action walk spends about
+  four actions on any one feature and a whole surface can go unvisited for a dozen walks running.
+  `createGeneratorSource` now takes `categoryWeights`, driven by `SOAK_CATEGORY_WEIGHTS` /
+  `INVARIANT_CATEGORY_WEIGHTS` (`"chart:10"`), and a boost key matches an action's `category` OR its
+  id prefix — so `{chart: 10}` also lifts `chart.deselect`, whose category is the cross-feature
+  `deselect`, which is precisely the transition the contextual-tab invariant tests. Under `chart:10`
+  a walk spends 27-46 of its 75 actions on charts instead of 3-4. **The weights are part of what a
+  seed MEANS**, so every failure bundle's replay command now carries the env var; a command that
+  omitted it would replay a different walk, the same class of lie the rapid-fire walk's derived seed
+  had to be fixed for.
+* **Coverage in the PASS path.** A green walk reported four numbers, none of which said what it had
+  explored — so "the oracles found no chart bug" and "the oracles never created a chart" were
+  indistinguishable in every report this programme has produced. They were in fact the second.
+  `formatWalkReport` now prints per-family counts of the actions that actually RAN, on pass and on
+  failure, with a `[N threw]` tail.
+
+### 10e. The hang the register had already recorded, and never diagnosed — BUG-0037
+
+`playwright.config.ts` carries a note about an `invariant` walk that stopped at
+`[step 47/75] ribbon.switch-tab` and printed nothing for twelve minutes on a live, responding app.
+That is why `actionTimeout: 30_000` exists. The timeout converted the hang into a reported failure,
+and there the matter rested: the report named the victim ("waiting for `locator('button')` …
+`<div class="css-1fr3uyz"> intercepts pointer events") and not the culprit, because an emotion hash
+is not a component.
+
+This pass added an **overlay census** — when an action throws, the walker enumerates every
+`position: fixed/absolute` element covering ≥40% of the viewport, with its class, z-index,
+pointer-events and text — and the answer came out of the first run that reproduced it:
+
+> `[covering 100% of the viewport] <div class="css-1fr3uyz" role=- position:fixed z:1050
+> pointer-events:auto text:"Customize Home TabXCurrent GroupsClipboard…"`
+
+`ribbon.switch-tab` matched its target with `filter({ hasText: name }).first()` — a SUBSTRING match
+resolved by DOM order. Clicking the **View** tab opens the View MENU, whose *"Customize Home Tab…"*
+item is a `<button>` containing the word "Home" and sits at DOM index 22, ten positions before the
+real ribbon Home tab at 32. The action's "return to Home" click opened the Customize modal.
+
+From that step on, every UI action in the walk was clicking into a modal backdrop. Each burned the
+30-second timeout and was **tolerated**, so the walk ran to completion and reported PASS over a
+workbook whose UI had been unreachable for half the run. On seed 1786456498740 that was two throws
+and sixty seconds of a 75-action walk.
+
+Two fixes, and only the first is the bug:
+
+* `ribbon.switch-tab` presses Escape and uses `getByRole("button", { name, exact: true })`, which
+  cannot match "Customize Home Tab…" while looking for "Home".
+* **A new invariant, `ui-not-blocked`.** `captureVisualState` hit-tests the centre of a real ribbon
+  tab button with `document.elementFromPoint` and records what comes back if it is neither the button
+  nor inside the tab strip. A blocked UI is not itself a product bug — a modal is allowed to be
+  modal — it is a statement that **the rest of this walk means nothing**, and that has to stop the
+  walk rather than decorate it.
+
+  The long-standing `visibleDialogCount` could not have caught this and never could: the modal
+  carries no `role="dialog"`, so the count read 0 the whole time. It had also been captured after
+  every action since the beginning and **read by nothing**. The hit test asks the only question that
+  survives both styled-components hashes and missing ARIA roles: *if I clicked the ribbon, what would
+  I hit?*
+
+Attacked on the real tree: with the invariant in place and the old locator restored, seed
+1786456498740 fails at step 40 naming the modal; restored, the same seed passes with **zero** thrown
+actions where it previously had two.
+
+### 10f. And then the sheet surface, unblocked for the first time, produced a Core defect — BUG-0038
+
+Seed 90040001 under `sheet:10` failed `selection-in-bounds`:
+
+> Malformed selection (endRow < startRow): `{"startRow":14,"startCol":1,"endRow":3,"endCol":6}`
+
+Minimized to three actions, confirmed over 30 replays: `chart.create` → `cell.click B15` →
+`cell.click G4`, where G4 sits under the chart.
+
+The inverted range is the symptom. **The defect is that a zero-duration click leaves the grid
+permanently dragging.** `handleGlobalMouseUp` in `useMouseSelection` is always attached, but it reads
+`isDragging` / `isSelectionDragging` / … from the CLOSURE of the render that attached it. A mousedown
+starts a drag with `setIsDragging(true)`; if the matching mouseup is dispatched before React commits
+that state, the still-attached handler sees every flag `false` and ends nothing. The flag then stays
+`true` forever — and the `mousemove` listener, whose effect IS conditional on the flags and therefore
+attaches on the next render, proceeds to extend the selection on every subsequent pointer MOVE, with
+no button held.
+
+Measured on the running app — click one cell, then only move the mouse:
+
+| hold between down and up | result |
+|---|---|
+| 0 ms | the selection follows the pointer forever |
+| 5 ms | correct |
+| 20 ms, 150 ms, 400 ms | correct |
+
+A physical mouse never produces a 0 ms click, which is why no human has reported it. **`element.click()`
+always does.** Macro replay, object scripts, MCP-driven interaction and OS-synthesized touch/pen taps
+all take that path, and for a product whose entire premise is user automation, "the grid enters an
+unending drag when a script clicks a cell" is a defect, not a test artifact.
+
+It needed the chart to become VISIBLE: normally the next mousedown re-anchors the phantom drag and
+the range looks ordinary, but the chart overlay consumes that mousedown, so nothing re-anchored it
+and the malformed range survived to be observed. Anything iterating `startRow..endRow` over that
+selection silently operates on nothing.
+
+**Fixed by latching the missed event, not by duplicating the teardown.** `handleGlobalMouseUp` gains
+a final `else`: when no drag is committed it records `pendingMouseUpRef` rather than returning
+silently, and the same effect replays `handleGlobalMouseUp` the moment a drag becomes visible while
+the latch is set — the one teardown recipe, one render later, with a consistent closure.
+
+The clear is the part that was measured rather than reasoned. The first attempt cleared the latch at
+the top of `handleMouseDown` **and the fix did not work.** Instrumenting the real app printed:
+
+```
+up   (all flags false, latch true)
+down (latchWas true)          <-- AFTER the mouseup
+```
+
+`handleMouseDown` is `async` and reached through React's delegated dispatch, so it runs after the
+window mouseup listener; clearing there erases the very mouseup it was meant to preserve. A native
+window `mousedown` listener runs during the mousedown dispatch, which always completes first. Capture
+phase is belt-and-braces — re-running the regression spec with `false` still passes, and the comment
+says so rather than claiming a property that was not measured.
+
+`app/e2e/soak/synthetic-click-drag.spec.ts` pins all three halves: the stuck drag; that a real
+press-move-release still selects a RANGE and stops growing after release (without that case, "end
+every drag immediately" would pass); and that clicking a chart leaves the cell selection exactly as
+it was, which is what Excel does.
+
+> **A note on what was deliberately NOT done.** The obvious cheap fix is to normalize the range where
+> it is stored, so `endRow < startRow` can never be observed. That would have made the invariant go
+> quiet while leaving the grid dragging — a suppression wearing a fix's clothes, which is the exact
+> mistake §5 records twice. The malformed range was the only visible symptom of a defect that is
+> mostly invisible; silencing it would have cost the only detector.
+
+### 10g. The walk that hung instead of failing — BUG-0039, and it was the last blind spot
+
+A soak walk stopped printing at `[shrink] replay 22` and sat there. Fifteen minutes later the app was
+still answering `page.evaluate`, a screenshot showed an ordinary spreadsheet, and
+`list-app-windows.ps1` reported **twelve** visible `#32770` windows stacked on it:
+
+> `TEXT:Failed to rename sheet: Sheet index 2 out of range`
+
+Two independent causes had to meet.
+
+**One: a shrunk trace can manufacture invalid input.** The walk recorded `sheet.rename {tabIndex: 2}`
+against a three-sheet workbook; the shrinker then dropped the `sheet.add` that made the third sheet
+and replayed the rename against two — dozens of times. `ActionDef.precondition` received only the
+snapshot, never the recorded params, so it could ask "are there at least two sheets?" and never "does
+sheet 2 exist?". The catalog's own header had been promising that "preconditions are re-checked on
+replay" the whole time.
+
+**Two: nothing in the harness could see a native dialog.** It is a separate Win32 window: absent from
+page screenshots, no DOM, and invisible to the brand-new `ui-not-blocked` invariant, whose
+`elementFromPoint` hit test only knows about the page. Playwright cannot touch it either — Tauri
+defines its IPC surface with non-writable, non-configurable properties, so it can be neither stubbed
+nor observed from inside. And `deepResetForWalk` issues a long chain of invokes inside ONE
+`page.evaluate`, which nothing bounded. `actionTimeout` bounds locator actions, not `page.evaluate`;
+the single place the walker awaited an unbounded chain of IPC was the one place with no bound.
+
+Fixed on both sides, plus a bound for what neither covers:
+
+* `precondition` now takes the recorded `params` as an optional second argument, supplied ONLY on the
+  replay path. `sheet.rename` and `sheet.switch` refuse a `tabIndex` that no longer addresses a
+  sheet, and `createTraceSource` hands the params over — without that wiring the preconditions are
+  correct and the walk still hangs. The generator passes nothing, so both actions stay generatable;
+  a guard that made them ungeneratable would have re-created §10a's hole from the other end.
+* `e2e/helpers/nativeDialogs.ts` wraps the existing `answer-native-dialog.ps1` for the Node side.
+  `deepResetForWalk` sweeps the whole STACK before anything else and prints what it cleared — a reset
+  that has to clear dialogs is itself a finding — and is bounded at 90s with one retry, then throws a
+  named error. The walk runner bounds `captureSnapshot` (its first invoke after every action) at 45s
+  and, on timeout, sweeps, names the dialogs and fails with `native-dialog-blocking`.
+
+**What is deliberately NOT claimed:** that a single native alert blocks IPC. Measured on the live app,
+one open alert left `get_charts` answering normally; it is the pile-up that stopped `new_file`. The
+sweep is what keeps the pile from forming; the timeouts are the backstop for what the sweep cannot
+see coming. `e2e/soak/native-dialog-hang.spec.ts` rebuilds the twelve-alert pile deliberately and
+asserts the reset survives it: on the live app it dismissed **23** stacked dialogs, naming each, and
+completed in 50s instead of never.
+
+The sweep earned itself on its first live run, before any test asked it to: `[reset] dismissed 3
+leftover native dialog(s)`, two of them index-7 alerts from an earlier probe that had been sitting
+there unnoticed.
+
+### 10h. What the clean sweep then found — BUG-0040 and BUG-0041, filed OPEN
+
+With the harness fixed, the same two known seeds were re-run and the noise was gone: the shrink that
+had been reporting `no-console-errors x12` (the alerts' own console output) now reports 20-21 clean
+passes and one confirmed violation each.
+
+**BUG-0040 — removing a table's AutoFilter does not survive save/reload. Two actions.**
+`table.create` → `filter.remove`, confirmed independently on seeds 20260810 and 1786446166374.
+`create_table` establishes an AutoFilter when `show_filter_button` is set; `remove_auto_filter`
+removes it; `auto_filter_id` is derived state and is never persisted. On load, `persistence.rs` finds
+no `autofilters.json` for the sheet and runs a block commented *"Seed a filter from the lowest
+filter-button table when the workbook has none saved (pre-existing behavior, kept)"* — manufacturing
+the filter again and relinking ownership to it. A filter the user deliberately removed comes back on
+reopen. Same family as §5 and §10a: a legacy compensation outliving its reason.
+
+**BUG-0041 — a sparkline group teleports to another sheet across save/reload. Three actions.**
+`sheet.add` → `sparkline.create` → `sheet.delete`. Before save the backend still holds
+`sparklines.1`, the deleted sheet's index; after reload it is `sparklines.0[1]` — the same group,
+landed on sheet 0 as its second group. A hyperlink goes the other way and is lost. Data on the wrong
+sheet after a reopen.
+
+Both are filed OPEN with their minimized traces committed to `tests/regression/repros/`, and both
+were re-verified replaying from those committed paths. Neither was fixed, for stated reasons rather
+than for lack of time:
+
+* BUG-0040's fix is three lines, but deleting the seed may remove filter buttons from an IMPORTED
+  (.xlsx) workbook, and that path was not traced. It is a Rust change and belongs with a
+  re-verification of the app-lib suite.
+* BUG-0041's census rule already says it is implemented — `object_deps.rs` carries
+  `sparkline.sheetIndex → cascade_sheet_removed`, and that function does walk `state.sparklines` and
+  drop entries whose index remaps to `None`. The census is satisfied and the entry survived anyway,
+  so the first work is finding out WHICH of three mechanisms is responsible (a cascade that runs too
+  early, a frontend write-through that runs too late, or a store no remap covers — `hyperlinks` and
+  `notes` are absent from `remap_sheet_keyed_stores` while `comments` are in it). Guessing between
+  them is how a fix makes the oracle go quiet without making the product right, which §10f already
+  had to refuse once this pass.
+
+> **The ledger is 41 entries, 39 fixed, 2 open.** It began this pass at 34 and zero open. Filing two
+> reproducible, minimized defects is the correct end state for a hunt: the alternative is a ledger
+> that says zero open because nobody looked at the sheet and chart surfaces, which is exactly what
+> §10a and §10b found had been true for the whole programme.
+
+### 10i. Verification — measured, with the corrections stated
+
+| check | result | baseline |
+|---|---|---|
+| vitest, full | **765 files / 106,385 passed** | 761 / 106,363 (+4 files, +22 cases — all new self-tests) |
+| `npm run check-types` | clean | clean |
+| `npm run lint:boundaries` | clean | clean |
+| `tsc -p e2e/tsconfig.json` | clean | clean |
+| `npm run check:line-endings` | `[OK] no mixed line endings` | same |
+| `check:script-typings` | **39 interfaces / 736 members** | 39 / 736 |
+| `cargo check --all-targets` (core) | **0 warnings** | 0 |
+| `cargo check --all-targets` (app/src-tauri) | **0 warnings** | 0 |
+| E2E `--project=functional` (cold) | **541 passed / 2 failed / 11 skipped** | 543 / 0 / 11 |
+| E2E `--project=soak`, walker guards | 5/5 action-effects, 3/3 synthetic-click, 1/1 native-dialog | new |
+| invariant walks | 13 seeds; 4 failures, all ledgered and fixed | — |
+| soak walks | 5 seeds (200-250 actions); 3 failures → BUG-0040 ×2, BUG-0041 | — |
+
+**No Rust was changed this pass**, so the core / app-lib / test_pivot suites were not re-run; both
+`cargo check --all-targets` runs are clean and the handover's figures stand unmeasured by choice, not
+by omission.
+
+**The two functional failures were investigated rather than waved through**, and neither is a
+regression from this work:
+
+* `vba-idioms-wave4 › setNote/getNote/listNotes` — fails in the full run and against a warm app,
+  **passes on a cold one**, and still fails with the Core change of §10f reverted. Order/residue
+  dependent, not this pass's.
+* `scrolling › scroll down via mouse wheel changes viewport` — 11,122 differing pixels, ratio
+  **0.02**, against the `maxDiffPixelRatio: 0.02` the spec sets for itself with the comment
+  "mouse-wheel scrolling lands on a slightly non-deterministic offset between runs". It is the
+  documented flake sitting exactly on its own budget. (Run in isolation it fails on a DIFFERENT
+  golden — `scroll-before`, whose baseline encodes `inline-editor-live`'s residue in B10 — which is
+  the accumulating-workbook property the register already documents, not a defect.)
+
+**One instrument note for the next pass:** the walker's family weighting means a seed only names a
+walk together with its weights. Every failure bundle now prints the env var in its replay command;
+a bundle from before this pass does not, and its seed will not reproduce under a boost.
+
+---
+
+## 11. The ledger closes — and the sparkline bug turns out to be a serialiser that invents identity (2026-08-13)
+
+The hunt of §10 left two entries open with full diagnoses and no fix, deliberately, because each
+ended in a question a patch could not answer by itself. Both questions have now been answered by
+tracing rather than by guessing, and both bugs are fixed. **The ledger is 41 entries, 41 fixed,
+zero open.**
+
+The larger of the two was not the bug that was filed.
+
+### 11a. BUG-0041 — the mechanism was candidate one, and the damage was done by two fallbacks nobody had connected to it
+
+The entry named three candidate mechanisms and refused to choose between them, on the grounds that
+guessing is how a fix silences an oracle without fixing a product. It is the first: the frontend
+write-through. But finding that only explains how the orphan is *created*. What makes it
+**data on the wrong sheet** is two silent fallbacks in the serialiser, sitting one function apart:
+
+```rust
+// save: an index that names no sheet
+sheet_ids.get(index).copied().unwrap_or_else(|| SheetId::from_bytes(generate_uuid_v7()))
+// load: an id the workbook does not have
+workbook.sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0)
+```
+
+Four steps, each individually defensible:
+
+1. `cascade_sheet_removed` correctly drops the sparkline entry whose sheet index no longer
+   resolves. **This half was never broken** — which is precisely why `object_deps.rs`'s census was
+   satisfied while the bug was live, and why the entry recorded that the census "already claims it
+   is implemented". The census asked "does the cascade walk this store?" and the honest answer was
+   yes.
+2. The Sparklines extension saves on every `SHEET_CHANGED`, and `SHEET_CHANGED` also fires when the
+   sheet **collection** changes. The grid-state snapshot still holds the pre-change active index, so
+   the save arrives naming the **deleted** sheet and re-inserts exactly what step 1 removed.
+3. On save the out-of-range index gets a **brand-new random `SheetId`**. A detectable inconsistency
+   becomes an undetectable one: the entry is written under an identity matching nothing in the file.
+4. On load that id is not found and the answer is **`0`**. The orphan lands on the first sheet.
+
+Steps 3 and 4 were never sparkline-specific, and that is the weight of this entry. **Every**
+per-sheet store on the save/load path routes through that one pair of helpers — tables, slicers,
+charts, conditional formats, data validation, comments, scenarios, outlines, named ranges and sheet
+**protection**. Any of them, orphaned by any means, was being *relocated onto sheet 0* rather than
+dropped.
+
+Both helpers now return `Option` and all 29 call sites drop the orphan. Two of them needed more than
+a mechanical change:
+
+* a **sheet-scoped named range** whose sheet is gone is dropped, not flattened. Letting the two
+  `Option`s collapse would turn `Some(idx)` that no longer resolves into `None` — silently promoting
+  a name that was local to one sheet into a workbook-global one;
+* a **pending-recalc marker** naming a missing sheet is dropped rather than landing on sheet 0,
+  where it would warn the user that a fully-calculated sheet is stale.
+
+The first defence, though, is at the authority: `save_sparklines_impl` now refuses an entry naming a
+sheet index that does not exist, reading the live `sheet_names` length. The refusal is silent and
+**clean** — the write is spurious, so it must not dirty a document nobody edited. The frontend was
+deliberately left alone: its stale write is harmless once the authority refuses it, and for an
+ordinary sheet *switch* the pre-change index it uses is the correct one.
+
+> **A fix that would have hollowed out an existing guard, caught before it did.**
+> `document_effect_objects_tests::an_upsert_that_changes_nothing_neither_dirties_nor_records_undo`
+> used `sheet_index: 3` against a fixture with **one** sheet. The new refusal would have satisfied
+> that step for the wrong reason and the test would have gone on passing while pinning nothing. It
+> now uses sheet 0 — which exists and has no entry, the case the test actually describes — with the
+> reason recorded in the test body.
+
+### 11b. BUG-0040 — the seed is not the bug, and deleting it would have broken every imported workbook
+
+The entry's own warning was that deleting the load-path seed is three lines but might strip filter
+buttons from imported `.xlsx` workbooks, and that the path had not been traced. It has been now, and
+the warning was right: `load_xlsx` hard-codes `user_files: HashMap::new()`, so an imported workbook
+**never** carries an `autofilters.json`. The `show_filter_button` in the table metadata is the only
+record of its filters that exists. Deleting the seed would have silently disarmed every one of them.
+
+The real defect is one level up: Calcula kept **two records of one thing** —
+`Table.style_options.show_filter_button` (persisted, on the table) and the entry in `auto_filters`
+(persisted separately). `create_table` wrote both; `remove_auto_filter` cleared only the second.
+Excel has a single state here, `ListObject.ShowAutoFilter`: Data ▸ Filter and Table Design ▸ Filter
+Button are the same switch, and turning it off persists. Under "Excel parity wins", removing the
+filter clears the flag — and the seed then only ever fires for a table that still asks for buttons,
+which is its job.
+
+**Undo had to move with it**, or the fix trades one bug for another. Ownership is *re-derived* from
+`show_filter_button` by `relink_autofilter_owner`, so an undo restoring the filter alone restores an
+**orphan**: a sheet filter no table claims, on a table showing no buttons to clear it with. The
+`obj_autofilter` snapshot grew a `filter_buttons` list; the restore applies it and records the
+current values into the inverse so redo is exact. The other nine autofilter recorders pass an empty
+list — a criteria change moves no buttons.
+
+### 11c. What was attacked, and what was proved live
+
+Every fix was attacked on the real tree and restored byte-identical (sha256 verified each time):
+
+| attack | tests that fired, by name |
+|---|---|
+| restore `unwrap_or(0)` on the load side | `an_id_that_is_not_in_the_workbook_resolves_to_nothing`, `neither_helper_may_regain_a_silent_fallback`, `the_two_directions_compose_into_a_dropped_orphan_not_a_moved_one` |
+| disable the sparkline authority guard | `a_sparkline_save_naming_a_deleted_sheet_is_refused_and_stays_clean` |
+| stop the undo applying `filter_buttons` | `undoing_the_removal_restores_the_filter_and_the_buttons_together`, `the_inverse_of_that_undo_records_the_state_it_replaced` |
+| stop clearing `show_filter_button` on removal | 4 tests in `autofilter_table_button_tests` |
+
+**The source census had to be narrowed before it was worth anything.** The first version searched
+the whole of `persistence.rs` for the minting expression and fired on two *legitimate* uses (a sheet
+that exists but has no registered id, and File > New's blank document). A census that flags correct
+code teaches people to delete censuses, so it now extracts one function body at a time, and its
+self-test proves the extractor both fires on a planted fallback **and** does not bleed into the next
+function.
+
+Live, from a cold app on CDP 9222, `app/e2e/journeys/orphaned-sheet-state.spec.ts` — five tests,
+every one of them paired with a positive control that runs first:
+
+* **BUG-0005 through the real UI.** Three sheets; the edit is made on index 2; the sheet is then
+  moved left through the real tab context menu so index 2 means a *different* sheet; Ctrl+Z. The
+  exact value a mis-aimed undo would write is planted on the victim sheet **first**, and the probe
+  is required to report it — so the final assertion cannot pass because the reader is blind. Both
+  properties hold: nothing lands on the sheet nobody edited, and the edit stands, because a
+  workbook-structure change ends the history (Excel parity, §9).
+* **BUG-0040**: real `create_table`, real `remove_auto_filter`, real `save_file`/`open_file` with a
+  full WebView reload. The filter stays removed. Control: a table that kept its buttons keeps its
+  filter.
+* **BUG-0041**: real tab-bar `+`, real sparkline API, real context-menu delete with its
+  confirmation, real save/reload. Nothing reappears. Control: a sparkline on a sheet that is *not*
+  deleted survives.
+
+**Teeth, on the running build.** The sparkline guard was disabled in `sparkline_commands.rs`,
+`tauri dev` rebuilt and restarted the app, and the live test failed with the store holding the dead
+sheet's entry — while its positive control still passed, which is what makes the sabotage targeted
+rather than merely destructive. Restored byte-identical (sha256 `74df5dcd…`, 8460 bytes) and green
+again.
+
+### 11d. Verification, and one triage from §10 that does not survive contact
+
+Everything below was measured on this tree, this pass.
+
+| suite | result | delta |
+|---|---|---|
+| vitest | **765 files / 106,385** | unchanged — no TypeScript was changed except one new E2E spec |
+| core | **1,342** (script-engine **111**, a subset) | unchanged |
+| app-lib | **1,530 / 0 / 5** | 1,513 + **17** new tests (11 orphaned-sheet-state, 6 autofilter-table-button) |
+| test_pivot | **56** | unchanged |
+| model-engine-lib (`--test-threads=1`) | **2,192** | unchanged |
+| `cargo check --all-targets` | **0 warnings**, both workspaces | — |
+| check-types · lint:boundaries · check:script-typings (**39/736**) · check:line-endings · e2e tsc | all clean | — |
+
+E2E, each project run **alone from a cold app**:
+
+| project | result | against baseline |
+|---|---|---|
+| functional | **541 / 2 / 11** | the same two failures §10 reported, neither from this work |
+| journey | **138 / 0 / 1** | 133 + exactly the **5** new live proofs |
+| scenario | **24 / 24** | — |
+| visual | **18 / 18** on **two** cold runs | — |
+| macro (`--grep "[Mm]acro"`) | **27 / 27** | — |
+
+> **A line-ending near-miss worth recording, because the tool that warns about it was the only thing
+> that caught it.** `printf '\r\n'` was used to append the test-module declaration to
+> `persistence.rs`, on the belief — from a Git Bash `grep -c $'\r$'` — that the file was CRLF. It is
+> not: `.rs` in this crate is **LF**, and MSYS grep had been reporting every line as CRLF-terminated
+> the whole time. The result was four CRLF lines in a 5,813-line LF file: precisely the mixed state
+> CLAUDE.md warns makes exact-string edits silently no-op. `npm run check:line-endings` named the
+> file and the counts; the four lines were normalised. **Do not trust Git Bash `grep` for this
+> question on this machine — read the bytes with node.**
+
+#### The §10 triage that does not hold
+
+§10 recorded `vba-idioms-wave4 › setNote/getNote/listNotes` as "passes cold and still fails with my
+Core change reverted — order/residue dependent, not this pass's". The second half is right and the
+first half is not. Run **alone, on a freshly launched app, twice**, it fails both times.
+
+Chased down rather than re-waved-through, and it is a **product** defect, now **BUG-0042**:
+
+* the spec's own two screenshots show the note's red triangle **present** on AA61 before the click
+  and **absent** after it, with the cell selected and no overlay;
+* a direct probe — `add_note` at (60, 26), `grid:refresh`, click AA61 — reports **0 visible
+  textareas**, while `get_note` still returns the note **byte-identical**. So nothing is lost; the
+  note is simply unreachable from the UI, and clicking is the product's only inspection gesture for
+  one (the spec's own comment records that `hoverHandler.ts`'s preview is unwired dead code —
+  `initHoverHandler` has no caller);
+* mechanism, named but **not** verified: `handleAnnotationClick` decides on a **synchronous**
+  `Map.get` against `noteIndicatorMap`, which only `readAnnotationState()` — an `async` function —
+  refills, while `invalidateAnnotationCache()` empties it synchronously. That opens a window in
+  which the click handler returns false *and* the decoration paints nothing, which is exactly the
+  pair of symptoms seen.
+
+It is filed rather than patched: it is a Review-extension frontend defect, outside the
+sheet/undo/persistence work of this pass, and it predates it — §10 already reported the same test
+failing. The cheap fix (await a refresh inside the click handler) would turn the test green and
+leave the **disappearing triangle** untouched, which is the half a user actually notices.
+
+The other functional failure, `scrolling › scroll down via mouse wheel changes viewport`, is the
+documented wheel-offset flake sitting on its own `maxDiffPixelRatio: 0.02` budget, unchanged.
+
+#### Ledger
+
+**42 entries: 41 fixed, 1 open (BUG-0042, filed this pass).** BUG-0040 and BUG-0041 both carry
+populated `fix` blocks naming files, mechanism, the Excel-parity reasoning, and their attack and
+live evidence. No id was reused — `addBug` derives the next id from the entries, and BUG-0042 was
+allocated through it rather than by hand.
+
+**No oracle suppression was added, and none exists:** `EXCLUDED_UNTIL_FIXED` is still the empty
+array §10 left it as, so `walkerExclusions.test.ts` has nothing to expire.

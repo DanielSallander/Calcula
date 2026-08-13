@@ -38,6 +38,24 @@
 // by the cap, or undone past by the walk itself — the baseline state is
 // unreachable and no number of undo steps restores it, so the oracle says so
 // (`undo-history-unreachable`) instead of blaming the product.
+//
+// A THIRD WAY THE ID CAN BE GONE, and it is the one BUG-0005 was filed as
+// -------------------------------------------------------------------------
+// A change to the workbook's SHEET STRUCTURE ends the undo history outright.
+// Excel does not let adding, deleting, renaming, moving or copying a sheet be
+// undone — deleting a worksheet is the documented case, and the Undo command
+// goes unavailable after it — and Calcula matches that under the standing
+// "Excel parity wins" rule. So a walk that adds a sheet mid-window has ended
+// the history it would have to wind back through, and no product defect is
+// involved.
+//
+// This oracle could not see that. `sheet.add` at action 35 of soak seed 424242
+// came back as "undo-all did not restore the checkpoint: 14 digest differences"
+// — a report about undo, produced by an action Excel would not let you undo.
+// The backend now counts wholesale clears separately from cap evictions
+// (`clearedTotal` vs `evictedTotal`), so the three causes are tellable apart
+// and only the third — the walk undoing past its own checkpoint — is ever
+// reported as anything other than "outside the history".
 
 import type { Page } from "@playwright/test";
 import { getWorkbookDigest, diffDigests } from "./digest";
@@ -54,6 +72,9 @@ interface UndoStateJson {
   undoSeqs: number[];
   /** Transactions the size cap has dropped over this document's lifetime. */
   evictedTotal: number;
+  /** Transactions a wholesale clear has discarded over this document's
+   *  lifetime — i.e. a workbook-STRUCTURE change ended the history. */
+  clearedTotal: number;
   /** The history cap. */
   historyLimit: number;
 }
@@ -81,6 +102,7 @@ export async function captureUndoBaseline(page: Page): Promise<OracleBaseline> {
       ? undoState.undoSeqs[undoState.undoSeqs.length - 1]
       : null,
     evictedTotal: undoState.evictedTotal,
+    clearedTotal: undoState.clearedTotal ?? 0,
   };
 }
 
@@ -91,13 +113,33 @@ export async function captureUndoBaseline(page: Page): Promise<OracleBaseline> {
  * without a running app: everything it needs is the two readings.
  */
 export function stepsBackToBaseline(
-  baseline: Pick<OracleBaseline, "undoTopSeq" | "evictedTotal">,
-  now: Pick<UndoStateJson, "undoSeqs" | "evictedTotal">
+  baseline: Pick<OracleBaseline, "undoTopSeq" | "evictedTotal" | "clearedTotal">,
+  now: Pick<UndoStateJson, "undoSeqs" | "evictedTotal" | "clearedTotal">
 ): { steps: number } | { unreachable: string } {
+  // A WHOLESALE CLEAR IS ASKED ABOUT FIRST, because it is the only one of the
+  // three causes that can empty the stack without either of the other two
+  // leaving a trace — and it is the one the oracle used to misread. Excel does
+  // not let a change to the workbook's sheet STRUCTURE be undone: adding,
+  // deleting, renaming, moving or copying a sheet ends the undo history, and
+  // Calcula matches that (BUG-0005). A walk that does any of those inside a
+  // checkpoint window cannot be wound back to the checkpoint, and saying so is
+  // not the same as saying undo is broken. Before this, the walk's sheet.add
+  // came back as "the walk undid past the checkpoint" — a diagnosis naming a
+  // mechanism that had not occurred.
+  const cleared = now.clearedTotal - (baseline.clearedTotal ?? 0);
+  const clearedReason =
+    `a workbook-structure change ended the undo history since the checkpoint ` +
+    `(${cleared} transaction(s) discarded). Adding, deleting, renaming, moving ` +
+    `or copying a sheet is not undoable in Excel and clears the stack here too, ` +
+    `so no number of undo steps returns to the checkpoint`;
+
   if (baseline.undoTopSeq === null || baseline.undoTopSeq === undefined) {
     // Nothing was on the stack at the baseline, so every entry now is
-    // post-baseline — unless the cap dropped some of them, which is the one
-    // case an empty baseline cannot distinguish on its own.
+    // post-baseline — unless something has removed entries since, which is the
+    // one case an empty baseline cannot distinguish on its own.
+    if (cleared > 0) {
+      return { unreachable: clearedReason };
+    }
     if (now.evictedTotal !== baseline.evictedTotal) {
       return {
         unreachable:
@@ -111,6 +153,13 @@ export function stepsBackToBaseline(
 
   const position = now.undoSeqs.indexOf(baseline.undoTopSeq);
   if (position < 0) {
+    if (cleared > 0) {
+      return {
+        unreachable:
+          `the checkpoint's top undo entry (#${baseline.undoTopSeq}) is gone: ` +
+          clearedReason,
+      };
+    }
     const evicted = now.evictedTotal - (baseline.evictedTotal ?? 0);
     return {
       unreachable:
@@ -190,6 +239,9 @@ export async function checkUndoRoundTrip(
           baselineTopSeq: baseline.undoTopSeq,
           currentDepth: undoState.undoDepth,
           evictedSinceBaseline: undoState.evictedTotal - (baseline.evictedTotal ?? 0),
+          // Non-zero means a sheet was added/deleted/renamed/moved/copied in
+          // this window and the history ended there (Excel parity).
+          clearedSinceBaseline: undoState.clearedTotal - (baseline.clearedTotal ?? 0),
           historyLimit: undoState.historyLimit,
         },
       },

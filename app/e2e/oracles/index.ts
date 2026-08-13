@@ -63,14 +63,25 @@ export class OracleBattery {
   readonly suppressed: Array<{ violation: OracleViolation; ledgerId: string }> = [];
   /**
    * Checkpoints an oracle DECLINED to decide, with the reason. Not defects and
-   * not suppressions: the question could not be asked. Today the only source is
-   * `undo-history-unreachable` — the walk pushed more than the 100-entry undo
-   * cap holds, so the checkpoint state is no longer on the stack and no number
-   * of undo steps returns to it.
+   * not suppressions: the question could not be asked. The only invariant id
+   * that lands here is `undo-history-unreachable`, and it now arrives for two
+   * distinct reasons:
+   *
+   *   * the walk pushed more than the 100-entry undo cap holds, so the
+   *     checkpoint state is no longer on the stack (the original reason); or
+   *   * the walk changed the workbook's SHEET STRUCTURE inside the window.
+   *     Adding, deleting, renaming, moving or copying a sheet is not undoable
+   *     in Excel and ends the undo history here too (BUG-0005), so there is no
+   *     history left to wind back through.
+   *
+   * The message says which, because the remedies differ: the first is a
+   * checkpoint-spacing problem, the second is inherent to the action.
    *
    * Collected rather than dropped because a run where most late checkpoints
    * end up here is a WEAK run, and that has to be visible: it is how the
-   * round-trip oracle silently stops testing anything on a long walk.
+   * round-trip oracle silently stops testing anything on a long walk. That is
+   * doubly true now — a walker that reaches `sheet.add` often will undecide
+   * many windows, and the count is the only signal that it did.
    */
   readonly undecided: Array<{ checkpoint: number; violation: OracleViolation }> = [];
 

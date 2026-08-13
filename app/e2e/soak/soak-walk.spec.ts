@@ -31,6 +31,7 @@ import {
   createTraceSource,
   deepResetForWalk,
   formatWalkReport,
+  parseCategoryWeights,
   writeFailureBundle,
 } from "../walker";
 import type { ActionTrace, WalkResult } from "../walker";
@@ -48,6 +49,9 @@ const RESULTS_DIR = process.env.SOAK_RESULTS_DIR
   ? path.resolve(process.env.SOAK_RESULTS_DIR)
   : path.resolve(HERE, "../results/soak");
 const NO_SHRINK = process.env.SOAK_NO_SHRINK === "1";
+/** Family weight boost, e.g. SOAK_CATEGORY_WEIGHTS="chart:8,table:2". */
+const CATEGORY_WEIGHTS_SPEC = process.env.SOAK_CATEGORY_WEIGHTS ?? "";
+const CATEGORY_WEIGHTS = parseCategoryWeights(CATEGORY_WEIGHTS_SPEC);
 
 test.describe("Soak walk", () => {
   test("random walk maintains semantic oracles", async ({ appPage, grid }) => {
@@ -58,14 +62,19 @@ test.describe("Soak walk", () => {
     console.log(
       `\n  Soak walk: seed=${SEED} actions=${MAX_ACTIONS}` +
         `${BUDGET_MS ? ` budget=${Math.round(BUDGET_MS / 1000)}s` : ""} ` +
-        `oracleEvery=${ORACLE_EVERY}`
+        `oracleEvery=${ORACLE_EVERY}` +
+        `${CATEGORY_WEIGHTS_SPEC ? ` weights=${CATEGORY_WEIGHTS_SPEC}` : ""}`
     );
 
     const liveDir = path.join(RESULTS_DIR, "live");
     fs.mkdirSync(liveDir, { recursive: true });
 
     const runner = new WalkRunner(appPage, grid, {
-      source: createGeneratorSource({ seed: SEED, rapidFireProbability: RAPID_FIRE }),
+      source: createGeneratorSource({
+        seed: SEED,
+        rapidFireProbability: RAPID_FIRE,
+        categoryWeights: CATEGORY_WEIGHTS,
+      }),
       invariants: ALL_INVARIANTS,
       oracleBattery: new OracleBattery({
         tmpDir: path.join(RESULTS_DIR, "tmp"),
@@ -92,9 +101,14 @@ test.describe("Soak walk", () => {
       resultsDir: RESULTS_DIR,
       harness: "soak",
       seed: SEED,
+      // The weights are part of what the seed MEANS: the same seed under a
+      // different boost picks different actions, so a replay command that
+      // omits them replays a different walk. That is the same class of lie the
+      // rapid-fire walk's derived seed already had to be fixed for.
       replayCommand:
         `E2E_MANUAL=1 SOAK_SEED=${SEED} SOAK_ACTIONS=${MAX_ACTIONS} ` +
         `SOAK_ORACLE_EVERY=${ORACLE_EVERY} SOAK_RAPID_FIRE=${RAPID_FIRE} ` +
+        `${CATEGORY_WEIGHTS_SPEC ? `SOAK_CATEGORY_WEIGHTS="${CATEGORY_WEIGHTS_SPEC}" ` : ""}` +
         `npx playwright test --project=soak --grep "random walk"`,
       replay: NO_SHRINK ? null : makeReplayFn(appPage, grid, RESULTS_DIR),
       extra: {
@@ -102,6 +116,7 @@ test.describe("Soak walk", () => {
         rapidFireProbability: RAPID_FIRE,
         oracleEveryNActions: ORACLE_EVERY,
         budgetMs: BUDGET_MS ?? null,
+        categoryWeights: CATEGORY_WEIGHTS ?? null,
       },
     });
 

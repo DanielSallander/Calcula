@@ -33,13 +33,21 @@ static CELL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Capture a snapshot of the current grid state for undo.
+///
+/// STAMPED WITH THE ACTIVE SHEET, and that stamp is the whole point. The
+/// snapshot is taken from `state.grid` — the ACTIVE sheet's mirror — and it is a
+/// whole-grid replacement when it is restored. Without the stamp, undoing an
+/// insert-row performed on Sheet2 while Sheet1 was in front of the user replaced
+/// SHEET1's entire cell map with Sheet2's saved one.
 fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
+    let sheet = *state.active_sheet.read().unwrap();
     let grid = state.grid.read().unwrap();
     let row_heights = state.row_heights.read().unwrap();
     let column_widths = state.column_widths.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
 
     GridSnapshot {
+        sheet,
         cells: grid.cells.clone(),
         row_heights: row_heights.clone(),
         column_widths: column_widths.clone(),

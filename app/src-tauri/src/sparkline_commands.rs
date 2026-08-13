@@ -65,6 +65,36 @@ pub(crate) fn save_sparklines_impl(
 ) -> Result<(), String> {
     let sheet_index = entry.sheet_index;
 
+    // PER-SHEET STATE MUST NAME A SHEET THAT EXISTS (BUG-0041).
+    //
+    // This extension saves on every SHEET_CHANGED (see the note below), and
+    // SHEET_CHANGED also fires when the sheet COLLECTION changes -- add, rename,
+    // move, DELETE. Delete the sheet a group lives on and that save arrives
+    // naming the deleted index, re-inserting the very entry
+    // `cascade_sheet_removed` had just dropped.
+    //
+    // The resurrected entry then had nowhere to go: on save `sheet_index_to_id`
+    // minted a brand-new random id for the out-of-range index, and on load
+    // `sheet_id_to_index` could not find that id and answered 0 -- so a
+    // sparkline drawn on a DELETED sheet came back ON ANOTHER SHEET after a
+    // reopen. Both of those fallbacks are gone now (persistence.rs), but the
+    // first defence belongs here: the backend is the authority on which sheets
+    // exist, so it does not take the caller's word for it.
+    //
+    // Refusing is silent and CLEAN on purpose -- the write is spurious, nothing
+    // changed, and a document nobody edited must not be dirtied by it.
+    {
+        let sheet_count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
+        if sheet_index >= sheet_count {
+            log::warn!(
+                "[sparklines] refused a save naming sheet index {} ({} sheet(s) exist)",
+                sheet_index,
+                sheet_count
+            );
+            return Ok(());
+        }
+    }
+
     // AN UPSERT THAT CHANGES NOTHING IS NOT A DOCUMENT CHANGE.
     //
     // Resolved under a READ guard, before any `DocumentEffect::mutates` exists,

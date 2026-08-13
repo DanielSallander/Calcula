@@ -34,6 +34,13 @@ export interface OracleBaseline {
   /** Transactions the size cap had dropped when the baseline was taken. A
    *  change since then means history older than the cap is gone. */
   evictedTotal: number;
+  /** Transactions a WHOLESALE clear had discarded when the baseline was taken.
+   *  A change since then means a workbook-STRUCTURE change ended the history
+   *  (Excel parity: adding, deleting, renaming, moving or copying a sheet is
+   *  not undoable and clears the stack). Without this the oracle could not
+   *  tell that case from "the walk undid past the checkpoint", and reported a
+   *  sheet insert as an undo defect — BUG-0005. */
+  clearedTotal: number;
 }
 
 export interface OracleCheckpointResult {

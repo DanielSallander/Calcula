@@ -33,8 +33,25 @@ export interface ActionDef<P extends Record<string, unknown> = Record<string, un
   category: string;
   /** Relative probability of being chosen (higher = more likely) */
   weight: number;
-  /** Can this action run in the current state? Re-checked on replay. */
-  precondition: (snapshot: StateSnapshot) => boolean;
+  /**
+   * Can this action run in the current state? Re-checked on replay.
+   *
+   * `params` is present ONLY on the replay path, where the action's parameters
+   * were chosen against a different workbook and may no longer be valid. It is
+   * absent when the generator is choosing an action, because the parameters do
+   * not exist yet.
+   *
+   * WHY IT TAKES PARAMS AT ALL. The header above promises "preconditions are
+   * re-checked on replay", and a precondition that cannot see the parameters
+   * cannot re-check them. `sheet.rename` recorded `tabIndex: 2` against a
+   * three-sheet workbook; the shrinker then dropped the `sheet.add` that made
+   * the third sheet and replayed the rename against two, and the product
+   * answered with a NATIVE alert ("Sheet index 2 out of range") that blocked
+   * Tauri IPC and hung the walk in silence for its whole timeout (BUG-0039).
+   * The action was not "still valid" in any sense the old signature could
+   * express.
+   */
+  precondition: (snapshot: StateSnapshot, params?: P) => boolean;
   /** Choose concrete, JSON-serializable parameters. All randomness MUST come
    *  from `rng`; use `seq` (the step number) for unique names. */
   pickParams: (rng: () => number, snapshot: StateSnapshot, seq: number) => P;
@@ -280,6 +297,29 @@ const chartCreate: ActionDef<{ title: string }> = {
   },
 };
 
+// A chart's identity in the STORE is `chartId` (ChartDefinition.chartId); the
+// BACKEND's ChartEntry calls the same value `id`. Reading `.id` off a store
+// object yields `undefined`, and every function below takes a chart id as its
+// only argument, so the whole call becomes a silent no-op.
+//
+// MEASURED LIVE 2026-08-12, immediately after BUG-0031 taught `chart.create` to
+// go through the store: a chart-weighted 75-action walk issued 46 chart
+// actions, and afterwards `get_charts` answered NINE while
+// `getCurrentChartId()` was still null. Nothing had ever been selected and
+// nothing had ever been deleted. BUG-0031 fixed the create half and left the
+// select/delete half reading a key that does not exist -- so the walk grew
+// charts monotonically, the `contextual-ribbon-tabs` invariant STILL could not
+// observe a Chart Design tab, and `deepResetForWalk` (same `.id`) could not
+// clear charts between walks either, defeating its entire purpose for this one
+// object type.
+//
+// Filed as BUG-0035. `e2e/tests/walker-actions-are-real.spec.ts` now asserts
+// live that each of these actions has an observable effect, so a bridge that
+// renames a key cannot quietly turn the walker's chart lifecycle into no-ops
+// for a third time. (The id is read INSIDE each `page.evaluate` rather than via
+// a shared helper: the callback is serialized into the WebView, where nothing
+// from this module exists.)
+
 const chartDelete: ActionDef<Record<string, never>> = {
   id: "chart.delete",
   category: "chart",
@@ -292,7 +332,14 @@ const chartDelete: ActionDef<Record<string, never>> = {
       if (!chartApi) return;
       const charts = chartApi.getAllCharts();
       if (charts && charts.length > 0) {
-        chartApi.deleteChart(charts[0].id);
+        const id = charts[0].chartId ?? charts[0].id;
+        if (id == null) {
+          throw new Error(
+            "chart.delete: the chart store exposes no id — " +
+              `keys were [${Object.keys(charts[0]).join(",")}]`
+          );
+        }
+        chartApi.deleteChart(id);
         chartApi.syncChartRegions();
       }
     });
@@ -312,7 +359,14 @@ const chartSelect: ActionDef<Record<string, never>> = {
       if (!chartApi) return;
       const charts = chartApi.getAllCharts();
       if (charts && charts.length > 0) {
-        chartApi.selectChart(charts[0].id);
+        const id = charts[0].chartId ?? charts[0].id;
+        if (id == null) {
+          throw new Error(
+            "chart.select: the chart store exposes no id — " +
+              `keys were [${Object.keys(charts[0]).join(",")}]`
+          );
+        }
+        chartApi.selectChart(id);
       }
     });
     await page.waitForTimeout(200);
@@ -901,7 +955,9 @@ const sheetSwitch: ActionDef<{ tabIndex: number }> = {
   id: "sheet.switch",
   category: "sheet",
   weight: 2,
-  precondition: (s) => s.logical.sheetCount > 1,
+  precondition: (s, p) =>
+    s.logical.sheetCount > 1 &&
+    (p?.tabIndex === undefined || p.tabIndex < s.logical.sheetCount),
   pickParams: (rng, s) => ({ tabIndex: pickInt(rng, 0, Math.max(0, s.logical.sheetCount - 1)) }),
   async execute(page, _grid, p) {
     const tab = page.locator(`button[data-sheet-tab="${p.tabIndex}"]`);
@@ -916,7 +972,13 @@ const sheetRename: ActionDef<{ tabIndex: number; name: string }> = {
   id: "sheet.rename",
   category: "sheet",
   weight: 1,
-  precondition: (s) => s.logical.sheetCount > 1,
+  // The recorded tabIndex must still address a sheet that EXISTS. Replaying it
+  // against a smaller workbook raises a native "Sheet index N out of range"
+  // alert, which blocks Tauri IPC and hangs the walk — BUG-0039, and the reason
+  // `precondition` now receives the params at all.
+  precondition: (s, p) =>
+    s.logical.sheetCount > 1 &&
+    (p?.tabIndex === undefined || p.tabIndex < s.logical.sheetCount),
   pickParams: (rng, s, seq) => ({
     tabIndex: pickInt(rng, 1, Math.max(1, s.logical.sheetCount - 1)),
     name: `Blad_${seq}`,
@@ -1274,12 +1336,40 @@ const switchRibbonTab: ActionDef<{ tabName: string }> = {
   precondition: () => true,
   pickParams: (rng) => ({ tabName: pick(rng, STANDARD_TABS) }),
   async execute(page, _grid, p) {
-    const tabBtn = page.locator("button").filter({ hasText: p.tabName }).first();
+    // EXACT accessible name, not `hasText`, and `Escape` first.
+    //
+    // MEASURED 2026-08-12 (BUG-0037), and it explains a hang this register had
+    // already recorded and never diagnosed. `filter({ hasText: "Home" })` is a
+    // SUBSTRING match and `.first()` takes DOM order. Clicking the "View" tab
+    // opens the View MENU, whose "Customize Home Tab..." item is a <button>
+    // containing the word "Home" and lands at DOM index 22 — ten positions
+    // BEFORE the real ribbon tab at 32. So the "return to Home" click opened
+    // the Customize Home Tab dialog: a modal at z-index 1050 covering 100% of
+    // the viewport.
+    //
+    // From that step on, every UI action in the walk was clicking into a
+    // modal's backdrop. With `actionTimeout: 30_000` each one burns thirty
+    // seconds and is TOLERATED, so the walk finishes and reports PASS over a
+    // workbook whose UI had been unreachable for half the run. Before that
+    // timeout existed it hung forever — which is exactly the unexplained
+    // twelve-minute stall at `[step 47/75] ribbon.switch-tab` in the
+    // playwright.config.ts note.
+    //
+    // `getByRole("button", { name, exact: true })` cannot match
+    // "Customize Home Tab..." while looking for "Home". The Escape closes any
+    // menu or dialog a previous action left open, so the click lands on the
+    // ribbon rather than on a backdrop. The `ui-not-blocked` invariant is the
+    // backstop: it fails the walk if anything is covering the ribbon after an
+    // action, instead of letting the walk continue blind.
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(80);
+
+    const tabBtn = page.getByRole("button", { name: p.tabName, exact: true }).first();
     if (await tabBtn.isVisible({ timeout: 500 }).catch(() => false)) {
       await tabBtn.click();
       await page.waitForTimeout(200);
       if (p.tabName !== "Home") {
-        const homeBtn = page.locator("button").filter({ hasText: "Home" }).first();
+        const homeBtn = page.getByRole("button", { name: "Home", exact: true }).first();
         if (await homeBtn.isVisible({ timeout: 500 }).catch(() => false)) {
           await homeBtn.click();
           await page.waitForTimeout(100);
@@ -1466,17 +1556,25 @@ const scriptShapeUnmount: ActionDef<{ slotIndex: number }> = {
  * Actions excluded from GENERATION because a ledgered bug makes every walk
  * that uses them fail the same way, drowning out new findings. They remain
  * in FULL_ACTION_CATALOG so recorded traces (e.g. the bug's own repro) can
- * still be replayed. Re-enable when the referenced bug is fixed, then replay
- * tests/regression/repros/<bug>.trace.json to confirm.
+ * still be replayed.
+ *
+ * AN EXCLUSION MUST NOT OUTLIVE ITS BUG, AND ONE DID. This list held
+ * `sheet.add` / `sheet.switch` / `sheet.rename` / `sheet.delete` against
+ * BUG-0005 — so for the whole programme no walk could create, switch, rename
+ * or delete a sheet. BUG-0005 was closed, and the four actions stayed
+ * suppressed, because nothing connected the string "BUG-0005" to the ledger
+ * entry it names. That is the same failure the register already records twice
+ * for the undo oracle's two suppressions: the moment the bug is fixed, the
+ * suppression stops protecting the signal and starts hiding it. The sheet
+ * surface was rewritten by the BUG-0005/BUG-0034 fixes and the walker still
+ * could not touch a line of it.
+ *
+ * `app/e2e/__tests__/walkerExclusions.test.ts` now reads
+ * `tests/regression/bug-ledger.json` and fails when an entry here names a bug
+ * that is not open (or that does not exist). The exclusion is therefore
+ * self-expiring: closing the bug turns the suppression into a red test.
  */
-export const EXCLUDED_UNTIL_FIXED: Array<{ ledgerId: string; actions: AnyActionDef[] }> = [
-  {
-    // Undo is sheet-unaware: undo-all cannot cross a sheet.add boundary
-    // (active sheet, sheet list, and cell restorations all diverge).
-    ledgerId: "BUG-0005",
-    actions: [sheetAdd, sheetSwitch, sheetRename, sheetDelete],
-  },
-];
+export const EXCLUDED_UNTIL_FIXED: Array<{ ledgerId: string; actions: AnyActionDef[] }> = [];
 
 const ALL_ACTIONS: AnyActionDef[] = [
   // Object lifecycle (from v1)
@@ -1526,8 +1624,9 @@ const ALL_ACTIONS: AnyActionDef[] = [
   autoFilterApply,
   autoFilterValues,
   autoFilterRemove,
-  // Sheets — excluded from generation until BUG-0005 (sheet-unaware undo)
-  // is fixed; see EXCLUDED_UNTIL_FIXED above.
+  // Sheets — generated again since BUG-0005/BUG-0034 closed the sheet-unaware
+  // undo hole; see EXCLUDED_UNTIL_FIXED above for why the suppression had to
+  // become self-expiring.
   sheetAdd,
   sheetSwitch,
   sheetRename,

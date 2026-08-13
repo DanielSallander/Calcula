@@ -1307,7 +1307,10 @@ pub fn remove_auto_filter(
     result
 }
 
-fn remove_auto_filter_inner(
+/// Command body over plain references, so the table-button contract above is
+/// unit-testable (the command itself takes `State<_>`, which has no public
+/// constructor). Same convention as the `*_impl` seams elsewhere in the crate.
+pub(crate) fn remove_auto_filter_inner(
     state: &AppState,
     file_state: &FileState,
 ) -> AutoFilterResult {
@@ -1323,6 +1326,7 @@ fn remove_auto_filter_inner(
             .remove(&active_sheet)
             .expect("presence checked immediately above, under the same lock");
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
+        let removed_id = auto_filter.id;
 
         drop(auto_filters);
 
@@ -1331,16 +1335,44 @@ fn remove_auto_filter_inner(
         // table's link: the re-apply mints a NEW id that matches nothing.
         // Done AFTER releasing auto_filters — `create_table` locks tables then
         // auto_filters, so the reverse order here would risk a deadlock.
+        //
+        // A TABLE'S FILTER BUTTONS ARE THE FILTER (BUG-0040).
+        //
+        // Excel has one state here, `ListObject.ShowAutoFilter`: Data ▸ Filter
+        // and Table Design ▸ Filter Button are the same switch, and turning it
+        // off persists. Calcula had two — `show_filter_button` on the table and
+        // the entry in `auto_filters` — and this command cleared only the
+        // second. `auto_filter_id` is derived state that is never saved, so on
+        // load, `persistence.rs` finds no filter for the sheet, sees a table
+        // still advertising buttons, and SEEDS A NEW FILTER from it. A filter
+        // the user deliberately removed therefore came back on every reopen,
+        // and the reopened document differed from the one that was saved.
+        //
+        // Clearing the owner's flag makes the two agree and leaves the seed
+        // doing only the job it exists for: giving an IMPORTED workbook its
+        // table filters, since `load_xlsx` returns no `autofilters.json` at all
+        // (it hard-codes `user_files: HashMap::new()`), so `show_filter_button`
+        // carried in the table metadata is the only record there is.
+        let mut cleared_buttons: Vec<(identity::EntityId, bool)> = Vec::new();
         if let Ok(mut tables) = state.tables.write(&effect) {
             if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
+                for table in sheet_tables.values_mut() {
+                    if table.auto_filter_id == Some(removed_id)
+                        && table.style_options.show_filter_button
+                    {
+                        cleared_buttons.push((table.id, true));
+                        table.style_options.show_filter_button = false;
+                    }
+                }
                 crate::tables::relink_autofilter_owner(sheet_tables, None);
             }
         }
 
-        crate::undo_commands::record_autofilter_undo(
+        crate::undo_commands::record_autofilter_undo_with_buttons(
             &state,
             active_sheet,
             Some(auto_filter),
+            cleared_buttons,
             "Remove AutoFilter",
         );
 

@@ -40,4 +40,46 @@ export const selectionInBounds: Invariant = {
   },
 };
 
-export const CHEAP_INVARIANTS: Invariant[] = [selectionInBounds];
+/**
+ * INVARIANT: the ribbon must be clickable after every action.
+ *
+ * THE ONE THAT COST THE MOST AND SHOWED THE LEAST. A walker action opened the
+ * "Customize Home Tab" modal by accident (BUG-0037: a substring `.first()`
+ * match that hit the View menu's "Customize Home Tab..." item instead of the
+ * ribbon's Home tab). The modal is `position: fixed`, `z-index: 1050`, covers
+ * 100% of the viewport, and carries NO `role="dialog"` — so the long-standing
+ * `visibleDialogCount` read 0 while every remaining UI action in the walk
+ * clicked into its backdrop. Each such click burns the 30s action timeout and
+ * is TOLERATED by the runner, so the walk ran to completion and reported PASS
+ * over a workbook whose UI had been unreachable for half the run. Before
+ * `actionTimeout` was set at all, the same state produced the unexplained
+ * twelve-minute stall recorded in playwright.config.ts.
+ *
+ * A blocked UI is not a product bug in itself — a modal is allowed to be modal.
+ * It is a statement that THE REST OF THIS WALK MEANS NOTHING, and that has to
+ * stop the walk rather than decorate it. No action in the catalog legitimately
+ * leaves a viewport-covering modal open; every one of them either drives the
+ * backend directly or closes what it opened.
+ */
+export const uiNotBlocked: Invariant = {
+  id: "ui-not-blocked",
+  description: "No overlay covers the ribbon's tab strip after an action",
+  check(snapshot) {
+    const blocker = snapshot.visual.ribbonBlockedBy;
+    if (!blocker) return [];
+    return [
+      {
+        invariantId: "ui-not-blocked",
+        message:
+          `The ribbon is covered by <${blocker.tag} class="${blocker.className}" ` +
+          `role=${blocker.role ?? "-"} z-index=${blocker.zIndex}>` +
+          (blocker.text ? ` "${blocker.text}"` : "") +
+          `. Every UI action from here on clicks into this instead, so the ` +
+          `remainder of the walk proves nothing.`,
+        details: { blocker },
+      },
+    ];
+  },
+};
+
+export const CHEAP_INVARIANTS: Invariant[] = [selectionInBounds, uiNotBlocked];

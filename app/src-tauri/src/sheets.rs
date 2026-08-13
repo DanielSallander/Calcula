@@ -100,6 +100,89 @@ fn ensure_vec_len_with<T, F: Fn() -> T>(v: &mut Vec<T>, min_len: usize, make: F)
 }
 
 // ============================================================================
+// Undo history vs. workbook structure (BUG-0005)
+// ============================================================================
+
+/// EXCEL PARITY: a change to the workbook's STRUCTURE ends the undo history.
+///
+/// # Why the history cannot simply survive
+///
+/// An undo entry names its sheet by INDEX (`CellChange::SetCell { sheet, .. }`,
+/// and the `sheet_index` inside every `CustomRestore` payload). An index is a
+/// POSITION, not an identity: deleting, moving or copying a sheet renumbers
+/// every index after the affected one, so a queued entry silently comes to
+/// describe a DIFFERENT sheet than the one it was recorded on. Undo then
+/// restores a value onto a sheet the user never edited, and does it with no
+/// error and nothing on screen to see. That is the same missing-dimension root
+/// that made cross-sheet recalculation wrong (BUG-0019) and that
+/// `CellChange::SetCell`'s `sheet` field was added for — one level up, at the
+/// sheet-list level rather than the cell level.
+///
+/// Two of the four hazards are not about indices at all, which is why "remap
+/// the indices" was never a complete answer:
+///
+///   * a RENAME shifts no index, but rewrites every formula in the workbook.
+///     The `previous` cells sitting in the undo stack still hold ASTs spelling
+///     the OLD sheet name, so undoing across a rename restores a reference to a
+///     sheet that no longer answers to it;
+///   * the width/height/merge/snapshot changes carry no sheet dimension AT ALL
+///     — they are implicitly "the active sheet" — so no amount of remapping can
+///     aim them.
+///
+/// # What Excel does, which settles it
+///
+/// Excel does not let a sheet structural operation be undone, and ending the
+/// history is how it avoids exactly this problem. Deleting a worksheet is the
+/// famous case — Excel warns "You can't undo deleting sheets" and the Undo
+/// command goes unavailable — and no undo entry exists for inserting,
+/// renaming, moving or copying one either. Under the project's standing "Excel
+/// parity wins any design question" rule that is Calcula's behaviour too. It
+/// also answers, without inventing anything, the question of what an undo
+/// should do when its target sheet has since been DELETED: the question cannot
+/// arise, because the delete ended the history that could have asked it.
+///
+/// The MCP tool layer has been TELLING callers this all along — `add_sheet`
+/// returns "Sheet structure changes are NOT undoable", `delete_sheet` and
+/// `rename_sheet` and `move_sheet` each end with "NOT undoable" — while the
+/// stack was in fact left intact behind them. This makes the claim true.
+///
+/// # Contract
+///
+/// Call from EVERY command that adds, deletes, renames, moves or copies a
+/// sheet, AFTER the last gate that can still refuse (a refused operation must
+/// not cost the user their history) and with NO other state lock held. The
+/// crate's canonical order takes `undo_stack` BEFORE `grid`/`grids`
+/// (`undo_commands::apply_changes`), so taking it here while a grid guard is
+/// alive would close a deadlock cycle against the background recalculation
+/// pass. `sheet_structure_commands_invalidate_the_undo_history` in
+/// `undo_sheet_structure_tests` reads this file and fails the build if one of
+/// the five stops calling it.
+pub(crate) fn invalidate_undo_history_for_sheet_structure(state: &AppState, action: &str) {
+    let Ok(mut undo) = state.undo_stack.lock() else {
+        crate::log_error!(
+            "SHEET",
+            "{}: the undo history lock is poisoned; history NOT cleared",
+            action
+        );
+        return;
+    };
+    let before = undo.cleared_total();
+    undo.clear();
+    let discarded = undo.cleared_total() - before;
+    // Released before logging for the same reason the guard releases before it
+    // announces: a listener's first act is to read the stack back.
+    drop(undo);
+    if discarded > 0 {
+        crate::log_info!(
+            "SHEET",
+            "{} ended the undo history (Excel parity): {} transaction(s) discarded",
+            action,
+            discarded
+        );
+    }
+}
+
+// ============================================================================
 // Per-sheet HashMap store remapping (sheet move / delete / copy)
 // ============================================================================
 //
@@ -169,90 +252,23 @@ fn remap_sheet_keyed_stores(
     effect: &crate::document_effect::DocumentEffect,
     remap: impl Fn(usize) -> Option<usize>,
 ) {
-    // QUEUED UNDO ENTRIES FIRST.
+    // QUEUED UNDO ENTRIES ARE NOT REMAPPED HERE ANY MORE — THEY NO LONGER EXIST.
     //
-    // Every `obj_*` CustomRestore payload identifies its target sheet by INDEX,
-    // and this function is called precisely when those indices are renumbered.
-    // The live stores below were always remapped; the undo stack never was, so
-    // undoing past a sheet delete replayed a restore into whatever sheet had
-    // since taken that index — silently corrupting it, with no error and
-    // nothing to see.
+    // This block used to rewrite the sheet index inside every queued
+    // `CustomRestore` payload, because renumbering the sheets under a queued
+    // undo entry made it replay into whatever sheet had taken its index. That
+    // repaired half of the problem: the `CellChange::SetCell { sheet, .. }`
+    // indices sitting beside those payloads in the very same transactions were
+    // never touched, so an ordinary cell edit undone after a sheet delete still
+    // landed on the wrong sheet (BUG-0005's family).
     //
-    // Done generically over the JSON rather than per-kind: every snapshot spells
-    // the field `sheet_index` at the top level, so one rewrite covers all of
-    // them and any kind added later. A payload whose sheet is GONE is replaced
-    // with a no-op empty object: dropping the change would desynchronise the
-    // transaction's inverse, and leaving it would let it fire on the wrong sheet.
-    if let Ok(mut undo) = state.undo_stack.lock() {
-        undo.visit_custom_restores(|kind, data| {
-            let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(data) else {
-                return; // Not JSON we understand; leave it untouched.
-            };
-            let Some(obj) = value.as_object_mut() else { return };
-
-            // obj_controls is the one kind whose sheet indices do NOT sit in a
-            // top-level `sheet_index`: they live inside every `(sheet,row,col)`
-            // key tuple AND inside `control-<sheet>-<row>-<col>` instance-id
-            // strings. The generic rewrite below would skip it entirely.
-            if kind == "obj_controls" {
-                if let Some(controls) = obj.get_mut("controls").and_then(|v| v.as_array_mut()) {
-                    controls.retain_mut(|entry| {
-                        let Some(key) = entry
-                            .as_array_mut()
-                            .and_then(|pair| pair.first_mut())
-                            .and_then(|k| k.as_array_mut())
-                        else {
-                            return true;
-                        };
-                        let Some(old) = key.first().and_then(|v| v.as_u64()) else {
-                            return true;
-                        };
-                        match remap(old as usize) {
-                            Some(new_index) => {
-                                key[0] = serde_json::json!(new_index);
-                                true
-                            }
-                            None => false, // Sheet deleted: drop the entry.
-                        }
-                    });
-                }
-                if let Some(ids) = obj.get_mut("script_instance_ids").and_then(|v| v.as_array_mut()) {
-                    for entry in ids.iter_mut() {
-                        let Some(prev) = entry.as_array_mut().and_then(|pair| pair.get_mut(1)) else {
-                            continue;
-                        };
-                        let Some(s) = prev.as_str() else { continue };
-                        match remap_control_instance_id(s, &remap) {
-                            Some(Some(new_id)) => *prev = serde_json::json!(new_id),
-                            Some(None) => *prev = serde_json::Value::Null,
-                            None => {}
-                        }
-                    }
-                }
-                if let Ok(bytes) = serde_json::to_vec(&value) {
-                    *data = bytes;
-                }
-                return;
-            }
-
-            let Some(old) = obj.get("sheet_index").and_then(|v| v.as_u64()) else { return };
-            match remap(old as usize) {
-                Some(new_index) => {
-                    obj.insert("sheet_index".into(), serde_json::json!(new_index));
-                }
-                None => {
-                    // Sheet deleted: neutralise the payload. The restore arm
-                    // fails to deserialize it, logs, and returns without
-                    // touching any store.
-                    *obj = serde_json::Map::new();
-                }
-            }
-            if let Ok(bytes) = serde_json::to_vec(&value) {
-                *data = bytes;
-            }
-        });
-    }
-
+    // Excel's answer to the whole family is that a change to the workbook's
+    // STRUCTURE ends the undo history: deleting a sheet is famously not
+    // undoable, and neither adding, renaming, moving nor copying one is either.
+    // Under "Excel parity wins" that is now Calcula's answer too, applied at the
+    // five structural commands through
+    // `invalidate_undo_history_for_sheet_structure`. There is nothing left in
+    // the stack for this function to re-aim.
     {
         let mut comments = state.comments.write(effect).unwrap();
         remap_indexed_map(&mut comments, &remap);
@@ -893,6 +909,10 @@ pub fn add_sheet(
     }
     }; // drop all locks before rebuilding dependency maps
 
+    // EXCEL PARITY: adding a sheet ends the undo history (BUG-0005). Runs with
+    // every lock above released — see the function for the order that requires.
+    invalidate_undo_history_for_sheet_structure(&state, "add a sheet");
+
     // The new (empty) sheet is now active — rebuild the single-sheet
     // dependency maps for it (see set_active_sheet / BUG-0016).
     crate::undo_commands::rebuild_all_dependencies(&state);
@@ -1371,6 +1391,13 @@ pub fn delete_sheet(
     // No undo is recorded, deliberately: Excel does not let a sheet delete be
     // undone and neither does this command, so a cascade that recorded restores
     // would put slicers back onto a sheet that cannot come back.
+    //
+    // And nothing ALREADY on the stack may survive either (BUG-0005). Every
+    // queued entry names its sheet by index, and the delete just renumbered
+    // every index above this one — so undoing across the delete restored onto
+    // whichever sheet inherited the number. Excel ends the history here, and so
+    // does this.
+    invalidate_undo_history_for_sheet_structure(&state, "delete a sheet");
 
     // The active sheet (or its index) changed — rebuild the single-sheet
     // dependency maps (see set_active_sheet / BUG-0016).
@@ -1544,6 +1571,14 @@ pub fn rename_sheet(
     // name is called. Costs nothing when the workbook defines no names (the
     // restamp returns on the first `is_empty()`).
     crate::persistence::restamp_workbook_name_casing(&state, &effect);
+    // EXCEL PARITY, and here it is a CORRECTNESS matter rather than only a
+    // parity one (BUG-0005). A rename shifts no sheet index, but the repair
+    // above rewrote every formula in the workbook — while the undo stack still
+    // holds `previous` cells whose ASTs spell the OLD sheet name. Undoing
+    // across the rename would put those back, re-introducing references to a
+    // sheet that no longer answers to that name. Excel does not offer an undo
+    // for a sheet rename at all.
+    invalidate_undo_history_for_sheet_structure(&state, "rename a sheet");
     // `repair_all_formulas` above rewrote formula ASTs across every sheet, so
     // the ACTIVE sheet's sheet-less dependency maps describe the pre-repair
     // trees. This is the same call `delete_sheet` and `add_sheet` already make.
@@ -1954,10 +1989,36 @@ pub fn move_sheet(
         );
     }
 
-    Ok(SheetsResult {
+    let result = SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: new_active,
-    })
+    };
+
+    // EVERY GUARD RELEASED, in one move, before the undo history is touched.
+    // The crate's canonical order takes `undo_stack` BEFORE `grid`/`grids`
+    // (`undo_commands::apply_changes`), and the background recalculation pass
+    // takes the grid pair — so clearing the history while these are alive would
+    // close the same deadlock cycle `state_digest_lock_order_tests` exists for.
+    drop((
+        current_grid,
+        grids,
+        sheet_names,
+        active_sheet,
+        freeze_configs,
+        tab_colors,
+        sheet_visibility,
+        column_widths,
+        row_heights,
+        all_column_widths,
+        all_row_heights,
+        page_setups,
+    ));
+
+    // EXCEL PARITY: moving a sheet ends the undo history (BUG-0005). The
+    // rotation above renumbered the sheets under every queued entry.
+    invalidate_undo_history_for_sheet_structure(&state, "move a sheet");
+
+    Ok(result)
 }
 
 /// Copy a sheet to a new position.
@@ -2171,10 +2232,34 @@ pub fn copy_sheet(
         );
     }
 
-    Ok(SheetsResult {
+    let result = SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: new_index,
-    })
+    };
+
+    // Every guard released before the undo history is touched — see the
+    // identical drop in `move_sheet` for the lock order that requires.
+    drop((
+        current_grid,
+        grids,
+        sheet_names,
+        active_sheet,
+        freeze_configs,
+        tab_colors,
+        sheet_visibility,
+        column_widths,
+        row_heights,
+        all_column_widths,
+        all_row_heights,
+        page_setups,
+    ));
+
+    // EXCEL PARITY: copying a sheet ends the undo history (BUG-0005). The copy
+    // is INSERTED, so every index at or above the insertion point moved up by
+    // one under every queued entry.
+    invalidate_undo_history_for_sheet_structure(&state, "copy a sheet");
+
+    Ok(result)
 }
 
 /// Hide a sheet. Cannot hide the last visible sheet.

@@ -22,8 +22,10 @@ use crate::slicer::SlicerState;
 use engine::{Cell, CellValue};
 use std::collections::HashSet;
 
-struct Fixture {
-    state: AppState,
+/// `pub(super)` so the sibling `undo_sheet_structure_tests` reuses this
+/// fixture instead of growing a second one that drifts from it.
+pub(super) struct Fixture {
+    pub(super) state: AppState,
     file: FileState,
     files: UserFilesState,
     pivots: PivotState,
@@ -39,7 +41,7 @@ fn loading() -> crate::document_effect::DocumentEffect {
 }
 
 impl Fixture {
-    fn new(sheets: usize) -> Self {
+    pub(super) fn new(sheets: usize) -> Self {
         let state = crate::create_app_state();
         for i in 1..sheets {
             state.grids.write(&loading()).unwrap().push(engine::Grid::new());
@@ -73,7 +75,7 @@ impl Fixture {
 
     /// Write a cell straight into `grids[sheet]` (and the active mirror when
     /// that sheet is active), the way a load does — no undo entry, no cascade.
-    fn put(&self, sheet: usize, row: u32, col: u32, cell: Cell) {
+    pub(super) fn put(&self, sheet: usize, row: u32, col: u32, cell: Cell) {
         let active = *self.state.active_sheet.read().unwrap();
         self.state.grids.write(&loading()).unwrap()[sheet].set_cell(row, col, cell.clone());
         if sheet == active {
@@ -83,7 +85,7 @@ impl Fixture {
 
     /// Make `sheet` the active one, mirror and all — the recalculation-relevant
     /// half of `set_active_sheet`, which needs a `State<AppState>`.
-    fn switch_to(&self, sheet: usize) {
+    pub(super) fn switch_to(&self, sheet: usize) {
         {
             let mut grids = self.state.grids.write(&loading()).unwrap();
             let mut mirror = self.state.grid.write(&loading()).unwrap();
@@ -105,7 +107,7 @@ impl Fixture {
             .unwrap_or(CellValue::Empty)
     }
 
-    fn number(&self, sheet: usize, row: u32, col: u32) -> f64 {
+    pub(super) fn number(&self, sheet: usize, row: u32, col: u32) -> f64 {
         match self.value(sheet, row, col) {
             CellValue::Number(n) => n,
             other => panic!("sheet {sheet} ({row},{col}) is {other:?}, expected a number"),
@@ -134,7 +136,7 @@ impl Fixture {
         stack.commit_transaction();
     }
 
-    fn undo(&self) -> UndoResult {
+    pub(super) fn undo(&self) -> UndoResult {
         let transaction = self
             .state
             .undo_stack
@@ -155,7 +157,7 @@ impl Fixture {
         )
     }
 
-    fn redo(&self) -> UndoResult {
+    pub(super) fn redo(&self) -> UndoResult {
         let transaction = self
             .state
             .undo_stack
@@ -176,7 +178,7 @@ impl Fixture {
         )
     }
 
-    fn undo_depth(&self) -> usize {
+    pub(super) fn undo_depth(&self) -> usize {
         self.state.undo_stack.lock().unwrap().undo_depth()
     }
 }
@@ -812,4 +814,221 @@ fn every_outline_command_records_an_undo_entry() {
             "`{command}` mutates the outline without recording an undo entry"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// GAP 4 - the NON-CELL changes had no sheet dimension EITHER
+//
+// `SetCell` grew a `sheet` field (GAP 3 above) and the other four variants did
+// not, so the same defect survived beside the fix for it. Column widths, row
+// heights, merge regions and whole-grid snapshots were all applied to
+// `state.column_widths` / `state.row_heights` / `state.merged_regions` /
+// `state.grid` - the ACTIVE sheet's mirrors - no matter which sheet the change
+// had been recorded on. "The active sheet" is true when they are RECORDED and
+// need not be true when they are RESTORED, and nothing in between checked.
+//
+// The snapshot case is the severe one and it needs three ordinary actions:
+// insert a row on Sheet2, click the Sheet1 tab, press Ctrl+Z. Sheet1's ENTIRE
+// cell map was replaced by Sheet2's saved one, with no error and no way back.
+// ---------------------------------------------------------------------------
+
+fn undo_region(sr: u32, sc: u32, er: u32, ec: u32) -> engine::UndoMergeRegion {
+    engine::UndoMergeRegion { start_row: sr, start_col: sc, end_row: er, end_col: ec }
+}
+
+fn sheet_merges(
+    f: &Fixture,
+    sheet: usize,
+) -> std::collections::HashSet<crate::api_types::MergedRegion> {
+    crate::report::with_sheet_merges(&f.state, sheet, |m| m.clone())
+}
+
+#[test]
+fn a_column_width_undo_restores_the_sheet_it_was_recorded_on() {
+    // Resize a column on Sheet2, switch to Sheet1, Ctrl+Z. The restore has to
+    // land in `all_column_widths[1]`, not on the column the user is looking at.
+    let f = Fixture::new(2);
+    {
+        let e = crate::document_effect::test_seed_effect();
+        f.state.column_widths.write(&e).unwrap().insert(3, 111.0);
+        f.state.all_column_widths.write(&e).unwrap()[1].insert(3, 222.0);
+    }
+    f.state
+        .undo_stack
+        .lock()
+        .unwrap()
+        .record_column_width_change(1, 3, Some(64.0));
+
+    f.undo();
+
+    assert_eq!(
+        f.state.all_column_widths.read().unwrap()[1].get(&3).copied(),
+        Some(64.0),
+        "Sheet2's column 3 was not restored"
+    );
+    assert_eq!(
+        f.state.column_widths.read().unwrap().get(&3).copied(),
+        Some(111.0),
+        "the ACTIVE sheet's column 3 was resized by an undo belonging to another sheet"
+    );
+}
+
+#[test]
+fn a_row_height_undo_restores_the_sheet_it_was_recorded_on() {
+    let f = Fixture::new(2);
+    {
+        let e = crate::document_effect::test_seed_effect();
+        f.state.row_heights.write(&e).unwrap().insert(5, 40.0);
+        f.state.all_row_heights.write(&e).unwrap()[1].insert(5, 60.0);
+    }
+    f.state
+        .undo_stack
+        .lock()
+        .unwrap()
+        .record_row_height_change(1, 5, None);
+
+    f.undo();
+
+    assert!(
+        !f.state.all_row_heights.read().unwrap()[1].contains_key(&5),
+        "Sheet2's row 5 should be back to the default height"
+    );
+    assert_eq!(
+        f.state.row_heights.read().unwrap().get(&5).copied(),
+        Some(40.0),
+        "the ACTIVE sheet's row 5 was resized by another sheet's undo"
+    );
+}
+
+#[test]
+fn a_merge_undo_applies_to_the_sheet_the_merge_was_made_on() {
+    // Merge on Sheet2, switch to Sheet1, Ctrl+Z: Sheet2 unmerges, Sheet1 does
+    // not. Redo puts it back on Sheet2 - asserted because the direction is
+    // decided by `is_undo`, and getting that wrong is BUG-0009's double
+    // negation in a new place.
+    let f = Fixture::new(2);
+    let region = undo_region(0, 0, 1, 1);
+    crate::report::with_sheet_merges_mut(
+        &f.state,
+        &crate::document_effect::test_seed_effect(),
+        1,
+        |m| {
+            m.insert(crate::api_types::MergedRegion {
+                start_row: 0,
+                start_col: 0,
+                end_row: 1,
+                end_col: 1,
+            });
+        },
+    );
+    f.state
+        .undo_stack
+        .lock()
+        .unwrap()
+        .record_merge_region_added(1, region);
+
+    let result = f.undo();
+    assert!(result.merge_changed, "an off-sheet merge undo must announce itself");
+    assert!(
+        sheet_merges(&f, 1).is_empty(),
+        "Sheet2's merge survived the undo of the merge"
+    );
+    assert!(
+        sheet_merges(&f, 0).is_empty(),
+        "Sheet1 was given a merge it never had"
+    );
+
+    f.redo();
+    assert_eq!(sheet_merges(&f, 1).len(), 1, "redo must put Sheet2's merge back");
+    assert!(sheet_merges(&f, 0).is_empty(), "and must not touch Sheet1");
+}
+
+#[test]
+fn a_structural_snapshot_undo_does_not_replace_the_active_sheets_whole_grid() {
+    // THE SEVERE ONE. `RestoreSnapshot` replaces an entire grid. Recorded on
+    // Sheet2 by an insert-row; undone while Sheet1 is active. Before the sheet
+    // stamp, Sheet1's cell map became Sheet2's snapshot - every value on the
+    // sheet the user was looking at, gone and replaced by another sheet's.
+    let f = Fixture::new(2);
+    f.put(0, 0, 0, Cell::new_number(1000.0));
+    f.put(0, 1, 0, Cell::new_number(2000.0));
+    f.put(1, 0, 0, Cell::new_number(7.0));
+
+    // Sheet2 as it was BEFORE the edit being undone.
+    let mut before = engine::Grid::new();
+    before.set_cell(0, 0, Cell::new_number(5.0));
+    let snapshot = engine::GridSnapshot {
+        sheet: 1,
+        cells: before.cells.clone(),
+        row_heights: HashMap::new(),
+        column_widths: HashMap::new(),
+        merged_regions: HashSet::new(),
+        max_row: before.max_row,
+        max_col: before.max_col,
+        row_styles: HashMap::new(),
+        column_styles: HashMap::new(),
+    };
+    {
+        let mut stack = f.state.undo_stack.lock().unwrap();
+        stack.begin_transaction("Insert 1 row(s)".to_string());
+        stack.record_snapshot(snapshot);
+        stack.commit_transaction();
+    }
+
+    let result = f.undo();
+
+    // The catastrophic half FIRST, so a regression reports the data loss
+    // rather than the missed restore that accompanies it.
+    assert_eq!(
+        f.number(0, 0, 0),
+        1000.0,
+        "SHEET1's grid was replaced by Sheet2's snapshot - the user's whole sheet"
+    );
+    assert_eq!(f.number(1, 0, 0), 5.0, "Sheet2 was not restored from its own snapshot");
+    assert_eq!(f.number(0, 1, 0), 2000.0, "...and its second cell with it");
+    assert_eq!(
+        f.state.grid.read().unwrap().get_cell(0, 0).map(|c| c.value.clone()),
+        Some(CellValue::Number(1000.0)),
+        "the ACTIVE mirror must survive an off-sheet snapshot restore too"
+    );
+    assert!(
+        result.structural_restore,
+        "a whole-grid swap must tell the frontend to refresh, wherever it landed"
+    );
+
+    // Redo returns Sheet2 to its post-edit shape and still leaves Sheet1 alone.
+    f.redo();
+    assert_eq!(f.number(1, 0, 0), 7.0, "redo must re-apply Sheet2's edit");
+    assert_eq!(f.number(0, 0, 0), 1000.0, "and must still not touch Sheet1");
+}
+
+#[test]
+fn the_active_sheet_path_is_unchanged_by_the_off_sheet_one() {
+    // THE CONTROL, and it is the reason this change is safe to make without a
+    // live run: when the recorded sheet IS the active one, every arm behaves
+    // exactly as it always did. Only the previously-broken off-sheet branch is
+    // new, and nothing reached it before because nothing could express it.
+    let f = Fixture::new(2);
+    {
+        let e = crate::document_effect::test_seed_effect();
+        f.state.column_widths.write(&e).unwrap().insert(3, 111.0);
+    }
+    f.state
+        .undo_stack
+        .lock()
+        .unwrap()
+        .record_column_width_change(0, 3, Some(64.0));
+
+    f.undo();
+
+    assert_eq!(
+        f.state.column_widths.read().unwrap().get(&3).copied(),
+        Some(64.0),
+        "an ACTIVE-sheet width undo must still land on the mirror"
+    );
+    assert_eq!(
+        f.state.all_column_widths.read().unwrap()[1].get(&3).copied(),
+        None,
+        "and must not touch any other sheet's store"
+    );
 }

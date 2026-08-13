@@ -22,6 +22,15 @@ pub struct UndoMergeRegion {
 /// Snapshot of grid state for reversing structural changes (insert/delete rows/columns).
 #[derive(Debug, Clone)]
 pub struct GridSnapshot {
+    /// The sheet this snapshot was taken FROM, and the only sheet it may ever
+    /// be restored INTO.
+    ///
+    /// Without it the restore was "replace the active sheet's whole grid with
+    /// these cells", whichever sheet happened to be active. Insert a row on
+    /// Sheet2, switch to Sheet1, press Ctrl+Z, and Sheet1's entire cell map was
+    /// replaced by Sheet2's — the single largest silent data loss in the undo
+    /// path, and the same missing dimension `SetCell.sheet` exists for.
+    pub sheet: usize,
     pub cells: CellMap,
     pub row_heights: HashMap<u32, f64>,
     pub column_widths: HashMap<u32, f64>,
@@ -54,22 +63,29 @@ pub enum CellChange {
         col: u32,
         previous: Option<Cell>,
     },
-    /// A column width was changed: (col, previous_width)
+    /// A column width was changed: (sheet, col, previous_width)
     /// If previous_width is None, it was default width.
+    ///
+    /// `sheet`, like `SetCell`'s, is the sheet the change was recorded ON.
+    /// These four variants used to carry no sheet at all — they were
+    /// implicitly "the active sheet", which is true when they are RECORDED and
+    /// need not be true when they are RESTORED.
     SetColumnWidth {
+        sheet: usize,
         col: u32,
         previous: Option<f64>,
     },
-    /// A row height was changed: (row, previous_height)
+    /// A row height was changed: (sheet, row, previous_height)
     /// If previous_height is None, it was default height.
     SetRowHeight {
+        sheet: usize,
         row: u32,
         previous: Option<f64>,
     },
     /// A merge region was added (undo = remove it).
-    AddMergeRegion(UndoMergeRegion),
+    AddMergeRegion { sheet: usize, region: UndoMergeRegion },
     /// A merge region was removed (undo = add it back).
-    RemoveMergeRegion(UndoMergeRegion),
+    RemoveMergeRegion { sheet: usize, region: UndoMergeRegion },
     /// Full grid snapshot for structural changes (insert/delete rows/columns).
     /// Undo = restore the snapshot, Redo = restore the other snapshot.
     RestoreSnapshot(GridSnapshot),
@@ -140,6 +156,16 @@ pub struct UndoStack {
     /// caller cannot tell "nothing was pushed" from "what you remembered has
     /// been evicted".
     evicted_total: u64,
+    /// How many transactions a WHOLESALE `clear()` has discarded, ever.
+    ///
+    /// A separate counter from `evicted_total` because the two are different
+    /// facts with different remedies. Eviction means "your history is longer
+    /// than the cap"; a clear means "something ENDED the history" -- a sheet
+    /// was added, deleted, renamed, moved or copied, or the document itself
+    /// was replaced. A caller that remembered an id and cannot find it needs
+    /// to know WHICH of those happened, or it reports a product defect where
+    /// Excel-parity behaviour is all it observed.
+    cleared_total: u64,
 }
 
 impl UndoStack {
@@ -151,6 +177,7 @@ impl UndoStack {
             max_size: MAX_HISTORY_SIZE,
             next_seq: 1,
             evicted_total: 0,
+            cleared_total: 0,
         }
     }
 
@@ -162,6 +189,7 @@ impl UndoStack {
             max_size,
             next_seq: 1,
             evicted_total: 0,
+            cleared_total: 0,
         }
     }
 
@@ -216,9 +244,9 @@ impl UndoStack {
         }
     }
 
-    /// Record a column width change.
-    pub fn record_column_width_change(&mut self, col: u32, previous: Option<f64>) {
-        let change = CellChange::SetColumnWidth { col, previous };
+    /// Record a column width change on `sheet`.
+    pub fn record_column_width_change(&mut self, sheet: usize, col: u32, previous: Option<f64>) {
+        let change = CellChange::SetColumnWidth { sheet, col, previous };
         
         if let Some(ref mut transaction) = self.current_transaction {
             transaction.add_change(change);
@@ -229,9 +257,9 @@ impl UndoStack {
         }
     }
 
-    /// Record a row height change.
-    pub fn record_row_height_change(&mut self, row: u32, previous: Option<f64>) {
-        let change = CellChange::SetRowHeight { row, previous };
+    /// Record a row height change on `sheet`.
+    pub fn record_row_height_change(&mut self, sheet: usize, row: u32, previous: Option<f64>) {
+        let change = CellChange::SetRowHeight { sheet, row, previous };
 
         if let Some(ref mut transaction) = self.current_transaction {
             transaction.add_change(change);
@@ -242,9 +270,9 @@ impl UndoStack {
         }
     }
 
-    /// Record that a merge region was added (for undo of merge).
-    pub fn record_merge_region_added(&mut self, region: UndoMergeRegion) {
-        let change = CellChange::AddMergeRegion(region);
+    /// Record that a merge region was added on `sheet` (for undo of merge).
+    pub fn record_merge_region_added(&mut self, sheet: usize, region: UndoMergeRegion) {
+        let change = CellChange::AddMergeRegion { sheet, region };
         if let Some(ref mut transaction) = self.current_transaction {
             transaction.add_change(change);
         } else {
@@ -254,9 +282,9 @@ impl UndoStack {
         }
     }
 
-    /// Record that a merge region was removed (for undo of unmerge).
-    pub fn record_merge_region_removed(&mut self, region: UndoMergeRegion) {
-        let change = CellChange::RemoveMergeRegion(region);
+    /// Record that a merge region was removed on `sheet` (for undo of unmerge).
+    pub fn record_merge_region_removed(&mut self, sheet: usize, region: UndoMergeRegion) {
+        let change = CellChange::RemoveMergeRegion { sheet, region };
         if let Some(ref mut transaction) = self.current_transaction {
             transaction.add_change(change);
         } else {
@@ -380,6 +408,12 @@ impl UndoStack {
         self.evicted_total
     }
 
+    /// How many transactions a wholesale `clear()` has discarded over this
+    /// stack's lifetime. See the field for why it is not `evicted_total`.
+    pub fn cleared_total(&self) -> u64 {
+        self.cleared_total
+    }
+
     /// The history cap -- how many transactions are kept before the oldest
     /// starts being dropped.
     pub fn max_size(&self) -> usize {
@@ -406,35 +440,36 @@ impl UndoStack {
         self.redo_stack.back().map(|t| t.description.as_str())
     }
 
-    /// Clear all history.
-    /// Visit every queued `CustomRestore` payload, in both stacks and any open
-    /// transaction, so the host can rewrite payloads that have become stale.
+    /// `visit_custom_restores` USED TO BE HERE, and it was deleted rather than
+    /// extended (BUG-0005).
     ///
-    /// Exists for ONE reason: those payloads identify their target sheet by
-    /// INDEX, and deleting or moving a sheet renumbers every index after it.
-    /// The live stores are remapped at that moment, but queued undo entries are
-    /// not — so undoing past a sheet delete used to replay a restore into
-    /// whatever sheet had since taken that index, silently corrupting it.
+    /// It let the host REWRITE the sheet index inside every queued
+    /// `CustomRestore` payload when a sheet operation renumbered the sheets,
+    /// on the premise that undo history survives a sheet operation and merely
+    /// needs re-aiming. Excel's premise is the opposite one: a change to the
+    /// workbook's STRUCTURE ends the undo history outright -- deleting a sheet
+    /// is famously not undoable -- and under the project's "Excel parity wins"
+    /// rule that is the behaviour Calcula matches. `clear()` at the structural
+    /// sheet commands is now the whole answer.
     ///
-    /// Deliberately a visitor rather than a public accessor: the stacks stay
-    /// private, and the host cannot reorder or drop history through this.
-    pub fn visit_custom_restores(&mut self, mut visit: impl FnMut(&str, &mut Vec<u8>)) {
-        let open = self.current_transaction.iter_mut();
-        for transaction in self
-            .undo_stack
-            .iter_mut()
-            .chain(self.redo_stack.iter_mut())
-            .chain(open)
-        {
-            for change in transaction.changes.iter_mut() {
-                if let CellChange::CustomRestore { kind, data } = change {
-                    visit(kind, data);
-                }
-            }
-        }
-    }
-
+    /// The two cannot coexist. Re-aiming says "this entry is still valid,
+    /// somewhere else"; clearing says "this entry is gone". Keeping the
+    /// visitor would leave a second mechanism asserting an invariant the
+    /// product no longer holds -- and it only ever covered `CustomRestore`,
+    /// never the `SetCell { sheet, .. }` indices sitting beside them in the
+    /// same transactions, which is precisely the half that was silently
+    /// mis-aiming.
+    ///
+    /// Clear all history, counting what it discards.
+    ///
+    /// The count is not bookkeeping. A caller that remembered a transaction id
+    /// and can no longer find it has to distinguish "the cap dropped it"
+    /// (`evicted_total`) from "a workbook-structure change ended the history"
+    /// (`cleared_total`) from "the walk undid past it" (neither counter moved).
+    /// Those are three different answers and only the third is ever a product
+    /// defect.
     pub fn clear(&mut self) {
+        self.cleared_total += (self.undo_stack.len() + self.redo_stack.len()) as u64;
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.current_transaction = None;
@@ -565,46 +600,69 @@ mod tests {
     }
 }
 #[cfg(test)]
-mod visit_custom_restores_tests {
+mod structural_clear_tests {
+    //! `clear()` is how a workbook-structure change ends the history (Excel
+    //! parity), so the stack has to leave EVIDENCE that it happened. Without
+    //! it a caller that remembered a transaction id sees only that the id is
+    //! gone, and "gone" has three causes with three different meanings.
     use super::*;
 
-    fn payload(sheet: usize) -> Vec<u8> {
-        format!("{{\"sheet_index\":{},\"data\":\"x\"}}", sheet).into_bytes()
+    fn push(stack: &mut UndoStack, n: usize) {
+        for i in 0..n {
+            stack.record_cell_change(0, i as u32, 0, None);
+        }
     }
 
     #[test]
-    fn the_visitor_reaches_both_stacks_and_the_open_transaction() {
-        // All three matter: a sheet delete can happen with entries queued for
-        // undo, entries queued for redo, and a transaction still open.
+    fn clear_counts_the_transactions_it_discards() {
         let mut stack = UndoStack::new();
+        push(&mut stack, 4);
+        // One of them moved to the redo stack: a clear discards that too, and
+        // a caller checking the REDO half of a round trip needs it counted.
+        let undone = stack.pop_undo().expect("something to undo");
+        stack.push_redo(undone);
+        assert_eq!(stack.undo_depth(), 3);
+        assert_eq!(stack.redo_depth(), 1);
 
-        stack.begin_transaction("committed");
-        stack.record_custom_restore("obj_x".into(), payload(3), "a");
-        stack.commit_transaction();
+        assert_eq!(stack.cleared_total(), 0, "nothing cleared yet");
+        stack.clear();
+        assert_eq!(stack.cleared_total(), 4, "3 undo + 1 redo");
+        assert!(!stack.can_undo() && !stack.can_redo());
+    }
 
-        // Move it to the redo stack.
-        let popped = stack.pop_undo().expect("one transaction");
-        stack.push_redo(popped);
+    #[test]
+    fn clearing_an_empty_history_is_invisible_and_that_is_correct() {
+        // A structural sheet op on a workbook with nothing to undo discards
+        // nothing, so it must not look like history was lost -- otherwise
+        // every fresh document reports a phantom clear.
+        let mut stack = UndoStack::new();
+        stack.clear();
+        assert_eq!(stack.cleared_total(), 0);
+    }
 
-        stack.begin_transaction("still open");
-        stack.record_custom_restore("obj_y".into(), payload(3), "b");
+    #[test]
+    fn cleared_and_evicted_are_separate_facts() {
+        // The whole reason for a second counter: the cap dropping the oldest
+        // entry and a sheet operation ending the history are different events
+        // with different remedies, and one counter cannot say which occurred.
+        let mut stack = UndoStack::with_max_size(3);
+        push(&mut stack, 5); // 2 evicted
+        assert_eq!(stack.evicted_total(), 2);
+        assert_eq!(stack.cleared_total(), 0);
 
-        let mut seen = 0;
-        stack.visit_custom_restores(|_kind, data| {
-            seen += 1;
-            // Rewrite sheet 3 -> 1, the way a sheet delete would.
-            let s = String::from_utf8(data.clone()).unwrap();
-            *data = s.replace("\"sheet_index\":3", "\"sheet_index\":1").into_bytes();
-        });
-        assert_eq!(seen, 2, "redo-stack and open-transaction payloads both visited");
+        stack.clear();
+        assert_eq!(stack.evicted_total(), 2, "unchanged by a clear");
+        assert_eq!(stack.cleared_total(), 3);
+    }
 
-        let mut rewritten = 0;
-        stack.visit_custom_restores(|_kind, data| {
-            let s = String::from_utf8(data.clone()).unwrap();
-            assert!(s.contains("\"sheet_index\":1"), "payload not rewritten: {s}");
-            rewritten += 1;
-        });
-        assert_eq!(rewritten, 2);
+    #[test]
+    fn a_clear_accumulates_across_repeated_structural_changes() {
+        let mut stack = UndoStack::new();
+        push(&mut stack, 2);
+        stack.clear();
+        push(&mut stack, 3);
+        stack.clear();
+        assert_eq!(stack.cleared_total(), 5);
     }
 }
 

@@ -250,13 +250,21 @@ fn an_upsert_that_changes_nothing_neither_dirties_nor_records_undo() {
 
     // 1. A sheet that has never had a sparkline. No entry exists; the frontend
     //    sends the empty list.
+    //
+    //    THE INDEX HERE MUST NAME A SHEET THAT EXISTS. It used to be 3, which
+    //    `create_app_state` (one sheet, "Sheet1") does not have -- so once
+    //    `save_sparklines_impl` learned to refuse per-sheet state for a
+    //    nonexistent sheet (BUG-0041), this step would have returned early for
+    //    THAT reason and passed without ever exercising the unchanged-upsert
+    //    logic it exists to pin. Sheet 0 exists and has no entry yet, which is
+    //    precisely the case described above.
     let switch = FileState::default();
     let undo_before = state.undo_stack.lock().unwrap().undo_depth();
     crate::sparkline_commands::save_sparklines_impl(
         &state,
         &switch,
         crate::api_types::SparklineEntry {
-            sheet_index: 3,
+            sheet_index: 0,
             groups_json: "[]".to_string(),
         },
     )

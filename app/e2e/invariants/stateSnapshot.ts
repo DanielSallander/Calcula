@@ -72,11 +72,38 @@ export interface LogicalState {
   isEditing: boolean;
 }
 
+/**
+ * What is sitting on top of the ribbon, when anything is.
+ *
+ * WHY THIS IS A FIELD AND NOT A COMMENT. `visibleDialogCount` has been captured
+ * since the beginning and NOTHING ever checked it — and it would not have
+ * caught this anyway: the Customize Home Tab modal carries no `role="dialog"`,
+ * so the count stays 0 while a `position: fixed`, `z-index: 1050` div covers
+ * 100% of the viewport. The only reliable question is the one a user would ask:
+ * IF I CLICKED THE RIBBON, WHAT WOULD I HIT? That is `elementFromPoint`, and it
+ * is immune to both styled-components hashes and missing ARIA roles.
+ */
+export interface RibbonBlocker {
+  tag: string;
+  className: string;
+  role: string | null;
+  zIndex: string;
+  /** First ~80 chars of the covering element's text — usually names it. */
+  text: string;
+}
+
 export interface VisualState {
   ribbonTabs: RibbonTabInfo[];
   visibleDialogCount: number;
   nameBoxValue: string;
   formulaBarValue: string;
+  /**
+   * Non-null when a click on the ribbon's tab strip would land on something
+   * else. A walk that continues in this state is issuing UI actions into a
+   * backdrop — each one either silently doing nothing or burning the 30s
+   * action timeout — and still reporting PASS. See BUG-0037.
+   */
+  ribbonBlockedBy: RibbonBlocker | null;
 }
 
 export interface StateSnapshot {
@@ -453,11 +480,40 @@ async function captureVisualState(page: Page): Promise<VisualState> {
       'input[aria-label="Formula Bar"], [data-testid="formula-bar"] input, [data-testid="formula-bar"] textarea'
     );
 
+    // Is the ribbon's tab strip actually clickable? Hit-test the centre of a
+    // real tab button and see what comes back. Anything that is neither the
+    // button nor inside the tab strip is covering it.
+    let ribbonBlockedBy: Record<string, unknown> | null = null;
+    const tabStrip = document
+      .querySelector("[data-ribbon-content]")
+      ?.parentElement?.querySelector("div");
+    const probeBtn = tabStrip?.querySelector("button");
+    if (probeBtn) {
+      const r = probeBtn.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        const hit = document.elementFromPoint(
+          r.left + r.width / 2,
+          r.top + r.height / 2
+        );
+        if (hit && hit !== probeBtn && !probeBtn.contains(hit) && !tabStrip!.contains(hit)) {
+          const style = window.getComputedStyle(hit);
+          ribbonBlockedBy = {
+            tag: hit.tagName.toLowerCase(),
+            className: typeof hit.className === "string" ? hit.className : "",
+            role: hit.getAttribute("role"),
+            zIndex: style.zIndex,
+            text: (hit.textContent ?? "").trim().slice(0, 80),
+          };
+        }
+      }
+    }
+
     return {
       ribbonTabs,
       visibleDialogCount,
       nameBoxValue: nameBox?.value ?? "",
       formulaBarValue: formulaBar?.value ?? formulaBar?.textContent ?? "",
+      ribbonBlockedBy: ribbonBlockedBy as VisualState["ribbonBlockedBy"],
     };
   });
 }

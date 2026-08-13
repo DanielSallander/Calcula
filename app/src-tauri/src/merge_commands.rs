@@ -357,7 +357,9 @@ pub fn merge_cells(
     }
 
     // Record the merge region addition
-    undo_stack.record_merge_region_added(to_undo_region(&new_region));
+    // Sheet-tagged: a merge belongs to the sheet it was made on, and the user
+    // can be on another sheet by the time they undo it.
+    undo_stack.record_merge_region_added(active_sheet, to_undo_region(&new_region));
 
     if opened_transaction {
         undo_stack.commit_transaction();
@@ -580,6 +582,10 @@ pub fn unmerge_cells(
         )?;
     }
 
+    // The sheet this unmerge is recorded ON, read before the grid lock is taken
+    // (same reason the writeback guard above runs first).
+    let unmerge_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+
     let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     // `lock_pending`: this command legitimately does nothing when the clicked
@@ -598,7 +604,8 @@ pub fn unmerge_cells(
         if opened_transaction {
             undo_stack.begin_transaction("Unmerge cells".to_string());
         }
-        undo_stack.record_merge_region_removed(to_undo_region(&region));
+        // Sheet-tagged; see `merge_cells`.
+        undo_stack.record_merge_region_removed(unmerge_sheet, to_undo_region(&region));
         if opened_transaction {
             undo_stack.commit_transaction();
         }

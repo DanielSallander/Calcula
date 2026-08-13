@@ -21,6 +21,7 @@ import {
 import type { StateSnapshot } from "../invariants/stateSnapshot";
 import type { OracleBattery } from "../oracles";
 import type { OracleBaseline } from "../oracles/types";
+import { sweepNativeDialogs } from "../helpers/nativeDialogs";
 import type { ActionSource } from "./sources";
 import type { ActionTrace } from "./trace";
 import { createTrace, saveTrace } from "./trace";
@@ -48,6 +49,18 @@ export interface WalkOptions {
   settleTimeMs?: number;
   /** Directory where the live trace is flushed (trace.json). */
   resultsDir?: string;
+  /**
+   * How long the post-action snapshot may take before the walk concludes that
+   * Tauri IPC is blocked — which in practice means a NATIVE dialog is open.
+   *
+   * `captureSnapshot` is the walk's first `invoke` after every action, so it is
+   * exactly where a blocked IPC channel shows up. Default 45s: the slowest
+   * legitimate snapshot measured in these suites is under two seconds, and the
+   * app's heaviest dialogs settle in single digits, so this cannot turn a slow
+   * snapshot into a false failure — it turns an INFINITE one into a reported
+   * failure that names the dialog. See helpers/nativeDialogs.ts (BUG-0039).
+   */
+  snapshotTimeoutMs?: number;
   /** Catalog used for executing instances (default ACTION_CATALOG). */
   catalog?: AnyActionDef[];
   verbose?: boolean;
@@ -72,6 +85,83 @@ export interface ActionTiming {
   durationMs: number;
   /** Set when `execute()` threw and the walk tolerated it. */
   error?: string;
+  /**
+   * Elements covering most of the viewport at the moment an action threw.
+   *
+   * WHY. Playwright's `actionTimeout` turned an invisible hang into a reported
+   * failure, and the report named the victim ("waiting for locator('button')
+   * ... <div class="css-1fr3uyz"> intercepts pointer events") but not the
+   * culprit: an emotion hash is not a component. MEASURED on invariant seed
+   * 1786456498740, where `ribbon.switch-tab` failed TWICE against a ribbon
+   * button that was visible, enabled and stable — something was sitting on top
+   * of the whole ribbon, and nothing in the bundle could say what. A tolerated
+   * throw with no diagnosis is a lead this programme cannot follow, so the
+   * walker takes the census itself, at the moment it still exists.
+   */
+  overlays?: OverlayCensusEntry[];
+}
+
+/** One viewport-covering element, as seen when an action threw. */
+export interface OverlayCensusEntry {
+  tag: string;
+  id: string | null;
+  className: string;
+  role: string | null;
+  position: string;
+  zIndex: string;
+  pointerEvents: string;
+  /** Fraction of the viewport the element's box covers, 0..1. */
+  coverage: number;
+  /** First ~80 chars of text, to identify a menu/dialog by its content. */
+  text: string;
+}
+
+/**
+ * Census of elements that cover at least `minCoverage` of the viewport.
+ *
+ * Deliberately DOM-only and synchronous: it must run in the failure's own
+ * moment, before the settle wait gives whatever it is a chance to unmount.
+ */
+async function censusViewportOverlays(
+  page: Page,
+  minCoverage = 0.4
+): Promise<OverlayCensusEntry[]> {
+  try {
+    return (await page.evaluate((min: number) => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const area = vw * vh;
+      if (area === 0) return [];
+      const out: Array<Record<string, unknown>> = [];
+      for (const el of Array.from(document.body.querySelectorAll("*"))) {
+        const style = window.getComputedStyle(el);
+        if (style.position !== "fixed" && style.position !== "absolute") continue;
+        if (style.display === "none" || style.visibility === "hidden") continue;
+        const r = el.getBoundingClientRect();
+        const w = Math.min(r.right, vw) - Math.max(r.left, 0);
+        const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        if (w <= 0 || h <= 0) continue;
+        const coverage = (w * h) / area;
+        if (coverage < min) continue;
+        out.push({
+          tag: el.tagName.toLowerCase(),
+          id: (el as HTMLElement).id || null,
+          className: typeof el.className === "string" ? el.className : "",
+          role: el.getAttribute("role"),
+          position: style.position,
+          zIndex: style.zIndex,
+          pointerEvents: style.pointerEvents,
+          coverage: Math.round(coverage * 100) / 100,
+          text: (el.textContent ?? "").trim().slice(0, 80),
+        });
+      }
+      return out;
+    }, minCoverage)) as unknown as OverlayCensusEntry[];
+  } catch {
+    // The page may be gone — that is a different failure and is reported by
+    // the caller. Never let diagnostics mask the thing being diagnosed.
+    return [];
+  }
 }
 
 export interface CheckpointTiming {
@@ -122,6 +212,7 @@ export class WalkRunner {
       settleTimeMs = 250,
       resultsDir,
       catalog,
+      snapshotTimeoutMs = 45_000,
       verbose = true,
     } = this.opts;
 
@@ -215,8 +306,23 @@ export class WalkRunner {
           );
         }
         // Other failures are expected with random sequences (preconditions
-        // can be stale) — log and continue.
-        if (verbose) console.log(`    [action failed] ${instance.id}: ${msg}`);
+        // can be stale) — log and continue. But take the overlay census FIRST:
+        // a click that could not land because something covered the target is
+        // the one tolerated failure whose cause disappears if you wait.
+        timing.overlays = await censusViewportOverlays(this.page);
+        if (verbose) {
+          console.log(`    [action failed] ${instance.id}: ${msg}`);
+          if (timing.overlays.length > 0) {
+            for (const o of timing.overlays) {
+              console.log(
+                `      [covering ${Math.round(o.coverage * 100)}% of the viewport] ` +
+                  `<${o.tag} class="${o.className}" role=${o.role ?? "-"}> ` +
+                  `position:${o.position} z:${o.zIndex} pointer-events:${o.pointerEvents}` +
+                  (o.text ? ` text:"${o.text}"` : "")
+              );
+            }
+          }
+        }
       }
 
       // Settle
@@ -235,10 +341,28 @@ export class WalkRunner {
         );
       }
 
-      // Snapshot
+      // Snapshot.
+      //
+      // BOUNDED, because this is the walk's first `invoke` after every action
+      // and therefore exactly where a blocked IPC channel surfaces. A native
+      // dialog blocks Tauri IPC while leaving the page perfectly responsive —
+      // `page.evaluate` returns, the canvas paints, nothing throws — so an
+      // unbounded await here is a SILENT hang, not a failure. Measured: a soak
+      // walk sat on `Failed to rename sheet: Sheet index 2 out of range` with
+      // twelve stacked dialogs and burned its entire 30-minute spec timeout
+      // without printing a line (BUG-0039).
+      const NO_SNAPSHOT = Symbol("snapshot-timeout");
+      let timer: NodeJS.Timeout | undefined;
+      let captured: StateSnapshot | typeof NO_SNAPSHOT;
       try {
-        snapshot = await captureSnapshot(this.page);
+        captured = await Promise.race([
+          captureSnapshot(this.page),
+          new Promise<typeof NO_SNAPSHOT>((resolve) => {
+            timer = setTimeout(() => resolve(NO_SNAPSHOT), snapshotTimeoutMs);
+          }),
+        ]);
       } catch {
+        clearTimeout(timer);
         return fail(
           step,
           {
@@ -250,6 +374,42 @@ export class WalkRunner {
           null
         );
       }
+      clearTimeout(timer);
+
+      if (captured === NO_SNAPSHOT) {
+        // Read AND dismiss whatever is there: the text is the only evidence of
+        // what raised it, and leaving the pile standing poisons every later
+        // walk in the session.
+        const sweep = sweepNativeDialogs();
+        const named = sweep.dismissed.length
+          ? sweep.dismissed.map((t) => `"${t}"`).join("; ")
+          : "(none found — the block was elsewhere)";
+        console.log(
+          `  [ABORT] Tauri IPC stopped answering after ${instance.id}; ` +
+            `native dialogs dismissed: ${named}`
+        );
+        return fail(
+          step,
+          {
+            invariantId: "native-dialog-blocking",
+            message:
+              `Tauri IPC stopped answering within ${Math.round(snapshotTimeoutMs / 1000)}s ` +
+              `after action "${instance.id}". ${sweep.dismissed.length} native ` +
+              `dialog(s) were open and have been dismissed: ${named}. A native ` +
+              `dialog blocks every invoke while leaving the page responsive, so ` +
+              `this would otherwise be a silent hang, not a failure.`,
+            details: {
+              action: instance.id,
+              params: instance.params,
+              dismissedDialogs: sweep.dismissed,
+              snapshotTimeoutMs,
+            },
+          },
+          [],
+          null
+        );
+      }
+      snapshot = captured;
 
       // Cheap invariants
       const violations = invariants.flatMap((inv) => inv.check(snapshot));
@@ -347,14 +507,59 @@ export class WalkRunner {
 // Report formatting
 // ============================================================================
 
+/**
+ * What the walk actually touched, by family, counting only actions that ran
+ * without throwing.
+ *
+ * WHY A PASSING WALK NEEDS THIS. A green walk used to report four numbers, none
+ * of which said what it explored — so "the oracles never found a chart bug" and
+ * "the oracles never created a chart" were indistinguishable in every report
+ * this program has ever produced. They were in fact the second: BUG-0031 left
+ * `chart.select`/`chart.delete` silently doing nothing, and the reports could
+ * not show it. Coverage belongs in the PASS path precisely because that is
+ * where an untested surface hides.
+ */
+export function summarizeCoverage(
+  timings: ActionTiming[]
+): { families: Record<string, number>; byAction: Record<string, number>; threw: number } {
+  const families: Record<string, number> = {};
+  const byAction: Record<string, number> = {};
+  let threw = 0;
+  for (const t of timings) {
+    if (t.error) {
+      threw++;
+      continue;
+    }
+    const family = t.id.split(".")[0];
+    families[family] = (families[family] ?? 0) + 1;
+    byAction[t.id] = (byAction[t.id] ?? 0) + 1;
+  }
+  return { families, byAction, threw };
+}
+
+function formatCoverage(result: WalkResult): string[] {
+  const { families, threw } = summarizeCoverage(result.timings);
+  const entries = Object.entries(families).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return [];
+  return [
+    `  --- Coverage (actions that ran, by family) ---`,
+    `  ${entries.map(([k, n]) => `${k}=${n}`).join(" ")}` +
+      (threw > 0 ? `  [${threw} threw]` : ""),
+  ];
+}
+
 export function formatWalkReport(result: WalkResult): string {
   if (result.passed) {
     return (
-      `[OK] Walk passed\n` +
-      `  Seed: ${result.seed ?? "(trace replay)"}\n` +
-      `  Actions executed: ${result.totalActions}\n` +
-      `  Oracle checkpoints: ${result.checkpoints.length}\n` +
-      `  Elapsed: ${Math.round(result.elapsedMs / 1000)}s`
+      [
+        `[OK] Walk passed`,
+        `  Seed: ${result.seed ?? "(trace replay)"}`,
+        `  Actions executed: ${result.totalActions}`,
+        `  Oracle checkpoints: ${result.checkpoints.length}`,
+        `  Elapsed: ${Math.round(result.elapsedMs / 1000)}s`,
+      ]
+        .concat(formatCoverage(result))
+        .join("\n")
     );
   }
 
@@ -386,6 +591,8 @@ export function formatWalkReport(result: WalkResult): string {
     lines.push(``);
   }
 
+  lines.push(...formatCoverage(result));
+  lines.push(``);
   lines.push(`  --- Action trace (last 20 of ${result.trace.actions.length}) ---`);
   const actions = result.trace.actions;
   const startIdx = Math.max(0, actions.length - 20);

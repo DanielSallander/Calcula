@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "seed": 90010001,
+  "startedAt": "2026-08-12T15:57:37.554Z",
+  "actions": [
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_38"
+      }
+    },
+    {
+      "id": "chart.select",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    }
+  ]
+}
