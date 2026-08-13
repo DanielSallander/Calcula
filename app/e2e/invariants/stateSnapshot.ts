@@ -69,6 +69,34 @@ export interface LogicalState {
   activeSheet: number;
   /** Number of sheets in the workbook (1 if the query fails). */
   sheetCount: number;
+  /**
+   * The workbook's sheet NAMES, in index order (empty if the query fails).
+   *
+   * WHY A COUNT IS NOT ENOUGH. `sheet.rename` changes no count and no active
+   * index, so with `sheetCount` alone a rename that silently did nothing and a
+   * rename that worked produce byte-identical snapshots — and the walker's
+   * coverage line would report the action as "ran" either way. That is exactly
+   * the shape of BUG-0031, where `chart.select`/`chart.delete` were counted as
+   * explored for the whole programme while doing nothing at all. The names are
+   * the cheapest observation that distinguishes the two, and `get_sheets` is
+   * already being invoked here.
+   */
+  sheetNames: string[];
+  /**
+   * The active sheet as the BACKEND reports it (`get_sheets().activeIndex`),
+   * against `activeSheet` above, which is what the FRONTEND believes.
+   *
+   * They are supposed to be the same number and there was no way to notice when
+   * they were not. `hide_sheet` returned a "recommended" active index without
+   * performing the switch, every caller treated it as done, and the backend
+   * stayed on the sheet that had just been hidden — so the tab strip said
+   * Sheet1 while every cell read and write went to Sheet2 (BUG-0046). No digest
+   * could see it: the backend was self-consistent, and the digest only ever
+   * asks the backend.
+   */
+  backendActiveSheet: number;
+  /** Per-sheet visibility, in index order ("visible" | "hidden" | "veryHidden"). */
+  sheetVisibility: string[];
   isEditing: boolean;
 }
 
@@ -430,6 +458,13 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
         gridState?.sheetContext?.activeSheetIndex ??
         0,
       sheetCount: (sheetsResult as any)?.sheets?.length ?? 1,
+      sheetNames: (((sheetsResult as any)?.sheets ?? []) as any[]).map((s: any) =>
+        String(s?.name ?? "")
+      ),
+      backendActiveSheet: (sheetsResult as any)?.activeIndex ?? 0,
+      sheetVisibility: (((sheetsResult as any)?.sheets ?? []) as any[]).map((s: any) =>
+        String(s?.visibility ?? "visible")
+      ),
       isEditing: gridState?.editing === true,
     };
   });

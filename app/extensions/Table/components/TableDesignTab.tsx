@@ -337,7 +337,11 @@ export function ToolsSection(_props: PanelSectionProps): React.ReactElement | nu
         setTableState(null);
         // Clear every mounted Table Design section (each holds its own copy)
         window.dispatchEvent(new Event("table:deselected"));
-        emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+        // NO TABLE_DEFINITIONS_UPDATED HERE. The store announces the `objects`
+        // domain itself now (BUG-0051), and the Shell translator dispatches
+        // that event from it. Re-emitting from the button was the reason the
+        // defect was invisible from this screen and reproducible from every
+        // other route.
       }
     });
   }, [table, setTableState]);
@@ -349,7 +353,7 @@ export function ToolsSection(_props: PanelSectionProps): React.ReactElement | nu
         setTableState(null);
         // Clear every mounted Table Design section (each holds its own copy)
         window.dispatchEvent(new Event("table:deselected"));
-        emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+        // See handleConvertToRange: the store owns this announcement.
       }
     });
   }, [table, setTableState]);

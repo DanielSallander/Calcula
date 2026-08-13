@@ -68,6 +68,43 @@ pub struct UndoResult {
     /// legacy booleans are now DERIVED from this same set, so a kind cannot be
     /// classified twice and disagree with itself.
     pub refresh_domains: Vec<String>,
+    /// The sheet that is ACTIVE now the restore has finished, and its name.
+    ///
+    /// Excel keeps ONE undo history and switches to the sheet the undone action
+    /// happened on, so the user can see what changed. Calcula restored the right
+    /// cells on the right sheet and then said nothing, which made an undo of an
+    /// off-sheet edit completely invisible.
+    ///
+    /// Reported UNCONDITIONALLY, not only when it moved. The frontend decides
+    /// whether to follow by comparing this with the sheet IT believes is active,
+    /// which is the only comparison that can also repair a disagreement; a
+    /// "didSwitch" boolean would be the backend answering a question about the
+    /// frontend's state.
+    ///
+    /// The NAME rides along so the follow costs no second round trip: the tab
+    /// strip, the grid's sheet context and the `SHEET_CHANGED` announcement all
+    /// need it, and fetching it separately would open a window in which the
+    /// frontend has switched sheets but cannot yet say which.
+    pub active_sheet_index: usize,
+    /// Name of `active_sheet_index` (empty only if the workbook has no sheets).
+    pub active_sheet_name: String,
+    /// Top-left cell this restore rewrote on the now-active sheet, if any.
+    ///
+    /// Activating the sheet is only half of "so the user can see what changed":
+    /// the restored cells can be far outside the viewport that sheet was left
+    /// at. This is what the view is aimed at. `None` for a restore that names no
+    /// cell (a column width, a whole-sheet snapshot, an opaque custom payload).
+    pub restored_anchor: Option<RestoredAnchor>,
+}
+
+/// A single cell coordinate on the active sheet. A struct rather than a tuple
+/// because serde renders a tuple as a bare JSON array, and `[6, 4]` on the wire
+/// is one transposition away from being read as (col, row) by the next caller.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredAnchor {
+    pub row: u32,
+    pub col: u32,
 }
 
 /// ONE VOCABULARY OF DOMAINS, and this is the alias to it (§3cd).
@@ -170,6 +207,18 @@ pub struct UndoState {
     /// undo-round-trip oracle read the second case as the third and reported
     /// "the walk undid past the checkpoint" about a sheet insert.
     pub cleared_total: u64,
+    /// How many times the history has been wholesale CLEARED, ever — however
+    /// little each clear discarded.
+    ///
+    /// `cleared_total` counts transactions and is therefore ZERO when the stack
+    /// was already empty, which leaves the one case BUG-0005's fix did not
+    /// cover: a sheet added while the history happens to be empty ends nothing,
+    /// so a caller comparing two readings still concludes the window is fully
+    /// undoable. It is not — the add itself is not undoable. MEASURED on soak
+    /// seed 1786446166374 as `Undoing 22 steps did not restore the checkpoint
+    /// state ... sheetNames[2]: "<absent>" -> "Sheet3"`, whose two digest
+    /// differences were that EMPTY sheet and nothing else.
+    pub clears_total: u64,
     /// The history cap (Excel keeps 100 too).
     pub history_limit: usize,
 }
@@ -626,8 +675,73 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
         undo_seqs: undo_stack.undo_seqs(),
         evicted_total: undo_stack.evicted_total(),
         cleared_total: undo_stack.cleared_total(),
+        clears_total: undo_stack.clears_total(),
         history_limit: undo_stack.max_size(),
     }
+}
+
+/// The active sheet's index and name, for `UndoResult`.
+///
+/// Two short read locks, taken and dropped one at a time and never while the
+/// undo stack is held: the crate's one recorded lock-order inversion was a
+/// sheet-keyed store and `undo_stack` taken in the wrong order, and the census
+/// that followed it asserts `undo_stack` comes FIRST. Every caller here reads
+/// this before it touches the stack.
+fn active_sheet_identity(state: &AppState) -> (usize, String) {
+    let index = *state.active_sheet.read().unwrap();
+    let name = state
+        .sheet_names
+        .read()
+        .unwrap()
+        .get(index)
+        .cloned()
+        .unwrap_or_default();
+    (index, name)
+}
+
+/// Which sheet, if any, a restore should ACTIVATE before it runs.
+///
+/// Four ways to answer "leave the view alone", and each is a decision rather
+/// than a shortcut:
+///
+/// * the transaction names no sheet -- it is nothing but `CustomRestore`
+///   payloads, whose sheet is inside opaque bytes (see `Transaction::target_sheet`);
+/// * it names the sheet already in front of the user, which is the common case
+///   and must cost nothing: no mirror swap, no dependency rebuild;
+/// * it names a sheet that is out of range. That cannot happen while every
+///   sheet structural operation ENDS the history (`invalidate_undo_history_for_sheet_structure`),
+///   which is what makes a stored sheet INDEX safe at all -- it is checked
+///   anyway, because "safe by a rule elsewhere" is how the index became a
+///   hazard the first time;
+/// * it names a HIDDEN sheet. Excel cannot make one active: there is no tab to
+///   select and `Activate` on a hidden sheet raises an error. Following it here
+///   would put the grid on a sheet the tab strip cannot show -- the torn state
+///   this change exists to prevent -- so the restore lands where the changes
+///   say and the view stays put.
+///
+/// Each lock is taken and released on its own line. Nothing is held across
+/// them, and the caller holds nothing either.
+fn activation_target(state: &AppState, transaction: &Transaction) -> Option<usize> {
+    let target = transaction.target_sheet()?;
+    if target == *state.active_sheet.read().unwrap() {
+        return None;
+    }
+    if target >= state.sheet_names.read().unwrap().len() {
+        return None;
+    }
+    let visible = state
+        .sheet_visibility
+        .read()
+        .unwrap()
+        .get(target)
+        .map(|v| v == "visible")
+        // Matches `build_sheet_list`: a sheet with no recorded visibility is
+        // visible, so a short vector must not silently suppress the switch.
+        .unwrap_or(true);
+    if !visible {
+        return None;
+    }
+    Some(target)
 }
 
 /// Apply undo/redo changes and return the result.
@@ -1204,6 +1318,72 @@ pub(crate) fn apply_changes(
         );
     }
 
+    // ------------------------------------------------------------------
+    // SWITCH TO THE SHEET THE ACTION HAPPENED ON -- Excel's rule.
+    // ------------------------------------------------------------------
+    //
+    // Excel keeps ONE undo history across a workbook and switches to the sheet
+    // (or document) the undone action was performed in, so the user SEES what
+    // changed. Calcula already restored the right cells on the right sheet
+    // (BUG-0034) and then said nothing about it, which makes an undo of an
+    // off-sheet edit indistinguishable from nothing happening at all.
+    //
+    // AFTER the restore, not before, and that ordering is a decision. Switching
+    // first would make the target sheet the ACTIVE one for the whole pass and
+    // route every restore down the inline active-sheet arm -- tidier to read,
+    // and it would leave the entire off-sheet path (the deferred geometry
+    // queue, `grids[sheet]` writes, `recalc_after_off_sheet_write`) unexercised
+    // by the very tests written to prove it. That path is BUG-0034's fix and it
+    // is still the only thing that can serve a transaction spanning two sheets
+    // or a target that must NOT be activated. So the restore lands exactly
+    // where it landed yesterday and the view follows it; the mirror swap picks
+    // the restored state up because `activate_sheet` loads `grids[target]`,
+    // `all_column_widths[target]`, `all_row_heights[target]`,
+    // `all_merged_regions[target]` and the user-hidden sets -- every store the
+    // off-sheet arms have just written.
+    //
+    // It holds NO lock: every guard this function took was dropped before the
+    // deferred phase, and `activate_sheet` takes the canonical order itself.
+    //
+    // The dependency maps are rebuilt by `activate_sheet` (they are per-sheet
+    // and keyed by bare coordinates), which is why this must follow the
+    // cascades rather than sit between them: the cascades read the maps of the
+    // sheet they ran against.
+    if let Some(target) = activation_target(state, &transaction) {
+        match crate::sheets::activate_sheet(state, target) {
+            Ok(_) => {
+                // RE-STAMP WHAT `updated_cells` MEANS.
+                //
+                // `sheet_index: None` is the wire's way of saying "the ACTIVE
+                // sheet", and every cell above was stamped against the sheet
+                // that was active while the restore ran. The switch has just
+                // changed which sheet that is, so the stamps now describe a
+                // sheet the caller is no longer on: the restored cells would
+                // arrive labelled with a foreign index while cells from the
+                // sheet the user LEFT arrived labelled "active". The frontend
+                // uses exactly that flag to decide what may reach the formula
+                // bar, so a stale stamp puts one sheet's value under another
+                // sheet's cursor. Relabelling here keeps the field's meaning
+                // ("active" = `active_sheet_index`, which this same result
+                // reports) true of the result as a whole.
+                for cell in updated_cells.iter_mut() {
+                    cell.sheet_index = match cell.sheet_index {
+                        None => Some(active_sheet),
+                        Some(s) if s == target => None,
+                        other => other,
+                    };
+                }
+            }
+            Err(err) => {
+                // A refusal must not cost the restore, which has already
+                // happened and is correct. The only failure mode is an
+                // out-of-range index, which `activation_target` has already
+                // ruled out.
+                eprintln!("[undo] could not activate sheet {}: {}", target, err);
+            }
+        }
+    }
+
     // Push inverse transaction to the appropriate stack (re-acquire undo_stack)
     {
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -1218,6 +1398,15 @@ pub(crate) fn apply_changes(
         let undo_stack = state.undo_stack.lock().unwrap();
         (undo_stack.can_undo(), undo_stack.can_redo())
     };
+
+    // WHERE THE USER IS NOW. Re-read rather than reusing the value captured at
+    // the top: a deferred restore can replace the whole document (`calp_reset`)
+    // and move the active sheet under us, and reporting the pre-restore index
+    // would tell the frontend to follow a switch that has already been undone.
+    let (active_sheet_index, active_sheet_name) = active_sheet_identity(state);
+    let restored_anchor = transaction
+        .restored_anchor_on(active_sheet_index)
+        .map(|(row, col)| RestoredAnchor { row, col });
 
     UndoResult {
         success: true,
@@ -1236,6 +1425,9 @@ pub(crate) fn apply_changes(
         objects_changed: domains.contains(MutationDomain::Objects),
         hidden_changed: domains.contains(MutationDomain::Hidden),
         refresh_domains: domains.wire_names(),
+        active_sheet_index,
+        active_sheet_name,
+        restored_anchor,
     }
 }
 
@@ -1362,6 +1554,7 @@ fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFi
 fn r_outline(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_outline_restore(s, e, d, inv); }
 fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_user_hidden_restore(s, e, d, inv); }
 fn r_pivot_col_widths(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_col_widths_restore(s, e, d, inv); }
+fn r_sheet_tab_state(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_sheet_tab_state_restore(s, e, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -1465,6 +1658,19 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // locks are held. Its own change class so the frontend re-reads the hidden
     // sets — no cell in `updated_cells` reveals a visibility change.
     m.insert(USER_HIDDEN_RESTORE_KIND, RestoreSpec { restore: r_user_hidden, domains: MutationDomains::of(Hidden), defer: false });
+    // Sheet hide / unhide / tab colour (BUG-0050). The `Sheets` domain, because
+    // what changed is the sheet COLLECTION as the tab strip sees it — the
+    // translator fans it out to "sheets:refresh" (the tab bar re-reads the list)
+    // and SHEET_CHANGED (every per-sheet extension cache re-reads).
+    //
+    // DEFERRED, and that is not a preference: undoing the hide of the ACTIVE
+    // sheet puts the user back on it through `sheets::activate_sheet`, whose
+    // contract is that the caller holds no state lock. An inline restore runs
+    // while `apply_changes` still holds grid/grids/styles/widths/heights/merges,
+    // and `activate_sheet` takes every one of them — std's locks are not
+    // reentrant, so that is the deadlock the pivot column-width restore already
+    // paid for once ("the application went away").
+    m.insert(SHEET_TAB_STATE_RESTORE_KIND, RestoreSpec { restore: r_sheet_tab_state, domains: MutationDomains::of(Sheets), defer: true });
     m
 });
 
@@ -2279,6 +2485,10 @@ pub fn undo(
     ribbon_filter_state: State<'_, RibbonFilterState>,
     pane_control_state: State<'_, PaneControlState>,
 ) -> UndoResult {
+    // Read BEFORE the undo stack is locked: `undo_stack` is taken first
+    // everywhere in this crate, and the one lock-order inversion it has ever
+    // had was a sheet-keyed store taken around it.
+    let (active_sheet_index, active_sheet_name) = active_sheet_identity(&state);
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
         match undo_stack.pop_undo() {
@@ -2299,6 +2509,13 @@ pub fn undo(
                     objects_changed: false,
                     hidden_changed: false,
                     refresh_domains: Vec::new(),
+                    // Nothing was undone, so nothing moved -- but the field is
+                    // still the truth about where the user is, and a frontend
+                    // that compares it with its own state must not be told
+                    // "sheet 0" by a refusal.
+                    active_sheet_index,
+                    active_sheet_name,
+                    restored_anchor: None,
                 };
             }
         }
@@ -2321,6 +2538,8 @@ pub fn redo(
     ribbon_filter_state: State<'_, RibbonFilterState>,
     pane_control_state: State<'_, PaneControlState>,
 ) -> UndoResult {
+    // See `undo`: read before the stack is locked.
+    let (active_sheet_index, active_sheet_name) = active_sheet_identity(&state);
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
         match undo_stack.pop_redo() {
@@ -2341,6 +2560,9 @@ pub fn redo(
                     objects_changed: false,
                     hidden_changed: false,
                     refresh_domains: Vec::new(),
+                    active_sheet_index,
+                    active_sheet_name,
+                    restored_anchor: None,
                 };
             }
         }
@@ -4307,6 +4529,11 @@ mod restore_registry_tests {
             // User hide/unhide: inline (only touches the user_hidden_* sublocks)
             // and its own domain so the frontend re-reads the sets.
             ("user_hidden", false, MutationDomains::of(Hidden)),
+            // Sheet hide/unhide/tab colour (BUG-0050). `Sheets`, because what
+            // changed is the sheet collection as the tab strip sees it;
+            // DEFERRED, because putting the user back on an unhidden sheet goes
+            // through `activate_sheet`, whose caller must hold no state lock.
+            ("sheet_tab_state", true, MutationDomains::of(Sheets)),
         ];
         for (kind, defer, domains) in &expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
@@ -4385,7 +4612,15 @@ mod restore_registry_tests {
                 || *kind == "calp_reset"
                 // The outline is its own per-sheet store, taken after the grid
                 // locks drop for the same reason every other store-swap is.
-                || *kind == OUTLINE_RESTORE_KIND;
+                || *kind == OUTLINE_RESTORE_KIND
+                // Sheet visibility / tab colour. The stores themselves are leaf
+                // sublocks that would be safe inline; the RE-ACTIVATION is not.
+                // Undoing the hide of the active sheet puts the user back
+                // through `sheets::activate_sheet`, which takes the grid, the
+                // grids vector, the widths, the heights and the merges -- every
+                // one of which `apply_changes` is still holding during the
+                // inline phase, and std's locks are not reentrant.
+                || *kind == SHEET_TAB_STATE_RESTORE_KIND;
             assert_eq!(
                 spec.defer, legacy_deferred,
                 "defer for '{kind}' disagrees with the legacy prefix deferral"
@@ -4696,6 +4931,159 @@ pub(crate) fn apply_user_hidden_restore(
     });
 }
 
+/// CustomRestore `kind` for a sheet's TAB state — visibility and tab colour.
+pub(crate) const SHEET_TAB_STATE_RESTORE_KIND: &str = "sheet_tab_state";
+
+/// Snapshot for the `"sheet_tab_state"` CustomRestore — the workbook's sheet
+/// VISIBILITY and/or TAB COLOUR vectors before a hide / unhide / recolour, plus
+/// where the user was standing (BUG-0050).
+///
+/// # Why these three are undoable at all, when the five structural ones are not
+///
+/// `hide_sheet`, `unhide_sheet` and `set_tab_color` all construct
+/// `DocumentEffect::mutates` — the state IS written into the `.cala` — took no
+/// `undo_stack`, recorded nothing, and, unlike the five structural commands, did
+/// not invalidate the history either. That left the workbook in the one state
+/// that is indefensible under any reading of Excel: **a persisted change undo
+/// cannot reverse, with the history still claiming it can.** Press Ctrl+Z after
+/// hiding a sheet and the previous edit is undone while the sheet stays hidden,
+/// with nothing to say a step was skipped.
+///
+/// Two fixes close that, and they implement opposite behaviours: record an undo
+/// entry, or end the history the way `add`/`delete`/`rename`/`move`/`copy` do.
+/// The argument that settles the five DOES NOT REACH THESE THREE, and that is
+/// what decides it. Read
+/// `sheets::invalidate_undo_history_for_sheet_structure`: the five end the
+/// history because an undo entry names its sheet by INDEX and those five
+/// RENUMBER every index (or, for a rename, rewrite every formula that spells the
+/// name). Hiding a sheet renumbers nothing and rewrites nothing — it assigns one
+/// element of a parallel `Vec` in place — so every queued entry still describes
+/// exactly the sheet it was recorded on. The hazard the invalidation exists to
+/// prevent is absent here.
+///
+/// With the structural argument gone, what is left is the cost of being wrong in
+/// each direction, and it is asymmetric: ending the history throws away every
+/// undo step the user had accumulated, while recording an entry costs a few
+/// bytes. `hide_sheet_inner` already takes the same cheap direction one line
+/// over ("a false positive, which is the cheap direction"). So: undoable.
+///
+/// # Whole vectors, not per-index deltas
+///
+/// Same reasoning as `UserHiddenSnapshot` and `obj_named_ranges`: the vectors
+/// hold one short string per sheet, `ensure_visibility_len` pads them lazily so
+/// their LENGTH is itself state, and a partial restore could leave the list
+/// disagreeing with itself about how many sheets have a recorded visibility.
+/// `None` for a field means "this change did not touch it" — restoring then
+/// leaves it alone rather than clearing it.
+///
+/// # `active_sheet`
+///
+/// Hiding the ACTIVE sheet moves the user off it (BUG-0046: a hidden sheet
+/// cannot be active). Undoing that hide has to put them back, or the undo
+/// half-happens — the sheet is visible again and the user is somewhere else,
+/// looking at no evidence that anything was restored. Excel selects what an undo
+/// restored; this is the sheet-level form of `restored_anchor`. `None` means the
+/// change never moved the view (unhide, tab colour), and a restore that did not
+/// move the user must not move them back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SheetTabStateSnapshot {
+    visibility: Option<Vec<String>>,
+    tab_colors: Option<Vec<String>>,
+    active_sheet: Option<usize>,
+}
+
+/// Serialized `"sheet_tab_state"` snapshot bytes (in-open-transaction contract).
+pub(crate) fn sheet_tab_state_snapshot_bytes(
+    visibility: Option<Vec<String>>,
+    tab_colors: Option<Vec<String>>,
+    active_sheet: Option<usize>,
+) -> Vec<u8> {
+    serde_json::to_vec(&SheetTabStateSnapshot { visibility, tab_colors, active_sheet })
+        .unwrap_or_default()
+}
+
+/// Restore sheet visibility / tab colours, capturing the CURRENT ones as the
+/// inverse so redo re-applies the hide.
+///
+/// DEFERRED (see the registry row): it re-activates a sheet through
+/// `sheets::activate_sheet`, whose contract is that the caller holds NO state
+/// lock. The deferred pass is the phase where that is true.
+pub(crate) fn apply_sheet_tab_state_restore(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snap: SheetTabStateSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] bad sheet_tab_state snapshot: {}", e);
+            return;
+        }
+    };
+    let sheet_count = state.sheet_names.read().unwrap().len();
+
+    // Each guard is taken, used and dropped on its own line. `activate_sheet`
+    // below takes the canonical order for itself and must find nothing held.
+    let previous_visibility = snap.visibility.as_ref().map(|restored| {
+        let mut visibility = state.sheet_visibility.write(effect).unwrap();
+        let current = visibility.clone();
+        *visibility = restored.clone();
+        // A queued entry cannot outlive a change to the sheet COUNT (every one
+        // of those ends the history), but "safe by a rule elsewhere" is how the
+        // sheet index became a hazard the first time.
+        visibility.truncate(sheet_count);
+        crate::sheets::ensure_visibility_len(&mut visibility, sheet_count);
+        current
+    });
+    let previous_tab_colors = snap.tab_colors.as_ref().map(|restored| {
+        let mut tab_colors = state.tab_colors.write(effect).unwrap();
+        let current = tab_colors.clone();
+        *tab_colors = restored.clone();
+        tab_colors.truncate(sheet_count);
+        crate::sheets::ensure_tab_color_len(&mut tab_colors, sheet_count);
+        current
+    });
+
+    // The inverse is captured BEFORE the activation, so a redo re-applies the
+    // hide from the same standing point the user hid it from.
+    let previous_active = snap.active_sheet.map(|_| *state.active_sheet.read().unwrap());
+    inverse_transaction.add_change(engine::undo::CellChange::CustomRestore {
+        kind: SHEET_TAB_STATE_RESTORE_KIND.to_string(),
+        data: sheet_tab_state_snapshot_bytes(
+            previous_visibility,
+            previous_tab_colors,
+            previous_active,
+        ),
+    });
+
+    // PUT THE USER BACK, under exactly the rules `activation_target` applies to
+    // a cell restore: never onto the sheet already in front of them, never out
+    // of range, and never onto a HIDDEN one (Excel cannot make a hidden sheet
+    // active, so following the record there would produce the torn state where
+    // the tab strip cannot show what the grid is painting).
+    let Some(target) = snap.active_sheet else { return };
+    if target == *state.active_sheet.read().unwrap() || target >= sheet_count {
+        return;
+    }
+    let visible = state
+        .sheet_visibility
+        .read()
+        .unwrap()
+        .get(target)
+        .map(|v| v == "visible")
+        // Matches `build_sheet_list`: an unrecorded visibility is visible.
+        .unwrap_or(true);
+    if !visible {
+        return;
+    }
+    if let Err(err) = crate::sheets::activate_sheet(state, target) {
+        // A refusal must not cost the restore, which has already happened and
+        // is correct.
+        eprintln!("[undo] could not activate sheet {}: {}", target, err);
+    }
+}
+
 /// Snapshot for the "obj_named_ranges" CustomRestore — the whole named-range
 /// map before a structural edit rewrote the definitions.
 ///
@@ -4982,6 +5370,10 @@ mod undo_sheet_domain_tests;
 #[cfg(test)]
 #[path = "undo_sheet_structure_tests.rs"]
 mod undo_sheet_structure_tests;
+
+#[cfg(test)]
+#[path = "undo_sheet_activation_tests.rs"]
+mod undo_sheet_activation_tests;
 
 #[cfg(test)]
 #[path = "autofilter_table_button_tests.rs"]

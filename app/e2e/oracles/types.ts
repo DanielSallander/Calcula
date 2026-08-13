@@ -41,6 +41,11 @@ export interface OracleBaseline {
    *  tell that case from "the walk undid past the checkpoint", and reported a
    *  sheet insert as an undo defect — BUG-0005. */
   clearedTotal: number;
+  /** How many times a WHOLESALE clear had HAPPENED when the baseline was
+   *  taken, however little each one discarded. `clearedTotal` counts
+   *  transactions and stays at zero when the stack was already empty, which
+   *  left one case of the same family standing — see `UndoStateJson`. */
+  clearsTotal: number;
 }
 
 export interface OracleCheckpointResult {

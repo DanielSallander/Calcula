@@ -966,6 +966,11 @@ pub fn delete_table(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    // `sheet_names` BEFORE `tables`, and cloned so no guard is held at all --
+    // the pass takes `sheet_names` and then `tables`, so acquiring them the
+    // other way round here is the cycle BUG-0045 hung the app with. It was
+    // taken below, mid-function, with `tables` already alive.
+    let delete_sheet_names = state.sheet_names.read().unwrap().clone();
     let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
 
@@ -983,11 +988,9 @@ pub fn delete_table(
     };
 
     let table_name_upper = table.name.to_uppercase();
-    // Cloned rather than held: `rewrite_table_refs_to_ranges` needs it only to
-    // qualify a reference to a table on another sheet, and holding the guard
-    // across the rewrite would add a fourth lock to a function that already
-    // holds three.
-    let delete_sheet_names = state.sheet_names.read().unwrap().clone();
+    // `delete_sheet_names` was cloned above, before `tables` — see the lock-order
+    // note there. `rewrite_table_refs_to_ranges` needs it only to qualify a
+    // reference to a table on another sheet.
     let rewritten_cells = rewrite_table_refs_to_ranges(
         &tables,
         &table_names,
@@ -1915,9 +1918,11 @@ pub fn set_totals_row_function(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
+    // CANONICAL LOCK ORDER: both grid locks first, then `sheet_names`, then
+    // `tables` (see `delete_table` and BUG-0045).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let totals_sheet_names = state.sheet_names.read().unwrap().clone();
     let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
@@ -1962,7 +1967,6 @@ pub fn set_totals_row_function(
 
     let mut seeds: Vec<(u32, u32)> = Vec::new();
     if let Some((row, col, formula)) = written {
-        let sheet_names = state.sheet_names.read().unwrap().clone();
         let table_names = state.table_names.read().unwrap();
         write_table_formula_cell(
             &state,
@@ -1970,7 +1974,7 @@ pub fn set_totals_row_function(
             &mut grids,
             &tables,
             &table_names,
-            &sheet_names,
+            &totals_sheet_names,
             active_sheet,
             row,
             col,
@@ -2028,9 +2032,11 @@ pub fn toggle_totals_row(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
+    // CANONICAL LOCK ORDER: both grid locks first, then `sheet_names`, then
+    // `tables` (see `delete_table` and BUG-0045).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let toggle_sheet_names = state.sheet_names.read().unwrap().clone();
     let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
@@ -2085,7 +2091,6 @@ pub fn toggle_totals_row(
     // WRITE, after the `table` borrow ends: resolving the structured reference
     // needs `&tables`, and `table` is a mutable borrow of it.
     if !written.is_empty() {
-        let sheet_names = state.sheet_names.read().unwrap().clone();
         let table_names = state.table_names.read().unwrap();
         for (row, col, formula) in &written {
             write_table_formula_cell(
@@ -2094,7 +2099,7 @@ pub fn toggle_totals_row(
                 &mut grids,
                 &tables,
                 &table_names,
-                &sheet_names,
+                &toggle_sheet_names,
                 active_sheet,
                 *row,
                 *col,
@@ -2524,9 +2529,11 @@ pub fn convert_to_range(
         return TableResult::err(&e);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
+    // CANONICAL LOCK ORDER: both grid locks first, then `sheet_names`, then
+    // `tables` (see `delete_table` and BUG-0045).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    let convert_sheet_names = state.sheet_names.read().unwrap().clone();
     let mut tables = state.tables.write(&effect).unwrap();
     let mut table_names = state.table_names.write(&effect).unwrap();
 
@@ -2540,7 +2547,6 @@ pub fn convert_to_range(
     };
 
     let table_name_upper = table.name.to_uppercase();
-    let convert_sheet_names = state.sheet_names.read().unwrap().clone();
 
     let rewritten_cells = rewrite_table_refs_to_ranges(
         &tables,
@@ -3159,6 +3165,9 @@ pub fn set_calculated_column(
     // going to take in every case that does any work.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    // `sheet_names` BEFORE `tables`, for the same reason and by the same rule:
+    // it too was taken inside the block below with `tables` alive (BUG-0045).
+    let calc_sheet_names = state.sheet_names.read().unwrap().clone();
     let mut tables = state.tables.write(&effect).unwrap();
 
     let table = match tables.get_mut(&active_sheet).and_then(|t| t.get_mut(&table_id)) {
@@ -3198,9 +3207,9 @@ pub fn set_calculated_column(
             }
         };
 
-        // `grid` and `grids` were acquired at the top of the function -- see the
-        // lock-order note there.
-        let sheet_names = state.sheet_names.read().unwrap();
+        // `grid`, `grids` and `sheet_names` were acquired at the top of the
+        // function -- see the lock-order note there.
+        let sheet_names = &calc_sheet_names;
         let table_names = state.table_names.read().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let styles = state.style_registry.read().unwrap();

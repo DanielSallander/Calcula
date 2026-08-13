@@ -1010,12 +1010,26 @@ function SpreadsheetContent({
         return;
       }
 
+      // The pane options are what make this agree with the SELECTION under a
+      // frozen header row or a split: without them the pixel is mapped as if
+      // nothing were frozen, and the context menu acts on a different cell from
+      // the one the right-click highlighted.
+      const hasSplitPanes =
+        (splitConfig.splitRow !== null && splitConfig.splitRow > 0) ||
+        (splitConfig.splitCol !== null && splitConfig.splitCol > 0);
       const clickedCell = getCellFromPixel(
         mouseX,
         mouseY,
         config,
         viewport,
-        dimensions
+        dimensions,
+        {
+          freezeConfig: hasSplitPanes
+            ? { freezeRow: splitConfig.splitRow ?? null, freezeCol: splitConfig.splitCol ?? null }
+            : freezeConfig ?? undefined,
+          splitBarSize: hasSplitPanes ? SPLIT_BAR_SIZE : 0,
+          splitViewport: hasSplitPanes ? splitViewport : undefined,
+        }
       );
 
       const menuContext: GridMenuContext = {
@@ -1054,7 +1068,7 @@ function SpreadsheetContent({
       // Emit event for Shell to handle rendering
       emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, request);
     },
-    [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
+    [containerRef, config, viewport, dimensions, selection, gridState.sheetContext, gridState.zoom, freezeConfig, splitConfig, splitViewport]
   );
 
   // -------------------------------------------------------------------------

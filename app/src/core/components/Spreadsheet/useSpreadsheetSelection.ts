@@ -40,6 +40,7 @@ import {
   getAllRowHeights,
   getDefaultDimensions,
 } from "../../lib/tauri-api";
+import type { UndoResult } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
 import { getActiveGridTheme } from "../../theme/skinLoader";
@@ -47,7 +48,14 @@ import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
-import { setColumnWidth, setRowHeight, setAllDimensions, updateConfig } from "../../state/gridActions";
+import {
+  setColumnWidth,
+  setRowHeight,
+  setAllDimensions,
+  updateConfig,
+  setActiveSheet as setActiveSheetAction,
+  setSelection as setSelectionAction,
+} from "../../state/gridActions";
 import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
@@ -94,7 +102,7 @@ export function useSpreadsheetSelection({
   const effectiveSplitBarSize = hasSplit ? 4 : 0;
   const effectiveSplitViewport = hasSplit ? splitViewport : undefined;
 
-  const { scrollToSelection, registerScrollContainer } = useViewport();
+  const { scrollToSelection, scrollToCell, registerScrollContainer } = useViewport();
 
   const {
     selectCell,
@@ -187,7 +195,15 @@ export function useSpreadsheetSelection({
     };
 
     fetchCellContent();
-  }, [selection?.endRow, selection?.endCol, isEditing]);
+    // THE ACTIVE SHEET IS A DEPENDENCY, and its absence was a real defect on
+    // the ordinary tab click long before undo learned to switch sheets.
+    // `getCell` reads the ACTIVE sheet, and a sheet switch that lands on the
+    // same coordinates — Sheet2 has no saved state, so the switch selects A1
+    // and A1 was already selected — re-ran nothing. The formula bar went on
+    // showing the PREVIOUS sheet's cell against the new sheet's grid: the two
+    // disagreed, and the only clue was that the value was right for a sheet
+    // you were no longer on.
+  }, [selection?.endRow, selection?.endCol, isEditing, sheetContext.activeSheetIndex]);
 
   useCellEvents(
     useCallback(
@@ -675,12 +691,118 @@ export function useSpreadsheetSelection({
     }
   }, [canvasRef]);
 
-  // Handle Undo (Ctrl+Z)
-  const handleUndo = useCallback(async () => {
-    console.log("[useSpreadsheetSelection] Undo requested");
-    try {
-      const result = await undoApi();
-      console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
+  // -------------------------------------------------------------------------
+  // FOLLOW A BACKEND-INITIATED SHEET SWITCH
+  // -------------------------------------------------------------------------
+  //
+  // Excel keeps one undo history and switches to the sheet the undone action
+  // happened on, so the user sees what changed. The backend performs that
+  // switch (it owns the per-sheet mirrors) and reports the result; this is the
+  // frontend half, and everything about it is about ATOMICITY.
+  //
+  // WHY IT REUSES THE TAB-CLICK CHANNEL RATHER THAN INVENTING ONE. A backend
+  // switch the frontend follows only partially is worse than no switch at all:
+  // it shows one sheet's tab over another sheet's data. The set of things that
+  // must move is large and still growing — the tab strip, the grid's sheet
+  // context, the canvas's cell cache, column widths, row heights, the
+  // user-hidden sets, zoom, split, freeze panes, gridlines, the four display
+  // flags, and every extension that keys off the active sheet. All of them
+  // already answer to `sheet:beforeSwitch` / `sheet:normalSwitch` /
+  // SHEET_CHANGED, because that is what a tab click fires. A second channel
+  // would be a second list to keep in step, and the last time per-sheet state
+  // had two hydration paths the second one was mount-only and painted sheet 1's
+  // frozen panes on sheet 2.
+  //
+  // WHY IT IS SYNCHRONOUS. There is no `await` between the first dispatch and
+  // the last, so React cannot render — and the browser cannot paint — halfway
+  // through: the tab highlight, the sheet context and the refresh triggers all
+  // land in one batch. The asynchronous parts (dimension re-read, view
+  // hydration, cell fetch) are the SAME ones a tab click defers, so this can be
+  // no less atomic than the gesture it imitates.
+  //
+  // Returns whether it actually switched, so the caller can aim the selection
+  // at what was restored.
+  const followBackendSheetActivation = useCallback(
+    (index: number, name: string): boolean => {
+      if (index === sheetContext.activeSheetIndex) return false;
+
+      // Save the sheet we are LEAVING (selection + scroll), exactly as a tab
+      // click does, or coming back lands at A1 with the scroll thrown away.
+      window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+        detail: { oldSheetIndex: sheetContext.activeSheetIndex, newSheetIndex: index },
+      }));
+
+      // The grid's sheet context. The tab strip has no state of its own to
+      // update: it syncs its highlight from this.
+      dispatch(setActiveSheetAction(index, name));
+
+      // The grid data + every piece of per-sheet chrome.
+      window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
+        detail: { newSheetIndex: index, newSheetName: name },
+      }));
+
+      // Extensions (AutoFilter, Grouping, Protection, ...).
+      emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: index, sheetName: name });
+      return true;
+    },
+    [dispatch, sheetContext.activeSheetIndex]
+  );
+
+  // -------------------------------------------------------------------------
+  // WHAT A RESTORE DOES TO THE VIEW — one implementation for undo AND redo
+  // -------------------------------------------------------------------------
+  //
+  // These two bodies were byte-identical apart from the word "undo"/"redo" in
+  // one event payload, and that is not a tidiness observation: every gap this
+  // path has ever had was added to one of them and forgotten in the other, and
+  // the last two guards written for it (`redoing_an_off_sheet_set_cell_...`,
+  // `redoing_a_named_range_definition_...`) exist precisely because "redo is
+  // the same function" kept turning out not to be true. Sheet activation is one
+  // more thing that has to happen in both, so there is now one place for it.
+  const applyRestoreToTheView = useCallback(
+    async (result: UndoResult, source: "undo" | "redo") => {
+      // THE SHEET FIRST, before anything is repainted or announced.
+      //
+      // The backend has already switched (Excel's rule: an undo happens on the
+      // sheet the action happened on, and it switches there so you can see it),
+      // so from this moment every backend read answers about the NEW sheet.
+      // Following it first means the dimension re-read, the cell fetch and the
+      // domain refreshes below all describe the same sheet the tab strip does.
+      // Doing it later would repaint the new sheet's cells under the old
+      // sheet's chrome for one frame.
+      const switched = followBackendSheetActivation(
+        result.activeSheetIndex,
+        result.activeSheetName,
+      );
+
+      // AIM THE VIEW AT WHAT CHANGED — only when the sheet moved, and in the
+      // SAME synchronous batch as the switch.
+      //
+      // Switching sheets is only half of "so the user can see what changed":
+      // the restored cells can be anywhere on a sheet that was left scrolled
+      // somewhere else, and landing on that sheet's saved selection would show
+      // a sheet with no visible evidence of the undo. Excel selects the range
+      // an undo restored; this does the same for the switch case.
+      //
+      // It has to be dispatched HERE rather than after the awaits below: the
+      // switch itself restores the target sheet's saved selection, so a later
+      // dispatch would render that selection first and replace it a frame
+      // later — a visible jump. The SCROLL is deferred (see below) because a
+      // structural restore changes the dimensions it has to measure against.
+      //
+      // Deliberately NOT done when the sheet did not move: a same-sheet undo
+      // has never moved the selection, several E2E journeys depend on where the
+      // cursor is after Ctrl+Z, and widening that is a separate decision.
+      const anchor = switched ? result.restoredAnchor : null;
+      if (anchor) {
+        dispatch(setSelectionAction({
+          startRow: anchor.row,
+          startCol: anchor.col,
+          endRow: anchor.row,
+          endCol: anchor.col,
+          type: "cells",
+        }));
+      }
 
       // For structural restores (insert/delete rows/cols undo), refresh dimensions
       // IMPORTANT: await before refreshing cells so canvas renders with correct dimensions
@@ -705,26 +827,35 @@ export function useSpreadsheetSelection({
         emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
       }
 
-      // Report the change DOMAINS this undo touched and let the Shell translator
-      // fan out to the concrete per-feature refresh events. Core stays
-      // feature-agnostic — no pivot:refresh/slicers:refresh/styles:refresh/...
-      // literals here. ("styles" is always included: undo can re-apply formatting.)
-      // The backend reports the domains; Core no longer re-derives them from a
-      // ladder of booleans. That ladder was the reason the NON-CELL domains
-      // announced nothing on undo: adding one meant editing a Rust struct, a TS
-      // interface and this list in step, and outline / hyperlinks / validations /
-      // annotations / controls never were. ("styles" is always included: undo can
-      // re-apply formatting, and no restore kind reports it.)
+      // Report the change DOMAINS this restore touched and let the Shell
+      // translator fan out to the concrete per-feature refresh events. Core
+      // stays feature-agnostic — no pivot:refresh/slicers:refresh/... literals
+      // here. The backend reports the domains; Core no longer re-derives them
+      // from a ladder of booleans. That ladder was the reason the NON-CELL
+      // domains announced nothing on undo: adding one meant editing a Rust
+      // struct, a TS interface and this list in step, and outline / hyperlinks /
+      // validations / annotations / controls never were. ("styles" is always
+      // included: undo can re-apply formatting, and no restore kind reports it.)
       const domains: MutationDomain[] = [
         "styles",
         ...((result.refreshDomains ?? []) as MutationDomain[]),
       ];
-      emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
+      emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source });
 
       // Control/filter state restored: recalc GET.CONTROLVALUE dependents
       // (fire-and-forget; repaints when done).
       if (domains.includes("ribbonFilter") || domains.includes("paneControl")) {
         void recalcControlValueCells();
+      }
+
+      // ...and only now scroll to it: the dimensions a structural restore
+      // changed have been re-read above, so the measurement is against the
+      // geometry the user is actually looking at. `scrollToCell`, not
+      // `scrollToSelection` — the latter reads the selection out of state,
+      // which React has not necessarily committed yet, so it would scroll to
+      // where the cursor used to be.
+      if (anchor) {
+        scrollToCell(anchor.row, anchor.col, false);
       }
 
       // Emit event to update any listeners (e.g., formula bar).
@@ -744,10 +875,28 @@ export function useSpreadsheetSelection({
           formula: firstCell.formula || null,
         });
       }
+    },
+    [
+      canvasRef,
+      dispatch,
+      followBackendSheetActivation,
+      refreshDimensionsFromBackend,
+      recalcControlValueCells,
+      scrollToCell,
+    ]
+  );
+
+  // Handle Undo (Ctrl+Z)
+  const handleUndo = useCallback(async () => {
+    console.log("[useSpreadsheetSelection] Undo requested");
+    try {
+      const result = await undoApi();
+      console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
+      await applyRestoreToTheView(result, "undo");
     } catch (error) {
       console.error("[useSpreadsheetSelection] Undo failed:", error);
     }
-  }, [canvasRef, refreshDimensionsFromBackend, recalcControlValueCells]);
+  }, [applyRestoreToTheView]);
 
   // Handle Redo (Ctrl+Y or Ctrl+Shift+Z)
   const handleRedo = useCallback(async () => {
@@ -755,67 +904,11 @@ export function useSpreadsheetSelection({
     try {
       const result = await redoApi();
       console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
-
-      // For structural restores, refresh dimensions
-      // IMPORTANT: await before refreshing cells so canvas renders with correct dimensions
-      // See handleUndo: a hide/unhide redo is invisible in updatedCells.
-      if (result.structuralRestore || result.mergeChanged || result.hiddenChanged) {
-        await refreshDimensionsFromBackend();
-      }
-
-      // Trigger canvas refresh
-      const canvas = canvasRef.current;
-      if (canvas) {
-        await canvas.refreshCells();
-        canvas.redraw();
-      }
-
-      // Notify extensions about structural change so they can update their state
-      if (result.structuralRestore) {
-        emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
-      }
-
-      // Report the change DOMAINS this redo touched (see handleUndo) — one generic
-      // event, Shell translates to per-feature refreshes. Core names no features.
-      // The backend reports the domains; Core no longer re-derives them from a
-      // ladder of booleans. That ladder was the reason the NON-CELL domains
-      // announced nothing on undo: adding one meant editing a Rust struct, a TS
-      // interface and this list in step, and outline / hyperlinks / validations /
-      // annotations / controls never were. ("styles" is always included: undo can
-      // re-apply formatting, and no restore kind reports it.)
-      const domains: MutationDomain[] = [
-        "styles",
-        ...((result.refreshDomains ?? []) as MutationDomain[]),
-      ];
-      emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "redo" });
-
-      // Control/filter state restored: recalc GET.CONTROLVALUE dependents
-      // (fire-and-forget; repaints when done).
-      if (domains.includes("ribbonFilter") || domains.includes("paneControl")) {
-        void recalcControlValueCells();
-      }
-
-      // Emit event to update any listeners (e.g., formula bar).
-      // ACTIVE-SHEET cells only. Now that a restore reports which sheet it
-      // wrote, an undo of an off-sheet edit can put a foreign cell first in
-      // the list, and the formula bar has no sheet dimension — it would show
-      // another sheet's content against the current selection.
-      const firstCell = result.updatedCells.find(
-        (c) => c.sheetIndex === null || c.sheetIndex === undefined
-      );
-      if (firstCell) {
-        cellEvents.emit({
-          row: firstCell.row,
-          col: firstCell.col,
-          oldValue: undefined,
-          newValue: firstCell.display,
-          formula: firstCell.formula || null,
-        });
-      }
+      await applyRestoreToTheView(result, "redo");
     } catch (error) {
       console.error("[useSpreadsheetSelection] Redo failed:", error);
     }
-  }, [canvasRef, refreshDimensionsFromBackend, recalcControlValueCells]);
+  }, [applyRestoreToTheView]);
 
   // FIX: Wrapper for extendTo that uses merge expansion during drag
   // This is passed to useMouseSelection for drag operations
@@ -925,9 +1018,20 @@ export function useSpreadsheetSelection({
         return;
       }
 
-      // Get cell from click position to check for extension click interceptors
+      // Get cell from click position to check for extension click interceptors.
+      //
+      // THE PANE OPTIONS ARE NOT OPTIONAL. Without them getCellFromPixel maps
+      // the pixel as if nothing were frozen, so with a frozen header row (or a
+      // split) every interceptor — the note editor, the validation dropdown,
+      // the hyperlink follow, a button cell — was handed a DIFFERENT cell from
+      // the one the click actually selected, and acted on it. Every other
+      // caller of this function already passes them; this one did not.
       const { getCellFromPixel } = await import("../../lib/gridRenderer");
-      const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions);
+      const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions, {
+        freezeConfig: effectiveFreezeConfig,
+        splitBarSize: effectiveSplitBarSize,
+        splitViewport: effectiveSplitViewport,
+      });
 
       // FIX: Track if mouseup occurs during the async interceptor check.
       // Without this, a fast click-release can leave isDragging stuck at true:
@@ -970,7 +1074,7 @@ export function useSpreadsheetSelection({
         baseHandleMouseUp();
       }
     },
-    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions, state.zoom]
+    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions, state.zoom, effectiveFreezeConfig, effectiveSplitBarSize, effectiveSplitViewport]
   );
 
   const handleMouseMove = useCallback(

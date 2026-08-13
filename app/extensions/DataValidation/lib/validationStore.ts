@@ -98,10 +98,17 @@ export function setPromptState(visible: boolean, cell: { row: number; col: numbe
 /**
  * Re-read the cached validation ranges from the backend and sync the grid
  * overlay regions the dropdown chevrons are painted from.
+ *
+ * `state.validationRanges` is read SYNCHRONOUSLY by the chevron renderer, the
+ * dropdown click path and the input prompt, so the whole list is swapped in at
+ * once (never cleared first) and a failed read leaves the previous rule set
+ * standing. `stillCurrent` is honoured because the rules describe the ACTIVE
+ * SHEET: a pass still in flight when the sheet changes must not write it.
  */
-async function readValidationState(): Promise<void> {
+async function readValidationState(stillCurrent: () => boolean): Promise<void> {
   try {
     const ranges = await getAllDataValidations();
+    if (!stillCurrent()) return;
     state.validationRanges = ranges;
     syncDropdownChevronRegions();
 
@@ -125,7 +132,9 @@ async function readValidationState(): Promise<void> {
  * dialog that caused it, and each pass is an IPC round-trip that rebuilds one
  * grid region per validated cell.
  */
-const validationRefresh = createCoalescedRefresh(() => readValidationState());
+const validationRefresh = createCoalescedRefresh((stillCurrent) =>
+  readValidationState(stillCurrent)
+);
 
 /**
  * Ask for a rule-set refresh. This is what LISTENERS call: the

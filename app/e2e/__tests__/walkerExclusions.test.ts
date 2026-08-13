@@ -116,6 +116,19 @@ describe("the walker's action exclusions expire with the bugs that justify them"
     }
   });
 
+  it("covers the sheet operations that RENUMBER the workbook, and the one that hides", () => {
+    // The four re-enabled actions were the four that had been suppressed — not
+    // the four that matter. `move` and `copy` are the other two commands the
+    // undo oracle's own message names as history-ending, and they are the two
+    // that renumber every index-anchored object without deleting anything;
+    // `hide` changes which sheet is ACTIVE while changing the sheet list not at
+    // all, which is where BUG-0046 lived. None of the three existed here.
+    const generated = new Set(ACTION_CATALOG.map((a) => a.id));
+    for (const id of ["sheet.move", "sheet.copy", "sheet.hide"]) {
+      expect(generated.has(id), `${id} is not generatable`).toBe(true);
+    }
+  });
+
   it("has a detector that fires — a closed bug's exclusion is caught", () => {
     // The self-test the fourteen census families all carry: prove the check
     // can fail, using a synthetic list rather than the real one.

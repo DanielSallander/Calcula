@@ -37,7 +37,7 @@ import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 // ============================================================================
 
 /** An inclusive cell rectangle covered by selection chrome. */
-interface ChromeRect {
+export interface ChromeRect {
   minRow: number;
   maxRow: number;
   minCol: number;
@@ -53,7 +53,7 @@ interface ChromeRect {
  * else nothing paints between the cell pass and the replay point, so the output
  * is identical and the work is skipped.
  */
-function collectChromeRects(state: RenderState): ChromeRect[] {
+export function collectChromeRects(state: RenderState): ChromeRect[] {
   const rects: ChromeRect[] = [];
   const push = (r: { startRow: number; endRow: number; startCol: number; endCol: number }) => {
     rects.push({
@@ -77,13 +77,27 @@ function collectChromeRects(state: RenderState): ChromeRect[] {
   return rects;
 }
 
-function isCoveredByChrome(rects: ChromeRect[], row: number, col: number): boolean {
+export function isCoveredByChrome(rects: ChromeRect[], row: number, col: number): boolean {
   for (const r of rects) {
     if (row >= r.minRow && row <= r.maxRow && col >= r.minCol && col <= r.maxCol) {
       return true;
     }
   }
   return false;
+}
+
+/**
+ * One captured "over-selection" decoration, waiting for the selection chrome to
+ * be down.
+ *
+ * `clip` is the PANE the cell was painted in, and it is not optional detail:
+ * with frozen or split panes the cell pass runs inside `renderZone`'s clip, and
+ * the replay happens long after that clip was restored. Without carrying it, a
+ * decoration captured in one pane could paint over another.
+ */
+export interface DeferredCellDecoration {
+  context: CellDecorationContext;
+  clip: { x: number; y: number; width: number; height: number } | null;
 }
 
 /**
@@ -97,9 +111,16 @@ function isCoveredByChrome(rects: ChromeRect[], row: number, col: number): boole
  * contexts costs one object per chrome-covered cell (one, for the usual
  * single-cell selection) and cannot disagree with the pass that produced it.
  */
-export function drawDeferredCellDecorations(deferred: CellDecorationContext[]): void {
-  for (const context of deferred) {
+export function drawDeferredCellDecorations(deferred: DeferredCellDecoration[]): void {
+  for (const { context, clip } of deferred) {
+    if (clip) {
+      context.ctx.save();
+      context.ctx.beginPath();
+      context.ctx.rect(clip.x, clip.y, clip.width, clip.height);
+      context.ctx.clip();
+    }
     applyCellDecorations(context, "over-selection");
+    if (clip) context.ctx.restore();
   }
 }
 
@@ -597,7 +618,7 @@ function drawBorderLine(
  * Handles merged cells by drawing master cells with expanded dimensions.
  * Applies style interceptors for features like conditional formatting.
  */
-export function drawCellText(state: RenderState): CellDecorationContext[] {
+export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
   const rowHeaderWidth = rowHeaderGutter(config);
   const colHeaderHeight = colHeaderGutter(config);
@@ -628,7 +649,7 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
   // context per visible cell per frame to no effect.
   const useOverSelection = hasCellDecorations("over-selection");
   const chromeRects = useOverSelection ? collectChromeRects(state) : [];
-  const deferred: CellDecorationContext[] = [];
+  const deferred: DeferredCellDecoration[] = [];
 
   // Cell types render as their own content (suppressed in Show Formulas mode,
   // where the raw value/formula must stay visible).
@@ -746,7 +767,7 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
             };
             if (useDecorations) applyCellDecorations(decorationContext);
             if (useOverSelection) {
-              if (isCoveredByChrome(chromeRects, row, col)) deferred.push(decorationContext);
+              if (isCoveredByChrome(chromeRects, row, col)) deferred.push({ context: decorationContext, clip: null });
               else applyCellDecorations(decorationContext, "over-selection");
             }
           }
@@ -792,8 +813,15 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
       const isMergedMaster = rowSpan > 1 || colSpan > 1;
 
       // For empty cells with default style, skip entirely (unless merged,
-      // interceptors, decorations, or a cell-type assignment)
-      const hasDecorations = hasCellDecorations();
+      // interceptors, decorations, or a cell-type assignment).
+      //
+      // BOTH anchors count. This used to ask `hasCellDecorations()`, which
+      // answers for the UNDER-selection registry alone, so an existing-but-empty
+      // unstyled cell was skipped before its note/error/bookmark indicator could
+      // paint — unless some unrelated extension (Sparklines, Checkbox) happened
+      // to have registered an under-selection decoration. The Review
+      // extension's triangle depended on Sparklines being loaded.
+      const hasDecorations = useDecorations || useOverSelection;
       if (isEmpty && !isMergedMaster && !cellTypeHere) {
         const si = cell.styleIndex ?? 0;
         if (si === 0 && !hasDecorations && !useInterceptors) {
@@ -1099,7 +1127,7 @@ export function drawCellText(state: RenderState): CellDecorationContext[] {
         const decorationContext: CellDecorationContext = { ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: displayValue, styleIndex, styleCache };
         if (useDecorations) applyCellDecorations(decorationContext);
         if (useOverSelection) {
-          if (isCoveredByChrome(chromeRects, row, col)) deferred.push(decorationContext);
+          if (isCoveredByChrome(chromeRects, row, col)) deferred.push({ context: decorationContext, clip: null });
           else applyCellDecorations(decorationContext, "over-selection");
         }
       }

@@ -445,10 +445,35 @@ pub(crate) fn restamp_workbook_name_casing(
     // authorities, and because separating them would give the census three call
     // sites to police instead of one. Each is individually gated: a workbook
     // with no tables pays one `is_empty()` for the table pass.
-    let named_ranges = state.named_ranges.read().ok();
+    //
+    // LOCK ORDER — AND THIS FUNCTION HUNG THE APP FOR THE THIRD TIME IN THIS
+    // PROGRAMME (BUG-0045). It used to take the four name authorities FIRST and
+    // the two grid locks LAST, which is the crate's canonical order inside out
+    // twice over:
+    //
+    //   this function : named_ranges, tables, table_names -> sheet_names
+    //                   ... and then grid, grids, with all three still alive
+    //   the pass      : grid, grids, sheet_names          -> ... -> tables
+    //
+    // `recalculate_sheet_values` runs on a BACKGROUND thread (the `.calp`
+    // gather-refresh worker spawns it for every sheet, and `run_calculation_pass`
+    // is an async command), so the two really do overlap. MEASURED 2026-08-13 on
+    // soak seed 1786446166374: the main thread sat in `open_file` ->
+    // `restamp_workbook_name_casing` waiting for `sheet_names` while holding
+    // `tables`, and the gather worker sat in `recalculate_sheet_values` waiting
+    // for `tables` while holding `sheet_names`. No panic, no log line — the
+    // message pump stops with the main thread and the window goes "Not
+    // Responding". Two out-of-process stack dumps a minute apart were identical.
+    //
+    // The order below is the PASS's, exactly: `grid`, `grids`, then
+    // `sheet_names`, `tables`, `table_names`, `named_ranges`. Nothing here is
+    // held across an acquisition the pass makes in the other direction.
+    let mut grid = state.grid.write(effect).ok();
+    let mut grids = state.grids.write(effect).ok();
+    let sheet_names = state.sheet_names.read().ok().map(|n| n.clone());
     let tables = state.tables.read().ok();
     let table_names = state.table_names.read().ok();
-    let sheet_names = state.sheet_names.read().ok().map(|n| n.clone());
+    let named_ranges = state.named_ranges.read().ok();
 
     let has_names = named_ranges.as_ref().is_some_and(|n| !n.is_empty());
     let has_tables = table_names.as_ref().is_some_and(|t| !t.is_empty());
@@ -472,11 +497,11 @@ pub(crate) fn restamp_workbook_name_casing(
     };
 
     let mut respelled = 0usize;
-    if let Ok(mut grid) = state.grid.write(effect) {
-        respelled += respell_one(&mut grid);
+    if let Some(g) = grid.as_mut() {
+        respelled += respell_one(g);
     }
-    if let Ok(mut grids) = state.grids.write(effect) {
-        for g in grids.iter_mut() {
+    if let Some(gs) = grids.as_mut() {
+        for g in gs.iter_mut() {
             respelled += respell_one(g);
         }
     }

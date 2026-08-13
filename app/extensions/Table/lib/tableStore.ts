@@ -32,23 +32,41 @@ import { cellEvents } from "@api";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 /**
- * Announce that a table deletion cascaded into other object stores (§3bn).
+ * Announce that the set of TABLES changed, and that the change cascaded into
+ * other object stores (§3bn).
  *
- * Deleting a table deletes the slicers bound to it, backend-side. The Slicer
- * extension holds its own cache and its overlay claims a rectangle on the grid,
- * so without this the removed slicer keeps PAINTING and keeps swallowing every
- * click that lands on it -- which is exactly the symptom that turned the orphan
- * into a 120 s click-retry timeout in the invariant runner.
+ * THE CASCADE HALF. Deleting a table deletes the slicers bound to it,
+ * backend-side. The Slicer extension holds its own cache and its overlay claims
+ * a rectangle on the grid, so without this the removed slicer keeps PAINTING and
+ * keeps swallowing every click that lands on it -- which is exactly the symptom
+ * that turned the orphan into a 120 s click-retry timeout in the invariant
+ * runner.
+ *
+ * THE OWN-DOMAIN HALF, and why it is here rather than at the call sites
+ * (BUG-0051). `objects` is the Table's OWN domain, and this announcement used
+ * to leave it out on the reasoning that a route which re-reads its own cache
+ * needs no announcement for itself. That reasoning covers the CACHE and nothing
+ * else. The contextual "Table Design" tab is not the cache: it is re-derived by
+ * `syncDesignTabToTables`, which runs on TABLE_DEFINITIONS_UPDATED -- an event
+ * the `objects` domain dispatches and that nothing else in the delete path
+ * does. So the store deleted the last table, refreshed its own cache to empty,
+ * and the ribbon went on offering a tab whose every button addressed an object
+ * that no longer existed. Two callers papered over it by emitting
+ * TABLE_DEFINITIONS_UPDATED by hand after awaiting the store; every other
+ * caller (a script, an MCP tool, the E2E walker) got the ghost. The announcement
+ * belongs to the mutation, not to the button that happened to start it, so the
+ * hand-written emits are gone and this is the one announcer.
  *
  * A domain announcement rather than a feature event: the Shell translator owns
- * the mapping from "slicer" to "slicers:refresh", and an extension naming
- * another extension's event would be the seam violation the domains exist to
- * prevent. Emitted unconditionally -- a refresh with nothing to refresh is a
- * cache re-read, while a missed one is a ghost control.
+ * the mapping from "slicer" to "slicers:refresh" and from "objects" to
+ * TABLE_DEFINITIONS_UPDATED, and an extension naming another extension's event
+ * would be the seam violation the domains exist to prevent. Emitted
+ * unconditionally -- a refresh with nothing to refresh is a cache re-read, while
+ * a missed one is a ghost control.
  */
-function announceObjectCascade(): void {
+function announceTableObjectChange(): void {
   emitAppEvent(AppEvents.MUTATION_REFRESH, {
-    domains: ["slicer", "ribbonFilter"],
+    domains: ["objects", "slicer", "ribbonFilter"],
     source: "commit",
   });
 }
@@ -117,7 +135,7 @@ export async function deleteTableAsync(tableId: string): Promise<boolean> {
   const result = await backendDeleteTable(tableId);
   if (result.success) {
     await refreshCache();
-    announceObjectCascade();
+    announceTableObjectChange();
   }
   return result.success;
 }
@@ -149,8 +167,9 @@ export async function convertToRangeAsync(tableId: string): Promise<boolean> {
   if (result.success) {
     await refreshCache();
     // Convert to Range destroys the table object, so it carries the identical
-    // cascade to a delete -- including the slicers Excel removes with it.
-    announceObjectCascade();
+    // cascade to a delete -- including the slicers Excel removes with it, and
+    // the contextual tab that must stop offering to restyle it.
+    announceTableObjectChange();
   }
   return result.success;
 }

@@ -82,4 +82,75 @@ export const uiNotBlocked: Invariant = {
   },
 };
 
-export const CHEAP_INVARIANTS: Invariant[] = [selectionInBounds, uiNotBlocked];
+/**
+ * INVARIANT: the frontend and the backend agree about which sheet is active,
+ * and that sheet is a VISIBLE one.
+ *
+ * WHY NO ORACLE COULD SEE THIS. The three semantic oracles all reason from the
+ * workbook digest, and the digest is assembled entirely from `AppState` — so a
+ * backend that is wrong in a self-consistent way passes every one of them. The
+ * failure this catches is a DISAGREEMENT between the two halves of the app, and
+ * the walker's snapshot is the only thing in the tree that holds both.
+ *
+ * MEASURED (BUG-0046): `hide_sheet` returned a "recommended" new active index
+ * without performing the switch. All three of its callers — the tab strip, the
+ * notebook's deferred-action host and the script broker — treated the
+ * recommendation as done and moved the FRONTEND onto it. The backend stayed on
+ * the sheet that had just been hidden, and every cell read and write goes to
+ * the active sheet: the tab strip said Sheet1, the canvas painted Sheet2, and
+ * typing wrote into the hidden sheet.
+ *
+ * The second clause is the Excel rule that makes the first one decidable: a
+ * hidden sheet cannot be the active sheet (there is no tab to select, and
+ * `Activate` raises in VBA). An active index that names a hidden sheet is
+ * therefore a defect even when both halves agree on the number.
+ */
+export const activeSheetAgrees: Invariant = {
+  id: "active-sheet-agrees",
+  description:
+    "The frontend and backend name the same active sheet, and it is visible",
+  check(snapshot) {
+    const violations: InvariantViolation[] = [];
+    const { activeSheet, backendActiveSheet, sheetCount, sheetVisibility, sheetNames } =
+      snapshot.logical;
+
+    // A snapshot taken before the field existed (or from a failed query) must
+    // not manufacture a violation out of a default.
+    if (typeof backendActiveSheet !== "number") return violations;
+
+    if (activeSheet !== backendActiveSheet) {
+      violations.push({
+        invariantId: "active-sheet-agrees",
+        message:
+          `The frontend is on sheet ${activeSheet} ` +
+          `("${sheetNames?.[activeSheet] ?? "?"}") and the backend is on sheet ` +
+          `${backendActiveSheet} ("${sheetNames?.[backendActiveSheet] ?? "?"}"). ` +
+          `Every cell read and every cell write goes to the BACKEND's active ` +
+          `sheet, so the grid is painting one sheet under another sheet's tab ` +
+          `and an edit lands on the wrong one.`,
+        details: { activeSheet, backendActiveSheet, sheetNames },
+      });
+    }
+
+    const vis = sheetVisibility?.[backendActiveSheet];
+    if (vis !== undefined && vis !== "visible") {
+      violations.push({
+        invariantId: "active-sheet-agrees",
+        message:
+          `The active sheet (${backendActiveSheet}, ` +
+          `"${sheetNames?.[backendActiveSheet] ?? "?"}") is ${vis}. A hidden ` +
+          `sheet cannot be the active sheet — it has no tab to select, and ` +
+          `Excel's Activate raises on one.`,
+        details: { backendActiveSheet, visibility: vis, sheetCount },
+      });
+    }
+
+    return violations;
+  },
+};
+
+export const CHEAP_INVARIANTS: Invariant[] = [
+  selectionInBounds,
+  uiNotBlocked,
+  activeSheetAgrees,
+];

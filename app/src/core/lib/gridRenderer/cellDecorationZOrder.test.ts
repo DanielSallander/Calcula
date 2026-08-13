@@ -530,3 +530,156 @@ describe("the indicator extensions declare the anchor", () => {
     );
   });
 });
+
+// ============================================================================
+// Frozen and split panes
+// ============================================================================
+
+/**
+ * Render the same fixture with frozen or split panes.
+ *
+ * WHY THIS EXISTS. Freeze/split does not merely shift geometry: it sends the
+ * cells through a COMPLETELY DIFFERENT painter (`renderZone` ->
+ * `drawCellTextZone`) from the one every test above exercises. An indicator
+ * that the ordinary path draws correctly can be absent from the frozen path
+ * and nothing above would notice — which is exactly what was measured.
+ */
+function renderPaneFrame(
+  selection: Selection | null,
+  panes: { freeze?: { freezeRow: number | null; freezeCol: number | null }; split?: { splitRow: number | null; splitCol: number | null } },
+  cells: CellDataMap = makeCells(),
+): Raster {
+  const { ctx, raster } = makeRasterCtx();
+  renderGrid(
+    ctx,
+    W,
+    H,
+    CONFIG,
+    VIEWPORT,
+    selection,
+    null,
+    cells,
+    DEFAULT_THEME,
+    [],
+    { columnWidths: new Map(), rowHeights: new Map() },
+    createDefaultStyleCache(),
+    null,
+    null,
+    undefined,
+    null,
+    "none",
+    0,
+    null,
+    panes.freeze as never,
+    [],
+    [],
+    undefined,
+    [],
+    [],
+    panes.split as never,
+  );
+  return raster;
+}
+
+function paneIndicatorPixels(
+  selection: Selection | null,
+  panes: Parameters<typeof renderPaneFrame>[1],
+  cells?: CellDataMap,
+): number {
+  unregisterCellDecoration(DECORATION_ID);
+  const without = renderPaneFrame(selection, panes, cells);
+  registerCellDecoration(DECORATION_ID, drawNoteTriangle, 5, "over-selection");
+  const with_ = renderPaneFrame(selection, panes, cells);
+  unregisterCellDecoration(DECORATION_ID);
+  return diffPixels(without, with_);
+}
+
+/** The annotated cell with NO backend row at all — the ordinary case for a
+ *  note on an empty cell. */
+function noCells(): CellDataMap {
+  return new Map();
+}
+
+describe("indicators survive frozen and split panes", () => {
+  // The pane painter is the one a real workbook with a frozen header row uses
+  // for EVERY cell below the freeze, so an indicator it drops is an indicator
+  // the user never sees again.
+  const FREEZE_ABOVE = { freeze: { freezeRow: 1, freezeCol: 0 } } as const;
+  const SPLIT_ABOVE = { split: { splitRow: 1, splitCol: null } } as const;
+
+  it("the measurement is live: the same fixture shows the indicator unfrozen", () => {
+    expect(indicatorPixels(ELSEWHERE, "over-selection")).toBeGreaterThan(0);
+  });
+
+  it("a frozen ROW pane still paints the indicator", () => {
+    expect(paneIndicatorPixels(ELSEWHERE, FREEZE_ABOVE)).toBeGreaterThan(0);
+  });
+
+  it("a frozen pane paints it on an EMPTY cell too", () => {
+    // A note on a cell with no value is the common case; the pane painter used
+    // to `continue` past every empty cell before decorations ran.
+    expect(paneIndicatorPixels(ELSEWHERE, FREEZE_ABOVE, noCells())).toBeGreaterThan(0);
+  });
+
+  it("a frozen pane keeps it when the cell is SELECTED", () => {
+    // NOT `toBe`: the annotated cell's top edge sits exactly on the frozen-pane
+    // divider (a 2px line drawn after the panes), which eats the triangle's top
+    // row when it is painted inline — so the SELECTED frame, replayed above all
+    // the chrome, legitimately shows MORE of the mark, never less. The invariant
+    // is that selecting a cell cannot cost it its own indicator.
+    const unselected = paneIndicatorPixels(ELSEWHERE, FREEZE_ABOVE);
+    const selected = paneIndicatorPixels(ON_THE_CELL, FREEZE_ABOVE);
+    expect(unselected).toBeGreaterThan(0);
+    expect(selected).toBeGreaterThanOrEqual(unselected);
+  });
+
+  it("a SPLIT window still paints the indicator", () => {
+    expect(paneIndicatorPixels(ELSEWHERE, SPLIT_ABOVE)).toBeGreaterThan(0);
+  });
+
+  it("a split window keeps it when the cell is SELECTED", () => {
+    expect(paneIndicatorPixels(ON_THE_CELL, SPLIT_ABOVE)).toBe(
+      paneIndicatorPixels(ELSEWHERE, SPLIT_ABOVE),
+    );
+  });
+});
+
+describe("the empty-cell skip asks about the anchor that would paint", () => {
+  // An existing-but-empty, default-styled cell is skipped early for speed. The
+  // skip used to consult the UNDER-selection registry only, so a note triangle
+  // (over-selection) on such a cell was invisible whenever no unrelated
+  // extension happened to have registered an under-selection decoration —
+  // i.e. the Review extension's indicator depended on Sparklines being loaded.
+  function emptyCellPresent(): CellDataMap {
+    const cells: CellDataMap = new Map();
+    cells.set(cellKey(ANNOTATED_ROW, ANNOTATED_COL), {
+      row: ANNOTATED_ROW,
+      col: ANNOTATED_COL,
+      value: "",
+      display: "",
+      styleIndex: 0,
+    } as CellData);
+    return cells;
+  }
+
+  function pixelsFor(cells: CellDataMap): number {
+    unregisterCellDecoration(DECORATION_ID);
+    const { ctx: c1, raster: without } = makeRasterCtx();
+    renderGrid(c1, W, H, CONFIG, VIEWPORT, ELSEWHERE, null, cells, DEFAULT_THEME, [],
+      { columnWidths: new Map(), rowHeights: new Map() }, createDefaultStyleCache());
+    registerCellDecoration(DECORATION_ID, drawNoteTriangle, 5, "over-selection");
+    const { ctx: c2, raster: with_ } = makeRasterCtx();
+    renderGrid(c2, W, H, CONFIG, VIEWPORT, ELSEWHERE, null, cells, DEFAULT_THEME, [],
+      { columnWidths: new Map(), rowHeights: new Map() }, createDefaultStyleCache());
+    unregisterCellDecoration(DECORATION_ID);
+    return diffPixels(without, with_);
+  }
+
+  it("an empty backend cell with default style still shows its indicator", () => {
+    expect(pixelsFor(emptyCellPresent())).toBeGreaterThan(0);
+  });
+
+  it("and so does a cell with no backend row at all (control)", () => {
+    expect(pixelsFor(noCells())).toBeGreaterThan(0);
+  });
+});

@@ -6000,6 +6000,11 @@ pub fn remove_duplicates(
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
+    // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
+    // in that order on a BACKGROUND thread, so taking them the other way round
+    // here closes a cycle that hangs the app with no panic and no log line
+    // (BUG-0045). Cloned, so nothing is held; the rebuild below reads it.
+    let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
     let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
@@ -6224,8 +6229,8 @@ pub fn remove_duplicates(
     // Formula cells were COMPACTED UPWARDS into new positions, so the
     // dependency maps still describe where they used to live — the same
     // BUG-0010 hazard `sort_range` rebuilds for. Rebuild before seeding, or the
-    // cascade below would walk stale edges.
-    let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
+    // cascade below would walk stale edges. (`sheet_names_for_rebuild` was
+    // cloned at the top, before `style_registry` — see the note there.)
     // THE BRACES ARE LOAD-BEARING — do not un-nest them.
     //
     // Name tables are acquired HERE, at the call site, like `sheet_names`: the

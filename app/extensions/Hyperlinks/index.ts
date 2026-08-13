@@ -46,13 +46,33 @@ function cellKey(row: number, col: number): string {
   return `${row},${col}`;
 }
 
-async function readIndicators(): Promise<void> {
+/**
+ * Re-read the hyperlink indicators for the active sheet.
+ *
+ * EVERY READER OF `indicatorSet` IS SYNCHRONOUS — the cell decoration, the
+ * cursor interceptor, the click interceptor that decides whether a click
+ * FOLLOWS A LINK, and the context menu. So this read keeps the two properties
+ * a synchronously-read, asynchronously-refilled cache has to keep:
+ *
+ *  1. It swaps whole values in at the end rather than clearing first, so a
+ *     reader mid-refill sees the previous answer, never "no link here".
+ *  2. A FAILED read changes nothing. It used to empty both on any error, which
+ *     turned one dropped IPC call into "this cell has no hyperlink" — no
+ *     underline, no hand cursor, and a click that did nothing — until some
+ *     unrelated announcement happened to refresh.
+ *
+ * `stillCurrent` is honoured because these indicators describe the ACTIVE
+ * SHEET: a pass still in flight when the sheet changes is answering about the
+ * sheet the user just left.
+ */
+async function readIndicators(stillCurrent: () => boolean): Promise<void> {
   try {
-    cachedIndicators = await getHyperlinkIndicators();
-    indicatorSet = new Set(cachedIndicators.map((h) => cellKey(h.row, h.col)));
-  } catch {
-    cachedIndicators = [];
-    indicatorSet.clear();
+    const indicators = await getHyperlinkIndicators();
+    if (!stillCurrent()) return;
+    cachedIndicators = indicators;
+    indicatorSet = new Set(indicators.map((h) => cellKey(h.row, h.col)));
+  } catch (error) {
+    console.error("[Hyperlinks] Failed to refresh indicators:", error);
   }
 }
 
@@ -65,7 +85,7 @@ async function readIndicators(): Promise<void> {
  * do itself, so it always uses request(), never join(); see
  * @api/coalescedRefresh for the difference.
  */
-const indicatorRefresh = createCoalescedRefresh(() => readIndicators());
+const indicatorRefresh = createCoalescedRefresh((stillCurrent) => readIndicators(stillCurrent));
 
 function refreshIndicators(): Promise<void> {
   return indicatorRefresh.request();

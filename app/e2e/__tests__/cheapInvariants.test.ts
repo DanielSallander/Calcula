@@ -12,7 +12,12 @@
 // while the run reported PASS (BUG-0037).
 
 import { describe, it, expect } from "vitest";
-import { CHEAP_INVARIANTS, selectionInBounds, uiNotBlocked } from "../oracles/cheapInvariants";
+import {
+  CHEAP_INVARIANTS,
+  activeSheetAgrees,
+  selectionInBounds,
+  uiNotBlocked,
+} from "../oracles/cheapInvariants";
 import type { StateSnapshot } from "../invariants/stateSnapshot";
 
 function snapshot(overrides: {
@@ -56,6 +61,84 @@ describe("cheap invariants", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toContain("selection-in-bounds");
     expect(ids).toContain("ui-not-blocked");
+    expect(ids).toContain("active-sheet-agrees");
+  });
+
+  describe("active-sheet-agrees", () => {
+    // The one invariant in this file that reads the BACKEND's answer as well as
+    // the frontend's. Everything else in the harness reasons from one side.
+    const sheets = (over: {
+      activeSheet?: number;
+      backendActiveSheet?: number;
+      sheetVisibility?: string[];
+    }): StateSnapshot =>
+      ({
+        logical: {
+          activeSheet: over.activeSheet ?? 0,
+          backendActiveSheet: over.backendActiveSheet ?? 0,
+          sheetCount: 2,
+          sheetNames: ["Sheet1", "Sheet2"],
+          sheetVisibility: over.sheetVisibility ?? ["visible", "visible"],
+        },
+      }) as unknown as StateSnapshot;
+
+    it("is quiet when the two halves agree on a visible sheet", () => {
+      expect(activeSheetAgrees.check(sheets({ activeSheet: 1, backendActiveSheet: 1 }))).toEqual(
+        [],
+      );
+    });
+
+    it("fires when the frontend and the backend name different sheets", () => {
+      // BUG-0046 exactly: `hide_sheet` recommended sheet 0, the tab strip moved
+      // there, the backend stayed on the hidden sheet 1.
+      const v = activeSheetAgrees.check(sheets({ activeSheet: 0, backendActiveSheet: 1 }));
+      expect(v).toHaveLength(1);
+      expect(v[0].message).toContain("frontend is on sheet 0");
+      expect(v[0].message).toContain("backend is on sheet 1");
+    });
+
+    it("fires when the active sheet is hidden even though both halves agree", () => {
+      const v = activeSheetAgrees.check(
+        sheets({
+          activeSheet: 1,
+          backendActiveSheet: 1,
+          sheetVisibility: ["visible", "hidden"],
+        }),
+      );
+      expect(v).toHaveLength(1);
+      expect(v[0].message).toContain("cannot be the active sheet");
+    });
+
+    it("treats veryHidden the same as hidden", () => {
+      const v = activeSheetAgrees.check(
+        sheets({
+          activeSheet: 1,
+          backendActiveSheet: 1,
+          sheetVisibility: ["visible", "veryHidden"],
+        }),
+      );
+      expect(v).toHaveLength(1);
+    });
+
+    it("reports BOTH problems when both are true", () => {
+      const v = activeSheetAgrees.check(
+        sheets({
+          activeSheet: 0,
+          backendActiveSheet: 1,
+          sheetVisibility: ["visible", "hidden"],
+        }),
+      );
+      expect(v).toHaveLength(2);
+    });
+
+    it("says nothing about a snapshot that predates the backend field", () => {
+      // A default of 0 must not be mistaken for a measured 0 — that is how a
+      // misspelled key reported `activeSheet: 0` for the life of a file.
+      const legacy = {
+        logical: { activeSheet: 3, sheetNames: [], sheetVisibility: [] },
+      } as unknown as StateSnapshot;
+      expect(activeSheetAgrees.check(legacy)).toEqual([]);
+    });
   });
 
   describe("selection-in-bounds", () => {

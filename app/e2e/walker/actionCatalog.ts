@@ -411,6 +411,84 @@ const tableCreate: ActionDef<Record<string, never>> = {
 
     await page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
+      // THE PRODUCT'S OWN CREATE, for the reason `table.delete` below already
+      // gives about the delete -- and one more.
+      //
+      // A raw `create_table` invoke leaves the FRONTEND not knowing a table
+      // exists: the store's cache is only refilled by `refreshCache`, which
+      // nothing on this path calls. Every table action after it then ran
+      // against an empty cache, so `table.select-into` could not register the
+      // contextual tab and `table.delete` had nothing to take down. That is not
+      // a state a user can reach -- Insert > Table goes through
+      // `createTableAsync` and then announces TABLE_CREATED -- and it made the
+      // walk BLIND to the whole contextual-tab surface unless some UNRELATED
+      // action happened to refresh the cache first. BUG-0051 needed a
+      // `sheet.rename` wedged into the middle for exactly that reason, and the
+      // shrinker faithfully reported the rename as load-bearing when what was
+      // really load-bearing was the cache refresh it dragged along.
+      const store = (await (window as any).__calcImport(
+        new URL("/extensions/Table/lib/tableStore.ts", document.baseURI).href,
+      )) as {
+        createTableAsync?: (p: {
+          sheetIndex: number;
+          startRow: number;
+          startCol: number;
+          endRow: number;
+          endCol: number;
+          hasHeaders: boolean;
+        }) => Promise<{ id: string } | null>;
+      };
+      if (store?.createTableAsync) {
+        // DO NOT ASK FOR A TABLE THAT CANNOT BE MADE.
+        //
+        // This action always targets the SAME rectangle, so a second create
+        // while the first table is still there is refused by the backend with
+        // "Table overlaps with existing table". The raw invoke this replaced
+        // rejected the promise and the walker swallowed it; the product's route
+        // does what a product does with a refusal it was asked for -- it
+        // `console.error`s -- and `no-console-errors` fails the walk on a
+        // message the app was right to print. Measured: seed 90070001 got to
+        // step 143 and failed on exactly that.
+        //
+        // Checked against the BACKEND rather than a precondition on the
+        // walker's snapshot, because the snapshot's table list is not scoped
+        // the same way: a table on ANOTHER sheet must not stop this one.
+        const active = (await tauri.core.invoke("get_active_sheet", {})) as number;
+        const existing = (await tauri.core.invoke("get_all_tables", {})) as Array<{
+          sheetIndex?: number;
+          startRow: number;
+          startCol: number;
+          endRow: number;
+          endCol: number;
+        }>;
+        const overlaps = (existing ?? []).some(
+          (t) =>
+            (t.sheetIndex === undefined || t.sheetIndex === active) &&
+            t.startRow <= 2 &&
+            t.endRow >= 0 &&
+            t.startCol <= 32 &&
+            t.endCol >= 30,
+        );
+        if (overlaps) return;
+
+        const table = await store.createTableAsync({
+          sheetIndex: 0,
+          startRow: 0,
+          startCol: 30,
+          endRow: 2,
+          endCol: 32,
+          hasHeaders: true,
+        });
+        if (table) {
+          // What the Insert > Table dialog emits after the store resolves. It
+          // is what puts the contextual tab up, so a walk that skipped it would
+          // still be testing a state no user reaches.
+          window.dispatchEvent(
+            new CustomEvent("app:table-created", { detail: { tableId: table.id } }),
+          );
+        }
+        return;
+      }
       return tauri.core.invoke("create_table", {
         params: {
           name: "",
@@ -955,10 +1033,27 @@ const sheetSwitch: ActionDef<{ tabIndex: number }> = {
   id: "sheet.switch",
   category: "sheet",
   weight: 2,
-  precondition: (s, p) =>
-    s.logical.sheetCount > 1 &&
-    (p?.tabIndex === undefined || p.tabIndex < s.logical.sheetCount),
-  pickParams: (rng, s) => ({ tabIndex: pickInt(rng, 0, Math.max(0, s.logical.sheetCount - 1)) }),
+  // Only VISIBLE sheets have a tab, so a switch to a hidden index clicks
+  // nothing at all — a silent no-op that the coverage line would still count as
+  // a sheet action (§14a). Now that `sheet.hide` exists, that is a reachable
+  // state rather than a theoretical one.
+  precondition: (s, p) => {
+    const vis = s.logical.sheetVisibility ?? [];
+    const visibleCount = vis.length
+      ? vis.filter((v) => v === "visible").length
+      : s.logical.sheetCount;
+    if (visibleCount < 2) return false;
+    if (p?.tabIndex === undefined) return true;
+    if (p.tabIndex >= s.logical.sheetCount) return false;
+    return vis.length === 0 || vis[p.tabIndex] === "visible";
+  },
+  pickParams: (rng, s) => {
+    const vis = s.logical.sheetVisibility ?? [];
+    const visible = vis.length
+      ? vis.map((v, i) => (v === "visible" ? i : -1)).filter((i) => i >= 0)
+      : Array.from({ length: s.logical.sheetCount }, (_, i) => i);
+    return { tabIndex: pick(rng, visible.length ? visible : [0]) };
+  },
   async execute(page, _grid, p) {
     const tab = page.locator(`button[data-sheet-tab="${p.tabIndex}"]`);
     if (await tab.isVisible({ timeout: 500 }).catch(() => false)) {
@@ -976,11 +1071,19 @@ const sheetRename: ActionDef<{ tabIndex: number; name: string }> = {
   // against a smaller workbook raises a native "Sheet index N out of range"
   // alert, which blocks Tauri IPC and hangs the walk — BUG-0039, and the reason
   // `precondition` now receives the params at all.
+  //
+  // SHEET 0 IS INCLUDED, and a single-sheet workbook is a legal target. Renaming
+  // the FIRST sheet is the interesting case and it was the one excluded: a
+  // rename rewrites every formula in the workbook, re-keys the cross-sheet
+  // dependent map (which is keyed by NAME) and repairs every defined name's
+  // `refersTo` — and the walker's own `names.define` points at the active sheet,
+  // so renaming it exercises exactly that repair. Restricting this to sheets
+  // 1..n meant the walk could only ever rename a sheet nothing referred to.
   precondition: (s, p) =>
-    s.logical.sheetCount > 1 &&
+    s.logical.sheetCount >= 1 &&
     (p?.tabIndex === undefined || p.tabIndex < s.logical.sheetCount),
   pickParams: (rng, s, seq) => ({
-    tabIndex: pickInt(rng, 1, Math.max(1, s.logical.sheetCount - 1)),
+    tabIndex: pickInt(rng, 0, Math.max(0, s.logical.sheetCount - 1)),
     name: `Blad_${seq}`,
   }),
   async execute(page, _grid, p) {
@@ -996,21 +1099,69 @@ const sheetRename: ActionDef<{ tabIndex: number; name: string }> = {
   },
 };
 
-const sheetDelete: ActionDef<Record<string, never>> = {
+const sheetDelete: ActionDef<{ tabIndex: number }> = {
   id: "sheet.delete",
   category: "sheet",
   weight: 1,
-  precondition: (s) => s.logical.sheetCount > 1,
-  pickParams: () => ({}),
-  async execute(page) {
-    // Always delete the LAST sheet (never sheet 0, which anchors test data).
+  // DELETING THE LAST SHEET RENUMBERS NOTHING, and that is what this action used
+  // to do — unconditionally, reading the tab count out of the DOM. Every remap
+  // in `delete_sheet` (`remap_sheet_keyed_stores`, `cascade_sheet_removed`,
+  // `remap_report_sheets`, the cross-sheet dependency re-key, the defined-name
+  // re-scope) only moves indices ABOVE the deleted one, so a walk that always
+  // deleted the last sheet exercised none of them. BUG-0041 — a sparkline that
+  // came back on another sheet after save/reload — lived on exactly that path.
+  //
+  // Sheet 0 is still spared: it anchors the walk's seeded ranges, and losing it
+  // mid-walk turns every later action into a no-op on data that is not there.
+  //
+  // AND IT MUST LEAVE A VISIBLE SHEET BEHIND. `delete_sheet` refuses a delete
+  // that would leave the workbook with none, and a refusal comes back through
+  // `executeDeleteSheet`'s `alertAsync` — a NATIVE dialog, which blocks Tauri
+  // IPC and is the whole of BUG-0039. Now that `sheet.hide` exists, "the only
+  // visible sheet" is a state a walk can actually reach.
+  precondition: (s, p) => {
+    if (s.logical.sheetCount <= 1) return false;
+    const vis = s.logical.sheetVisibility ?? [];
+    const visibleAfter = (removing: number) =>
+      Array.from({ length: s.logical.sheetCount }, (_, i) => i)
+        .filter((i) => i !== removing)
+        .filter((i) => (vis.length === 0 ? true : vis[i] === "visible")).length;
+    if (p?.tabIndex === undefined) {
+      // Generation: some index in 1..n-1 must be deletable.
+      return Array.from({ length: s.logical.sheetCount - 1 }, (_, k) => k + 1).some(
+        (i) => visibleAfter(i) > 0
+      );
+    }
+    return (
+      p.tabIndex >= 1 &&
+      p.tabIndex < s.logical.sheetCount &&
+      visibleAfter(p.tabIndex) > 0
+    );
+  },
+  pickParams: (rng, s) => {
+    const vis = s.logical.sheetVisibility ?? [];
+    const visibleAfter = (removing: number) =>
+      Array.from({ length: s.logical.sheetCount }, (_, i) => i)
+        .filter((i) => i !== removing)
+        .filter((i) => (vis.length === 0 ? true : vis[i] === "visible")).length;
+    const candidates = Array.from(
+      { length: Math.max(0, s.logical.sheetCount - 1) },
+      (_, k) => k + 1
+    ).filter((i) => visibleAfter(i) > 0);
+    return {
+      tabIndex: candidates.length
+        ? pick(rng, candidates)
+        : pickInt(rng, 1, Math.max(1, s.logical.sheetCount - 1)),
+    };
+  },
+  async execute(page, _grid, p) {
     const count = await page.locator("button[data-sheet-tab]").count();
     if (count <= 1) return;
     await page.evaluate((idx: number) => {
       window.dispatchEvent(
         new CustomEvent("sheet:requestDelete", { detail: { index: idx } })
       );
-    }, count - 1);
+    }, p.tabIndex);
     await page.waitForTimeout(300);
     const deleteBtn = page.locator("button").filter({ hasText: /^Delete$/ });
     if (await deleteBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
@@ -1020,21 +1171,121 @@ const sheetDelete: ActionDef<Record<string, never>> = {
   },
 };
 
+// The three sheet operations the catalog never had. `move` and `copy` are the
+// other two commands that RENUMBER the workbook (and the register's own oracle
+// message has always named all five as history-ending), and `hide` is the one
+// that changes which sheet is active without changing the sheet list at all —
+// which is where BUG-0046 lived.
+
+const sheetMove: ActionDef<{ fromIndex: number; toIndex: number }> = {
+  id: "sheet.move",
+  category: "sheet",
+  weight: 1,
+  // Both ends must still address a sheet that EXISTS on replay — the lesson
+  // `sheet.rename` learned as BUG-0039.
+  precondition: (s, p) =>
+    s.logical.sheetCount > 1 &&
+    (p === undefined ||
+      (p.fromIndex < s.logical.sheetCount && p.toIndex < s.logical.sheetCount)),
+  pickParams: (rng, s) => {
+    const last = Math.max(0, s.logical.sheetCount - 1);
+    const fromIndex = pickInt(rng, 0, last);
+    // Uniform over the OTHER positions: a move onto its own index renumbers
+    // nothing and would still end the undo history, which is a walk step spent
+    // buying an undecided checkpoint.
+    let toIndex = pickInt(rng, 0, Math.max(0, last - 1));
+    if (toIndex >= fromIndex) toIndex += 1;
+    return { fromIndex, toIndex: Math.min(toIndex, last) };
+  },
+  async execute(page, _grid, p) {
+    await page.evaluate(
+      ({ fromIndex, toIndex }) => {
+        window.dispatchEvent(
+          new CustomEvent("sheet:requestMove", { detail: { fromIndex, toIndex } })
+        );
+      },
+      { fromIndex: p.fromIndex, toIndex: p.toIndex }
+    );
+    await page.waitForTimeout(500);
+  },
+};
+
+const sheetCopy: ActionDef<{ tabIndex: number }> = {
+  id: "sheet.copy",
+  category: "sheet",
+  weight: 1,
+  precondition: (s, p) =>
+    s.logical.sheetCount < 4 &&
+    (p?.tabIndex === undefined || p.tabIndex < s.logical.sheetCount),
+  pickParams: (rng, s) => ({
+    tabIndex: pickInt(rng, 0, Math.max(0, s.logical.sheetCount - 1)),
+  }),
+  async execute(page, _grid, p) {
+    await page.evaluate((index: number) => {
+      window.dispatchEvent(
+        new CustomEvent("sheet:requestCopy", { detail: { index } })
+      );
+    }, p.tabIndex);
+    await page.waitForTimeout(600);
+  },
+};
+
+const sheetHide: ActionDef<{ tabIndex: number }> = {
+  id: "sheet.hide",
+  category: "sheet",
+  weight: 1,
+  // At least two VISIBLE sheets, or the command refuses ("Cannot hide the last
+  // visible sheet") and raises a native alert that blocks Tauri IPC (BUG-0039).
+  // The recorded index must still name a visible sheet on replay for the same
+  // reason.
+  precondition: (s, p) => {
+    const visible = (s.logical.sheetVisibility ?? []).filter((v) => v === "visible");
+    if (visible.length < 2) return false;
+    if (p?.tabIndex === undefined) return true;
+    return (s.logical.sheetVisibility ?? [])[p.tabIndex] === "visible";
+  },
+  pickParams: (rng, s) => {
+    const visible = (s.logical.sheetVisibility ?? [])
+      .map((v, i) => (v === "visible" ? i : -1))
+      .filter((i) => i >= 0);
+    return { tabIndex: pick(rng, visible.length ? visible : [0]) };
+  },
+  async execute(page, _grid, p) {
+    await page.evaluate((index: number) => {
+      window.dispatchEvent(
+        new CustomEvent("sheet:requestHide", { detail: { index } })
+      );
+    }, p.tabIndex);
+    await page.waitForTimeout(500);
+  },
+};
+
 // ============================================================================
 // Named range actions
 // ============================================================================
 
-const nameDefine: ActionDef<{ name: string }> = {
+const nameDefine: ActionDef<{ name: string; sheetName: string }> = {
   id: "names.define",
   category: "names",
   weight: 1,
   precondition: () => true,
-  pickParams: (_rng, _s, seq) => ({ name: `TestName_${seq}` }),
+  // THE SHEET IS READ FROM THE WORKBOOK, not spelled "Sheet1" and hoped for.
+  // The literal made the action a silent no-op the moment anything renamed
+  // sheet 0 (`create_named_range` rejects a reference to a sheet that does not
+  // exist, and the call is `.catch(() => {})`), which is exactly what
+  // `sheet.rename` now does. Quoted, so a copied sheet's "Sheet1 (2)" parses.
+  pickParams: (_rng, s, seq) => ({
+    name: `TestName_${seq}`,
+    sheetName:
+      s.logical.sheetNames?.[s.logical.activeSheet] ??
+      s.logical.sheetNames?.[0] ??
+      "Sheet1",
+  }),
   async execute(page, _grid, p) {
     await invokeTauri(page, "create_named_range", {
       name: p.name,
       sheetIndex: null,
-      refersTo: "=Sheet1!$A$1:$B$5",
+      refersTo: `='${p.sheetName}'!$A$1:$B$5`,
       comment: null,
       folder: null,
     }).catch(() => {});
@@ -1631,6 +1882,9 @@ const ALL_ACTIONS: AnyActionDef[] = [
   sheetSwitch,
   sheetRename,
   sheetDelete,
+  sheetMove,
+  sheetCopy,
+  sheetHide,
   // Names
   nameDefine,
   nameDelete,

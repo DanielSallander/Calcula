@@ -1529,6 +1529,12 @@ pub(crate) fn insert_rows_impl(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
+    // in that order and runs on a BACKGROUND thread, so the reverse closes a
+    // cycle that hangs the app with no panic and no log line (BUG-0045). Cloned
+    // rather than held, so nothing downstream can extend the window.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     // `lock_pending`: this guard is taken with the grid, before the gates below
     // have finished and before the effect exists.
@@ -1671,8 +1677,8 @@ pub(crate) fn insert_rows_impl(
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet's name.
-    let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    // `sheet_names_snapshot` was taken at the top, BEFORE `style_registry` --
+    // see the lock-order note there (BUG-0045).
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -1961,6 +1967,12 @@ pub(crate) fn insert_columns_impl(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
+    // in that order and runs on a BACKGROUND thread, so the reverse closes a
+    // cycle that hangs the app with no panic and no log line (BUG-0045). Cloned
+    // rather than held, so nothing downstream can extend the window.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     // `lock_pending`: this guard is taken with the grid, before the gates below
     // have finished and before the effect exists.
@@ -2100,8 +2112,8 @@ pub(crate) fn insert_columns_impl(
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
-    let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    // `sheet_names_snapshot` was taken at the top, BEFORE `style_registry` --
+    // see the lock-order note there (BUG-0045).
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -2814,6 +2826,12 @@ pub(crate) fn delete_rows_impl(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
+    // in that order and runs on a BACKGROUND thread, so the reverse closes a
+    // cycle that hangs the app with no panic and no log line (BUG-0045). Cloned
+    // rather than held, so nothing downstream can extend the window.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     // `lock_pending`: this guard is taken with the grid, before the gates below
     // have finished and before the effect exists.
@@ -2956,8 +2974,8 @@ pub(crate) fn delete_rows_impl(
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
-    let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    // `sheet_names_snapshot` was taken at the top, BEFORE `style_registry` --
+    // see the lock-order note there (BUG-0045).
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()
@@ -3300,6 +3318,12 @@ pub(crate) fn delete_columns_impl(
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
+    // in that order and runs on a BACKGROUND thread, so the reverse closes a
+    // cycle that hangs the app with no panic and no log line (BUG-0045). Cloned
+    // rather than held, so nothing downstream can extend the window.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     // `lock_pending`: this guard is taken with the grid, before the gates below
     // have finished and before the effect exists.
@@ -3440,8 +3464,8 @@ pub(crate) fn delete_columns_impl(
     shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColDelete { at: col, count });
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
-    let sheet_names_snapshot: Vec<String> =
-        state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    // `sheet_names_snapshot` was taken at the top, BEFORE `style_registry` --
+    // see the lock-order note there (BUG-0045).
     let edited_sheet_name = sheet_names_snapshot
         .get(active_sheet)
         .cloned()

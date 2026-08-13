@@ -801,9 +801,18 @@ test.describe("Wave 4 VBA idioms (live, through the editor)", () => {
         // The product's inspection surface for a note is CLICKING the
         // annotated cell: the Review extension's cell-click interceptor opens
         // the note-editor overlay pre-loaded with the note's content. (The
-        // mousemove hover preview in hoverHandler.ts is unwired dead code —
-        // initHoverHandler has no caller — so a hover shows nothing; click is
-        // what a user actually does.)
+        // mousemove hover preview is mounted too — initHoverHandler is called
+        // from Review/index.ts — but it needs a 350ms rest over the cell, so
+        // the click is the gesture this test can assert deterministically.)
+        //
+        // BUG-0042 lived exactly here, and NOT where it was first filed. The
+        // editor did open; the same click's selection change then closed it
+        // ~35ms later, because the Review selection handler hid the editor
+        // whenever the active cell differed from the PREVIOUS one — which on
+        // this gesture is the cell you clicked away from. The note's triangle
+        // never disappeared (measured identical before and after). Editors now
+        // close per ANCHOR: only when the selection leaves the cell the editor
+        // is showing.
         const g = await gridGeom(page);
         await grid.canvas.click({
           position: { x: colX(g, 26) + 30, y: rowY(g, 60) + g.cellH / 2 },

@@ -100,11 +100,69 @@ impl Fixture {
         rebuild_all_dependencies(&self.state);
     }
 
+    /// A sheet's cell, read from whichever store is AUTHORITATIVE for it.
+    ///
+    /// The active sheet lives in the `grid` MIRROR; `grids[active]` is a copy
+    /// that is only guaranteed fresh at the moment of the last swap. Reading
+    /// `grids` unconditionally was harmless while the active sheet never moved
+    /// during a test, and stopped being harmless the moment undo started
+    /// ACTIVATING the sheet it restores -- a test would then be asking the
+    /// stale copy. This is the same active-or-`all_` rule
+    /// `report::with_sheet_merges` already applies to merged regions.
     fn value(&self, sheet: usize, row: u32, col: u32) -> CellValue {
-        self.state.grids.read().unwrap()[sheet]
-            .get_cell(row, col)
-            .map(|c| c.value.clone())
-            .unwrap_or(CellValue::Empty)
+        let active = *self.state.active_sheet.read().unwrap();
+        let cell = if sheet == active {
+            self.state.grid.read().unwrap().get_cell(row, col).cloned()
+        } else {
+            self.state.grids.read().unwrap()[sheet].get_cell(row, col).cloned()
+        };
+        cell.map(|c| c.value).unwrap_or(CellValue::Empty)
+    }
+
+    /// A sheet's column width, active-or-`all_` (see [`Fixture::value`]).
+    pub(super) fn column_width(&self, sheet: usize, col: u32) -> Option<f64> {
+        let active = *self.state.active_sheet.read().unwrap();
+        if sheet == active {
+            self.state.column_widths.read().unwrap().get(&col).copied()
+        } else {
+            self.state
+                .all_column_widths
+                .read()
+                .unwrap()
+                .get(sheet)
+                .and_then(|m| m.get(&col).copied())
+        }
+    }
+
+    /// A sheet's row height, active-or-`all_` (see [`Fixture::value`]).
+    pub(super) fn row_height(&self, sheet: usize, row: u32) -> Option<f64> {
+        let active = *self.state.active_sheet.read().unwrap();
+        if sheet == active {
+            self.state.row_heights.read().unwrap().get(&row).copied()
+        } else {
+            self.state
+                .all_row_heights
+                .read()
+                .unwrap()
+                .get(sheet)
+                .and_then(|m| m.get(&row).copied())
+        }
+    }
+
+    /// The index of the sheet the user is looking at.
+    pub(super) fn active(&self) -> usize {
+        *self.state.active_sheet.read().unwrap()
+    }
+
+    /// Hide a sheet, the way `hide_sheet` does -- it records no undo entry, so
+    /// an entry queued against a sheet that is later hidden is reachable.
+    pub(super) fn hide(&self, sheet: usize) {
+        let e = crate::document_effect::test_seed_effect();
+        let mut vis = self.state.sheet_visibility.write(&e).unwrap();
+        while vis.len() <= sheet {
+            vis.push("visible".to_string());
+        }
+        vis[sheet] = "hidden".to_string();
     }
 
     pub(super) fn number(&self, sheet: usize, row: u32, col: u32) -> f64 {
@@ -116,7 +174,7 @@ impl Fixture {
 
     /// Evaluate every formula on every sheet — the LOAD path, the oracle each
     /// undo has to agree with.
-    fn recalculate_every_sheet(&self) {
+    pub(super) fn recalculate_every_sheet(&self) {
         let sheets = self.state.sheet_names.read().unwrap().len();
         for idx in 0..sheets {
             crate::calculation::recalculate_sheet_values(
@@ -129,7 +187,7 @@ impl Fixture {
         }
     }
 
-    fn record_custom(&self, kind: &str, payload: Vec<u8>) {
+    pub(super) fn record_custom(&self, kind: &str, payload: Vec<u8>) {
         let mut stack = self.state.undo_stack.lock().unwrap();
         stack.begin_transaction(kind.to_string());
         stack.record_custom_restore(kind.to_string(), payload, kind);
@@ -215,10 +273,18 @@ fn set_cell_restores_to_the_sheet_it_was_recorded_on() {
         500.0,
         "Sheet1!A1 was overwritten by an undo belonging to another sheet"
     );
+    // The restore itself never touches the mirror it was not aimed at; the
+    // ACTIVATION that follows it deliberately does, because Excel switches to
+    // the sheet the undone action happened on. The mirror that must survive is
+    // therefore SHEET1's saved copy, which is what `grids[0]` is once the swap
+    // has put it back — and that is the assertion above. What the mirror shows
+    // now is Sheet2, and the guard that an off-sheet restore leaves the mirror
+    // ALONE lives in `undo_sheet_activation_tests`, where the target is hidden
+    // and no activation happens.
     assert_eq!(
         f.state.grid.read().unwrap().get_cell(0, 0).map(|c| c.value.clone()),
-        Some(CellValue::Number(500.0)),
-        "the ACTIVE mirror must not be touched by an off-sheet restore either"
+        Some(CellValue::Number(1.0)),
+        "undo must switch to the sheet it restored, so the mirror is Sheet2's"
     );
 }
 
@@ -261,7 +327,15 @@ fn an_off_sheet_set_cell_restore_reports_its_sheet_to_the_frontend() {
     // Correct values in `grids` are not enough: the frontend repaints and
     // re-caches what the command RETURNS, and an off-sheet cell must carry its
     // own sheet index (an active-sheet cell carries None, as it always has).
+    //
+    // SHEET2 IS HIDDEN, for the reason `redoing_an_off_sheet_set_cell_...`
+    // gives: undo now ACTIVATES the sheet it restored, and `sheet_index` is
+    // relative to the sheet the restore ENDED on, so on a visible Sheet2 the
+    // restored cell would correctly be reported as the active one and this
+    // guard would stop describing an off-sheet cell at all. A hidden target is
+    // the configuration in which a restore stays off-sheet.
     let f = Fixture::new(2);
+    f.hide(1);
     f.put(1, 3, 2, Cell::new_number(1.0));
     f.state
         .undo_stack
@@ -295,10 +369,19 @@ fn redoing_an_off_sheet_set_cell_restores_the_sheet_and_recalculates_too() {
     // ON SHEET1, recalculate SHEET2's formula reading into it, and report the
     // sheet index; a redo that lost the sheet dimension would write the active
     // sheet instead and leave the dependent stale.
+    //
+    // SHEET1 IS HIDDEN HERE, and that is not decoration. Undo now ACTIVATES the
+    // sheet it restores (Excel's rule -- `undo_sheet_activation_tests`), so on a
+    // visible Sheet1 both the undo and the redo below would end up on-sheet and
+    // this guard would silently stop testing the off-sheet path it exists for.
+    // A hidden target is the one configuration in which a restore stays
+    // off-sheet, because the view cannot follow it there -- and a hidden sheet
+    // holding the numbers another sheet reads is an ordinary workbook.
     let f = Fixture::new(2);
     f.put(0, 0, 0, Cell::new_number(10.0));
     f.put(1, 0, 0, Cell::new_formula("=Sheet1!A1*2".to_string()));
     f.switch_to(1);
+    f.hide(0);
     f.recalculate_every_sheet();
 
     f.state
@@ -861,15 +944,20 @@ fn a_column_width_undo_restores_the_sheet_it_was_recorded_on() {
 
     f.undo();
 
+    // Read per SHEET, not per store: undo activates the sheet it restored, so
+    // which of `column_widths` / `all_column_widths[n]` holds a given sheet's
+    // widths depends on where the user ended up. `Fixture::column_width`
+    // applies the same active-or-`all_` rule `report::with_sheet_merges` does,
+    // and asserting through it states the invariant the test always meant.
     assert_eq!(
-        f.state.all_column_widths.read().unwrap()[1].get(&3).copied(),
+        f.column_width(1, 3),
         Some(64.0),
         "Sheet2's column 3 was not restored"
     );
     assert_eq!(
-        f.state.column_widths.read().unwrap().get(&3).copied(),
+        f.column_width(0, 3),
         Some(111.0),
-        "the ACTIVE sheet's column 3 was resized by an undo belonging to another sheet"
+        "the OTHER sheet's column 3 was resized by an undo belonging to Sheet2"
     );
 }
 
@@ -889,14 +977,16 @@ fn a_row_height_undo_restores_the_sheet_it_was_recorded_on() {
 
     f.undo();
 
-    assert!(
-        !f.state.all_row_heights.read().unwrap()[1].contains_key(&5),
+    // Per sheet, not per store — see the column-width twin above.
+    assert_eq!(
+        f.row_height(1, 5),
+        None,
         "Sheet2's row 5 should be back to the default height"
     );
     assert_eq!(
-        f.state.row_heights.read().unwrap().get(&5).copied(),
+        f.row_height(0, 5),
         Some(40.0),
-        "the ACTIVE sheet's row 5 was resized by another sheet's undo"
+        "the OTHER sheet's row 5 was resized by Sheet2's undo"
     );
 }
 
@@ -986,10 +1076,13 @@ fn a_structural_snapshot_undo_does_not_replace_the_active_sheets_whole_grid() {
     );
     assert_eq!(f.number(1, 0, 0), 5.0, "Sheet2 was not restored from its own snapshot");
     assert_eq!(f.number(0, 1, 0), 2000.0, "...and its second cell with it");
+    // Sheet1's grid survived (asserted above) and the view has followed the
+    // restore to Sheet2, which is Excel's rule. The mirror therefore shows
+    // Sheet2's restored snapshot, not Sheet1.
     assert_eq!(
         f.state.grid.read().unwrap().get_cell(0, 0).map(|c| c.value.clone()),
-        Some(CellValue::Number(1000.0)),
-        "the ACTIVE mirror must survive an off-sheet snapshot restore too"
+        Some(CellValue::Number(5.0)),
+        "a snapshot restore must switch to the sheet it replaced"
     );
     assert!(
         result.structural_restore,
@@ -1021,6 +1114,7 @@ fn the_active_sheet_path_is_unchanged_by_the_off_sheet_one() {
 
     f.undo();
 
+    assert_eq!(f.active(), 0, "an active-sheet undo must not switch anything");
     assert_eq!(
         f.state.column_widths.read().unwrap().get(&3).copied(),
         Some(64.0),

@@ -22,10 +22,17 @@ export {
 export type {
   ActionTiming,
   CheckpointTiming,
+  SheetShape,
   WalkOptions,
   WalkResult,
 } from "./walkRunner";
-export { WalkRunner, formatWalkReport, summarizeCoverage } from "./walkRunner";
+export {
+  WalkRunner,
+  formatWalkReport,
+  sheetShapeOf,
+  sheetShapesDiffer,
+  summarizeCoverage,
+} from "./walkRunner";
 export type {
   ReplayFn,
   ReplayOutcome,

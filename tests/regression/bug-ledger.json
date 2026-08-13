@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 43,
+  "nextId": 54,
   "bugs": [
     {
       "id": "BUG-0023",
@@ -1800,7 +1800,7 @@
     },
     {
       "id": "BUG-0042",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-08-13",
       "source": {
         "kind": "e2e",
@@ -1809,7 +1809,7 @@
       },
       "violation": {
         "oracleId": "functional-assertion",
-        "message": "Clicking a cell that carries a NOTE does not open the note editor, and the note's red indicator triangle DISAPPEARS at the same moment. `vba-idioms-wave4.spec.ts:735` step 'clicking the annotated cell opens the note editor with the text' fails on `locator('textarea:visible').first()` — element(s) not found, 10s. MEASURED, and this is the part that makes it a product bug rather than a flaky test: the two screenshots the spec itself writes show the triangle PRESENT on AA61 before the click (wave4-note-triangle.png) and ABSENT after it (test-failed-1.png), with AA61 selected and no overlay. NO DATA IS LOST. A direct probe (add_note at row 60/col 26, grid:refresh, click AA61) reports 0 visible textareas while `get_note` STILL returns the note, byte-identical, after the click. So the note is intact in the backend and unreachable from the UI: clicking is the product's documented inspection gesture for a note (the spec's own comment records that the hover preview in hoverHandler.ts is unwired dead code — initHoverHandler has no caller), so there is currently NO way to read a note's text by pointing at it.",
+        "message": "Clicking a cell that carries a NOTE does not open the note editor, and the note's red indicator triangle DISAPPEARS at the same moment. `vba-idioms-wave4.spec.ts:735` step 'clicking the annotated cell opens the note editor with the text' fails on `locator('textarea:visible').first()` — element(s) not found, 10s. MEASURED, and this is the part that makes it a product bug rather than a flaky test: the two screenshots the spec itself writes show the triangle PRESENT on AA61 before the click (wave4-note-triangle.png) and ABSENT after it (test-failed-1.png), with AA61 selected and no overlay. NO DATA IS LOST. A direct probe (add_note at row 60/col 26, grid:refresh, click AA61) reports 0 visible textareas while `get_note` STILL returns the note, byte-identical, after the click. So the note is intact in the backend and unreachable from the UI: clicking is the product's documented inspection gesture for a note (the spec's own comment records that the hover preview in hoverHandler.ts is unwired dead code — initHoverHandler has no caller), so there is currently NO way to read a note's text by pointing at it. [CORRECTED 2026-08-13, see triage: the claim that the triangle DISAPPEARS is WRONG. Re-measured two ways (a live probe sampling the corner before and after the click, and a pixel decode of both screenshots) the indicator is present and IDENTICAL in both frames. The editor half is real, but its cause is not the cache: the editor opens and is closed ~35ms later by the same click's selection change. The claim that the hover preview is unwired is also stale — initHoverHandler is called from Review/index.ts.]",
         "digestDiffPaths": []
       },
       "repro": {
@@ -1819,16 +1819,459 @@
       },
       "triage": {
         "verdict": "product-bug",
-        "confidence": 0.85,
+        "confidence": 1,
         "behaviorIds": [],
-        "rootCauseHypothesis": "A SYNCHRONOUS READ OF AN ASYNCHRONOUSLY REFILLED CACHE. `handleAnnotationClick` (app/extensions/Review/handlers/clickHandler.ts) opens the editor only if `getNoteIndicatorAt(row, col)` returns something, and that is a synchronous `Map.get` on `noteIndicatorMap` in app/extensions/Review/lib/annotationStore.ts. The map is refilled only by `readAnnotationState()`, which is `async` (it awaits getCommentIndicators/getNoteIndicators), while `invalidateAnnotationCache()` and `resetAnnotationStore()` CLEAR both maps synchronously. So any invalidation opens a window — and, if nothing re-triggers the read, a permanent state — in which the indicator is absent: the click handler returns false (no editor) and the decoration paints nothing (no triangle). That is exactly the pair of symptoms observed, and it explains why the triangle can be present one paint and gone the next without the note changing. NOT VERIFIED: which invalidation fires here, and whether the re-read is never re-triggered or merely late. Distinguishing those is the first work, because they need different fixes (re-trigger vs. make the read await-and-retry), and guessing between them is how a fix makes a test go green without making the product right.",
-        "suggestedFixArea": "app/extensions/Review/lib/annotationStore.ts (readAnnotationState / invalidateAnnotationCache) + app/extensions/Review/handlers/clickHandler.ts (handleAnnotationClick reads the cache synchronously)"
+        "rootCauseHypothesis": "MEASURED, and it CORRECTS the hypothesis this entry was filed with. It is NOT a synchronous read of an asynchronously refilled cache, and the triangle does NOT disappear. Both halves were measured before anything was changed. (1) THE TRIANGLE: an instrumented probe sampled the indicator corner before and after the click on the live app and got the SAME red fraction, 0.1428 both times; independently, the spec's own two screenshots were decoded pixel by pixel and both contain the same 66-pixel triangle in the same 11x11 device-pixel box, with the cell plainly tinted (i.e. selected) in the frame taken AFTER a successful click. The over-selection anchor works. (2) THE EDITOR: the same probe recorded document.querySelectorAll('textarea').length on every animation frame for 5s after the click. The editor DOES open -- 1 textarea at t=32ms and t=50ms -- and is GONE from t=67ms. So the cache HIT (that is why the editor opened and why the triangle painted); something closed the editor ~35ms later. That something is Review/handlers/selectionHandler.ts: handleAnnotationClick deliberately returns false so the cell still selects (Excel parity), the same click therefore moves the selection onto the annotated cell, Layout.tsx reports it, and the handler hid 'note-editor' whenever the active cell differed from previousCell -- which on this gesture is the cell the user was on BEFORE the click. The rule 'close when the selection moves' closed the editor the click had just opened. The comments sidebar's click-a-note-to-open-it was broken by the same rule from the other direction: it navigates first and shows the overlay second.",
+        "suggestedFixArea": "app/extensions/Review/handlers/selectionHandler.ts — close an annotation editor only when the selection leaves the cell THAT EDITOR IS ANCHORED TO, reading the anchor from the overlay's own data (OverlayExtensions.getVisibleOverlays()) rather than from a second copy."
       },
       "fix": {
-        "status": "not-attempted",
+        "status": "fixed",
+        "filesChanged": [
+          "app/extensions/Review/handlers/selectionHandler.ts",
+          "app/extensions/Review/lib/annotationStore.ts",
+          "app/extensions/DataValidation/lib/validationStore.ts",
+          "app/extensions/Hyperlinks/index.ts",
+          "app/src/core/lib/gridRenderer/rendering/cells.ts",
+          "app/src/core/lib/gridRenderer/core.ts",
+          "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts",
+          "app/src/core/components/Spreadsheet/Spreadsheet.tsx",
+          "app/extensions/Review/handlers/__tests__/selectionHandler.test.ts",
+          "app/src/core/lib/gridRenderer/interaction/paneAwareHitTesting.test.ts",
+          "app/src/core/lib/gridRenderer/cellDecorationZOrder.test.ts",
+          "app/extensions/Review/lib/__tests__/annotationStore.test.ts",
+          "app/extensions/Review/lib/__tests__/annotationStore.deep.test.ts"
+        ],
+        "diffSummary": "THE BUG: the annotation editors now close per ANCHOR, not per change. handleSelectionChange reads each editor overlay's own row/col out of OverlayExtensions.getVisibleOverlays() and hides it only when the active cell is a different cell -- order-independent, so it does not matter whether the selection lands before or after the overlay is shown. Proved on the live app with the same probe that measured the defect: the textarea now stays up for the full 5s, and the triangle's red fraction is unchanged at 0.1428 before and after. THE CLASS the brief asked to enumerate: five extension caches are read synchronously while refilled asynchronously (Review annotations, DataValidation rules, Hyperlinks indicators, ErrorChecking indicators, Grouping outline). NONE of them clears before refilling -- the filed shape does not exist in the family. Three real things did: (a) invalidateAnnotationCache() was the only function that emptied a live cache with nothing scheduled to refill it, and had NO production caller -- deleted, and a source-census guard in annotationStore.deep.test.ts (self-tested) now keeps resetAnnotationStore the only clearer; (b) invalidate() was a NO-OP for Review/DataValidation/Hyperlinks because all three dropped the stillCurrent predicate createCoalescedRefresh hands them, so Review's documented sheet-switch abandonment abandoned nothing -- all three now consult it; (c) Hyperlinks wiped both caches on any read error, turning one dropped IPC call into 'this cell has no hyperlink' -- it now keeps the previous answer. THREE MORE DEFECTS in the same indicator path, each found by reading and then measured: (1) the frozen/split pane painter (drawCellTextZone) ran NO over-selection decorations at all and skipped every empty cell before the under-selection pass, so freezing the top row made every note/error/bookmark indicator on the sheet vanish (measured 0 indicator pixels) -- it now runs both anchors and returns its deferred list, each entry carrying the pane clip it must be replayed under; (2) the main painter's empty-cell skip was gated on hasCellDecorations(), which answers for the UNDER-selection registry only, so a note triangle on an existing-but-empty unstyled cell painted only while some unrelated extension had an under-selection decoration registered -- the gate now asks both anchors; (3) the cell-click-interceptor dispatch and the grid context menu called getCellFromPixel WITHOUT the pane options every other caller passes, so with a frozen header row an interceptor was handed a different cell from the one the click selected (measured: row 0 with the options, row 20 without) -- both now pass them, with a self-tested source census.",
+        "validatedBy": [
+          "app/extensions/Review/handlers/__tests__/selectionHandler.test.ts (9 tests; 4 fail when the old rule is pasted back)",
+          "app/src/core/lib/gridRenderer/cellDecorationZOrder.test.ts (frozen pane, split window, empty backend cell; all 4 new >0 assertions fail before the fix)",
+          "app/src/core/lib/gridRenderer/interaction/paneAwareHitTesting.test.ts (pane divergence + self-tested source census)",
+          "app/extensions/Review/lib/__tests__/annotationStore.test.ts (no empty window mid-refill; failed read keeps the answer; an abandoned pass writes nothing)",
+          "app/extensions/Review/lib/__tests__/annotationStore.deep.test.ts (only-clearer census, detector proved to fire)",
+          "live app, E2E_MANUAL=1 instrumented probe of the 5-step repro: editor open through t=5016ms; triangle 0.1428 before and after; get_note byte-identical",
+          "vitest 767 files / 106,409 passed; check-types clean; lint:boundaries clean"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0043",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "undo sheet-activation pass, 2026-08-13 (Rust + vitest; no E2E run)"
+      },
+      "violation": {
+        "oracleId": "excel-parity",
+        "message": "UNDO OF AN OFF-SHEET EDIT IS INVISIBLE. Excel keeps ONE undo history and switches to the sheet the undone action happened on, so the user sees what changed. Calcula restored the right cells on the right sheet (BUG-0034 fixed that) and then said nothing at all: the tab strip, the grid, the formula bar and every piece of per-sheet chrome stayed on the sheet the user happened to be looking at. An undo of an edit made on another sheet was therefore indistinguishable from an undo that did nothing -- the value moved, correctly, on a sheet nobody could see. Named as still-open in the register at 9f and deferred there because a backend-only switch would show Sheet1's tab over Sheet2's data, which is worse than the silence.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "THREE ORDINARY ACTIONS. (1) Click the Sheet2 tab and type a value into Sheet2!A1. (2) Click the Sheet1 tab. (3) Press Ctrl+Z. Before: nothing on screen changes -- the value on Sheet2 is correctly restored, but the app stays on Sheet1 and reports no switch, so there is no way to tell the undo happened. After: the app switches to Sheet2, selects A1, and the tab strip, grid, formula bar, column widths, row heights, hidden rows, merges, zoom, split and freeze panes all land on Sheet2 together. Redo behaves the same way. Unit-level reproduction: undo_commands::undo_sheet_activation_tests::an_undo_of_an_off_sheet_edit_activates_that_sheet.",
+        "trace": null,
+        "actionCount": 3
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "`UndoResult` had no sheet dimension at all, so the frontend could not have followed a switch even if the backend had made one, and `sheets::set_active_sheet` was a Tauri command taking `State<AppState>` -- unreachable from `apply_changes`, which holds an `&AppState`. Both halves were needed: the backend performing a REAL activation through the one implementation that swaps every per-sheet store, and the frontend following it through the same channel a tab click uses.",
+        "suggestedFixArea": "core/engine/src/undo.rs (Transaction::target_sheet / restored_anchor_on) + app/src-tauri/src/sheets.rs (activate_sheet) + app/src-tauri/src/undo_commands.rs (apply_changes) + app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "core/engine/src/undo.rs",
+          "app/src-tauri/src/sheets.rs",
+          "app/src-tauri/src/undo_commands.rs",
+          "app/src-tauri/src/undo_sheet_domain_tests.rs",
+          "app/src-tauri/src/undo_sheet_activation_tests.rs",
+          "app/src/core/lib/tauri-api.ts",
+          "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts",
+          "app/src/core/components/Spreadsheet/__tests__/undoSheetActivation.test.tsx"
+        ],
+        "diffSummary": "`Transaction::target_sheet()` answers WHICH sheet a transaction belongs to (first recorded change that carries one; None for a CustomRestore-only transaction, whose sheet is inside opaque bytes). `sheets::set_active_sheet` is now a one-line delegation to `sheets::activate_sheet(&AppState, index)`, the single implementation of the swap -- grid mirror, column widths, row heights, merged regions, user-hidden rows/cols, then the dependency-map rebuild. `apply_changes` calls it AFTER the restore and with no lock held, so the whole off-sheet path (deferred geometry, grids[sheet] writes, recalc_after_off_sheet_write) still runs and is still exercised by the BUG-0034 guards; the mirror swap then picks up exactly the stores those arms wrote. A HIDDEN target is restored but NOT activated -- Excel cannot make a hidden sheet active, and following it would put the grid on a sheet with no tab. `UndoResult` gains activeSheetIndex / activeSheetName / restoredAnchor, reported unconditionally so the frontend compares against its own state. The frontend follows through the tab click's OWN channel (sheet:beforeSwitch, the grid sheet context, sheet:normalSwitch, SHEET_CHANGED) with no await between the dispatches, and aims the selection at the restored anchor. handleUndo and handleRedo -- previously byte-identical copies -- are now one `applyRestoreToTheView`.",
+        "validatedBy": [
+          "app-lib 1546 passed / 0 failed / 5 ignored (baseline 1530; +16)",
+          "core 1349 passed (baseline 1342; +7)",
+          "test_pivot 56 passed",
+          "vitest full 768 files / 106416 passed; this pass adds 1 file / 7 tests",
+          "SABOTAGE: removing the activate_sheet call fails 8 tests; ignoring sheet visibility fails 3; not re-stamping updated_cells fails 1; disabling the frontend follow fails 4"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0044",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "undo sheet-activation pass, 2026-08-13 (Rust + vitest; no E2E run)"
+      },
+      "violation": {
+        "oracleId": "functional-assertion",
+        "message": "THE FORMULA BAR SHOWS THE PREVIOUS SHEET'S CELL AFTER A SHEET SWITCH. Found while making undo's sheet switch atomic, but it is NOT caused by it -- it fires on an ordinary tab click and predates this pass. The effect that fills the formula bar in useSpreadsheetSelection depended on [selection.endRow, selection.endCol, isEditing] only. `getCell` reads the ACTIVE sheet, so a switch that lands on the SAME coordinates re-ran nothing and the bar kept the old sheet's content. That is the COMMON case, not an edge: a sheet with no saved selection is given A1, and A1 is usually where you already were. The grid painted the new sheet while the formula bar described the old one, and the only clue was that the value was right for a sheet you were no longer on.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "TWO CLICKS. (1) On Sheet1, select A1 and give it a value (say 100). (2) Click the Sheet2 tab, where A1 is empty and no selection has been saved, so the switch selects A1. The grid correctly shows Sheet2, and the formula bar still reads 100. Unit-level reproduction: 're-reads the formula bar when the sheet moves under an unchanged selection' in app/src/core/components/Spreadsheet/__tests__/undoSheetActivation.test.tsx.",
+        "trace": null,
+        "actionCount": 2
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "A missing dependency on a React effect: the fetch reads backend state keyed by the ACTIVE SHEET but listed only the selection coordinates as its inputs, so the one input that actually changed was invisible to it.",
+        "suggestedFixArea": "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts",
+          "app/src/core/components/Spreadsheet/__tests__/undoSheetActivation.test.tsx"
+        ],
+        "diffSummary": "`sheetContext.activeSheetIndex` added to the effect's dependency list, so the active cell is re-read whenever the sheet moves under an unchanged selection. Fixes the ordinary tab click as well as undo's switch.",
+        "validatedBy": [
+          "vitest undoSheetActivation.test.tsx 7/7",
+          "SABOTAGE: removing the dependency again fails exactly that test"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0045",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "walk",
+        "seed": 1786446166374,
+        "runId": "soak walk seed 1786446166374 (200 actions, no category weights) — wedged at the final save/reload oracle checkpoint"
+      },
+      "violation": {
+        "oracleId": "app-hang",
+        "message": "THE APP DEADLOCKS WHEN A FILE IS OPENED WHILE THE BACKGROUND GATHER-REFRESH RECALCULATION IS RUNNING. Measured: the walk stopped printing at `[oracle checkpoint] after step 200`; the PAGE stayed alive (DOM answered, window title read `oracle-save-13232-1.cala`, no native dialogs open) but every Tauri invoke timed out. Two out-of-process stack dumps a minute apart were byte-identical. Main thread: `open_file` -> `restamp_workbook_name_casing` HOLDING `named_ranges` + `tables` + `table_names`, WAITING for `sheet_names`. Gather worker (`calp_commands::queue_gather_refresh` -> `calculation::recalculate_sheet_values`): HOLDING `grid` + `grids` + `sheet_names` + `style_registry`, WAITING for `tables`. Each holds what the other waits for. No panic, no crash, nothing in the app log after the checkpoint's own DIGEST line -- the message pump stops with the main thread and the window goes Not Responding. Third instance of this class in the programme and the SECOND on this seed. THE GUARD THAT EXISTS FOR THIS SHAPE WAS GREEN: `no_lock_is_held_while_a_grid_lock_is_acquired` treated `.ok()` as consuming the guard, but `LockResult::ok()` MOVES the guard into an `Option` -- so all three of restamp's held guards read as temporaries that had already died.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "RACE, so a trace reproduces it probabilistically rather than deterministically: `E2E_MANUAL=1 SOAK_SEED=1786446166374 SOAK_ACTIONS=200 SOAK_ORACLE_EVERY=25 npx playwright test --project=soak --grep \"random walk\"` -- the walk creates 14 tables and 8 charts, and the save/reload oracle's `open_file` at the final checkpoint lands while the gather-refresh worker is recalculating. DETERMINISTIC unit-level reproduction, which is what the fix is validated against: `state_digest_lock_order_tests::restamping_name_casing_does_not_hold_tables_while_it_waits_for_sheet_names` holds `sheet_names` (playing the pass), runs `restamp_workbook_name_casing` on another thread, and probes whether `tables` is still reachable -- with a deadline, so it FAILS rather than hangs. Its non-vacuity partner `the_tables_probe_itself_can_fail_the_way_the_defect_did` plants the pre-fix body and asserts the probe says no.",
+        "trace": "tests/regression/repros/BUG-0045.trace.json",
+        "actionCount": 200
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "A lock-order inversion between the load path and the background recalculation pass, on a PAIR no census asked about. The crate already had one canonical order (`grid` before `grids`, and no lock held while a grid lock is acquired) enforced crate-wide; nothing enforced the order of the four NAMING authorities relative to `sheet_names`, and the pass takes `sheet_names` FIRST while seven functions took one of `tables` / `table_names` / `named_ranges` / `style_registry` before it. `restamp_workbook_name_casing` was additionally inverted against the grid pair and escaped the existing census only because of the `.ok()` hole.",
+        "suggestedFixArea": "app/src-tauri/src/persistence.rs (restamp_workbook_name_casing) + the ten other inverted call sites + app/src-tauri/src/state_digest_lock_order_tests.rs (CONSUMING, and a census for the new pair)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/persistence.rs",
+          "app/src-tauri/src/tables.rs",
+          "app/src-tauri/src/calp_commands.rs",
+          "app/src-tauri/src/named_ranges.rs",
+          "app/src-tauri/src/tracing.rs",
+          "app/src-tauri/src/commands/print.rs",
+          "app/src-tauri/src/commands/structure.rs",
+          "app/src-tauri/src/commands/data.rs",
+          "app/src-tauri/src/state_digest_lock_order_tests.rs"
+        ],
+        "diffSummary": "ONE ORDER, TAKEN FROM THE THREAD THAT CANNOT CHANGE IT. `recalculate_sheet_values` runs on a background thread and takes `grid`, `grids`, `sheet_names`, `style_registry`, ... `tables`, `table_names`, `named_ranges`; everything else now agrees with it. `restamp_workbook_name_casing` takes the two grid locks FIRST and then the four authorities in the pass's order (it used to take the authorities first and the grid locks last). Ten other functions that held one of the four and then asked for `sheet_names` hoist a clone of `sheet_names` above it: `tables::{delete_table, set_totals_row_function, toggle_totals_row, convert_to_range, set_calculated_column}`, `calp_commands::apply_override_value_to_grid`, `named_ranges::{get_named_range_for_selection, resolve_named_range_coords}`, `tracing::{trace_precedents, trace_dependents}`, `commands::print::get_print_data`, `commands::data::remove_duplicates`, and the four `commands::structure::{insert,delete}_{rows,columns}_impl`. `.ok()` is out of `CONSUMING` (it moves the guard into an Option, it does not release it) with a planted-body tooth that fails if it returns. New crate-wide census `no_function_holds_a_name_authority_while_acquiring_sheet_names` over all four pairs, its direction pinned to the pass by `the_recalculation_pass_still_takes_sheet_names_first`, plus a live deadlock probe and its non-vacuity partner."
+      }
+    },
+    {
+      "id": "BUG-0046",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "sheet-surface sweep, 2026-08-13 — found by reading `hide_sheet` against its three callers while adding sheet actions to the walker"
+      },
+      "violation": {
+        "oracleId": "excel-parity",
+        "message": "HIDING THE ACTIVE SHEET LEAVES THE BACKEND ON THE HIDDEN SHEET, SO EDITS GO TO THE WRONG SHEET. `hide_sheet` set the visibility flag and RETURNED a recommended new active index without touching `state.active_sheet` or any per-sheet mirror -- its own doc comment said \"frontend should call set_active_sheet if it changed\". None of the three callers did: `SheetTabs.handleHide` passes `backendHandledSwitch: true` (\"Backend already swapped - just sync frontend state\"), `ScriptNotebook/lib/deferredActionHost.setSheetVisibility` comments \"Hiding the active sheet makes the backend switch\", and the broker's `api.setSheetVisibility` goes through `announceSheetsChanged`, which dispatches `setActiveSheet` into the frontend store. All three therefore moved the FRONTEND onto the recommended sheet while the backend still had the hidden sheet active -- and every cell read and every cell write goes to the active sheet. The tab strip highlights Sheet1, the canvas paints Sheet2's data, and typing writes into the sheet the user just hid. Excel's rule settles it: a hidden sheet cannot be the active sheet (no tab to select; `Activate` raises in VBA).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "TWO ACTIONS. (1) Add a sheet (which makes it active). (2) Right-click its tab and choose Hide. Before: the tab strip and the grid claim to be on Sheet1 while `get_active_sheet` still answers with the hidden sheet, so `get_cell_value`/`update_cell` operate on it -- typing appears to edit Sheet1 and edits the hidden sheet. After: the backend performs the switch through `activate_sheet`, so the index, the grid mirror, the column widths, the row heights, the merged regions and the user-hidden sets all move together. Unit-level: `sheets::hidden_active_sheet_tests::{hiding_the_active_sheet_activates_a_visible_one, the_grid_mirror_moves_with_it, the_sheet_it_lands_on_is_visible}`. NOTE: `TestRunner`'s \"Hide and unhide a sheet\" hides the sheet it has just added -- i.e. the ACTIVE sheet -- every time it runs, and asserted only `visibility == \"hidden\"`, so the defect sat underneath a passing test.",
+        "trace": null,
+        "actionCount": 2
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "A command that returns a RECOMMENDATION into a codebase where every caller reads it as a report of what happened. The four other sheet-structure commands (`add`, `delete`, `move`, `copy`) all write `active_sheet` and swap the mirrors themselves; `hide_sheet` was the only one that did not, and the asymmetry was invisible because the return type is identical.",
+        "suggestedFixArea": "app/src-tauri/src/sheets.rs (hide_sheet -> activate_sheet)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/sheets.rs",
+          "app/src-tauri/src/hidden_active_sheet_tests.rs",
+          "app/e2e/invariants/stateSnapshot.ts",
+          "app/e2e/oracles/cheapInvariants.ts",
+          "app/e2e/__tests__/cheapInvariants.test.ts",
+          "app/e2e/walker/actionCatalog.ts"
+        ],
+        "diffSummary": "`hide_sheet` splits into a `hide_sheet_inner(&AppState, &FileState, ..)` body (so the switch has a unit tier) that computes the target with every guard scoped to a block, releases them, and then calls `activate_sheet` -- the ONE implementation of the swap, the same one BUG-0043 extracted. A source census fails the build if it ever assigns `active_sheet` itself instead. SECOND DEFECT, found by the test fixture: `ensure_vec_len(&mut sheet_visibility, n)` pads with `String::default()`, i.e. the EMPTY STRING, while every reader compares against the literal \"visible\" -- `SheetTabs` renders `sheets.filter(s => s.visibility === \"visible\")`, `hide_sheet` counts the visible sheets that way, and `next_sheet`/`previous_sheet` skip anything else. A padded slot is therefore a sheet with no tab that the workbook believes is neither hidden nor visible, and `build_sheet_list`'s `.unwrap_or(\"visible\")` cannot repair it because the slot is `Some(\"\")` rather than `None`. All four padding sites go through a new `ensure_visibility_len`. INSTRUMENT: the walker snapshot now carries `backendActiveSheet` and `sheetVisibility`, and a new cheap invariant `active-sheet-agrees` fails the walk when the two halves of the app name different active sheets, or when the active sheet is not visible -- a class no digest oracle can see, because the digest is assembled entirely from AppState and a backend that is wrong in a self-consistent way passes all three. `sheet.hide` is now a walker action."
+      }
+    },
+    {
+      "id": "BUG-0047",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "walk",
+        "seed": 1786446166374,
+        "runId": "soak walk seed 1786446166374 (200 actions, no weights); reproduced independently on 90070001 (sheet:10) and 90070002 (sheet:8,chart:4)"
+      },
+      "violation": {
+        "oracleId": "save-reload-round-trip",
+        "message": "TABLES DO NOT FOLLOW THEIR SHEET THROUGH A MOVE OR A COPY. `state.tables` is keyed by sheet INDEX, and it is the one sheet-index-keyed store that is NOT in `remap_sheet_keyed_stores` -- `delete_sheet` re-keys it inline, because the same pass has to drop the deleted sheet's table NAMES out of `table_names` and a generic remap cannot do that half. `move_sheet` and `copy_sheet` therefore re-keyed every OTHER per-sheet store (comments, scenarios, outlines, conditional formats, data validations, cell types, controls, protection, AUTOFILTERS, spill tracking, reports, and the floating slicer/timeline/chart/sparkline stores) and left this one where it was. The measured symptom is the AutoFilter link, because `auto_filters` DID move: on reload `relink_autofilter_owner` looks for the owning table under the filter's sheet index, finds none, and the link is gone (`tables.<id>.autoFilterId: <id> -> <absent>`) -- or worse, finds a DIFFERENT sheet's table and hands it the filter (`<A> -> <B>`, seed 90070001; `<absent> -> <id>`, seed 90070002). The lost link is only the visible half. The table itself is now registered against another sheet, and that registry is what every structured reference (`=SUM(Table1[Amount])`) resolves through, what the save path writes per sheet, and what the AutoFilter, totals-row and calculated-column commands look the table up in.",
+        "digestDiffPaths": [
+          "tables."
+        ]
+      },
+      "repro": {
+        "description": "NINE ACTIONS, confirmed by the shrinker (30 replays, 20 clean passes, verdict=confirmed): `sheet.add` -> (noise) -> `table.create` -> `sheet.hide {tabIndex:1}` -> `sheet.move {from:0,to:1}`, then save and reload. Replay: E2E_MANUAL=1 SOAK_TRACE=tests/regression/repros/BUG-0047.trace.json SOAK_EXPECT_FAIL=1 npx playwright test --project=soak --grep \"Trace replay\". The essential pair is `table.create` followed by any `sheet.move` that renumbers the table's sheet; the hide only makes the move land somewhere interesting. Unit-level: `sheets::tables_remap_tests::{a_move_carries_the_table_and_re_stamps_its_sheet_index, a_copy_shifts_everything_at_or_above_the_insertion_point, every_structural_command_re_keys_the_table_store}`.",
+        "trace": "tests/regression/repros/BUG-0047.trace.json",
+        "actionCount": 9
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "One store outside the shared helper. §3bn's sweep asked 'is this store keyed by sheet index, and does the helper reach it' and `tables` answered the first question yes and the second no -- it has its own inline re-key in `delete_sheet`, so it looked handled. Nothing asked the two commands that do not delete anything.",
+        "suggestedFixArea": "app/src-tauri/src/sheets.rs (move_sheet, copy_sheet)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/sheets.rs"
+        ],
+        "diffSummary": "New `remap_tables_store(state, effect, remap)` re-keys the store and re-stamps the `sheet_index` each `Table` carries -- both halves, because a key that moved without the field is the same divergence one layer down. `move_sheet` and `copy_sheet` call it with the very remap closures they already pass to `remap_sheet_keyed_stores`; `delete_sheet` keeps its inline pass, which also has to drop the deleted sheet's names out of `table_names`. A source census (`every_structural_command_re_keys_the_table_store`) checks all three by name, because 'it is a sheet-keyed store' is exactly the reasoning that missed it. Lock order: the call sites already hold `sheet_names`, and taking `tables` under it is the canonical direction the BUG-0045 census enforces."
+      }
+    },
+    {
+      "id": "BUG-0048",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "sheet-surface sweep, 2026-08-13 — found by asking BUG-0046's question of the DELETE side"
+      },
+      "violation": {
+        "oracleId": "excel-parity",
+        "message": "DELETING A SHEET CAN LEAVE A WORKBOOK WITH NO VISIBLE SHEET, AND CAN LEAVE THE ACTIVE SHEET ON A HIDDEN ONE. `hide_sheet` has always refused to hide the last VISIBLE sheet; `delete_sheet` only ever checked that at least one SHEET remained (`sheet_names.len() <= 1`). Hide Sheet1, delete Sheet2, and that guard is satisfied while the workbook is left with a single HIDDEN sheet: no tab to click, and an active index naming a sheet the user cannot look at. Excel's wording is exactly the distinction it was missing -- \"a workbook must contain at least one visible worksheet\". Separately, the index arithmetic that picks the post-delete active sheet is pure bookkeeping, so deleting the sheet beside a hidden one lands the user ON the hidden one even when other visible sheets exist.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "TWO ACTIONS, from the sheet tab context menu. (1) Right-click Sheet1 > Hide. (2) Right-click Sheet2 > Delete. Before: the delete succeeds and the workbook has one sheet, hidden -- the tab strip is empty and the grid is showing a sheet with no tab. After: the delete is refused with \"Cannot delete the last visible sheet\". The second half: with three sheets, hide Sheet2, then delete Sheet3 -- before, the active index lands on the hidden Sheet2; after, it walks on to a visible one. Unit-level: `sheets::hidden_active_sheet_tests::{a_delete_that_would_leave_no_visible_sheet_is_counted_as_zero, the_landing_sheet_skips_a_hidden_preference, delete_sheet_asks_both_questions}`.",
+        "trace": null,
+        "actionCount": 2
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "\"At least one sheet\" and \"at least one VISIBLE sheet\" are different tests, and only one of the two commands that can violate the rule was making the right one. The asymmetry survived because `delete_sheet` takes eight `State<T>` arguments and cannot be driven from a unit test, so the rule was never asked of it.",
+        "suggestedFixArea": "app/src-tauri/src/sheets.rs (delete_sheet)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/sheets.rs",
+          "app/src-tauri/src/hidden_active_sheet_tests.rs"
+        ],
+        "diffSummary": "Two pure functions with their own unit tier -- `visible_sheets_after_removing` (the refusal) and `nearest_visible_sheet` (the landing) -- plus `sheet_is_visible`, which reads a SHORT `sheet_visibility` as visible exactly as `build_sheet_list` does. `delete_sheet` calls both, and a source census (`delete_sheet_asks_both_questions`) fails the build if either call goes away, because the command itself cannot be tested directly. Non-vacuity partners pin that the landing walk is a no-op when the preferred sheet is already visible, and that a short visibility vector does not make a workbook undeletable."
+      }
+    },
+    {
+      "id": "BUG-0049",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "walk",
+        "seed": 1786446166374,
+        "runId": "soak walk seed 1786446166374 (200 actions), on the build that had just fixed BUG-0047"
+      },
+      "violation": {
+        "oracleId": "undo-round-trip",
+        "message": "THE UNDO ORACLE REPORTS A FALSE PRODUCT DEFECT WHEN A SHEET IS ADDED WHILE THE UNDO HISTORY IS EMPTY. Measured: \"Undoing 22 steps did not restore the checkpoint state. 2 differences; first: sheetNames[2]: \\\"<absent>\\\" -> \\\"Sheet3\\\"\" -- and both digest differences were that one EMPTY sheet. The walk had ADDED Sheet3 inside the checkpoint window; adding a sheet is not undoable (Excel parity, BUG-0005), so no number of undo steps returns to the checkpoint and the window is not decidable. The oracle decided it anyway. `stepsBackToBaseline` asks whether a wholesale clear DISCARDED anything (`clearedTotal`, a count of TRANSACTIONS), and a structure change made while the stack is already empty discards nothing -- so the counter does not move, the oracle sees no clear, winds the history back and reports the sheet the walk added as an undo defect. This is the exact false alarm BUG-0005's fix removed for the non-empty case, on the one case it left standing; it is a harness defect, and its cost is a triage cycle plus a lost walk each time it fires.",
+        "digestDiffPaths": [
+          "sheetNames",
+          "sheets"
+        ]
+      },
+      "repro": {
+        "description": "Any walk that (a) reaches a checkpoint with an empty or freshly-cleared undo stack, (b) pushes some ordinary transactions, and (c) adds/deletes/renames/moves/copies a sheet in the same window. Seed 1786446166374 at 200 actions does it at the checkpoint after step 125. Deterministic unit-level reproduction: `undoHistoryHorizon.test.ts::says so when the clear discarded NOTHING because the stack was empty` -- baseline {clearedTotal: 4, clearsTotal: 1}, now {clearedTotal: 4, clearsTotal: 2}: `clearedTotal` has not moved and the window must still be undecidable. Its partner covers the non-empty-baseline branch. Sabotage-checked: reverting the decision to `cleared > 0` fails exactly those two.",
+        "trace": null,
+        "actionCount": 125
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The counter answered a question next to the one that was being asked. `cleared_total` was introduced to tell \"a structure change ended the history\" from \"the cap dropped it\" and \"the walk undid past it\", and it does -- as long as the history had something in it. The fact the caller actually needs is whether a clear HAPPENED, which is not the same number.",
+        "suggestedFixArea": "core/engine/src/undo.rs (UndoStack::clear) + app/src-tauri/src/undo_commands.rs (UndoState) + app/e2e/oracles/undoRoundTrip.ts (stepsBackToBaseline)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "core/engine/src/undo.rs",
+          "app/src-tauri/src/undo_commands.rs",
+          "app/e2e/oracles/undoRoundTrip.ts",
+          "app/e2e/oracles/types.ts",
+          "app/e2e/__tests__/undoHistoryHorizon.test.ts"
+        ],
+        "diffSummary": "`UndoStack` gains `clears_total`, incremented on EVERY `clear()` regardless of what it discarded, alongside the transaction-counting `cleared_total` -- kept separate so `no_phantom_clear_on_a_pristine_workbook` keeps meaning what it says. `get_undo_state` reports it as `clearsTotal`; `stepsBackToBaseline` decides on `clears > 0` and uses `cleared` only to say how much was lost (\"1 clear(s), 0 transaction(s) discarded\"). Two new cases in `undoHistoryHorizon.test.ts` cover both branches (empty and non-empty baseline) with `clearedTotal` deliberately unchanged, and they fail when the decision is reverted."
+      }
+    },
+    {
+      "id": "BUG-0050",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "walk",
+        "seed": 90070001,
+        "runId": "soak walk seed 90070001, 250 actions, SOAK_CATEGORY_WEIGHTS=sheet:10, on the build carrying the BUG-0045/0046/0047/0049 fixes"
+      },
+      "violation": {
+        "oracleId": "undo-round-trip",
+        "message": "SHEET VISIBILITY (AND TAB COLOUR) ARE PERSISTED MUTATIONS WITH NO UNDO ENTRY AND NO HISTORY INVALIDATION. Measured: \"Undoing 26 steps did not restore the checkpoint state. 1 differences; first: sheets[1].visibility: \\\"visible\\\" -> \\\"hidden\\\"\" -- the sheet was VISIBLE at the checkpoint, the walk hid it inside the window, and undoing the whole window left it hidden. `hide_sheet`, `unhide_sheet` and `set_tab_color` all construct `DocumentEffect::mutates` (the state IS saved into the .cala), take no `undo_stack`, record nothing, and -- unlike the five structural commands -- do not call `invalidate_undo_history_for_sheet_structure` either. THE DEFECT IS REAL UNDER EITHER PARITY READING, and only the fix differs: if Excel undoes a sheet hide (which is the author's reading, at moderate confidence -- the Undo button is available after Format > Hide & Unhide > Hide Sheet), the commands owe an undo entry that restores `sheet_visibility` / `tab_colors`; if it does not, they owe the history invalidation the other sheet commands make, so the oracle declines the window instead of deciding it. What is NOT defensible is the current third state, where the history stays intact across a change undo cannot reverse.",
+        "digestDiffPaths": [
+          "sheets."
+        ]
+      },
+      "repro": {
+        "description": "THREE ACTIONS. (1) Type a value into Sheet1!A1. (2) Right-click Sheet2's tab and choose Hide. (3) Press Ctrl+Z. The cell edit is undone and Sheet2 stays hidden, with no indication that anything was skipped -- and pressing Ctrl+Z again walks further back through a history that no longer describes the workbook. Same shape for Unhide and for a tab colour. Walk-level: E2E_MANUAL=1 SOAK_SEED=90070001 SOAK_ACTIONS=250 SOAK_CATEGORY_WEIGHTS=\"sheet:10\" SOAK_ORACLE_EVERY=25 npx playwright test --project=soak --grep \"random walk\" -- fails at the checkpoint after step 125. NOT SUPPRESSED: no `KNOWN_ISSUES` entry was added, so sheet-weighted walks will keep reporting it until it is decided.",
+        "trace": null,
+        "actionCount": 3
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "CONFIRMED, and the OWNER CALL is decided in favour of an undo ENTRY. The two candidates were 'record a CustomRestore' and 'end the history the way the five structural sheet commands do', and what settles it is that the argument FOR ending the history does not reach these three. Read `invalidate_undo_history_for_sheet_structure`'s own doc: the five end the history because an undo entry names its sheet by INDEX and those five RENUMBER every index (or, for a rename, rewrite every formula that spells the name), so a queued entry silently comes to describe a different sheet. Hiding a sheet renumbers nothing and rewrites nothing -- it assigns one element of a parallel Vec in place -- so every queued entry still describes exactly the sheet it was recorded on, and the hazard the invalidation exists to prevent is ABSENT. With the structural argument gone what remains is an asymmetry of cost: ending the history destroys every undo step the user had accumulated, recording an entry costs a few bytes. `hide_sheet_inner` already takes that same cheap direction one line over for the dirty flag ('a false positive, which is the cheap direction').",
+        "suggestedFixArea": "app/src-tauri/src/sheets.rs (hide_sheet_inner, unhide_sheet, set_tab_color) — either a `CustomRestore` payload for `sheet_visibility` / `tab_colors` plus its apply arm in undo_commands.rs, or a call to `invalidate_undo_history_for_sheet_structure`. OWNER CALL: which one is Excel parity."
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/sheets.rs",
+          "app/src-tauri/src/undo_commands.rs",
+          "app/src-tauri/src/sheet_tab_state_undo_tests.rs",
+          "app/e2e/journeys/sheet-tab-state-undo.spec.ts"
+        ],
+        "diffSummary": "A new `\"sheet_tab_state\"` CustomRestore kind carries `{ visibility, tab_colors, active_sheet }` -- whole vectors (their LENGTH is state: `ensure_visibility_len` pads them lazily and `build_sheet_list` reads them by index, so a partial restore could leave the list disagreeing with itself), each field `Option` so 'this change did not touch it' is expressible, exactly like `UserHiddenSnapshot`. `hide_sheet_inner`, `unhide_sheet_inner` and `set_tab_color_inner` record it; the latter two are NEW `_inner` splits, added for the same reason `hide_sheet_inner` exists (a `State<T>` command has no unit tier). Every recording happens with NO other state lock held -- `record_custom_restore` takes `undo_stack`, which the crate's canonical order puts ahead of the grid locks -- and only when something actually changed, so a no-op hide/unhide/recolour and a REFUSED hide burn no undo step. Registry row: domain `Sheets` (the translator fans it out to \"sheets:refresh\" + SHEET_CHANGED, which is what makes the tab strip re-read), `defer: true` -- not a preference: undoing the hide of the ACTIVE sheet puts the user back through `sheets::activate_sheet`, which takes grid/grids/widths/heights/merges, all of which `apply_changes` still holds during the inline phase. `active_sheet` is recorded ONLY by hide (the only one that moves the user) and the restore refuses to follow it onto a sheet that is out of range or hidden, under the same rules as `activation_target`. 15 unit tests in `sheet_tab_state_undo_tests.rs` (undo/redo of all three, the standing-point follow and its non-active control, the hidden-target refusal, three no-op cases, a refused hide) plus a source census that every command recording persisted tab state names the kind, with a synthetic-source self-test proving the detector fires in both directions and that the brace matcher stops at the right function. `restore_registry_tests` (which fired on the new kind and had to be taught it) pins the domain and the defer flag. PROVED LIVE from a cold app through the REAL tab context menu and REAL Ctrl+Z (`sheet-tab-state-undo.spec.ts`): the hidden tab's absence is asserted FIRST so the probe is shown able to report the broken answer, then the tab returns, the backend and the rendered strip agree on the active index, and the formula bar reads a mark that only exists on the restored sheet. Paired control: undoing the hide of a NON-active sheet restores it and moves nobody."
+      }
+    },
+    {
+      "id": "BUG-0051",
+      "status": "fixed",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "walk",
+        "seed": 90080002,
+        "runId": "invariant walk seed 90080002, INVARIANT_CATEGORY_WEIGHTS=sheet:6,chart:4,table:4, on the build carrying the BUG-0045/0046/0047/0048/0049 fixes"
+      },
+      "violation": {
+        "oracleId": "contextual-ribbon-tabs",
+        "message": "THE \"TABLE DESIGN\" CONTEXTUAL TAB SURVIVES THE DELETE OF THE LAST TABLE WHEN A SHEET HAS BEEN RENAMED IN BETWEEN. Measured: 'Contextual tab \"Table Design\" is visible but at least one table must exist. Found: slicers=0, charts=0, tables=0, pivots=0, timelines=0, sparklines=0'. The backend has NO tables and the ribbon still offers a tab whose every button addresses an object that no longer exists — the same end state BUG-0026 and the `syncDesignTabToTables` fix (soak seed 20260810) were about, reached through a door those fixes do not cover. The shrinker kept the rename: removing it makes the trace pass, so it is load-bearing and not incidental.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "FOUR ACTIONS, confirmed by the shrinker (30 replays, 22 clean passes, verdict=confirmed): `table.create` -> `sheet.rename {tabIndex: 0}` -> `table.select-into` -> `table.delete`. Replay: E2E_MANUAL=1 SOAK_TRACE=tests/regression/repros/BUG-0051.trace.json SOAK_EXPECT_FAIL=1 npx playwright test --project=soak --grep \"Trace replay\". NOTE ON REACHABILITY: renaming sheet 0 only became generatable in this pass — the walker's `sheet.rename` picked `pickInt(rng, 1, n-1)` and could never rename the first sheet, which is the one everything else refers to.",
+        "trace": "tests/regression/repros/BUG-0051.trace.json",
+        "actionCount": 4
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "ESTABLISHED, and it is NEITHER of the two filed candidates -- no probe was needed, the source says it. `deleteTableAsync` DOES succeed and DOES refresh its own cache; what it never does is announce the `objects` domain. The only thing that re-derives the contextual tab is `syncDesignTabToTables`, which runs on TABLE_DEFINITIONS_UPDATED, which is dispatched by the `objects` domain and by nothing else in the delete path. `announceObjectCascade` in the Table store named only [\"slicer\", \"ribbonFilter\"]; TWO CALLERS papered over it by emitting TABLE_DEFINITIONS_UPDATED BY HAND after awaiting the store (TableDesignTab's Delete and Convert-to-Range buttons), so the defect was invisible from the screen a human uses and reproducible from every other route -- a script, an MCP tool, the E2E walker. WHY THE CENSUS THAT EXISTS FOR THIS DID NOT CATCH IT: the two halves of `cascadeAnnouncementCensus.test.ts` contradicted each other. Its cascade half runs off `requiredDomainsFor`, which DELETES the owner's own domain from the required set on the reasoning that a route re-reading its own cache needs no announcement for itself -- and `objects` IS the Table's own domain. Its selection half, meanwhile, recorded in its own `why` that the tab 'is re-derived ... on TABLE_DEFINITIONS_UPDATED, which the `objects` domain dispatches'. One half excused exactly what the other half depended on. AND THE RENAME: the shrinker was right that removing `sheet.rename` made the trace pass, but it is not load-bearing to the DEFECT -- it was load-bearing to the SETUP. The walker's `table.create` used a raw `create_table` invoke, which leaves the frontend cache empty, so `table.select-into` could not register the tab at all; the rename fired SHEET_CHANGED, whose Table handler calls `refreshCache()`, and that -- nothing about renaming -- is what made the tab appear so it could then survive.",
+        "suggestedFixArea": "app/extensions/Table/lib/tableStore.ts (deleteTableAsync) + app/extensions/Table/index.ts (the SHEET_CHANGED handler, which refreshes the cache without re-deriving the tab) + app/extensions/Table/handlers/selectionHandler.ts"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/extensions/Table/lib/tableStore.ts",
+          "app/extensions/Table/components/TableDesignTab.tsx",
+          "app/src/api/__tests__/cascadeAnnouncementCensus.test.ts",
+          "app/e2e/walker/actionCatalog.ts",
+          "app/e2e/journeys/sheet-tab-state-undo.spec.ts"
+        ],
+        "diffSummary": "The STORE announces its own domain change: `announceObjectCascade` becomes `announceTableObjectChange` and names [\"objects\", \"slicer\", \"ribbonFilter\"], so the delete and the convert-to-range make the identical announcement an out-of-band MCP table delete already made. The two hand-written TABLE_DEFINITIONS_UPDATED emits in TableDesignTab are DELETED -- they were a second source of truth for 'the table list changed' that only the button path had. THE CENSUS IS REPAIRED SO THE CLASS CANNOT RECUR: `SelectionOwner` gains `reconcileDomain` (the refresh domain whose fan-out reaches the reconciliation) and a mandatory `reconcileDomainWhy` for the null case, and a new rule `unannouncedReconciliations` requires EVERY delete route for that kind to announce it -- own domain or not, which is precisely the check `auditRoutes` structurally cannot make. Non-vacuity is asserted (exactly one owner exercises the rule today) and a synthetic-source teeth case proves the detector fires, that the fixed shape is accepted, that `ownDomain` + a self-refresh does NOT excuse it, and that a null domain with no reason is reported. The new rule immediately found a SECOND, INDEPENDENT instance -- but it was a false report: `announceObjectCascade` in `scriptHost/host.ts` reaches \"objects\" through a SECOND hop (`announceObjectsChanged`) that the analyser's one-hop rule did not follow. `domainsAnnounced` now follows announcement helpers transitively, which keeps the closure at 'the announcement helpers this route reaches' rather than the whole module. HARNESS: `table.create` in the walker goes through `createTableAsync` and emits TABLE_CREATED, the way Insert > Table does. The raw invoke it replaces left the frontend not knowing a table existed, which made the walk blind to the whole contextual-tab surface unless an unrelated action happened to refresh the cache. PROVED LIVE from a cold app: the ribbon is asserted to be SHOWING 'Table Design' before the delete (so 'it is gone' cannot pass vacuously), the backend is asserted to hold zero tables after it, and the rendered ribbon no longer offers the tab. TEETH: with the fix sabotaged on the running build and the WebView reloaded, the same live test reports `[\"Home\", \"Page Layout\", \"Controls\", \"Table Design\"]` with zero tables; the file was then restored byte-identically (sha256 8ac813074b0b42914c0044001e22801efa3fa1940d88d30402d40199c10dc2bf) and it passes again. The committed 4-action trace `repros/BUG-0051.trace.json` now replays clean."
+      }
+    },
+    {
+      "id": "BUG-0052",
+      "status": "open",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "live per-animation-frame sampling in app/e2e/journeys/sheet-tab-state-undo.spec.ts, written to attack BUG-0043's atomicity claim rather than re-read it"
+      },
+      "violation": {
+        "oracleId": "rendered-frame-consistency",
+        "message": "A SHEET SWITCH IS NOT ATOMIC ON SCREEN: for a two-frame window the tab strip paints the NEW sheet as active while the canvas is still painting the OLD sheet's cells. Measured per animation frame, with the strip's own painted font-weight and a canvas `getImageData` probe of a cell that has ink on one sheet and not the other: undo-of-an-off-sheet-edit 21-71 ms, an ORDINARY TAB CLICK 60-67 ms, across three runs on the same build. It is therefore NOT undo's defect -- `applyRestoreToTheView` deliberately reuses the tab click's channel and measures no worse than it, usually better -- but a property of every sheet switch in the app. `followBackendSheetActivation` dispatches sheet:beforeSwitch -> the grid sheet context -> sheet:normalSwitch with no `await` between them, so the tab strip repaints on the next frame; the canvas cannot repaint until `refreshCells()` has completed a backend round trip.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "TWO ACTIONS, no scripting. (1) On Sheet2, type something into D1 so the two sheets are visually distinguishable. (2) Click Sheet1's tab, then click Sheet2's tab while sampling. For ~60 ms the Sheet2 tab is bold and the grid below it still shows Sheet1. Automated: `E2E_MANUAL=1 npx playwright test --project=journey e2e/journeys/sheet-tab-state-undo.spec.ts --grep BUG-0043`, which PRINTS both windows ('[BUG-0043] torn window: tab click N ms, undo M ms') and asserts only that undo is no worse than the click plus 50 ms, and that both settle. Raising that to the absolute claim -- no torn frame at all -- fails today, which is how this was found.",
+        "trace": null,
+        "actionCount": 2
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 0.95,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The switch is atomic in STATE and sequential in PAINT. The tab strip derives from the grid sheet context and re-renders synchronously with it; the canvas has to fetch the new sheet's cells before it can draw them. Closing it means either fetching the target sheet's viewport BEFORE the context swap and committing both in one batch, or suppressing the canvas paint until the fetch lands (which trades a wrong sheet for a stale one -- no better). The first is a change to the ONE switch path every tab click, script, MCP tool and undo goes through, and the register's standing warning about that path is that the last time it had two hydration paths, the second was mount-only and painted sheet 1's panes on sheet 2.",
+        "suggestedFixArea": "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts (followBackendSheetActivation) and whatever consumes `sheet:normalSwitch` to refetch the viewport. NOT undo-specific: fixing it in applyRestoreToTheView alone would make undo differ from the tab click, which is the split BUG-0043 closed."
+      },
+      "fix": {
+        "status": "open",
         "filesChanged": [],
-        "diffSummary": "NOT FIXED THIS PASS, and deliberately: it is a frontend defect in the Review extension, outside the sheet/undo/persistence work this pass was sent to do, and it long predates it — §10 already reported this exact test failing. It is filed rather than patched because the cheap fix (have the click handler await a refresh before deciding) would make the test green while leaving the DISAPPEARING TRIANGLE untouched, and the triangle is the half a user actually notices. What this pass adds is the evidence the previous triage lacked: it reproduces COLD AND ALONE, it is not order-dependent, no data is lost, and the mechanism is a synchronous read of an asynchronously refilled cache with a named pair of functions.",
-        "validatedBy": []
+        "diffSummary": "NOT FIXED IN THIS PASS, and deliberately not suppressed. It is cosmetic -- a two-frame flicker, no wrong answer, no data loss, and the settled state is asserted to agree -- while the fix is a change to the single sheet-switch path the whole app shares. The measurement, the probe and the bound are committed, so the day it is attempted there is already a test that fails before and passes after."
+      }
+    },
+    {
+      "id": "BUG-0053",
+      "status": "open",
+      "discovered": "2026-08-13",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "full --project=functional pass on a verified cold app, 2026-08-13 (542 passed / 1 failed / 11 skipped)"
+      },
+      "violation": {
+        "oracleId": "screenshot-baseline",
+        "message": "THE `grid-scroll-before` GOLDEN WAS CAPTURED FROM A CONTAMINATED WORKBOOK, so the test it guards can only pass when an unrelated spec has run first in the same app session. `scrolling.spec.ts > scroll down via mouse wheel changes viewport` writes \"Top\" into A1 and screenshots the grid. MEASURED: on a freshly launched app with `new_file` invoked immediately before the run, the diff shows the golden containing TWO CELLS THE LIVE GRID DOES NOT HAVE -- \"First second\" at B6 and \"original\" at B10 -- and both are written by `e2e/tests/inline-editor-live.spec.ts` (setCellValueDirect(\"B10\", \"original\"), grep-confirmed). In the FULL ordered run the same test fails the other way as well: the live grid then carries residue the golden lacks (tables at M1:O6 and R1:S10, \"Col1/Col2\", \"Item/Amount\"). So neither a clean workbook nor a differently-contaminated one matches, and the only state that would is the exact accumulated state the capture happened to see. NOT CAUSED BY THIS PASS: nothing in it writes those cells or touches the renderer, and the failing comparison is between a golden and a wiped grid.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "TWO STEPS. (1) Launch the app cold. (2) `E2E_MANUAL=1 npx playwright test --project=functional e2e/tests/scrolling.spec.ts`. The first test fails on `grid-scroll-before.png`; the diff at `test-results/scrolling-*/grid-scroll-before-diff.png` shows only cells the GOLDEN has and the live grid does not. Invoking `new_file` immediately before the run does not change the diff, which is what proves the extra content is in the baseline rather than in the session.",
+        "trace": null,
+        "actionCount": 2
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 0.95,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "A screenshot golden captured mid-suite with whatever the previous specs had left in the workbook. This is the golden-provenance class §12 opened (`goldenCorpus.ts` reads three provenance axes) reaching a screenshot that lives in the FUNCTIONAL project rather than the visual one, and so never went through `validate-baselines.mjs`. The test is wrapped in `softly()`, which does not suppress a mismatch -- only the missing-snapshot case was ever believed to be soft.",
+        "suggestedFixArea": "app/e2e/tests/scrolling.spec.ts -- start the test from a known workbook (the `new_file` wipe every journey spec uses) and RE-CAPTURE `grid-scroll-before.png` and `grid-scroll-after-wheel-down.png` through the review flow (`npm run e2e:visual:baseline` / `node tests/regression/validate-baselines.mjs`), not by hand."
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "NOT FIXED IN THIS PASS, deliberately. The fix requires REPLACING A CHECKED-IN GOLDEN, which is a change to evidence rather than to code, and this repo has a review flow for exactly that. Silently re-capturing a baseline at the end of an unrelated pass is how evidence-free goldens got into the tree the first time (§12 found 75 of them). The measurement, the contaminating spec and the one-line fix are recorded above so the recapture can be done deliberately and reviewed. Pre-existing: the pass that filed this measured functional at 542/1/11 against a stated baseline of 541/2/11 -- one FEWER failure than the baseline, with the same 554 total."
       }
     }
   ]

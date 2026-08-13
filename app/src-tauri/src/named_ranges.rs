@@ -552,8 +552,11 @@ pub fn get_named_range_for_selection(
     end_row: u32,
     end_col: u32,
 ) -> Option<NamedRange> {
-    let named_ranges = state.named_ranges.read().unwrap();
+    // `sheet_names` FIRST: the recalculation pass takes it before `named_ranges`
+    // and runs on a background thread, so the other order closes a cycle that
+    // hangs the app with no panic and no log line (BUG-0045).
     let sheet_names = state.sheet_names.read().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
     let current_sheet_name = sheet_names.get(sheet_index).cloned().unwrap_or_default();
 
     // Build the expected refers_to patterns to match against.
@@ -699,8 +702,10 @@ pub fn resolve_named_range_coords(
     state: State<AppState>,
     name: String,
 ) -> Result<NamedRangeCoords, String> {
-    let named_ranges = state.named_ranges.read().unwrap();
+    // `sheet_names` before `named_ranges` — see `get_named_range_for_selection`
+    // and BUG-0045.
     let sheet_names = state.sheet_names.read().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
 
     let key = name.to_uppercase();
     let nr = named_ranges

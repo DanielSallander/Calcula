@@ -113,13 +113,16 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
     // while seven other guards were alive, which is the inverted order.
     let grid = state.grid.read().unwrap();
     let grids = state.grids.read().unwrap();
+    // `sheet_names` BEFORE `style_registry` and `locale`: that is the order the
+    // recalculation pass takes them in, and it runs on a BACKGROUND thread, so
+    // the reverse closes a cycle that hangs the app silently (BUG-0045).
+    let sheet_names = state.sheet_names.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let dependencies = state.dependencies.lock().unwrap();
     let column_dependencies = state.column_dependencies.lock().unwrap();
     let row_dependencies = state.row_dependencies.lock().unwrap();
     let cross_sheet_deps = state.cross_sheet_dependencies.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let source_is_error = cell_is_error(&grid, row, col);
@@ -218,13 +221,15 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
     // while seven other guards were alive, which is the inverted order.
     let grid = state.grid.read().unwrap();
     let grids = state.grids.read().unwrap();
+    // `sheet_names` BEFORE `style_registry` and `locale` — see the twin note in
+    // `trace_precedents` (BUG-0045).
+    let sheet_names = state.sheet_names.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let dependents = state.dependents.lock().unwrap();
     let column_dependents = state.column_dependents.lock().unwrap();
     let row_dependents = state.row_dependents.lock().unwrap();
     let cross_sheet_deps = state.cross_sheet_dependents.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     let source_is_error = cell_is_error(&grid, row, col);

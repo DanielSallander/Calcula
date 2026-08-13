@@ -75,6 +75,21 @@ interface UndoStateJson {
   /** Transactions a wholesale clear has discarded over this document's
    *  lifetime — i.e. a workbook-STRUCTURE change ended the history. */
   clearedTotal: number;
+  /**
+   * How many times the history was wholesale CLEARED, however little each
+   * clear discarded.
+   *
+   * `clearedTotal` counts TRANSACTIONS, and it stays at zero when the stack was
+   * already empty — which leaves one case of the BUG-0005 family standing. A
+   * sheet added while the history happens to be empty ends nothing, so the
+   * oracle sees no clear, decides the window is decidable, winds the history
+   * back and then finds a sheet the baseline never had. MEASURED on soak seed
+   * 1786446166374: "Undoing 22 steps did not restore the checkpoint state ...
+   * sheetNames[2]: <absent> -> Sheet3", whose two digest differences were that
+   * EMPTY sheet and nothing else. A report about undo, produced by an action
+   * Excel does not let you undo.
+   */
+  clearsTotal: number;
   /** The history cap. */
   historyLimit: number;
 }
@@ -103,6 +118,7 @@ export async function captureUndoBaseline(page: Page): Promise<OracleBaseline> {
       : null,
     evictedTotal: undoState.evictedTotal,
     clearedTotal: undoState.clearedTotal ?? 0,
+    clearsTotal: undoState.clearsTotal ?? 0,
   };
 }
 
@@ -113,8 +129,14 @@ export async function captureUndoBaseline(page: Page): Promise<OracleBaseline> {
  * without a running app: everything it needs is the two readings.
  */
 export function stepsBackToBaseline(
-  baseline: Pick<OracleBaseline, "undoTopSeq" | "evictedTotal" | "clearedTotal">,
-  now: Pick<UndoStateJson, "undoSeqs" | "evictedTotal" | "clearedTotal">
+  baseline: Pick<
+    OracleBaseline,
+    "undoTopSeq" | "evictedTotal" | "clearedTotal" | "clearsTotal"
+  >,
+  now: Pick<
+    UndoStateJson,
+    "undoSeqs" | "evictedTotal" | "clearedTotal" | "clearsTotal"
+  >
 ): { steps: number } | { unreachable: string } {
   // A WHOLESALE CLEAR IS ASKED ABOUT FIRST, because it is the only one of the
   // three causes that can empty the stack without either of the other two
@@ -126,18 +148,31 @@ export function stepsBackToBaseline(
   // not the same as saying undo is broken. Before this, the walk's sheet.add
   // came back as "the walk undid past the checkpoint" — a diagnosis naming a
   // mechanism that had not occurred.
+  //
+  // THE QUESTION IS "DID A CLEAR HAPPEN", NOT "DID A CLEAR DISCARD ANYTHING".
+  // `clearedTotal` counts TRANSACTIONS, so a structure change made while the
+  // stack was already empty moves it by zero — and the oracle then decided a
+  // window it could not decide, wound the history back, and reported the sheet
+  // the walk had ADDED as an undo defect. That is the same false alarm
+  // BUG-0005's fix removed for the non-empty case, on the one case it left
+  // standing (measured: soak seed 1786446166374, "sheetNames[2]: <absent> ->
+  // Sheet3", two digest diffs, both that empty sheet). `clearsTotal` counts the
+  // clears themselves and is the authority; `clearedTotal` only decorates the
+  // message with how much was lost.
+  const clears = (now.clearsTotal ?? 0) - (baseline.clearsTotal ?? 0);
   const cleared = now.clearedTotal - (baseline.clearedTotal ?? 0);
   const clearedReason =
     `a workbook-structure change ended the undo history since the checkpoint ` +
-    `(${cleared} transaction(s) discarded). Adding, deleting, renaming, moving ` +
-    `or copying a sheet is not undoable in Excel and clears the stack here too, ` +
-    `so no number of undo steps returns to the checkpoint`;
+    `(${clears} clear(s), ${cleared} transaction(s) discarded). Adding, ` +
+    `deleting, renaming, moving or copying a sheet is not undoable in Excel and ` +
+    `clears the stack here too, so no number of undo steps returns to the ` +
+    `checkpoint`;
 
   if (baseline.undoTopSeq === null || baseline.undoTopSeq === undefined) {
     // Nothing was on the stack at the baseline, so every entry now is
     // post-baseline — unless something has removed entries since, which is the
     // one case an empty baseline cannot distinguish on its own.
-    if (cleared > 0) {
+    if (clears > 0) {
       return { unreachable: clearedReason };
     }
     if (now.evictedTotal !== baseline.evictedTotal) {
@@ -153,7 +188,7 @@ export function stepsBackToBaseline(
 
   const position = now.undoSeqs.indexOf(baseline.undoTopSeq);
   if (position < 0) {
-    if (cleared > 0) {
+    if (clears > 0) {
       return {
         unreachable:
           `the checkpoint's top undo entry (#${baseline.undoTopSeq}) is gone: ` +
@@ -206,6 +241,29 @@ async function refreshGrid(page: Page): Promise<void> {
 }
 
 /**
+ * What this checkpoint's undo round-trip actually managed to ASK.
+ *
+ * Three outcomes, and a green report has to tell them apart:
+ *   * `decided`         — the history was wound back and compared. Evidence.
+ *   * `nothing-to-undo`  — the window pushed no transaction. Trivially green.
+ *   * `undecided`        — the checkpoint is outside the history the stack still
+ *                          holds (a sheet-structure change ended it, or the cap
+ *                          evicted it). Nothing was tested.
+ *
+ * The last two were indistinguishable from the first in every report this
+ * harness has produced, and that stopped being an academic problem the moment
+ * the walker was allowed to generate sheet actions again: a sheet-weighted walk
+ * ends the undo history in nearly every window, so its "[OK] Walk passed"
+ * covers an undo oracle that ran zero comparisons. See `OracleBattery.coverage`.
+ */
+export interface UndoRoundTripOutcome {
+  verdict: "decided" | "nothing-to-undo" | "undecided";
+  /** Transactions actually wound back and replayed (0 unless `decided`). */
+  stepsUndone: number;
+  violations: OracleViolation[];
+}
+
+/**
  * Run the undo round-trip against a baseline captured before the actions of
  * this checkpoint window.
  *
@@ -215,7 +273,7 @@ async function refreshGrid(page: Page): Promise<void> {
 export async function checkUndoRoundTrip(
   page: Page,
   baseline: OracleBaseline
-): Promise<OracleViolation[]> {
+): Promise<UndoRoundTripOutcome> {
   const violations: OracleViolation[] = [];
 
   const after = await getWorkbookDigest(page);
@@ -227,7 +285,10 @@ export async function checkUndoRoundTrip(
     // no longer reaches the checkpoint, so there is nothing this oracle can
     // decide about this window; saying "undo is broken" here is exactly the
     // false report that cost S11/S12 a triage cycle each.
-    return [
+    return {
+      verdict: "undecided",
+      stepsUndone: 0,
+      violations: [
       {
         invariantId: "undo-history-unreachable",
         oracleId: "undo-round-trip",
@@ -245,7 +306,8 @@ export async function checkUndoRoundTrip(
           historyLimit: undoState.historyLimit,
         },
       },
-    ];
+      ],
+    };
   }
 
   const stepsToUndo = distance.steps;
@@ -259,7 +321,7 @@ export async function checkUndoRoundTrip(
     // This is the same reason `undecided` is collected instead of dropped:
     // both are ways the round-trip silently stops testing anything.
     console.log("  [oracle] undo round-trip: nothing undoable in this window");
-    return [];
+    return { verdict: "nothing-to-undo", stepsUndone: 0, violations: [] };
   }
 
   // How far this checkpoint actually wound the history back. A green run that
@@ -322,7 +384,7 @@ export async function checkUndoRoundTrip(
   }
 
   await refreshGrid(page);
-  return violations;
+  return { verdict: "decided", stepsUndone: undone, violations };
 }
 
 function formatFirstDiff(

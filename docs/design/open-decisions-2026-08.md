@@ -12851,7 +12851,8 @@ passed, which is the evidence that only the previously-broken branch changed.
 
 ### 9f. Still open, named rather than implied
 
-* **Undo does not ACTIVATE the sheet it restores.** Excel switches to the sheet the action happened
+* **Undo does not ACTIVATE the sheet it restores.** ~~Still open~~ — **CLOSED 2026-08-13, §13
+  (BUG-0043).** Excel switches to the sheet the action happened
   on so the user can see the change; Calcula now restores the right sheet but says nothing, so an
   undo of an off-sheet edit is invisible. Verified Excel behaviour (9b, first bullet). Not fixed
   here because it needs the frontend to follow a backend-initiated sheet switch, and this pass was
@@ -13458,3 +13459,966 @@ allocated through it rather than by hand.
 
 **No oracle suppression was added, and none exists:** `EXCLUDED_UNTIL_FIXED` is still the empty
 array §10 left it as, so `walkerExclusions.test.ts` has nothing to expire.
+
+---
+
+## 12. BUG-0042 closed — and the filed mechanism was wrong on both counts (2026-08-13)
+
+The last open ledger entry. §11 filed it honestly, with the mechanism marked **NOT VERIFIED** and a
+deliberate refusal to patch it, on the grounds that the cheap fix would green the test and leave the
+disappearing triangle. That refusal was right, and the filing was wrong: **there is no disappearing
+triangle, and the cache was never the cause.** Both halves were measured before anything was
+changed.
+
+### 12a. What was measured, against what was filed
+
+Two independent measurements, neither of them a re-reading of the same screenshots.
+
+**1. The screenshots the spec itself writes, decoded pixel by pixel.** `wave4-note-triangle.png`
+(the failing run, before the click) and `wave4-note-inspect.png` (an earlier run in which the click
+DID open the editor, taken after it) were inflated with a small PNG reader and scanned for the
+indicator's colour. Both contain the *same* triangle, at the *same* 11x11 device-pixel box, with the
+*same* 66 pixels — and in the `-inspect` frame the cell under it is plainly **tinted**, i.e.
+selected. The over-selection anchor introduced earlier in this programme does exactly what it
+claims: selecting a noted cell does not cost it its indicator.
+
+**2. The five-step repro, instrumented, on the live app.** A probe spec (four backend calls and one
+click, no macro and no editor window) sampled the triangle's corner before and after the click and
+recorded `document.querySelectorAll("textarea").length` on **every animation frame** for five
+seconds afterwards:
+
+| measurement | before the click | after the click |
+|---|---|---|
+| red fraction at AA61's corner | **0.1428** | **0.1428** — *identical* |
+| visible textareas | 0 | 1 at t=32 ms, 1 at t=50 ms, **0 from t=67 ms** |
+| `get_note(60, 26)` | the note | the note, byte-identical |
+
+So: the triangle never moves, and the note editor **does** open — for about 35 milliseconds — and is
+then closed by something. The filed "synchronous `Map.get` against an async-refilled cache" cannot
+be it: the cache HIT. That is why the editor opened at all, and why the triangle painted.
+
+### 12b. The actual defect: the click closes the editor it just opened
+
+`handleAnnotationClick` deliberately returns **false** after showing the overlay, so the cell still
+selects — Excel parity, and the spec depends on it. That same click therefore moves the selection
+onto the annotated cell, the shell reports it (`Layout.tsx` -> `notifySelectionChange`), and
+`Review/handlers/selectionHandler.ts` ran:
+
+    if (previousCell && (previousCell.row !== activeRow || previousCell.col !== activeCol)) {
+      hideOverlay("note-editor");
+      hideOverlay("comment-panel");
+    }
+
+`previousCell` is the cell the user was on BEFORE the click, so on the very gesture that opens the
+editor the condition is true and the editor is hidden one React commit later. The rule "close when
+the selection moves" is not the rule the feature needs; the rule is **close when the selection
+leaves the cell the editor is anchored to**. That anchor is not a new piece of state — every opener
+(click interceptor, context menu, keyboard shortcut, comments sidebar) already writes `row`/`col`
+into the overlay's own data, so the handler reads it back from
+`OverlayExtensions.getVisibleOverlays()` rather than keeping a second copy that would drift on the
+first opener that forgot to update it.
+
+The new rule is **order-independent**, which matters for a second, separate victim: the comments
+sidebar's "click a note to open it" emits `NAVIGATE_TO_CELL` and *then* shows the editor, so the
+selection change can arrive before the overlay exists. Under the old rule that path was broken too,
+and nobody had reported it.
+
+Nine unit tests in `Review/handlers/__tests__/selectionHandler.test.ts` drive the real click
+interceptor and the real selection handler against a live overlay double. With the old rule pasted
+back in, four of them fail; with it removed, all nine pass. Confirmed on the running app: the same
+probe, after the fix, holds the textarea open for the full five seconds.
+
+### 12c. The class, enumerated — and what it actually contains
+
+The brief asked which extension-held caches are read SYNCHRONOUSLY while being refilled
+ASYNCHRONOUSLY, and what each does on a miss. There are five, all read from a paint or a hit-test:
+
+| cache | read synchronously by | empty window during refill? | on a failed read |
+|---|---|---|---|
+| `Review/lib/annotationStore` | triangle renderer, click interceptor, hover preview | no — maps built in locals, swapped at the end | keeps previous |
+| `DataValidation/lib/validationStore` | chevron renderer, dropdown click, input prompt | no — list assigned in one statement | keeps previous |
+| `Hyperlinks/index` | decoration, cursor interceptor, click interceptor | no | **wiped both caches** |
+| `ErrorChecking/lib/errorCheckingStore` | error triangle renderer | no — map rebuilt then swapped | keeps previous |
+| `Grouping/lib/groupingStore` | outline bar renderer | no — and it already honoured `stillCurrent` | keeps previous |
+
+**The filed shape does not exist anywhere in the family.** Not one of them clears before refilling.
+What the enumeration did find is three real things:
+
+1. **`invalidateAnnotationCache()`** — the *only* function in the family that empties a live cache
+   with nothing scheduled to refill it, which is precisely the defect the filing described. It had
+   **no production caller at all**: dead code, and a loaded gun (a cache that answers "absent" is
+   indistinguishable from "deleted" to all three of its readers). Deleted, per the
+   no-backward-compatibility rule, and replaced by a standing guard in `annotationStore.deep.test.ts`
+   that reads the store's own source and asserts `resetAnnotationStore` is the only exported function
+   that clears — with the detector proved to fire by temporarily re-adding a clearer.
+2. **`invalidate()` was a no-op for three of the five.** Review, DataValidation and Hyperlinks all
+   passed `() => read()` to `createCoalescedRefresh`, dropping the `stillCurrent` predicate the
+   primitive hands them. Review *calls* `invalidateAnnotationRefresh()` on `SHEET_CHANGED` and
+   documents it as abandoning the in-flight pass's writes; it abandoned nothing. All three now
+   consult it. Ordering through `tail` had been masking this, so it is a latent race rather than a
+   live one — recorded as such rather than dressed up.
+3. **Hyperlinks wiped its cache on any read error.** One dropped IPC call became "this cell has no
+   hyperlink" — no underline, no hand cursor, and a click that did nothing — until an unrelated
+   announcement happened to refresh. It now logs and leaves the previous answer standing, like the
+   other four.
+
+### 12d. Three more defects in the same path, found by reading and then measured
+
+None of these is BUG-0042, and each is a real Excel-parity break in the indicator path.
+
+**The frozen/split pane painter drew no indicators at all.** `renderZone` -> `drawCellTextZone` is a
+*different* cell painter from `drawCellText`, used for every cell of every pane whenever panes are
+frozen or split. It ran only the `"under-selection"` anchor, and it `continue`d past every empty cell
+before reaching even that. So freezing the top row — the single most common thing a user does to a
+sheet — made **every note triangle, error triangle and bookmark dot on the sheet disappear**, and a
+note on an empty cell (the ordinary case) was invisible in a frozen pane either way. Measured at 0
+indicator pixels; now painted, with the over-selection replay carried through the pane's clip so a
+decoration captured in one pane cannot paint over another.
+
+**The empty-cell skip asked the wrong registry.** The main painter skips an existing-but-empty,
+unstyled cell for speed, gated on `hasCellDecorations()` — which answers for the **under-selection**
+registry alone. A note triangle is an over-selection decoration, so on such a cell it painted only
+while some *unrelated* extension (Sparklines, Checkbox, Controls) happened to have an under-selection
+decoration registered: the Review extension's indicator depended on Sparklines being loaded. The gate
+now asks about both anchors.
+
+**Two pixel-to-cell callers were not told about panes.** `getCellFromPixel` translates pane
+coordinates only when handed `options.freezeConfig`. Every caller passes it except two: the
+**cell-click interceptor dispatch** in `useSpreadsheetSelection.ts` and the **grid context menu** in
+`Spreadsheet.tsx`. With a frozen header row those two mapped the pixel as if nothing were frozen, so
+an extension interceptor — the note editor, a validation dropdown, a hyperlink follow, a button cell
+— was handed a *different cell from the one the same click selected*, and acted on it. Measured: a
+pixel in the frozen band resolves to row 0 with the options and row 20 without. Both now pass them,
+guarded by a source census (self-tested) that fails if a caller drops them again.
+
+### 12e. Files changed
+
+* `app/extensions/Review/handlers/selectionHandler.ts` — anchor-based close; `+` a reset seam for tests
+* `app/extensions/Review/lib/annotationStore.ts` — honours `stillCurrent`; `invalidateAnnotationCache` deleted
+* `app/extensions/DataValidation/lib/validationStore.ts`, `app/extensions/Hyperlinks/index.ts` — same predicate, non-destructive error path
+* `app/src/core/lib/gridRenderer/rendering/cells.ts` — `DeferredCellDecoration` (carries a clip); skip gate asks both anchors
+* `app/src/core/lib/gridRenderer/core.ts` — the pane painter runs both anchors and returns its deferred list
+* `app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts`, `.../Spreadsheet.tsx` — pane options on the two blind hit-tests
+* tests: `Review/handlers/__tests__/selectionHandler.test.ts` (new), `gridRenderer/interaction/paneAwareHitTesting.test.ts` (new),
+  `gridRenderer/cellDecorationZOrder.test.ts` (+ frozen/split and empty-cell cases), the two annotationStore suites
+
+#### Ledger
+
+**42 entries, 42 fixed, 0 open.** BUG-0042 carries a populated `fix` block naming the files, the
+measured mechanism, and the correction to its own filed triage. `EXCLUDED_UNTIL_FIXED` remains the
+empty array, so `walkerExclusions.test.ts` still has nothing to expire.
+
+---
+
+## 13. Undo activates the sheet it restores — and the formula bar had never followed a sheet switch at all (2026-08-13)
+
+§9f named this as still open and said why it had been left: *"a backend switch without the frontend
+following would show Sheet1's tab over Sheet2's data, which is worse than the current silence."*
+Both halves are now built, and the frontend half turned up a defect of its own that has nothing to do
+with undo — the formula bar has never re-read on an ordinary tab click.
+
+**Filed rather than left as prose: BUG-0043 (the activation) and BUG-0044 (the formula bar), both
+`fixed` with populated `fix` blocks. The ledger is 44 entries, 44 fixed, 0 open.**
+
+### 13a. What Excel does, checked rather than assumed
+
+* **Excel keeps ONE undo history and switches to the document/sheet the undone action happened in**,
+  so the user sees what changed. Confirmed in §9b from two sources and re-confirmed here; it is the
+  premise the whole change rests on.
+* **A hidden sheet cannot be the active sheet.** There is no tab to select, and `Activate` on a
+  hidden worksheet raises an error in VBA. So Excel's own model gives the answer for the case the
+  brief asked about: **restore it, do not go there.** Nothing had to be invented.
+* **Excel selects the range an undo restored.** That is why the fix aims the selection at an anchor
+  as well as switching sheets — see 13d.
+
+### 13b. The question the brief asked first: which undos does this even apply to?
+
+**Confirmed, with one correction to the way it is usually stated.** It is *sheet*-structure changes
+that end the history, not "structure changes":
+
+* `add_sheet`, `delete_sheet`, `rename_sheet`, `move_sheet`, `copy_sheet` call
+  `invalidate_undo_history_for_sheet_structure` and clear both stacks (§9c, and a census in
+  `undo_sheet_structure_tests` fails by name if one stops). No queued entry can therefore name a
+  sheet that has been renumbered or removed — **which is exactly what makes activating by a stored
+  `usize` index safe at all.**
+* **Row and column** structural undos are *not* history-ending. They stay in the stack, they carry
+  their sheet on `GridSnapshot.sheet` (BUG-0034), and they activate like any other restore. So the
+  activation question is not confined to content undos; it is confined to undos that still EXIST,
+  and every one of those either carries a sheet or carries none.
+* A transaction made only of `CustomRestore` payloads names no sheet at all — its sheet is inside
+  opaque bytes this layer must not parse — and moves nothing. That is a deliberate limit, not an
+  oversight; see 13f.
+
+### 13c. The fix, and the ONE ordering decision inside it
+
+`Transaction::target_sheet()` (core/engine) answers *which sheet does this transaction belong to*:
+the first RECORDED change that carries one — recorded order, not application order, because a
+restore replays in reverse but "where I did that" is where the action started. `None` for a
+`CustomRestore`-only transaction.
+
+`sheets::set_active_sheet` is now a one-line delegation to `sheets::activate_sheet(&AppState, usize)`.
+That split is the whole safety argument for the backend half: activation is not "set an index", it is
+a swap of the grid mirror, the column widths, the row heights, the merged regions and the user-hidden
+row/column sets, followed by a dependency-map rebuild (BUG-0016). A second copy that forgot one store
+would be the startup-only hydration defect all over again — sheet 1's panes on sheet 2 — so there is
+one implementation and a census that fails if either caller grows its own.
+
+**`apply_changes` activates AFTER the restore, and that is a decision.** Switching first would make
+the target the active sheet for the whole pass and route every restore down the inline active-sheet
+arm — tidier to read, and it would leave the entire off-sheet path (the deferred geometry queue, the
+`grids[sheet]` writes, `recalc_after_off_sheet_write`) unexercised by the very tests written to prove
+it. That path is BUG-0034's fix and it is still the only thing that can serve a transaction spanning
+two sheets, or a target that must not be activated. So the restore lands exactly where it landed
+yesterday and the view follows: the mirror swap picks the restored state up because `activate_sheet`
+loads precisely the stores those arms have just written.
+
+It runs with **no lock held** — every guard `apply_changes` takes is dropped before the deferred
+phase — and after the cascades, because the cascades read the dependency maps of the sheet they ran
+against and `activate_sheet` rebuilds them for the new one.
+
+### 13d. The frontend half, and why atomicity is guaranteed rather than hoped for
+
+`UndoResult` gains `activeSheetIndex`, `activeSheetName` and `restoredAnchor`. The index is reported
+**unconditionally**, not only when it moved: the frontend decides whether to follow by comparing it
+with the sheet IT believes is active, which is the only comparison that can also repair a
+disagreement. The NAME rides along so following costs no second round trip — a `getSheets()` hop
+would open a window in which the app has switched sheets and cannot say which.
+
+The follow **reuses the tab click's own channel** rather than adding one, and that is the atomicity
+argument. The set of things that must move is large and still growing — tab strip, grid sheet
+context, canvas cell cache, column widths, row heights, user-hidden sets, zoom, split, freeze panes,
+gridlines, the four display flags, and every extension that keys off the active sheet — and all of
+them already answer to `sheet:beforeSwitch` → grid sheet context → `sheet:normalSwitch` →
+`SHEET_CHANGED`. A second channel would be a second list to keep in step.
+
+Guarantee, stated precisely: **there is no `await` between the first dispatch and the last**, so
+React cannot render and the browser cannot paint halfway through — the tab highlight, the sheet
+context and every refresh trigger land in one batch. The asynchronous parts that remain (dimension
+re-read, view hydration, cell fetch) are the SAME ones a tab click defers, so the switch cannot be
+less atomic than the gesture it imitates. Whatever else is true, the tab strip and the grid can never
+disagree, because the tab strip has no state of its own: it syncs its highlight from the grid's sheet
+context.
+
+The selection is aimed at `restoredAnchor` **only when the sheet actually moved**. Switching is half
+of "so the user can see what changed" — the restored cells can be far outside the viewport the target
+sheet was left at, and landing on its saved selection would show a sheet with no visible evidence of
+the undo. Excel selects the restored range; this does the same for the switch case. Deliberately NOT
+widened to same-sheet undos: that has never moved the cursor, E2E journeys depend on where it lands
+after Ctrl+Z, and it is a separate decision (13f).
+
+`handleUndo` and `handleRedo` were byte-identical apart from one string. They are now one
+`applyRestoreToTheView(result, source)`. That is not tidiness: every gap this path has ever had was
+added to one of them and forgotten in the other, and sheet activation is one more thing that has to
+happen in both. **Redo therefore gets the behaviour by construction, and is asserted anyway** — in
+Rust (`a_redo_activates_the_sheet_too`) and in vitest ("follows a redo exactly as it follows an
+undo") — because `is_undo` already branches inside `apply_changes`.
+
+### 13e. BUG-0044 — found while proving the formula bar agrees, and it is NOT about undo
+
+The brief asked that the grid, the tab strip and the formula bar agree. Two of the three were a
+matter of wiring. The third was already broken, on the **ordinary tab click**, and had been:
+
+> The effect that fills the formula bar listed `[selection.endRow, selection.endCol, isEditing]` as
+> its inputs. `getCell` reads the **active sheet**. So a switch that lands on the same coordinates
+> re-ran nothing and the bar kept the previous sheet's content.
+
+That is the common case rather than an edge: a sheet with no saved selection is given A1, and A1 is
+usually where you already were. Select a valued A1 on Sheet1, click the Sheet2 tab, and the grid
+shows Sheet2 while the formula bar still reads Sheet1's number. One missing dependency; the fix is
+one identifier, and it repairs the tab click as much as undo's switch.
+
+### 13f. What was deliberately NOT done, named rather than implied
+
+* **A `CustomRestore`-only transaction does not move the view.** `report_restore`, `calp_reset` and
+  `script_grid_cells` DO know their sheet — they report it on `RestoreReport.sheets_rewritten` — so a
+  fallback is possible. It was not taken: `sheets_rewritten` is a SET with no rule for choosing among
+  its members, and a second source of truth for "which sheet" is a second answer that can disagree
+  with the first. Undoing a report refresh from another sheet therefore stays silent.
+* **A same-sheet undo still does not move the selection.** Excel selects the restored range in that
+  case too. Changing it is a one-line widening of the `switched &&` guard and a real Excel-parity
+  gap, but it moves the cursor on every Ctrl+Z and several E2E journeys assert where the cursor is.
+  Owner call, not a passing change.
+* **`TestRunner`'s `ctx.undo()` bypasses the whole frontend path.** It calls the `undo` command
+  directly (`app/extensions/TestRunner/lib/runner.ts`), so an in-app suite that undoes an off-sheet
+  change leaves the view where it was. Its own header says the direct call is deliberate. Routing it
+  through `CommandRegistry.execute(CoreCommands.UNDO)` would make its undos faithful to Ctrl+Z, but
+  its suites can only be run inside the live app and this pass ran no E2E, so it is reported rather
+  than changed.
+* **`set_active_sheet` still accepts a hidden sheet index.** The undo path refuses to go there, but
+  the command itself does not (nor did it before). Excel's `Activate` errors on a hidden sheet;
+  tightening the command could break scripts and E2E specs that use it to reach hidden sheets, so it
+  is named here rather than changed under cover of another fix.
+* **`SetCell` still carries an INDEX, not a `SheetId`** — unchanged from §9f, and now load-bearing in
+  one more place: the activation resolves that index. It is safe for the same reason it was safe
+  before (no surviving entry can be renumbered), and `activation_target` range-checks it anyway.
+* **No E2E was run**, by instruction and because another agent held the app for the whole pass. Owed:
+  a `--project=functional` run, whose plausible interactions are any spec that undoes across a sheet
+  switch, and a visual run (nothing in the change alters a first-sheet workbook, so no golden should
+  move).
+
+### 13g. Verification — measured, on a tree another agent was also writing to
+
+| check | result |
+|---|---|
+| `cargo check --all-targets` (core) | **0 warnings** |
+| `cargo check --all-targets` (app/src-tauri) | **0 warnings** |
+| core tests | **1,349** (baseline 1,342; +7 `Transaction::target_sheet` / `restored_anchor_on`) |
+| app-lib | **1,546 passed / 0 failed / 5 ignored** (baseline 1,530; +16) |
+| vitest, full | **768 files / 106,416 passed** — of which THIS pass adds 1 file / 7 tests; the rest of the delta over the 765/106,385 baseline belongs to the BUG-0042 pass running concurrently |
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| `tsc -p e2e/tsconfig.json` | clean |
+| `npm run check:line-endings` | `[OK] no mixed line endings` |
+| `test_pivot` | **56** — run only at the end of the pass: for most of it cargo could not relink `app.exe`, held open by the other agent's live app (`os error 5`) |
+
+**Sabotage, because a guard nobody has watched fail is a comment.** Removing the `activate_sheet`
+call failed 8 tests including both of BUG-0034's own; letting `activation_target` ignore visibility
+failed the two hidden-sheet guards and the off-sheet redo one; dropping the `updated_cells` re-stamp
+(13h) failed exactly the one test written for it; disabling the frontend follow failed 4 vitest
+cases; removing the formula-bar dependency again failed exactly the one test written for it.
+
+### 13h. One consequence that is easy to miss: `sheet_index: null` changes meaning mid-result
+
+`UndoResult.updatedCells[].sheetIndex` is `null` for "the ACTIVE sheet", and every cell is stamped
+while the OLD sheet is still active. The switch changes which sheet that word denotes, so without a
+correction the result arrives **inside out**: the restored cells labelled with a foreign index, and
+cells on the sheet the user just LEFT labelled "active". The frontend uses precisely that flag to
+decide what may reach the formula bar, so the inversion puts one sheet's value under another sheet's
+cursor.
+
+`apply_changes` therefore re-stamps `updated_cells` after a successful activation — `None` becomes
+the sheet just left, and the target's index becomes `None` — so the field stays true of the result as
+a whole ("active" = the `activeSheetIndex` the same result reports). It takes a transaction spanning
+TWO sheets to produce both kinds at once, which is an ordinary shape (a grouped script batch, or an
+edit made with sheets grouped), and that is what
+`the_reported_sheet_indices_are_relative_to_the_sheet_the_undo_ended_on` builds.
+
+**One correction to a guard's reading point, stated because it looks like a weakening and is not.**
+Four BUG-0034 tests asserted through the raw stores (`all_column_widths[1]`, the `grid` mirror). Which
+store holds a given sheet now depends on where the user ended up, so they read through
+`Fixture::column_width` / `row_height` / `value`, which apply the same active-or-`all_` rule
+`report::with_sheet_merges` already applies — the invariant they always meant. The one test that
+genuinely needed the off-sheet path (`redoing_an_off_sheet_set_cell_...`) now HIDES its target sheet,
+which is the only configuration in which a restore stays off-sheet, and its assertions are otherwise
+unchanged.
+
+---
+
+## 14. The sheet surface, walked for the first time — and it wedged the app on a lock pair no census asked about (2026-08-13)
+
+`EXCLUDED_UNTIL_FIXED` was emptied at the end of §12, so this is the first sweep in the programme
+whose walks could add, switch, rename or delete a sheet. Two product defects came out of it, and both
+are of the kind this register keeps finding rather than the kind the brief predicted: **not an
+isolated sheet bug, but a sheet operation colliding with something else** — a background
+recalculation in one case, three callers' shared assumption in the other.
+
+A third finding is about the instruments, and it is the one worth reading first: **two of the guards
+that exist for exactly these defects were green while the defects were live.**
+
+### 14a. The instrument said "explored" and meant "issued"
+
+`summarizeCoverage` counts an action as explored when it ran without throwing. Half the sheet actions
+CANNOT throw — `sheet.add` probes `isVisible({ timeout: 500 })` and returns silently when the button
+is not there, and `sheet.switch` and `sheet.delete` do the same. So `sheet=7` in a walk report has
+never distinguished seven sheet operations from seven no-ops. That is BUG-0031's exact shape
+(`chart.select` / `chart.delete` counted as explored for a whole programme while talking to nothing),
+and it mattered here more than anywhere, because the FIRST question about a freshly un-suppressed
+surface is whether the walker really reached it.
+
+Effect is now OBSERVED rather than inferred. The snapshot carries the workbook's sheet NAMES (a
+rename changes no count and no active index, so a count could never have caught one), the walk runner
+records a `sheetChange` on any action whose sheet shape moved, and the report prints
+`Sheet structure: N action(s) issued, M changed the workbook` — with a `[WARNING]` when M is zero,
+and a separate line naming any NON-sheet action that moved the sheet structure, which would be a
+finding in its own right.
+
+### 14b. The oracle counts that had been accumulated since the class was written, and never read
+
+`OracleBattery` has carried `undecided` and `suppressed` from the beginning. The comment on
+`undecided` says, in as many words, that a run where most checkpoints land there is a WEAK run "and
+that has to be visible". It was not: one `console.warn` per checkpoint, scrolled past in a log, and a
+final verdict still reading `[OK] Walk passed`. Nothing in the tree read either field.
+
+That stopped being cosmetic the moment the sheet actions came back, because **a sheet-structure
+change ends the undo history** (Excel parity, §9). MEASURED on soak seed 90060001, 40 actions,
+`SOAK_CATEGORY_WEIGHTS=sheet:10`: two oracle checkpoints, BOTH undecided, and `saveReloadEvery` is 4
+so the save/reload oracle never ran either. That walk verified undo zero times and persistence zero
+times and reported a clean pass.
+
+`checkUndoRoundTrip` now returns a verdict (`decided` / `nothing-to-undo` / `undecided`) instead of a
+bare violation list, the battery counts all three plus the recalc and save/reload runs, and the walk
+report ends with
+
+```
+  --- Oracle coverage over 10 checkpoint(s) ---
+  undo round-trip: 6 decided (84 transaction(s) wound back), 1 with nothing to undo, 3 undecided
+  recalc consistency: 10 run(s); save/reload round-trip: 2 run(s)
+```
+
+with a `[WARNING]` line when the undo oracle decided nothing, and another when save/reload never ran.
+**The history-ending semantics themselves read correctly** — every sheet-structure walk reports
+`undo-history-unreachable` as a declined question and none of them was ever presented as a defect,
+which is what §9's fix was for. What was missing was the count.
+
+### 14c. BUG-0045 — the app deadlocks on `open_file` versus the background gather refresh
+
+Soak seed **1786446166374**, 200 actions, no weights. The walk stopped printing at
+`[oracle checkpoint] after step 200`. The PAGE was alive — the DOM answered, the window title read
+`oracle-save-13232-1.cala`, and a Win32 enumeration found no `#32770` dialogs — but every Tauri
+invoke timed out. Two out-of-process stack dumps a minute apart were byte-identical:
+
+```
+main thread    open_file -> restamp_workbook_name_casing
+               HOLDS  named_ranges, tables, table_names
+               WAITS  sheet_names
+
+gather worker  calp_commands::queue_gather_refresh -> calculation::recalculate_sheet_values
+               HOLDS  grid, grids, sheet_names, style_registry, ...
+               WAITS  tables
+```
+
+Each holds what the other waits for. No panic, no crash, and nothing in the app log after the
+checkpoint's own `DIGEST` line — the message pump stops with the main thread and the window goes Not
+Responding. **Third instance of this class in the programme, and the second on this very seed**
+(§3cb records the first two, on `grid` / `grids`).
+
+**Two things were wrong, and only one was the product.**
+
+1. **The order.** `restamp_workbook_name_casing` took the four naming authorities FIRST and the two
+   grid locks LAST — the crate's canonical order inside out — and took `sheet_names` last of the four
+   while the pass takes it first. Ten other functions also held one of `tables` / `table_names` /
+   `named_ranges` / `style_registry` and then asked for `sheet_names`.
+
+2. **The census had a hole, and it is why a guard written for this shape was green.** `.ok()` was in
+   `CONSUMING`. `LockResult::ok()` **moves** the guard into an `Option`; it does not release it. So
+   `let tables = state.tables.read().ok();` read as a temporary that had already died, and all three
+   of restamp's held guards were invisible to `no_lock_is_held_while_a_grid_lock_is_acquired`.
+
+The fix takes its direction from the thread that cannot change it, exactly as §3cb did for the grid
+pair: `recalculate_sheet_values` runs on a background thread (`queue_gather_refresh` spawns it per
+sheet, and `run_calculation_pass` is an async command), so everything else agrees with IT.
+`restamp_workbook_name_casing` now takes `grid`, `grids`, `sheet_names`, `tables`, `table_names`,
+`named_ranges` in that order; the other ten hoist a clone of `sheet_names` above the authority they
+hold. `.ok()` is out of `CONSUMING`, with a planted-body tooth that fails if it returns.
+
+A new crate-wide census — `no_function_holds_a_name_authority_while_acquiring_sheet_names` — asks the
+question no test in this tree asked: not "is a lock held while a grid lock is taken" but "are these
+two locks ever taken in the opposite order from the background pass's". Its direction is pinned to
+the pass by `the_recalculation_pass_still_takes_sheet_names_first`, so a reordering of the pass turns
+the census red rather than leaving every other function aligned to an order nothing takes any more.
+A live probe (`restamping_name_casing_does_not_hold_tables_while_it_waits_for_sheet_names`) plays the
+pass on the test thread and asks a third thread whether `tables` is still reachable, with a deadline
+so it FAILS rather than joins the deadlock; its non-vacuity partner plants the pre-fix body and
+asserts the probe says no.
+
+### 14d. BUG-0046 — a hidden sheet stayed the active sheet, and every caller believed otherwise
+
+Found by reading, while adding `sheet.hide` to the walker. `hide_sheet` set the visibility flag,
+worked out which visible sheet should take over, and **returned** that index — without touching
+`state.active_sheet` or any per-sheet mirror. Its own doc comment said so: *"Returns the recommended
+new active_index (frontend should call set_active_sheet if it changed)."*
+
+Not one of the three callers did:
+
+* `SheetTabs.handleHide` passes `backendHandledSwitch: true`, whose own comment reads *"Backend
+  already swapped - just sync frontend state"*;
+* `ScriptNotebook/lib/deferredActionHost.setSheetVisibility` comments *"Hiding the active sheet makes
+  the backend switch"*;
+* the broker's `api.setSheetVisibility` goes through `announceSheetsChanged`, which dispatches
+  `setActiveSheet` into the frontend store and emits `SHEET_CHANGED`.
+
+All three moved the FRONTEND onto the recommended sheet while the backend still had the hidden sheet
+active — and every cell read and every cell write goes to the active sheet. The tab strip highlights
+Sheet1, the canvas paints Sheet2's data, and typing writes into the sheet the user has just hidden.
+Excel's rule settles it: a hidden sheet cannot be the active sheet (no tab to select, and `Activate`
+raises in VBA), which is the same rule §13 used to decide the undo case.
+
+The switch now happens in the command every route passes through, and it goes through
+`activate_sheet` — the ONE implementation of the swap that §13 extracted. A source census fails the
+build if `hide_sheet_inner` ever assigns `active_sheet` itself instead.
+
+**The defect sat underneath a passing test the whole time.** `TestRunner`'s "Hide and unhide a sheet"
+adds a sheet — which makes it active — and then hides it, i.e. it hides the ACTIVE sheet on every run,
+and asserts only that `visibility == "hidden"`.
+
+**The delete side of the same rule, found by asking the question the other way round.** `hide_sheet`
+has always refused to hide the last VISIBLE sheet; `delete_sheet` only ever checked that at least one
+SHEET remained. Hide Sheet1, delete Sheet2, and the guard is satisfied while the workbook is left
+with a single hidden sheet — no tab to click, and an active index naming a sheet the user cannot look
+at. Excel's wording is exactly the distinction: *a workbook must contain at least one visible
+worksheet*. And the index arithmetic that picks the post-delete active sheet is pure bookkeeping, so
+deleting the sheet beside a hidden one lands the user ON the hidden one. Both are now decided by two
+pure functions (`visible_sheets_after_removing`, `nearest_visible_sheet`) with their own unit tier
+and a source census tying them back to the command — `delete_sheet` takes eight `State<T>` arguments
+and cannot be driven from a test, which is exactly how the rule went unasked.
+
+**A third defect, found by the new test fixture.** `ensure_vec_len(&mut sheet_visibility, n)` pads
+with `String::default()`, i.e. the EMPTY STRING, while every reader compares against the literal
+`"visible"`: `SheetTabs` renders `sheets.filter(s => s.visibility === "visible")`, `hide_sheet` counts
+the visible sheets that way, and `next_sheet` / `previous_sheet` skip anything else. A padded slot is
+therefore a sheet with no tab that the workbook believes is neither hidden nor visible — and
+`build_sheet_list`'s `.unwrap_or("visible")` cannot repair it, because the slot is `Some("")` rather
+than `None`. All four padding sites go through a new `ensure_visibility_len`.
+
+### 14e. The instrument that can see this class at all
+
+None of the three semantic oracles could have found BUG-0046. They all reason from the workbook
+digest, and the digest is assembled entirely from `AppState` — so a backend that is wrong in a
+self-consistent way passes every one of them. The failure is a DISAGREEMENT between the two halves of
+the app, and the walker's snapshot is the only thing in the tree that holds both.
+
+It was not using it. `logical.activeSheet` is read from the FRONTEND grid state (§12 corrected the
+key it reads); the backend's own `activeIndex` was fetched in the same call and thrown away. The
+snapshot now keeps `backendActiveSheet` and `sheetVisibility`, and a new cheap invariant
+`active-sheet-agrees` fails the walk when the two halves name different active sheets, or when the
+active sheet is not visible.
+
+### 14f. The walker still could not reach most of the sheet surface
+
+Un-suppressing the four actions was necessary and not sufficient. Measured against the commands:
+
+| what the walker could do | what it could not |
+|---|---|
+| `sheet.add` | `sheet.move`, `sheet.copy` — the other two commands that RENUMBER the workbook, and two of the five the undo oracle's own message names as history-ending |
+| `sheet.delete` of the LAST sheet, always | `sheet.delete` of any other sheet — and deleting the last one renumbers NOTHING, so every remap in `delete_sheet` (`remap_sheet_keyed_stores`, `cascade_sheet_removed`, `remap_report_sheets`, the cross-sheet dependency re-key, the defined-name re-scope) went unexercised. BUG-0041 lived on exactly that path |
+| `sheet.rename` of sheets 1..n | `sheet.rename` of sheet 0 — the one that exercises the whole-workbook formula repair, the cross-sheet dependent re-key (that map is keyed by NAME) and the defined-name `refersTo` repair |
+| — | `sheet.hide`, which changes which sheet is ACTIVE while changing the sheet list not at all. BUG-0046 lived there |
+
+All four gaps are closed. `names.define` also stopped pointing at the string `"Sheet1"` and now names
+the active sheet from the snapshot — with the literal, a walk that renamed sheet 0 turned every later
+`names.define` into a silently caught no-op, which is the same "counted as explored, did nothing"
+reading §14a is about.
+
+### 14g. BUG-0047 — tables do not follow their sheet through a move or a copy
+
+The first walk of the re-armed sweep found it, and the shrinker cut it to nine actions:
+
+```
+1 sheet.add            6 table.create
+2 redo                 7 cell.edit-number B15
+3 script.shape-unmount 8 sheet.hide  {tabIndex: 1}
+4 slicer.click-away    9 sheet.move  {from: 0, to: 1}
+5 note.add
+```
+
+then save and reload. Confirmed over 30 replays (20 clean passes), and reproduced independently on
+two more seeds with different weights.
+
+`state.tables` is keyed by sheet INDEX, and it is **the one sheet-index-keyed store that is not in
+`remap_sheet_keyed_stores`** — `delete_sheet` re-keys it inline, because the same pass has to drop the
+deleted sheet's table NAMES out of `table_names` and a generic remap cannot do that half. So
+`move_sheet` and `copy_sheet` re-keyed every other per-sheet store — comments, scenarios, outlines,
+conditional formats, data validations, cell types, controls, protection, **autofilters**, spill
+tracking, reports, and the floating slicer / timeline / chart / sparkline stores — and left this one
+where it was.
+
+The measured symptom is the AutoFilter link, precisely because `auto_filters` DID move: on reload
+`relink_autofilter_owner` looks for the owning table under the filter's sheet index, finds none, and
+the link is gone (`tables.<id>.autoFilterId: <id> -> <absent>`) — or finds a DIFFERENT sheet's table
+and hands it the filter (`<A> -> <B>` on seed 90070001, `<absent> -> <id>` on 90070002).
+
+**That is the visible half.** The table itself is now registered against another sheet, and that
+registry is what every structured reference (`=SUM(Table1[Amount])`) resolves through, what the save
+path writes per sheet, and what the AutoFilter, totals-row and calculated-column commands look the
+table up in. The workbook digest cannot see it: `move_sheet` does not touch the table map at all, so
+the key and the `sheet_index` FIELD stay consistent with each other — wrong together, and therefore
+identical across save and reload. Only the filter, which moved, betrays it.
+
+`remap_tables_store` now does both halves (the key and the field — a key that moved without the field
+is the same divergence one layer down), `move_sheet` and `copy_sheet` call it with the very remap
+closures they already pass to `remap_sheet_keyed_stores`, and a source census checks all three
+commands BY NAME, because "it is a sheet-keyed store, so the helper reaches it" is exactly the
+reasoning that missed it.
+
+**Why §3bn's sweep did not catch this.** That sweep asked, of every store, "is it keyed by sheet
+index, and does the helper reach it". `tables` answered the first question *yes* and the second *no* —
+and looked handled, because it had its own re-key. Nothing asked the two commands that delete
+nothing.
+
+### 14h. BUG-0049 — and the oracle's own answer to §9 turned out to have one case left in it
+
+With BUG-0047 fixed, the same seed failed again, differently:
+
+```
+Undoing 22 steps did not restore the checkpoint state.
+2 differences; first: sheetNames[2]: "<absent>" -> "Sheet3"
+```
+
+Both differences were that one sheet, and it was EMPTY. The walk had **added** Sheet3 inside the
+checkpoint window; adding a sheet is not undoable, so no number of undo steps returns to the
+checkpoint and the window is not decidable. The oracle decided it anyway — which is precisely the
+false report §9's fix exists to prevent, arriving through the one door it left open.
+
+`stepsBackToBaseline` asks whether a wholesale clear **discarded** anything (`clearedTotal`, a count
+of TRANSACTIONS). A structure change made while the stack is already empty discards nothing, so the
+counter does not move, the oracle sees no clear, and it winds the history back into a state the
+baseline digest cannot describe.
+
+The fact the caller needs is whether a clear **happened**, and that is a different number.
+`UndoStack` now carries `clears_total` alongside `cleared_total` — incremented on every `clear()`
+regardless of what it discarded — kept separate so `no_phantom_clear_on_a_pristine_workbook` keeps
+meaning what it says. `stepsBackToBaseline` decides on the clears and uses the transactions only to
+say how much was lost ("1 clear(s), 0 transaction(s) discarded"). Two new cases in
+`undoHistoryHorizon.test.ts` cover both branches with `clearedTotal` deliberately unchanged; reverting
+the decision to `cleared > 0` fails exactly those two and nothing else.
+
+### 14i. BUG-0050 — LEFT OPEN, and deliberately not suppressed
+>
+> **CLOSED in §15a (2026-08-13).** Decided in favour of the undo ENTRY, and not by new evidence about
+> Excel: the argument that makes the five structural commands end the history — they RENUMBER the
+> indices every queued entry names — does not reach a hide, which assigns one element of a parallel
+> `Vec` in place. See §15a.
+
+With those four in, the sheet-weighted walk failed on a fifth:
+
+```
+Undoing 26 steps did not restore the checkpoint state.
+1 differences; first: sheets[1].visibility: "visible" -> "hidden"
+```
+
+`hide_sheet`, `unhide_sheet` and `set_tab_color` all construct `DocumentEffect::mutates` — the state
+IS written into the `.cala` — take no `undo_stack`, record nothing, and, unlike the five structural
+commands, do not invalidate the history either. So the workbook is left in the one state that is
+indefensible under any reading: **a persisted change that undo cannot reverse, with the history still
+claiming it can.**
+
+The two candidate fixes implement opposite Excel behaviours — an undo entry restoring
+`sheet_visibility` / `tab_colors`, or the same history invalidation the five structural commands make
+— and which one is parity is a question this pass could not answer at high confidence. Guessing would
+put a parity claim in the tree that nobody measured, so it is filed **open** with both candidates and
+the one-line decision spelled out.
+
+**No `KNOWN_ISSUES` entry was added.** Sheet-weighted walks will keep reporting it until it is
+decided, which is the intended cost: two suppressions in this programme outlived their bugs, one of
+them for the whole of it.
+
+### 14j. What the sweep found, and what each finding needed
+
+Four product defects, one harness defect, and one open owner call. Every one of them needed a sheet
+operation to happen NEXT TO something else:
+
+| | needed |
+|---|---|
+| BUG-0045 | a file OPEN while the background gather-refresh recalculation was running |
+| BUG-0046 | hiding the sheet that happened to be ACTIVE |
+| BUG-0047 | a table on a sheet that was then MOVED (or copied) |
+| BUG-0048 | a DELETE next to a hidden sheet, or of the last visible one |
+| BUG-0049 | a sheet added while the undo history happened to be EMPTY |
+| BUG-0050 | any hide at all, inside a checkpoint window |
+
+None is reachable by a walk that cannot touch sheets, which is what every walk in this programme was
+until §12 emptied `EXCLUDED_UNTIL_FIXED` — and four of the six additionally needed one of the actions
+the catalog did not have (`move`, `copy`, `hide`) or a `delete` of something other than the last
+sheet.
+
+### 14k. The sweep, measured
+
+Seven soak walks on the fixed build (one known regression seed, six fresh, weighted at the sheet
+surface), 1,700 actions:
+
+| walk | seed | weights | sheet actions issued / EFFECTIVE | result |
+|---|---|---|---|---|
+| B0 | 1786446166374 | (none) | 13 / 12 | **pass** |
+| B1 | 90070001 | `sheet:10` | 36 / 25 | fail — BUG-0050 |
+| B2 | 90070002 | `sheet:8,chart:4` | 58 / 42 | pass |
+| B3 | 90070003 | `sheet:8,table:4,filter:3` | 61 / 42 | pass |
+| B4 | 90070004 | `sheet:8,sparkline:4,slicer:3` | 54 / 42 | pass |
+| B5 | 90070005 | `sheet:6,cf:4,validation:4,annotation:4` | 56 / 31 | pass |
+| B6 | 90070006 | `sheet:6,names:6,structure:3` | 36 / 27 | pass |
+
+**314 sheet actions issued, 221 of them measurably changed the workbook** — across `add`, `switch`,
+`rename`, `delete`, `move`, `copy` and `hide`. Every walk reached the sheet surface; the gap between
+the two columns is the number §14a exists to make visible, and it is mostly `sheet.switch` onto the
+sheet that was already active and `sheet.copy` refused at the four-sheet cap.
+
+Then eight `invariant` walks (75 actions each, two per project run) across four seeds — the known
+regression seed 1786456498740, BUG-0038's 90040001, and two fresh — with 120 sheet actions issued
+and 93 effective. Seven pass. The eighth found **BUG-0051**, minimized to four actions:
+`table.create` -> `sheet.rename {tabIndex: 0}` -> `table.select-into` -> `table.delete`, after which
+the workbook has no tables and the ribbon still shows the "Table Design" tab. The shrinker kept the
+rename — removing it makes the trace pass — and renaming sheet 0 is a thing the walker could not do
+until this pass. It is filed **open** with the repro committed: two candidate mechanisms are
+consistent with the code, one live probe separates them, and it is UI-only.
+
+> **CLOSED in §15b (2026-08-13), and it was NEITHER candidate.** No probe was needed: the delete
+> path never announces the `objects` domain, which is the only thing that dispatches
+> `TABLE_DEFINITIONS_UPDATED` and therefore the only thing that re-derives the tab. The rename the
+> shrinker kept was load-bearing to the SETUP, not to the defect — it was the only action refreshing
+> the frontend table cache after the walker's raw `create_table` invoke. See §15b.
+
+**The history-ending semantics read correctly throughout.** Every sheet-structure change inside a
+checkpoint window came back as `undo-history-unreachable` with the reason spelled out, and not one of
+them was presented as a defect. What the new coverage line adds is the price of that correctness:
+on a `sheet:10` walk the undo oracle decided **0 of 10** checkpoints, and B2 and B3 both carry
+`[WARNING] the undo round-trip decided NOTHING in this run`. A sheet-weighted walk is a strong test
+of persistence and recalculation and **no test of undo at all** — which was true before and is now
+printed rather than assumed.
+
+#### Ledger
+
+**51 entries, 49 fixed, 2 open.** BUG-0045 through BUG-0049 are fixed with populated `fix` blocks
+naming the files and the measured mechanism; BUG-0050 and BUG-0051 are open with populated `repro`
+blocks, committed traces where a trace exists, and — deliberately — **no `KNOWN_ISSUES` suppression
+for either**. `EXCLUDED_UNTIL_FIXED` remains the empty array.
+
+## 15. The last two open bugs close — and a census that contradicted itself (2026-08-13)
+
+§14 left exactly two entries open, both with the honest reason "the mechanism needs one more
+measurement and guessing would put an unmeasured claim in the tree". Both measurements were
+available without a probe: one from the doc comment of the function the fix was being compared
+against, one from reading four files in the delete path. **Neither open bug needed the experiment it
+was filed waiting for.**
+
+A third thing came out of attacking a contract instead of re-reading it, and it is the finding of
+this pass: **the sheet switch is atomic in state and sequential in paint**, and no test in the tree
+could have said so, because none of them looked at a FRAME.
+
+### 15a. BUG-0050 — the owner call, decided by the doc comment of the alternative
+
+The filed choice was between two opposite Excel behaviours: give `hide_sheet` / `unhide_sheet` /
+`set_tab_color` an undo entry, or make them END the undo history the way the five structural sheet
+commands do. §14i recorded moderate confidence in either and stopped there.
+
+What settles it is not new evidence about Excel. It is that **the argument for ending the history
+does not reach these three**, and that argument is already written down in the tree —
+`invalidate_undo_history_for_sheet_structure`'s own doc comment:
+
+> An undo entry names its sheet by INDEX (`CellChange::SetCell { sheet, .. }` […]). An index is a
+> POSITION, not an identity: deleting, moving or copying a sheet renumbers every index after the
+> affected one, so a queued entry silently comes to describe a DIFFERENT sheet than the one it was
+> recorded on.
+
+The five end the history because they RENUMBER (or, for a rename, rewrite every formula that spells
+the name). **Hiding a sheet renumbers nothing and rewrites nothing** — it assigns one element of a
+parallel `Vec` in place. Every queued entry still describes exactly the sheet it was recorded on, so
+the hazard the invalidation exists to prevent is absent, and the invalidation would be a cost paid
+for nothing.
+
+With the structural argument gone, what is left is an asymmetry: ending the history destroys every
+undo step the user had accumulated; recording an entry costs a few bytes. `hide_sheet_inner` already
+takes that same cheap direction one line over, for the dirty flag ("a false positive, which is the
+cheap direction"). **Undoable.**
+
+The restore is one new `CustomRestore` kind, `"sheet_tab_state"`, carrying
+`{ visibility, tab_colors, active_sheet }` — whole vectors rather than per-index deltas, because
+their LENGTH is state (`ensure_visibility_len` pads lazily and `build_sheet_list` reads by index, so
+a partial restore could leave the list disagreeing with itself about how many sheets have a recorded
+visibility), and each field `Option` so "this change did not touch it" is expressible. That is
+`UserHiddenSnapshot`'s shape, deliberately: the two are the same problem one level apart.
+
+Three things about it were decisions rather than defaults:
+
+* **`defer: true`.** The stores themselves are leaf sublocks that would be safe inline. The
+  RE-ACTIVATION is not: undoing the hide of the ACTIVE sheet puts the user back through
+  `sheets::activate_sheet`, which takes the grid, the grids vector, the widths, the heights and the
+  merges — every one of which `apply_changes` is still holding during the inline phase. That is the
+  deadlock the pivot column-width restore already paid for once, and its symptom was "the
+  application went away".
+* **`active_sheet` is recorded only by `hide`.** It is the only one of the three that moves the user
+  (BUG-0046: a hidden sheet cannot be active). A change that did not move the view must not move it
+  back, so unhide and tab colour record `None` — and the restore that does follow refuses a target
+  that is out of range or has since become hidden, under exactly the rules `activation_target`
+  applies to a cell restore.
+* **A no-op records nothing.** Hiding an already-hidden sheet, unhiding a visible one, recolouring to
+  the same colour, and a REFUSED hide ("Cannot hide the last visible sheet") all leave the stack
+  alone. An undo step that restores the state it is already in is indistinguishable, from the
+  keyboard, from a Ctrl+Z that was swallowed.
+
+`unhide_sheet_inner` and `set_tab_color_inner` are new splits, for the reason `hide_sheet_inner`
+exists: a `State<T>` command has no unit tier, and a command whose new behaviour cannot be unit
+tested is a command whose new behaviour is asserted rather than measured.
+
+**What caught the gap in the guard.** `restore_registry_tests::registry_matches_expected_domains`
+and `defer_agrees_with_legacy_prefix_logic` both FAILED on the new kind the moment it was added —
+the registry census doing precisely its job, since a kind with no row is dispatched to
+`eprintln!("[undo] Unknown custom restore kind")` and silently discarded. An entry recorded, popped,
+and dropped on the floor looks exactly like the defect it was written to fix.
+
+### 15b. BUG-0051 — the two halves of one census contradicted each other
+
+The filed triage offered two candidate mechanisms and said one live probe separates them. Neither
+was right, and no probe was needed — the delete path says it in four files.
+
+`deleteTableAsync` succeeds and refreshes its own cache. What it never does is announce the
+**`objects`** domain. The only thing that re-derives the contextual tab is `syncDesignTabToTables`,
+which runs on `TABLE_DEFINITIONS_UPDATED`, which is dispatched by the `objects` domain and by
+nothing else in that path. The store's `announceObjectCascade` named only
+`["slicer", "ribbonFilter"]`.
+
+It was invisible from the screen a human uses because **two callers papered over it**: the Table
+Design tab's Delete and Convert-to-Range buttons each emitted `TABLE_DEFINITIONS_UPDATED` by hand
+after awaiting the store. So the button worked and every other route — a script, an MCP tool, the
+E2E walker — got the ghost tab. That is the second-source-of-truth shape this register keeps
+deleting: the announcement belongs to the mutation, not to the button that happened to start it.
+
+**Why the census written for exactly this did not catch it.** `cascadeAnnouncementCensus.test.ts`
+has two halves and they disagreed:
+
+* the CASCADE half runs off `requiredDomainsFor`, which **deletes the owner's own domain** from the
+  required set — reasoning that a route re-reading its own cache needs no announcement for itself.
+  `objects` IS the Table's own domain, so the census would never ask a table delete to announce it.
+  And that reasoning is sound as far as it goes: it covers the CACHE. The contextual tab is not the
+  cache.
+* the SELECTION half, added after BUG-0026, recorded in its own `why` field that the tab "is
+  re-derived from the CURRENT table list on TABLE_DEFINITIONS_UPDATED, **which the `objects` domain
+  dispatches**".
+
+One half excused exactly what the other half depended on, in the same file, three hundred lines
+apart.
+
+The repair makes the dependency explicit rather than prose: `SelectionOwner` gains
+`reconcileDomain` — the refresh domain whose fan-out reaches the reconciliation — with a MANDATORY
+`reconcileDomainWhy` when it is null, and `unannouncedReconciliations` requires every delete route
+for that kind to announce it, own domain or not. Non-vacuity is asserted (exactly one owner
+exercises the rule today, and the test names it), and a synthetic-source teeth case proves the
+detector fires, that the fixed shape is accepted, that `ownDomain` plus a self-refresh does NOT
+excuse it, and that a null domain with no reason is reported rather than skipped.
+
+The new rule immediately reported a second instance — and **it was a false report**, which is worth
+recording because a census that cries wolf teaches the next reader to disbelieve it. The script
+broker's `announceObjectCascade` reaches `objects` through a SECOND hop (`announceObjectsChanged`)
+that the analyser's deliberate one-hop rule did not follow. `domainsAnnounced` now follows
+announcement helpers TRANSITIVELY. The original one-hop reasoning was "two hops make the closure the
+whole module and stop discriminating", and that holds for arbitrary callees; restricting the
+frontier to functions whose NAME says they announce keeps the closure at "the announcement helpers
+this route reaches" however many are chained.
+
+**The rename was load-bearing to the SETUP, not to the defect.** The shrinker was right that
+removing `sheet.rename` made the trace pass, and the conclusion drawn from that was wrong. The
+walker's `table.create` used a raw `create_table` invoke, which leaves the frontend not knowing a
+table exists; `table.select-into` therefore could not register the tab at all. The rename fired
+`SHEET_CHANGED`, whose Table handler calls `refreshCache()` — and THAT, nothing about renaming, is
+what made the tab appear so it could then survive its table. `table.create` now goes through
+`createTableAsync` and emits `TABLE_CREATED`, the way Insert > Table does. A create no user can
+perform was making the walk blind to the whole contextual-tab surface unless an unrelated action
+happened to refresh a cache.
+
+### 15c. BUG-0052 — the sheet switch is atomic in state and sequential in paint
+
+§13 claimed the undo switch is atomic: "There is no `await` between the first dispatch and the last,
+so React cannot paint mid-switch." The instruction for this pass was to ATTACK that, so it was
+measured rather than re-read — per animation frame, inside the page (a Playwright poll from outside
+cannot observe a state that lasts one paint), sampling two things that come from different places:
+the tab strip's own painted `font-weight`, and a `getImageData` probe of a cell that has ink on one
+sheet and not on the other.
+
+The absolute claim FAILS:
+
+```
+{"t":45,"tab":0,"ink":false}   <- Sheet1 shown consistently
+{"t":60,"tab":1,"ink":false}   <- the strip says Sheet2; the canvas is still painting Sheet1
+{"t":98,"tab":1,"ink":true}    <- the canvas catches up
+```
+
+The claim is true of the STATE and false of the PAINT. `followBackendSheetActivation` really does
+dispatch `sheet:beforeSwitch` -> the grid sheet context -> `sheet:normalSwitch` with no `await`, so
+the tab strip repaints on the very next frame; the canvas cannot repaint until `refreshCells()` has
+completed a backend round trip.
+
+**And it is not undo's.** The control was measured in the same run, on the same machine: an ORDINARY
+TAB CLICK has the same window. Across three runs — `tab click 65 ms / undo 22 ms`, `60 / 71`,
+`67 / 21` — they are the same quantity within noise, and undo is usually the smaller of the two.
+That is exactly what §13's "reuse the tab click's own channel" bought, and it is the honest form of
+contract (a): **undo introduces no disagreement that the app's own sheet switch does not already
+have.** The live test asserts that comparison, prints both numbers, and additionally requires the
+settled state (a second later) to agree — a tear that never closes is a defect of a different order
+from one that lasts two frames.
+
+The residual is filed as **BUG-0052**, open, cosmetic, not suppressed. Closing it means fetching the
+target sheet's viewport BEFORE the context swap and committing both in one batch — a change to the
+ONE switch path every tab click, script, MCP tool and undo shares, and the register's standing
+warning about that path is that the last time it had two hydration paths, the second was mount-only
+and painted sheet 1's panes on sheet 2. The measurement, the probe and the bound are committed, so
+the day it is attempted there is already a test that fails before and passes after.
+
+### 15d. Proved live, from a cold app
+
+New: `app/e2e/journeys/sheet-tab-state-undo.spec.ts`, four tests. Every one asserts its WRONG
+outcome first, because the register records an acceptance test that passed on a demonstrably broken
+build by reading something the broken and fixed builds agreed about.
+
+| proof | gesture | wrong outcome asserted first |
+|---|---|---|
+| BUG-0050 | real tab context menu > Hide Sheet, then real Ctrl+Z | the strip really stops rendering the hidden tab, and the user really is moved off it |
+| BUG-0050 control | hide a NON-active sheet, undo | the tab is really gone, and the user is really on Sheet2 |
+| BUG-0043 | Ctrl+Z with a per-frame sampler, against a tab-click control | the same-sheet undo is shown reporting "no switch, no ink" |
+| BUG-0051 | create through the store, cursor into the table, delete through the store | the ribbon is asserted to BE showing "Table Design" before the delete |
+
+The BUG-0050 test reads the restored sheet's own mark out of the FORMULA BAR after the undo, so
+"the grid is on Sheet2" is measured rather than inferred from a label.
+
+**Teeth.** With `announceTableObjectChange` sabotaged back to `["slicer", "ribbonFilter"]` on the
+running build and the WebView reloaded, the BUG-0051 test reports the rendered ribbon as
+`["Home", "Page Layout", "Controls", "Table Design"]` with zero tables — the filed symptom, exactly.
+The file was then restored byte-identically (sha256
+`8ac813074b0b42914c0044001e22801efa3fa1940d88d30402d40199c10dc2bf`, 15310 bytes, verified) and all
+four tests pass again. The first attempt at this was a VACUOUS PASS and is recorded as such: the
+reload script failed with `ERR_MODULE_NOT_FOUND`, the app kept the old module, and the test passed
+against unsabotaged code. A sabotage that is not observed to fail proves nothing.
+
+`repros/BUG-0051.trace.json` — the committed four-action trace — now replays clean.
+
+### 15e. Every project, measured — and two harness findings that cost most of the pass
+
+| project | invocation | result | baseline | delta |
+|---|---|---|---|---|
+| functional | `--project=functional` (cold) | **542 passed / 1 failed / 11 skipped** | 541 / 2 / 11 | one FEWER failure, same 554 total |
+| journey | `--project=journey` (cold) | **142 / 0 / 1** | 138 / 0 / 1 | +4 = this pass's new spec |
+| scenario | `--project=scenario` (cold) | **24 / 24** | 24 / 24 | — |
+| visual | `--project=visual`, two COLD runs | **18 / 18** and **18 / 18** | 18 / 18 | — |
+| macro | `--project=functional --grep "[Mm]acro"` (cold) | **27 / 27** | 27 / 27 | — |
+| soak | seed 90070001, 250 actions, `sheet:10` | **pass**, 10 checkpoints, 63 sheet actions issued / 45 effective | failed on BUG-0050 | closed |
+| trace replay | `repros/BUG-0051.trace.json` | **pass** | failed (the repro) | closed |
+
+**BUG-0053 — the one functional failure, and it is a GOLDEN, not the product.**
+`scrolling.spec.ts > scroll down via mouse wheel changes viewport` fails on
+`grid-scroll-before.png`. Measured on a cold app with `new_file` invoked immediately before the run:
+the diff contains cells THE GOLDEN HAS AND THE LIVE GRID DOES NOT — "First second" at B6 and
+"original" at B10 — and both are written by `inline-editor-live.spec.ts`
+(`setCellValueDirect("B10", "original")`). The baseline was captured mid-suite from a contaminated
+workbook, so the test can only pass when that spec has run first and left exactly that residue. In
+the full ordered run it fails the other way as well: by then the live grid carries residue the golden
+lacks (tables at M1:O6 and R1:S10). Filed **open** rather than fixed, because the fix is to REPLACE
+A CHECKED-IN GOLDEN — a change to evidence, for which this repo has a review flow
+(`validate-baselines.mjs`), and silently re-capturing a baseline at the end of an unrelated pass is
+how 75 evidence-free goldens got into the tree in the first place (§12).
+
+**Two harness traps cost more of this pass than any of the fixes, and both produced a result that
+LOOKED like a clean number.**
+
+1. **A cold relaunch that silently did not relaunch.** The first helper killed the app, started the
+   launcher, and then waited for CDP to answer. When the kill had not taken effect yet, CDP answered
+   *immediately from the app that was supposed to be dead*, the launcher (correctly) REFUSED to steal
+   a live port, and the helper reported success. The journey suite then ran a second consecutive time
+   on an app that had already been through a full journey pass, and produced a screen of failures
+   that were nothing but accumulated state. The helper now VERIFIES: app process count must reach 0
+   after the kill, and the app PID must differ afterwards, or it aborts. Every project result in the
+   table above was taken through the verified version.
+2. **A run that collected 134 of 143 tests and said nothing about the other 9.** The first journey
+   pass reported a clean `133 passed / 1 skipped` — and its own header said "Running 134 tests" while
+   `--list` said 143. The new spec's four tests were not among them. A green number for a suite that
+   quietly dropped nine tests is worse than a red one. The re-run on a verified cold app collected
+   all 143 and the numbers reconcile exactly (138 baseline + 4 new = 142 passed, 1 skipped). The
+   shortfall itself is UNEXPLAINED and is recorded here as such rather than rationalised: the check
+   that catches it is comparing the run's own "Running N tests" against `--list`, which costs
+   nothing and is now written down.
+
+A third, smaller one: the `list` reporter rewrites its lines in place, so a redirected log keeps only
+fragments and cannot be audited after the fact. Every run in the table was taken with
+`--reporter=dot,json` and counted from the JSON.
+
+**The walker change had a cost, and the walk found it.** Routing `table.create` through the product
+made a second create at the same rectangle a REFUSAL the product legitimately `console.error`s about
+— which `no-console-errors` then failed the walk on (seed 90070001, step 143). The raw invoke it
+replaced rejected a promise the walker swallowed. The action now asks the backend whether anything
+overlaps its rectangle and skips rather than asking for something that cannot be done. This is the
+same lesson as §14a one level down: an action that CANNOT succeed is not coverage.
+
+
+#### Ledger
+
+**53 entries, 51 fixed, 2 open.** BUG-0050 and BUG-0051 carry populated `fix` blocks naming the
+files and the measured mechanism; BUG-0052 (the paint-order tear) and BUG-0053 (the contaminated
+scroll golden) are open, each with its measurement and its repro, and BUG-0052 with its committed
+probe. `EXCLUDED_UNTIL_FIXED` remains the empty array and no `KNOWN_ISSUES` entry was
+added for anything in this pass.

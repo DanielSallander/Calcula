@@ -41,23 +41,43 @@ function cellKey(row: number, col: number): string {
 /**
  * Read the annotation indicator cache from the backend.
  * Called on initial load, sheet change, and after annotation mutations.
+ *
+ * TWO PROPERTIES THIS READ MUST KEEP, both of them about what a SYNCHRONOUS
+ * reader sees while this is in flight:
+ *
+ *  1. NO EMPTY WINDOW. The maps are built in locals and swapped in at the end,
+ *     so a reader during the refill sees the PREVIOUS answer, never "absent".
+ *     A clear-then-fill would make "this cell has no note" indistinguishable
+ *     from "the refill has not finished", which the renderer, the click
+ *     interceptor and the hover preview would all read as "no annotation here".
+ *  2. A FAILED READ CHANGES NOTHING. The catch logs; it does not wipe.
+ *
+ * `stillCurrent` is honoured because invalidateAnnotationRefresh() is really
+ * called (on SHEET_CHANGED): the indicators describe the ACTIVE SHEET, so a
+ * pass that was reading the sheet the user just left must not write its answer
+ * over the new one. Ignoring the predicate made invalidate() a no-op.
  */
-async function readAnnotationState(): Promise<void> {
+async function readAnnotationState(stillCurrent: () => boolean): Promise<void> {
   try {
     const [comments, notes] = await Promise.all([
       getCommentIndicators(),
       getNoteIndicators(),
     ]);
 
-    commentIndicatorMap = new Map<string, CommentIndicator>();
+    if (!stillCurrent()) return;
+
+    const nextComments = new Map<string, CommentIndicator>();
     for (const indicator of comments) {
-      commentIndicatorMap.set(cellKey(indicator.row, indicator.col), indicator);
+      nextComments.set(cellKey(indicator.row, indicator.col), indicator);
     }
 
-    noteIndicatorMap = new Map<string, NoteIndicator>();
+    const nextNotes = new Map<string, NoteIndicator>();
     for (const indicator of notes) {
-      noteIndicatorMap.set(cellKey(indicator.row, indicator.col), indicator);
+      nextNotes.set(cellKey(indicator.row, indicator.col), indicator);
     }
+
+    commentIndicatorMap = nextComments;
+    noteIndicatorMap = nextNotes;
   } catch (error) {
     console.error("[Review] Failed to refresh annotation state:", error);
   }
@@ -71,7 +91,9 @@ async function readAnnotationState(): Promise<void> {
  * triangle is on screen before their overlay closes — two passes per comment
  * without this.
  */
-const annotationRefresh = createCoalescedRefresh(() => readAnnotationState());
+const annotationRefresh = createCoalescedRefresh((stillCurrent) =>
+  readAnnotationState(stillCurrent)
+);
 
 /**
  * Await the refresh already answering for an annotation the CALLER just wrote.
@@ -144,15 +166,15 @@ export function getAllNoteIndicatorsCached(): NoteIndicator[] {
 }
 
 /**
- * Invalidate the annotation cache (forces next render to re-fetch).
- */
-export function invalidateAnnotationCache(): void {
-  commentIndicatorMap.clear();
-  noteIndicatorMap.clear();
-}
-
-/**
  * Reset the annotation store (on extension unload).
+ *
+ * THIS IS NOT AN INVALIDATOR, and the difference is the whole of BUG-0042's
+ * neighbourhood: emptying the maps while the extension is still mounted leaves
+ * every synchronous reader — the triangle renderer, the click interceptor, the
+ * hover preview — answering "this cell has no annotation" for a cell that has
+ * one, with nothing scheduled to correct it. Only deactivate() may call this,
+ * and it unregisters the decoration and the interceptor in the same breath. To
+ * make the cache re-read, call requestAnnotationRefresh().
  */
 export function resetAnnotationStore(): void {
   commentIndicatorMap.clear();

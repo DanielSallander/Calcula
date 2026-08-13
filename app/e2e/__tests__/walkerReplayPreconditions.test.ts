@@ -80,8 +80,22 @@ describe("replay re-checks the RECORDED parameters, not just the shape of the st
     for (const id of ["sheet.rename", "sheet.switch"]) {
       const def = findAction(id, ACTION_CATALOG)!;
       expect(def.precondition(snapshot(3)), `${id} became ungeneratable`).toBe(true);
-      expect(def.precondition(snapshot(1)), `${id} on a single-sheet workbook`).toBe(false);
     }
+    // `sheet.switch` needs somewhere to switch TO.
+    expect(
+      findAction("sheet.switch", ACTION_CATALOG)!.precondition(snapshot(1)),
+      "sheet.switch on a single-sheet workbook",
+    ).toBe(false);
+    // `sheet.rename` does NOT, and used to be excluded from that case for no
+    // reason: renaming the only sheet is an ordinary Excel action, and it is the
+    // one that exercises the whole-workbook formula repair, the cross-sheet
+    // dependent re-key (that map is keyed by NAME) and the defined-name
+    // `refersTo` repair. Restricting it to sheets 1..n meant a walk could only
+    // ever rename a sheet nothing referred to.
+    expect(
+      findAction("sheet.rename", ACTION_CATALOG)!.precondition(snapshot(1)),
+      "sheet.rename on a single-sheet workbook",
+    ).toBe(true);
   });
 
   it("the trace source SKIPS the stale action instead of executing it", () => {

@@ -93,6 +93,91 @@ fn ensure_vec_len<T: Default>(v: &mut Vec<T>, min_len: usize) {
     }
 }
 
+/// Pad the tab-colour vector to one entry per sheet (empty = no colour).
+///
+/// `pub(crate)` for the `"sheet_tab_state"` undo restore, which re-pads after
+/// swapping the whole vector back in. One padding rule, not two — the LENGTH of
+/// these vectors is state (`build_sheet_list` reads them by index), so a restore
+/// that padded differently from the command would make a sheet's colour depend
+/// on which direction you arrived from.
+pub(crate) fn ensure_tab_color_len(v: &mut Vec<String>, min_len: usize) {
+    ensure_vec_len(v, min_len);
+}
+
+/// Is sheet `index` visible? A SHORT `sheet_visibility` counts as visible,
+/// exactly as `build_sheet_list` reads it — and a slot that exists but holds
+/// something other than `"visible"` does not, which is what makes the padding
+/// rule below load-bearing.
+pub(crate) fn sheet_is_visible(sheet_visibility: &[String], index: usize) -> bool {
+    sheet_visibility
+        .get(index)
+        .map(|v| v == "visible")
+        .unwrap_or(true)
+}
+
+/// How many sheets would still be VISIBLE if `removing` were deleted.
+///
+/// "At least one sheet" and "at least one VISIBLE sheet" are different tests,
+/// and `delete_sheet` only ever made the first (BUG-0046's family). Hide
+/// Sheet1, delete Sheet2, and the workbook is left with one HIDDEN sheet: no
+/// tab to click, and an active index naming a sheet the user cannot look at.
+/// `hide_sheet` has always refused the mirror image ("Cannot hide the last
+/// visible sheet").
+pub(crate) fn visible_sheets_after_removing(
+    sheet_visibility: &[String],
+    sheet_count: usize,
+    removing: usize,
+) -> usize {
+    (0..sheet_count)
+        .filter(|&i| i != removing)
+        .filter(|&i| sheet_is_visible(sheet_visibility, i))
+        .count()
+}
+
+/// `preferred` if it is visible, otherwise the first visible sheet there is.
+///
+/// The index arithmetic a delete performs is pure bookkeeping, so it can land
+/// on a hidden sheet; this is the step that makes the landing legal. Falls back
+/// to `preferred` when nothing is visible, which the caller's refusal has
+/// already ruled out.
+pub(crate) fn nearest_visible_sheet(
+    sheet_visibility: &[String],
+    sheet_count: usize,
+    preferred: usize,
+) -> usize {
+    if sheet_is_visible(sheet_visibility, preferred) {
+        return preferred;
+    }
+    (0..sheet_count)
+        .find(|&i| sheet_is_visible(sheet_visibility, i))
+        .unwrap_or(preferred)
+}
+
+/// Pad `sheet_visibility` — and it may NOT go through `ensure_vec_len`.
+///
+/// `String::default()` is `""`, and every reader of this vector compares
+/// against the literal `"visible"`: `SheetTabs` renders
+/// `sheets.filter(s => s.visibility === "visible")`, `hide_sheet` counts the
+/// visible sheets that way, and `next_sheet` / `previous_sheet` skip anything
+/// that is not that string. So a padded entry is a sheet with NO TAB that the
+/// workbook nonetheless believes is neither hidden nor visible — and
+/// `build_sheet_list`'s `.unwrap_or("visible")` cannot repair it, because a
+/// padded slot is `Some("")` rather than `None`.
+///
+/// Found by `the_sheet_it_lands_on_is_visible`: a three-sheet workbook whose
+/// visibility vector had not been grown refused "hide Sheet1" with "Cannot hide
+/// the last visible sheet", because the padding had made the other two invisible
+/// to the count.
+/// Pad the visibility vector to one entry per sheet ("visible" is the default —
+/// see `build_sheet_list`, which reads a MISSING entry as visible too).
+///
+/// `pub(crate)` for the `"sheet_tab_state"` undo restore; see
+/// `ensure_tab_color_len` for why the restore reuses these rather than padding
+/// its own way.
+pub(crate) fn ensure_visibility_len(v: &mut Vec<String>, min_len: usize) {
+    ensure_vec_len_with(v, min_len, || "visible".to_string());
+}
+
 fn ensure_vec_len_with<T, F: Fn() -> T>(v: &mut Vec<T>, min_len: usize, make: F) {
     while v.len() < min_len {
         v.push(make());
@@ -358,6 +443,42 @@ fn remap_sheet_keyed_stores(
                 None => false,
             },
         });
+    }
+}
+
+/// Re-key the TABLE store after sheet indices are renumbered, re-stamping the
+/// `sheet_index` each `Table` carries.
+///
+/// `tables` is NOT in `remap_sheet_keyed_stores`, and the reason is historical
+/// rather than principled: `delete_sheet` re-keys it inline, in the same pass
+/// that drops the deleted sheet's table NAMES out of `table_names` (a generic
+/// remap cannot do that half). `move_sheet` and `copy_sheet` were therefore the
+/// two structural commands with NO table remap at all — so moving a sheet left
+/// every table on it registered under the index that now holds a DIFFERENT
+/// sheet.
+///
+/// MEASURED (BUG-0047), soak seed 1786446166374 minimized to nine actions: add
+/// a sheet, create a table on it, hide it, move the other sheet past it. The
+/// sheet's AutoFilter moved with it (`auto_filters` IS in
+/// `remap_sheet_keyed_stores`) and its table did not, so on reload
+/// `relink_autofilter_owner` looked for the table under the filter's index,
+/// found none, and the link was gone. The lost link is only the visible half:
+/// the table itself is now attached to another sheet, which is what every
+/// structured reference (`=SUM(Table1[Amount])`) resolves through.
+pub(crate) fn remap_tables_store(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    remap: impl Fn(usize) -> Option<usize>,
+) {
+    let mut tables = state.tables.write(effect).unwrap();
+    let old = std::mem::take(&mut *tables);
+    for (index, mut sheet_tables) in old {
+        if let Some(new_index) = remap(index) {
+            for table in sheet_tables.values_mut() {
+                table.sheet_index = new_index;
+            }
+            tables.insert(new_index, sheet_tables);
+        }
     }
 }
 
@@ -673,6 +794,25 @@ pub fn set_show_gridlines(
 
 #[tauri::command]
 pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult, String> {
+    activate_sheet(&state, index)
+}
+
+/// Make `index` the active sheet -- the WHOLE swap, not the flag.
+///
+/// The command above is a one-line delegation to this, and the split exists
+/// because the backend now initiates a sheet switch of its own: Excel keeps one
+/// undo history and switches to the sheet the undone action happened on, so
+/// `undo_commands::apply_changes` has to perform a real activation. It holds an
+/// `&AppState`, not a `State<AppState>`, and a second implementation of "swap
+/// the mirrors" is exactly how the per-sheet stores drift apart -- the grid, the
+/// column widths, the row heights, the merged regions and the user-hidden sets
+/// all have to move together, and each one that a copy forgot would be that
+/// sheet's state leaking onto the other.
+///
+/// CALLERS MUST HOLD NO STATE LOCK. This takes the canonical order (`grid`,
+/// `grids`, then everything else) and then, with every guard dropped, rebuilds
+/// the dependency maps.
+pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsResult, String> {
     // AUDITED OPT-OUT. `workbook.active_sheet` IS persisted, and Excel does dirty on a
     // sheet switch -- we deliberately diverge, because merely LOOKING at a workbook must
     // never make it dirty or the close prompt stops meaning anything. Declared rather
@@ -1009,6 +1149,20 @@ pub fn delete_sheet(
         return Err(format!("Sheet index {} out of range", index));
     }
 
+    // EXCEL PARITY: a workbook must keep at least one VISIBLE worksheet, and
+    // "at least one sheet" is not the same test (BUG-0046's family). Hide
+    // Sheet1, delete Sheet2, and the guard above is satisfied while the
+    // workbook is left with a single HIDDEN sheet — no tab to click, and an
+    // active index naming a sheet the user cannot be looking at. `hide_sheet`
+    // has always refused the mirror image of this ("Cannot hide the last
+    // visible sheet"); the delete side never asked.
+    //
+    // A short `sheet_visibility` counts as visible, exactly as
+    // `build_sheet_list` reads it.
+    if visible_sheets_after_removing(&sheet_visibility, sheet_names.len(), index) == 0 {
+        return Err("Cannot delete the last visible sheet".to_string());
+    }
+
     let old_active = *active_sheet;
     let deleted_name = sheet_names[index].clone();
 
@@ -1335,6 +1489,14 @@ pub fn delete_sheet(
     } else {
         old_active
     };
+
+    // ...AND THE SHEET IT LANDS ON MUST BE VISIBLE. The arithmetic above is
+    // pure index bookkeeping, so deleting the sheet next to a hidden one leaves
+    // the active index on the hidden one — a sheet with no tab, showing its
+    // data under nobody's tab (BUG-0046's family; the refusal above guarantees
+    // there is a visible sheet to find). `sheet_visibility` has already had the
+    // deleted entry removed, so these indices are the post-delete ones.
+    let new_active = nearest_visible_sheet(&sheet_visibility, sheet_names.len(), new_active);
 
     *active_sheet = new_active;
 
@@ -1852,7 +2014,7 @@ pub fn move_sheet(
     // Ensure all per-sheet vecs are long enough
     ensure_vec_len(&mut freeze_configs, count);
     ensure_vec_len(&mut tab_colors, count);
-    ensure_vec_len(&mut sheet_visibility, count);
+    ensure_visibility_len(&mut sheet_visibility, count);
     ensure_vec_len(&mut page_setups, count);
 
     rotate_element(&mut *sheet_names, from_index, to_index);
@@ -1972,6 +2134,12 @@ pub fn move_sheet(
         // tracking) — historically missed here, which left their entries
         // pointing at whatever sheet inherited the old index after a move.
         remap_sheet_keyed_stores(&state, &effect, |i| Some(remap(i)));
+
+        // TABLES, which `remap_sheet_keyed_stores` does not reach (see
+        // `remap_tables_store`). Without this a table stayed under the index its
+        // sheet used to occupy while its AutoFilter — which IS in that helper —
+        // moved with the sheet (BUG-0047).
+        remap_tables_store(&state, &effect, |i| Some(remap(i)));
 
         // The floating object stores carry a sheet_index FIELD rather than a
         // sheet KEY, so nothing above reaches them (§3bn). A move renumbers
@@ -2104,7 +2272,7 @@ pub fn copy_sheet(
     let cloned_grid = grids[source_index].clone();
     ensure_vec_len(&mut freeze_configs, count);
     ensure_vec_len(&mut tab_colors, count);
-    ensure_vec_len(&mut sheet_visibility, count);
+    ensure_visibility_len(&mut sheet_visibility, count);
     ensure_vec_len(&mut page_setups, count);
 
     let cloned_freeze = freeze_configs[source_index].clone();
@@ -2217,6 +2385,14 @@ pub fn copy_sheet(
             Some(if i >= insert_at { i + 1 } else { i })
         });
 
+        // TABLES, for the same reason and by the same shift — they are not in
+        // the helper above (see `remap_tables_store`, BUG-0047). The copy gets
+        // none of its own, mirroring reports; this re-anchors the originals the
+        // insertion pushed up.
+        remap_tables_store(&state, &effect, |i| {
+            Some(if i >= insert_at { i + 1 } else { i })
+        });
+
         // Same shift for the floating object stores (slicers, timelines,
         // charts, sparklines, bySheet filter targets), which are keyed by a
         // sheet_index FIELD and were missed here for the same reason (§3bn).
@@ -2265,7 +2441,29 @@ pub fn copy_sheet(
 /// Hide a sheet. Cannot hide the last visible sheet.
 /// `level` controls the visibility: "hidden" (default, unhidable from UI) or "veryHidden"
 /// (only unhidable via code/VBA, not from the UI).
-/// Returns the recommended new active_index (frontend should call set_active_sheet if it changed).
+///
+/// HIDING THE ACTIVE SHEET PERFORMS THE SWITCH (BUG-0046). It used only to
+/// RECOMMEND one — "frontend should call set_active_sheet if it changed", said
+/// the doc comment — and not one of the three callers did:
+///
+///   * `SheetTabs.handleHide` passes `backendHandledSwitch: true`, which means
+///     literally "the backend already swapped grids/state, do NOT call
+///     setActiveSheetApi";
+///   * `ScriptNotebook/lib/deferredActionHost.setSheetVisibility` says in as
+///     many words "Hiding the active sheet makes the backend switch";
+///   * the broker's `api.setSheetVisibility` goes through
+///     `announceSheetsChanged`, which dispatches `setActiveSheet` into the
+///     frontend store and emits SHEET_CHANGED.
+///
+/// So all three moved the FRONTEND to the recommended sheet while
+/// `state.active_sheet` still named the sheet that had just been hidden — and
+/// every cell read and every cell write goes to the active sheet. The tab strip
+/// highlighted Sheet2, the canvas painted Sheet1's data, and typing wrote into
+/// the hidden sheet. Excel's rule is simply that a hidden sheet cannot be
+/// active, so the switch belongs here, in the one place all three routes pass
+/// through, and it goes through `activate_sheet` — the single implementation
+/// that moves the grid mirror, the widths, the heights, the merges and the
+/// user-hidden sets together.
 #[tauri::command]
 pub fn hide_sheet(
     state: State<AppState>,
@@ -2273,54 +2471,113 @@ pub fn hide_sheet(
     index: usize,
     level: Option<String>,
 ) -> Result<SheetsResult, String> {
-    crate::protection::check_workbook_structure(&state, "hide a sheet")?;
-    let sheet_names = state.sheet_names.read().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let freeze_configs = state.freeze_configs.read().unwrap();
-    let tab_colors = state.tab_colors.read().unwrap();
+    hide_sheet_inner(&state, &file_state, index, level)
+}
 
-    if index >= sheet_names.len() {
-        return Err(format!("Sheet index {} out of range", index));
-    }
+/// Command body over plain references, so the switch it now performs has a unit
+/// tier (`State<T>` cannot be built in a test). Same split as
+/// `set_sheet_zoom_inner` below.
+pub(crate) fn hide_sheet_inner(
+    state: &AppState,
+    file_state: &FileState,
+    index: usize,
+    level: Option<String>,
+) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(state, "hide a sheet")?;
 
-    let hide_level = level.unwrap_or_else(|| "hidden".to_string());
-    if hide_level != "hidden" && hide_level != "veryHidden" {
-        return Err(format!("Invalid visibility level '{}'. Use 'hidden' or 'veryHidden'.", hide_level));
-    }
+    // Every guard is scoped to this block: `activate_sheet` below takes the
+    // canonical order for itself and CALLERS MUST HOLD NO STATE LOCK.
+    let (result, switch_to, previous_visibility, previous_active) = {
+        let sheet_names = state.sheet_names.read().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
+        let freeze_configs = state.freeze_configs.read().unwrap();
+        let tab_colors = state.tab_colors.read().unwrap();
 
-    // Past the structure gate and both validations. `sheet.visibility` is persisted.
-    // The last-visible-sheet check below can still refuse; it is a pure read of the
-    // store, so a refused hide leaves the data untouched but the flag set -- a false
-    // positive, which is the cheap direction. Every refusal that CAN be resolved
-    // before the decision is.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
+        if index >= sheet_names.len() {
+            return Err(format!("Sheet index {} out of range", index));
+        }
 
-    ensure_vec_len(&mut sheet_visibility, sheet_names.len());
+        let hide_level = level.unwrap_or_else(|| "hidden".to_string());
+        if hide_level != "hidden" && hide_level != "veryHidden" {
+            return Err(format!("Invalid visibility level '{}'. Use 'hidden' or 'veryHidden'.", hide_level));
+        }
 
-    // Check: at least one visible sheet must remain
-    let visible_count = sheet_visibility.iter().enumerate()
-        .filter(|(i, vis)| vis.as_str() == "visible" && *i != index)
-        .count();
-    if visible_count == 0 {
-        return Err("Cannot hide the last visible sheet".to_string());
-    }
+        // Past the structure gate and both validations. `sheet.visibility` is persisted.
+        // The last-visible-sheet check below can still refuse; it is a pure read of the
+        // store, so a refused hide leaves the data untouched but the flag set -- a false
+        // positive, which is the cheap direction. Every refusal that CAN be resolved
+        // before the decision is.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
 
-    sheet_visibility[index] = hide_level;
+        ensure_visibility_len(&mut sheet_visibility, sheet_names.len());
 
-    // If hiding the active sheet, recommend the nearest visible sheet
-    let recommended_active = if index == active_sheet {
-        (0..sheet_names.len())
-            .find(|&i| sheet_visibility[i] == "visible")
-            .unwrap_or(0)
-    } else {
-        active_sheet
+        // Check: at least one visible sheet must remain
+        let visible_count = sheet_visibility.iter().enumerate()
+            .filter(|(i, vis)| vis.as_str() == "visible" && *i != index)
+            .count();
+        if visible_count == 0 {
+            return Err("Cannot hide the last visible sheet".to_string());
+        }
+
+        // Captured AFTER the last refusal and BEFORE the write. Recording the
+        // entry itself happens outside this block: `record_custom_restore` takes
+        // `undo_stack`, and the crate's canonical order puts `undo_stack` ahead
+        // of the grid locks, so taking it under these guards would close a cycle
+        // against the background recalculation pass -- the same reason
+        // `invalidate_undo_history_for_sheet_structure` documents for its own
+        // caller contract.
+        // `None` when the sheet was already at that level: a no-op must not
+        // burn an undo step. Excel does not push an entry for a change that
+        // changed nothing, and a step that restores the state it is already in
+        // is indistinguishable, from the keyboard, from an undo that was
+        // swallowed.
+        let previous_visibility =
+            (sheet_visibility[index] != hide_level).then(|| sheet_visibility.clone());
+
+        sheet_visibility[index] = hide_level;
+
+        // Hiding the ACTIVE sheet moves to the nearest visible one. The check
+        // above guarantees there is one.
+        let switch_to = if index == active_sheet {
+            (0..sheet_names.len()).find(|&i| sheet_visibility[i] == "visible")
+        } else {
+            None
+        };
+
+        let result = SheetsResult {
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            active_index: switch_to.unwrap_or(active_sheet),
+        };
+        (result, switch_to, previous_visibility, active_sheet)
     };
 
-    Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
-        active_index: recommended_active,
-    })
+    // UNDOABLE (BUG-0050). See `SheetTabStateSnapshot` for why these three
+    // record an entry where the five structural commands END the history.
+    //
+    // The active sheet is recorded because a hide of the ACTIVE sheet moves the
+    // user off it; undoing has to put them back, or the sheet comes out of
+    // hiding somewhere the user cannot see it happen.
+    if let Some(previous_visibility) = previous_visibility {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_custom_restore(
+            crate::undo_commands::SHEET_TAB_STATE_RESTORE_KIND.to_string(),
+            crate::undo_commands::sheet_tab_state_snapshot_bytes(
+                Some(previous_visibility),
+                None,
+                Some(previous_active),
+            ),
+            "Hide sheet",
+        );
+    }
+
+    match switch_to {
+        // The REAL activation, with every guard above released. Its own
+        // `SheetsResult` is the authoritative one: it is built after the swap
+        // and reports the active index the backend actually holds.
+        Some(target) => activate_sheet(state, target),
+        None => Ok(result),
+    }
 }
 
 /// Unhide a sheet.
@@ -2330,26 +2587,62 @@ pub fn unhide_sheet(
     file_state: State<FileState>,
     index: usize,
 ) -> Result<SheetsResult, String> {
-    let sheet_names = state.sheet_names.read().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let freeze_configs = state.freeze_configs.read().unwrap();
-    let tab_colors = state.tab_colors.read().unwrap();
+    unhide_sheet_inner(&state, &file_state, index)
+}
 
-    if index >= sheet_names.len() {
-        return Err(format!("Sheet index {} out of range", index));
+/// Command body over plain references, so the undo entry it now records has a
+/// unit tier (`State<T>` cannot be built in a test). Same split as
+/// `hide_sheet_inner` above.
+pub(crate) fn unhide_sheet_inner(
+    state: &AppState,
+    file_state: &FileState,
+    index: usize,
+) -> Result<SheetsResult, String> {
+    // Every guard is scoped to this block: the undo entry below takes
+    // `undo_stack`, which the crate's canonical order puts ahead of these.
+    let (result, previous_visibility) = {
+        let sheet_names = state.sheet_names.read().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
+        let freeze_configs = state.freeze_configs.read().unwrap();
+        let tab_colors = state.tab_colors.read().unwrap();
+
+        if index >= sheet_names.len() {
+            return Err(format!("Sheet index {} out of range", index));
+        }
+
+        // Past the range check; `sheet.visibility` is persisted.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
+
+        ensure_visibility_len(&mut sheet_visibility, sheet_names.len());
+        // `None` when it was already visible — see `hide_sheet_inner`.
+        let previous_visibility =
+            (sheet_visibility[index] != "visible").then(|| sheet_visibility.clone());
+        sheet_visibility[index] = "visible".to_string();
+
+        let result = SheetsResult {
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            active_index: active_sheet,
+        };
+        (result, previous_visibility)
+    };
+
+    // UNDOABLE (BUG-0050). No `active_sheet`: an unhide never moves the user, so
+    // undoing it must not move them either.
+    if let Some(previous_visibility) = previous_visibility {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_custom_restore(
+            crate::undo_commands::SHEET_TAB_STATE_RESTORE_KIND.to_string(),
+            crate::undo_commands::sheet_tab_state_snapshot_bytes(
+                Some(previous_visibility),
+                None,
+                None,
+            ),
+            "Unhide sheet",
+        );
     }
 
-    // Past the range check; `sheet.visibility` is persisted.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
-
-    ensure_vec_len(&mut sheet_visibility, sheet_names.len());
-    sheet_visibility[index] = "visible".to_string();
-
-    Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
-        active_index: active_sheet,
-    })
+    Ok(result)
 }
 
 /// Set the tab color for a sheet.
@@ -2360,26 +2653,61 @@ pub fn set_tab_color(
     index: usize,
     color: String,
 ) -> Result<SheetsResult, String> {
-    let sheet_names = state.sheet_names.read().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let freeze_configs = state.freeze_configs.read().unwrap();
-    let sheet_visibility = state.sheet_visibility.read().unwrap();
+    set_tab_color_inner(&state, &file_state, index, color)
+}
 
-    if index >= sheet_names.len() {
-        return Err(format!("Sheet index {} out of range", index));
+/// Command body over plain references, so the undo entry it now records has a
+/// unit tier (`State<T>` cannot be built in a test). Same split as
+/// `hide_sheet_inner` above.
+pub(crate) fn set_tab_color_inner(
+    state: &AppState,
+    file_state: &FileState,
+    index: usize,
+    color: String,
+) -> Result<SheetsResult, String> {
+    // Every guard is scoped to this block: the undo entry below takes
+    // `undo_stack`, which the crate's canonical order puts ahead of these.
+    let (result, previous_tab_colors) = {
+        let sheet_names = state.sheet_names.read().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
+        let freeze_configs = state.freeze_configs.read().unwrap();
+        let sheet_visibility = state.sheet_visibility.read().unwrap();
+
+        if index >= sheet_names.len() {
+            return Err(format!("Sheet index {} out of range", index));
+        }
+
+        // Past the range check; `sheet.tab_color` is persisted.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut tab_colors = state.tab_colors.write(&effect).unwrap();
+
+        ensure_tab_color_len(&mut tab_colors, sheet_names.len());
+        // `None` when the colour was already that — see `hide_sheet_inner`.
+        let previous_tab_colors = (tab_colors[index] != color).then(|| tab_colors.clone());
+        tab_colors[index] = color;
+
+        let result = SheetsResult {
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            active_index: active_sheet,
+        };
+        (result, previous_tab_colors)
+    };
+
+    // UNDOABLE (BUG-0050). No `active_sheet`: a recolour never moves the user.
+    if let Some(previous_tab_colors) = previous_tab_colors {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_custom_restore(
+            crate::undo_commands::SHEET_TAB_STATE_RESTORE_KIND.to_string(),
+            crate::undo_commands::sheet_tab_state_snapshot_bytes(
+                None,
+                Some(previous_tab_colors),
+                None,
+            ),
+            "Tab color",
+        );
     }
 
-    // Past the range check; `sheet.tab_color` is persisted.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut tab_colors = state.tab_colors.write(&effect).unwrap();
-
-    ensure_vec_len(&mut tab_colors, sheet_names.len());
-    tab_colors[index] = color;
-
-    Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
-        active_index: active_sheet,
-    })
+    Ok(result)
 }
 
 /// Navigate to the next visible sheet (wraps around).
@@ -2842,3 +3170,174 @@ mod sheet_zoom_tests {
         assert!(super::set_sheet_zoom_inner(&state, &fs, 400.0).is_ok());
     }
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0047 — tables must follow their sheet through a move and a copy
+// ---------------------------------------------------------------------------
+//
+// `tables` is the one sheet-index-keyed store that is NOT in
+// `remap_sheet_keyed_stores`: `delete_sheet` re-keys it inline, because the
+// same pass has to drop the deleted sheet's table NAMES out of `table_names`
+// and a generic remap cannot do that half. The consequence was that `move_sheet`
+// and `copy_sheet` re-keyed every OTHER per-sheet store and left this one where
+// it was.
+//
+// MEASURED: soak seed 1786446166374, minimized by the shrinker to nine actions
+// (add a sheet, create a table on it, hide it, move the other sheet past it).
+// The sheet's AutoFilter moved with it and its table did not, so on reload
+// `relink_autofilter_owner` found no table under the filter's index and the
+// link was gone. The lost link is the visible half; the table itself was left
+// attached to another sheet, which is what every structured reference resolves
+// through.
+
+#[cfg(test)]
+mod tables_remap_tests {
+    use super::*;
+    use crate::tables::Table;
+
+    fn table_on(sheet: usize, name: &str) -> Table {
+        Table {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            sheet_index: sheet,
+            start_row: 0,
+            start_col: 0,
+            end_row: 5,
+            end_col: 3,
+            columns: vec![],
+            style_options: crate::tables::TableStyleOptions::default(),
+            style_name: "TableStyleMedium2".to_string(),
+            auto_filter_id: None,
+        }
+    }
+
+    fn store_with(sheets: &[usize]) -> AppState {
+        let state = crate::create_app_state();
+        let effect = crate::document_effect::test_seed_effect();
+        let mut tables = state.tables.write(&effect).unwrap();
+        for (n, &s) in sheets.iter().enumerate() {
+            let t = table_on(s, &format!("Table{}", n + 1));
+            tables.entry(s).or_default().insert(t.id, t);
+        }
+        drop(tables);
+        state
+    }
+
+    fn keys_and_stamps(state: &AppState) -> Vec<(usize, usize)> {
+        let tables = state.tables.read().unwrap();
+        let mut out: Vec<(usize, usize)> = tables
+            .iter()
+            .flat_map(|(k, m)| m.values().map(move |t| (*k, t.sheet_index)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_move_carries_the_table_and_re_stamps_its_sheet_index() {
+        // Sheet 1 moves to position 0: its table must move with it, KEY and
+        // FIELD together. A key that moved without the field is the same
+        // divergence one layer down.
+        let state = store_with(&[0, 1]);
+        let effect = crate::document_effect::test_seed_effect();
+        // move_sheet's own rotation remap for from=1, to=0.
+        remap_tables_store(&state, &effect, |i| {
+            Some(match i {
+                1 => 0,
+                0 => 1,
+                other => other,
+            })
+        });
+        assert_eq!(keys_and_stamps(&state), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn a_copy_shifts_everything_at_or_above_the_insertion_point() {
+        let state = store_with(&[0, 1, 2]);
+        let effect = crate::document_effect::test_seed_effect();
+        let insert_at = 1usize;
+        remap_tables_store(&state, &effect, |i| {
+            Some(if i >= insert_at { i + 1 } else { i })
+        });
+        assert_eq!(keys_and_stamps(&state), vec![(0, 0), (2, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn a_dropped_sheet_takes_its_tables_with_it() {
+        // The `None` arm, which `delete_sheet` uses inline today but which this
+        // helper has to honour if it is ever adopted there.
+        let state = store_with(&[0, 1]);
+        let effect = crate::document_effect::test_seed_effect();
+        remap_tables_store(&state, &effect, |i| if i == 1 { None } else { Some(i) });
+        assert_eq!(keys_and_stamps(&state), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn the_identity_remap_changes_nothing() {
+        // Non-vacuity: a helper that emptied the store would satisfy the drop
+        // test above and lose every table.
+        let state = store_with(&[0, 1, 2]);
+        let effect = crate::document_effect::test_seed_effect();
+        remap_tables_store(&state, &effect, Some);
+        assert_eq!(keys_and_stamps(&state), vec![(0, 0), (1, 1), (2, 2)]);
+    }
+
+    /// Brace-matched body of a free function in this file.
+    fn body_of(signature: &str) -> String {
+        let src = include_str!("sheets.rs");
+        let at = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} not found — it was renamed"));
+        let open = src[at..].find('{').expect("no body") + at;
+        let bytes = src.as_bytes();
+        let mut depth = 0usize;
+        for i in open..src.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return src[open..=i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        src[open..].to_string()
+    }
+
+    #[test]
+    fn every_structural_command_re_keys_the_table_store() {
+        // The census. `remap_sheet_keyed_stores` does not reach `tables`, so
+        // "it is a sheet-keyed store" is not enough to keep the three commands
+        // honest — each one has to be checked for it by name.
+        let move_body = body_of("pub fn move_sheet(");
+        assert!(
+            move_body.contains("remap_tables_store("),
+            "`move_sheet` no longer re-keys the table store, so a table stays \
+             registered under the index its sheet used to occupy (BUG-0047)."
+        );
+        let copy_body = body_of("pub fn copy_sheet(");
+        assert!(
+            copy_body.contains("remap_tables_store("),
+            "`copy_sheet` no longer shifts the table store, so an insertion \
+             leaves every table above it on the wrong sheet (BUG-0047)."
+        );
+        // `delete_sheet` does it inline, in the pass that also drops the
+        // deleted sheet's names out of `table_names`. Pinned by its own shape
+        // rather than by the helper's name.
+        let delete_body = body_of("pub fn delete_sheet(");
+        assert!(
+            delete_body.contains("table.sheet_index = new_key"),
+            "`delete_sheet` no longer re-stamps table sheet indices."
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "hidden_active_sheet_tests.rs"]
+mod hidden_active_sheet_tests;
+
+#[cfg(test)]
+#[path = "sheet_tab_state_undo_tests.rs"]
+mod sheet_tab_state_undo_tests;

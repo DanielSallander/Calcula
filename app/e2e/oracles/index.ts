@@ -31,6 +31,7 @@ import type {
 export type { Digest, DigestDiff, DigestDiffEntry, DiffProfile } from "./digest";
 export { getWorkbookDigest, diffDigests, canonicalStringify, hashValue } from "./digest";
 export { captureUndoBaseline, checkUndoRoundTrip, getUndoState } from "./undoRoundTrip";
+export type { UndoRoundTripOutcome } from "./undoRoundTrip";
 export { checkSaveReloadRoundTrip } from "./saveReloadRoundTrip";
 export { checkRecalcConsistency } from "./recalcConsistency";
 export { checkNoCalculationLimit, LIMIT_LITERAL } from "./calculationBudget";
@@ -85,6 +86,66 @@ export class OracleBattery {
    */
   readonly undecided: Array<{ checkpoint: number; violation: OracleViolation }> = [];
 
+  /**
+   * WHAT THIS RUN'S ORACLES ACTUALLY GOT TO ASK.
+   *
+   * `undecided` and `suppressed` above have been accumulated since this class
+   * was written and NOTHING has ever read either one. The comment on
+   * `undecided` says, in as many words, that a run where most checkpoints end
+   * up there is a WEAK run "and that has to be visible" — and it never was: the
+   * only trace is a `console.warn` per checkpoint, scrolled past in a log, with
+   * the final verdict still reading `[OK] Walk passed`.
+   *
+   * That gap became load-bearing the moment `EXCLUDED_UNTIL_FIXED` was emptied
+   * and the walker could generate sheet actions again. A sheet-structure change
+   * ENDS the undo history (Excel parity), so a sheet-weighted walk leaves nearly
+   * every window undecided. MEASURED on soak seed 90060001 (40 actions,
+   * `sheet:10`): two checkpoints, BOTH undecided, and `saveReloadEvery` is 4 so
+   * the save/reload oracle never ran either. The walk verified undo zero times
+   * and persistence zero times, and reported a clean pass.
+   *
+   * So the counts are now part of the report. `decided` is evidence; the rest
+   * are the absence of it.
+   */
+  readonly coverage = {
+    checkpoints: 0,
+    undoDecided: 0,
+    undoNothingToUndo: 0,
+    undoUndecided: 0,
+    /** Total transactions wound back and replayed across all checkpoints. */
+    undoStepsWoundBack: 0,
+    recalcRuns: 0,
+    saveReloadRuns: 0,
+  };
+
+  /** One line stating what was verified and what was merely not contradicted. */
+  formatCoverage(): string {
+    const c = this.coverage;
+    const undoParts = [
+      `${c.undoDecided} decided (${c.undoStepsWoundBack} transaction(s) wound back)`,
+      `${c.undoNothingToUndo} with nothing to undo`,
+      `${c.undoUndecided} undecided`,
+    ];
+    return (
+      `  --- Oracle coverage over ${c.checkpoints} checkpoint(s) ---\n` +
+      `  undo round-trip: ${undoParts.join(", ")}\n` +
+      `  recalc consistency: ${c.recalcRuns} run(s); ` +
+      `save/reload round-trip: ${c.saveReloadRuns} run(s)` +
+      (c.undoDecided === 0 && c.checkpoints > 0
+        ? `\n  [WARNING] the undo round-trip decided NOTHING in this run — ` +
+          `a green result here is not evidence about undo`
+        : "") +
+      (c.saveReloadRuns === 0 && c.checkpoints > 0
+        ? `\n  [WARNING] the save/reload round-trip never ran — ` +
+          `persistence was not exercised`
+        : "") +
+      (this.suppressed.length > 0
+        ? `\n  ${this.suppressed.length} violation(s) suppressed as known issues: ` +
+          [...new Set(this.suppressed.map((s) => s.ledgerId))].join(", ")
+        : "")
+    );
+  }
+
   constructor(options: OracleBatteryOptions) {
     this.tmpDir = options.tmpDir;
     this.saveReloadEvery = options.saveReloadEvery ?? 4;
@@ -106,6 +167,7 @@ export class OracleBattery {
     baseline: OracleBaseline
   ): Promise<OracleCheckpointResult> {
     this.checkpointCount++;
+    this.coverage.checkpoints++;
     const violations: OracleViolation[] = [];
     const budgetViolations: OracleViolation[] = [];
     let undoBaselineReset = false;
@@ -122,12 +184,22 @@ export class OracleBattery {
 
     // 1. Recalc consistency — read-only with respect to undo stack.
     if (!this.disabled.has("recalc-consistency")) {
+      this.coverage.recalcRuns++;
       violations.push(...(await checkRecalcConsistency(page)));
     }
 
     // 2. Undo round-trip — ends back at the current state.
     if (!this.disabled.has("undo-round-trip")) {
-      violations.push(...(await checkUndoRoundTrip(page, baseline)));
+      const outcome = await checkUndoRoundTrip(page, baseline);
+      if (outcome.verdict === "decided") {
+        this.coverage.undoDecided++;
+        this.coverage.undoStepsWoundBack += outcome.stepsUndone;
+      } else if (outcome.verdict === "nothing-to-undo") {
+        this.coverage.undoNothingToUndo++;
+      } else {
+        this.coverage.undoUndecided++;
+      }
+      violations.push(...outcome.violations);
     }
 
     // 3. Save/reload round-trip — LAST: open_file clears the undo stack.
@@ -135,6 +207,7 @@ export class OracleBattery {
       this.saveReloadEvery > 0 &&
       this.checkpointCount % this.saveReloadEvery === 0;
     if (saveReloadDue && !this.disabled.has("save-reload-round-trip")) {
+      this.coverage.saveReloadRuns++;
       violations.push(
         ...(await checkSaveReloadRoundTrip({ page, tmpDir: this.tmpDir }))
       );

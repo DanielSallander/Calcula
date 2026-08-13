@@ -24,7 +24,13 @@ import { DEFAULT_THEME } from "./types";
 import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
-import { drawCellText, drawDeferredCellDecorations } from "./rendering/cells";
+import {
+  drawCellText,
+  drawDeferredCellDecorations,
+  collectChromeRects,
+  isCoveredByChrome,
+  type DeferredCellDecoration,
+} from "./rendering/cells";
 import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
 import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
 import { drawSpillBorders } from "./rendering/spillBorder";
@@ -228,7 +234,7 @@ function renderZone(
   clipY: number,
   clipWidth: number,
   clipHeight: number
-): void {
+): DeferredCellDecoration[] {
   const { ctx, theme } = state;
   
   ctx.save();
@@ -240,8 +246,9 @@ function renderZone(
   if (state.displayGridlines !== false) {
     drawGridLinesZone(state, range, clipX, clipY, clipWidth, clipHeight);
   }
-  drawCellTextZone(state, range, clipX, clipY, clipWidth, clipHeight);
+  const deferred = drawCellTextZone(state, range, clipX, clipY, clipWidth, clipHeight);
   ctx.restore();
+  return deferred;
 }
 
 function drawGridLinesZone(
@@ -337,7 +344,7 @@ function drawCellTextZone(
   clipY: number,
   clipWidth: number,
   clipHeight: number
-): void {
+): DeferredCellDecoration[] {
   const { ctx, config, viewport, theme, cells, editing, dimensions, styleCache } = state;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
@@ -348,6 +355,30 @@ function drawCellTextZone(
   // this zone path historically skipped empty cells entirely — typed cells
   // must not be skipped (ghost checkbox, button on an empty cell).
   const useCellTypes = hasCellTypes() && !state.showFormulas;
+
+  // DECORATIONS IN A FROZEN OR SPLIT PANE. This painter runs INSTEAD of
+  // drawCellText for every cell of every pane, and it used to run no
+  // "over-selection" decorations at all and to skip empty cells before the
+  // under-selection pass — so freezing the top row made every note triangle,
+  // error triangle and bookmark dot on the sheet disappear, and a note on an
+  // empty cell (the ordinary case) was invisible either way. Excel keeps them.
+  const useDecorations = hasCellDecorations();
+  const useOverSelection = hasCellDecorations("over-selection");
+  const chromeRects = useOverSelection ? collectChromeRects(state) : [];
+  const paneClip = { x: clipX, y: clipY, width: clipWidth, height: clipHeight };
+  const deferred: DeferredCellDecoration[] = [];
+
+  /** Run both anchors for one cell, deferring the chrome-covered ones. The
+   *  cell is taken from the context so the two can never disagree. */
+  const decorate = (context: CellDecorationContext): void => {
+    if (useDecorations) applyCellDecorations(context);
+    if (!useOverSelection) return;
+    if (isCoveredByChrome(chromeRects, context.row, context.col)) {
+      deferred.push({ context, clip: paneClip });
+    } else {
+      applyCellDecorations(context, "over-selection");
+    }
+  };
 
   const zoneLeft = clipX;
   const zoneTop = clipY;
@@ -407,6 +438,27 @@ function drawCellTextZone(
       const cellTypeHere = useCellTypes && getCellTypeAt(row, col) !== null;
 
       if ((!cell || cellDisplayText === "") && !cellTypeHere) {
+        // Nothing of the cell's own to paint — but an indicator belongs to the
+        // CELL, not to its text, and a note on an empty cell is the common
+        // case. Mirrors the main painter's no-data branch (no clip, no style
+        // work): just the decoration hook.
+        if (useDecorations || useOverSelection) {
+          const decoLeft = Math.max(baseX, zoneLeft);
+          const decoTop = Math.max(baseY, zoneTop);
+          const decoRight = Math.min(baseX + colWidth, zoneRight);
+          const decoBottom = Math.min(baseY + rowHeight, zoneBottom);
+          if (decoRight > decoLeft && decoBottom > decoTop) {
+            decorate({
+              ctx, row, col,
+              cellLeft: decoLeft, cellTop: decoTop,
+              cellRight: decoRight, cellBottom: decoBottom,
+              config, viewport, dimensions,
+              display: "",
+              styleIndex: cell?.styleIndex ?? 0,
+              styleCache,
+            });
+          }
+        }
         baseX += colWidth;
         continue;
       }
@@ -462,9 +514,10 @@ function drawCellTextZone(
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       }
 
-      // Draw cell decorations (e.g., sparklines) between background and text
-      if (hasCellDecorations()) {
-        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cellDisplayText, styleIndex, styleCache });
+      // Draw cell decorations (e.g., sparklines) between background and text,
+      // and capture the indicator chrome for replay above the selection.
+      if (useDecorations || useOverSelection) {
+        decorate({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cellDisplayText, styleIndex, styleCache });
       }
 
       // Cell-type renderer: a typed cell can take over content rendering
@@ -553,6 +606,8 @@ function drawCellTextZone(
     }
     baseY += rowHeight;
   }
+
+  return deferred;
 }
 
 // ============================================================================
@@ -715,9 +770,10 @@ export function renderGrid(
   paintLayers("under-cells");
 
   // Cell decorations that declared the "over-selection" anchor, captured by the
-  // cell pass for the cells the selection/clipboard chrome covers. Empty in
-  // split/freeze mode, where the zone cell painter runs no decorations at all.
-  let deferredCellDecorations: CellDecorationContext[] = [];
+  // cell pass for the cells the selection/clipboard chrome covers. The frozen
+  // and split pane painters contribute to the same list, each entry carrying
+  // the pane it must be clipped to when it is replayed.
+  let deferredCellDecorations: DeferredCellDecoration[] = [];
 
   // Split window rendering
   const hasSplitRows = splitConfig && splitConfig.splitRow !== null && splitConfig.splitRow > 0;
@@ -750,27 +806,27 @@ export function renderGrid(
     if (rightPaneWidth > 0 && bottomPaneHeight > 0) {
       // Trick: add header sizes so calculateVisibleRange subtracts them to get correct pane size
       const brRange = calculateVisibleRange(viewport, effectiveConfig, rightPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
-      renderZone(state, brRange, rightPaneLeft, bottomPaneTop, rightPaneWidth, bottomPaneHeight);
+      deferredCellDecorations.push(...renderZone(state, brRange, rightPaneLeft, bottomPaneTop, rightPaneWidth, bottomPaneHeight));
     }
 
     // Bottom-left pane: scrolls vertically with main viewport, horizontally with split viewport
     if (hasSplitCols && leftPaneWidth > 0 && bottomPaneHeight > 0) {
       const blViewport: Viewport = { ...viewport, scrollX: svp.scrollX };
       const blRange = calculateVisibleRange(blViewport, effectiveConfig, leftPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
-      renderZone(state, blRange, rowHeaderWidth, bottomPaneTop, leftPaneWidth, bottomPaneHeight);
+      deferredCellDecorations.push(...renderZone(state, blRange, rowHeaderWidth, bottomPaneTop, leftPaneWidth, bottomPaneHeight));
     }
 
     // Top-right pane: scrolls horizontally with main viewport, vertically with split viewport
     if (hasSplitRows && topPaneHeight > 0 && rightPaneWidth > 0) {
       const trViewport: Viewport = { ...viewport, scrollY: svp.scrollY };
       const trRange = calculateVisibleRange(trViewport, effectiveConfig, rightPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
-      renderZone(state, trRange, rightPaneLeft, colHeaderHeight, rightPaneWidth, topPaneHeight);
+      deferredCellDecorations.push(...renderZone(state, trRange, rightPaneLeft, colHeaderHeight, rightPaneWidth, topPaneHeight));
     }
 
     // Top-left pane: independent scroll from split viewport (both axes)
     if (hasSplitRows && hasSplitCols && topPaneHeight > 0 && leftPaneWidth > 0) {
       const tlRange = calculateVisibleRange(svp, effectiveConfig, leftPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
-      renderZone(state, tlRange, rowHeaderWidth, colHeaderHeight, leftPaneWidth, topPaneHeight);
+      deferredCellDecorations.push(...renderZone(state, tlRange, rowHeaderWidth, colHeaderHeight, leftPaneWidth, topPaneHeight));
     }
 
     // Draw split bars
@@ -821,27 +877,27 @@ export function renderGrid(
 
     const scrollableRange = calculateScrollableRange(viewport, freezeConfig!, effectiveConfig, width, height, dims);
     if (scrollableWidth > 0 && scrollableHeight > 0) {
-      renderZone(state, scrollableRange, scrollableX, scrollableY, scrollableWidth, scrollableHeight);
+      deferredCellDecorations.push(...renderZone(state, scrollableRange, scrollableX, scrollableY, scrollableWidth, scrollableHeight));
     }
 
     if (hasFreezeCols) {
       const leftRange = calculateFrozenLeftRange(viewport, freezeConfig!, effectiveConfig, width, height, dims);
       if (leftRange && scrollableHeight > 0) {
-        renderZone(state, leftRange, frozenColsX, scrollableY, layout.frozenColsWidth, scrollableHeight);
+        deferredCellDecorations.push(...renderZone(state, leftRange, frozenColsX, scrollableY, layout.frozenColsWidth, scrollableHeight));
       }
     }
 
     if (hasFreezeRows) {
       const topRange = calculateFrozenTopRange(viewport, freezeConfig!, effectiveConfig, width, height, dims);
       if (topRange && scrollableWidth > 0) {
-        renderZone(state, topRange, scrollableX, frozenRowsY, scrollableWidth, layout.frozenRowsHeight);
+        deferredCellDecorations.push(...renderZone(state, topRange, scrollableX, frozenRowsY, scrollableWidth, layout.frozenRowsHeight));
       }
     }
 
     if (hasFreezeRows && hasFreezeCols) {
       const topLeftRange = calculateFrozenTopLeftRange(freezeConfig!, effectiveConfig, width, height, dims);
       if (topLeftRange) {
-        renderZone(state, topLeftRange, frozenColsX, frozenRowsY, layout.frozenColsWidth, layout.frozenRowsHeight);
+        deferredCellDecorations.push(...renderZone(state, topLeftRange, frozenColsX, frozenRowsY, layout.frozenColsWidth, layout.frozenRowsHeight));
       }
     }
     

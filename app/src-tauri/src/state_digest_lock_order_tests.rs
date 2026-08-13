@@ -796,12 +796,31 @@ fn is_state_receiver(name: &str) -> bool {
 
 /// Method calls that CONSUME the guard inside the same statement, leaving
 /// nothing alive afterwards (`state.grids.read().map(|g| g.len())`).
+///
+/// `.ok()` WAS IN THIS LIST AND IT DOES NOT BELONG, which is how the census
+/// this file is named for passed against a live deadlock (BUG-0045).
+/// `LockResult<Guard>::ok()` returns `Option<Guard>` — the guard is MOVED INTO
+/// the option and lives exactly as long as the binding does. So
+///
+///     let named_ranges = state.named_ranges.read().ok();   // HELD
+///     let tables       = state.tables.read().ok();         // HELD
+///     ...
+///     if let Ok(mut grid) = state.grid.write(effect) { ... }
+///
+/// is three locks held while a grid lock is acquired, and the census read it as
+/// three temporaries that had already died. That is `restamp_workbook_name_casing`
+/// verbatim, and on 2026-08-13 it wedged the app for the third time in this
+/// programme — the second time on soak seed 1786446166374, with a guard in the
+/// tree whose entire purpose was this shape.
+///
+/// The genuinely consuming forms that go through `.ok()` all carry a SECOND
+/// marker from this list (`.ok().map(..)`, `.ok().and_then(..)`,
+/// `.ok().map(|n| n.clone())`), so removing it loses no correct case.
 const CONSUMING: &[&str] = &[
     ".clone()",
     ".iter()",
     ".len()",
     ".map(",
-    ".ok()",
     ".is_empty()",
     ".contains",
     ".get(",
@@ -1233,6 +1252,15 @@ fn the_generalised_detector_fires_on_every_shape_that_deadlocked() {
             "let-bound match arms",
             "pub fn f(state: &AppState) {\n    let n = match state.sheet_names.read() {\n        Ok(g) => g,\n        Err(_) => return,\n    };\n    let g = match state.grids.read() {\n        Ok(g) => g,\n        Err(_) => return,\n    };\n}\n",
         ),
+        (
+            // BUG-0045, and the reason `.ok()` came out of CONSUMING.
+            // `LockResult::ok()` MOVES the guard into an `Option`; it does not
+            // release it. This is `restamp_workbook_name_casing` as it stood
+            // when it deadlocked against the background recalculation pass, and
+            // the census reported it as clean.
+            "guards bound through .ok()",
+            "pub fn f(state: &AppState) {\n    let named_ranges = state.named_ranges.read().ok();\n    let tables = state.tables.read().ok();\n    let table_names = state.table_names.read().ok();\n    if let Ok(mut grid) = state.grid.write(effect) {\n        respell(&mut grid);\n    }\n}\n",
+        ),
     ];
     for (label, src) in cases {
         let found = grid_locks_taken_while_holding("planted.rs", src);
@@ -1304,4 +1332,394 @@ fn the_generalised_detector_stays_quiet_on_the_shapes_that_are_correct() {
             found
         );
     }
+}
+
+// ===========================================================================
+// BUG-0045 — THE SAME CLASS, ON A PAIR THE GRID CENSUS DOES NOT ASK ABOUT
+// ===========================================================================
+//
+// MEASURED 2026-08-13, soak seed 1786446166374, 200 actions. The app stopped
+// answering Tauri IPC while the page stayed perfectly alive (the DOM answered,
+// the window title read `oracle-save-13232-1.cala`). Two out-of-process stack
+// dumps a minute apart were identical:
+//
+//   main thread   open_file -> restamp_workbook_name_casing
+//                 HOLDS named_ranges, tables, table_names
+//                 WAITS sheet_names
+//
+//   gather worker calp_commands::queue_gather_refresh -> recalculate_sheet_values
+//                 HOLDS grid, grids, sheet_names, style_registry, ...
+//                 WAITS tables
+//
+// Each holds what the other is waiting for. No panic, no crash, nothing in the
+// app log after the checkpoint's own DIGEST line — the message pump stops with
+// the main thread and the window goes "Not Responding". That is the third time
+// in this programme, and the second on this very seed.
+//
+// TWO THINGS WERE WRONG, and only one of them was the product.
+//
+// 1. THE ORDER. `restamp_workbook_name_casing` took the four naming
+//    authorities and only then the two grid locks, which is the crate's
+//    canonical order inside out; and it took `sheet_names` LAST of the four
+//    while the pass takes it FIRST. It now takes them in the pass's own order.
+//    Ten other functions took `tables` / `table_names` / `named_ranges` /
+//    `style_registry` before `sheet_names` and are corrected the same way.
+//
+// 2. THE CENSUS ABOVE HAD A HOLE, and it is the reason a guard written for
+//    exactly this shape was green while the app hung. `.ok()` was in
+//    `CONSUMING`. `LockResult::ok()` MOVES the guard into an `Option` — it does
+//    not release it — so every one of `restamp`'s three held guards read as a
+//    temporary that had already died. See the comment on `CONSUMING`.
+//
+// The census below asks the SECOND question, which no test in this tree asked:
+// not "is a lock held while a grid lock is taken" but "are these two locks ever
+// taken in the opposite order from the one the background pass takes them in".
+// The pass is the fixed point for the same reason it is for `grid`/`grids`: it
+// runs off the main thread, so everything else has to agree with IT.
+
+/// One function that still holds `held` when it acquires `then`.
+#[derive(Debug)]
+struct PairInversion {
+    file: String,
+    function: String,
+    line: usize,
+}
+
+/// Every function in `text` that holds `held` while acquiring `then`.
+///
+/// Built on `acquisitions_in`, so it inherits the temporary-versus-guard
+/// analysis the grid census already has to get right — including the `.ok()`
+/// correction, which is the whole reason this pair got through.
+fn pair_inversions(file: &str, text: &str, held: &str, then: &str) -> Vec<PairInversion> {
+    const FN_STARTS: &[&str] = &[
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ];
+    let stripped = strip_cfg_test_items(text);
+    let lines: Vec<&str> = stripped.lines().collect();
+    let code: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect();
+
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    let mut depth: i32 = 0;
+    // Depths at which a live `held` guard was bound.
+    let mut held_at: Vec<i32> = Vec::new();
+    let mut spawn_until: Option<i32> = None;
+
+    for (i, raw) in lines.iter().enumerate() {
+        if FN_STARTS.iter().any(|p| raw.starts_with(p)) {
+            current = raw
+                .split("fn ")
+                .nth(1)
+                .map(|r| r.split(['(', '<']).next().unwrap_or("").to_string());
+            depth = 0;
+            held_at.clear();
+            spawn_until = None;
+        }
+        let line = code[i];
+        let opens_here = line.matches('{').count() as i32;
+        let closes_here = line.matches('}').count() as i32;
+        if spawn_until.is_none() && line.contains("spawn(") && opens_here > closes_here {
+            spawn_until = Some(depth);
+        }
+        let mut tail = String::new();
+        for next in code.iter().skip(i + 1).take(4) {
+            tail.push_str(next);
+            if next.contains(';') {
+                break;
+            }
+        }
+        let acquisitions = if spawn_until.is_some() {
+            Vec::new()
+        } else {
+            acquisitions_in(line, &tail)
+        };
+        for acq in acquisitions {
+            // A MOMENTARY acquisition deadlocks exactly as a held one does: the
+            // thread still waits for the lock. So `live` is NOT consulted here.
+            if acq.field == then && !held_at.is_empty() {
+                if let Some(name) = current.clone() {
+                    out.push(PairInversion {
+                        file: file.to_string(),
+                        function: name,
+                        line: i + 1,
+                    });
+                }
+            }
+            if acq.field == held && acq.live {
+                let is_let_binding = line.trim_start().starts_with("let ");
+                let scope = if !is_let_binding && line.trim_end().ends_with('{') {
+                    depth + 1
+                } else {
+                    depth
+                };
+                held_at.push(scope);
+            }
+        }
+        if line.contains("drop(") {
+            held_at.clear();
+        }
+        depth -= closes_here;
+        held_at.retain(|d| depth >= *d);
+        depth += opens_here;
+        if spawn_until.is_some_and(|d| depth <= d) {
+            spawn_until = None;
+        }
+    }
+    out
+}
+
+/// The stores the background recalculation pass takes AFTER `sheet_names`.
+///
+/// The order is the pass's, and `the_recalculation_pass_still_takes_sheet_names_first`
+/// reads it back out of `calculation.rs` — a list that drifts from the pass is a
+/// census enforcing the wrong direction.
+const AFTER_SHEET_NAMES: &[&str] = &["style_registry", "tables", "table_names", "named_ranges"];
+
+#[test]
+fn no_function_holds_a_name_authority_while_acquiring_sheet_names() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(
+        files.len() > 50,
+        "the census walked {} files — it is not finding the crate",
+        files.len()
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for field in AFTER_SHEET_NAMES {
+            for hit in pair_inversions(&rel, &text, field, "sheet_names") {
+                offenders.push(format!(
+                    "  {}::{} (line {}) holds `{}` and then takes `sheet_names`",
+                    hit.file, hit.function, hit.line, field
+                ));
+            }
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+
+    assert!(
+        offenders.is_empty(),
+        "these functions hold one of the naming authorities and THEN wait for \
+         `sheet_names`:\n{}\n\nThe background recalculation pass \
+         (`recalculate_sheet_values`, spawned per sheet by \
+         `calp_commands::queue_gather_refresh`, and reached again by the async \
+         `run_calculation_pass`) takes `sheet_names` FIRST and those stores \
+         after — so each of these can interleave with it and each will hold what \
+         the other is waiting for. There is no panic, no crash and no log line: \
+         the main thread stops inside its command and the window stops \
+         answering (BUG-0045). Take `sheet_names` first, or clone it and hold no \
+         guard at all.",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_recalculation_pass_still_takes_sheet_names_first() {
+    // The census above enforces a DIRECTION, and the direction is not a choice:
+    // it is whatever the background pass does. If the pass is ever reordered,
+    // this fails here rather than leaving every other function aligned to an
+    // order nothing takes any more.
+    let calc = include_str!("calculation.rs");
+    let pass = function_body(calc, "pub(crate) fn recalculate_sheet_values(");
+    let sheet_names = first_index_of(pass, "state.sheet_names.read(")
+        .expect("the pass no longer locks `sheet_names` — re-derive this census");
+    for field in AFTER_SHEET_NAMES {
+        let needle = format!("state.{field}.read(");
+        let at = first_index_of(pass, &needle).unwrap_or_else(|| {
+            panic!("the pass no longer locks `{field}` — re-derive AFTER_SHEET_NAMES")
+        });
+        assert!(
+            sheet_names < at,
+            "the pass now takes `{field}` BEFORE `sheet_names`, so \
+             `no_function_holds_a_name_authority_while_acquiring_sheet_names` is \
+             enforcing the opposite of the order that actually runs on the \
+             background thread"
+        );
+    }
+}
+
+#[test]
+fn the_pair_detector_fires_on_the_shape_that_deadlocked() {
+    // TEETH, on the real body: `restamp_workbook_name_casing` as it stood.
+    let measured = "pub(crate) fn f(state: &AppState) {\n    let named_ranges = state.named_ranges.read().ok();\n    let tables = state.tables.read().ok();\n    let table_names = state.table_names.read().ok();\n    let sheet_names = state.sheet_names.read().ok();\n}\n";
+    assert_eq!(
+        pair_inversions("planted.rs", measured, "tables", "sheet_names").len(),
+        1,
+        "the detector cannot see the body that hung the app"
+    );
+    assert_eq!(
+        pair_inversions("planted.rs", measured, "named_ranges", "sheet_names").len(),
+        1,
+        "the detector missed the `named_ranges` half of the same body"
+    );
+
+    // A MOMENTARY acquisition of the second lock still deadlocks — the thread
+    // waits for it either way. This is `tables::delete_table` as it stood.
+    let momentary = "pub fn f(state: &AppState) {\n    let tables = state.tables.write(&effect).unwrap();\n    let names = state.sheet_names.read().unwrap().clone();\n}\n";
+    assert_eq!(
+        pair_inversions("planted.rs", momentary, "tables", "sheet_names").len(),
+        1,
+        "a clone-and-drop acquisition of `sheet_names` still WAITS for the lock"
+    );
+
+    // ...and the `.ok()` correction is load-bearing: with `.ok()` treated as
+    // consuming, the measured body reads as clean.
+    assert!(
+        !CONSUMING.contains(&".ok()"),
+        "`.ok()` is back in CONSUMING — `LockResult::ok()` moves the guard into \
+         an Option and every guard bound that way becomes invisible to BOTH \
+         censuses. That is exactly how BUG-0045 got past the guard written for it."
+    );
+}
+
+#[test]
+fn the_pair_detector_stays_quiet_on_the_shapes_that_are_correct() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "canonical order",
+            "pub fn f(state: &AppState) {\n    let names = state.sheet_names.read().unwrap();\n    let tables = state.tables.read().unwrap();\n}\n",
+        ),
+        (
+            "the first guard is a temporary",
+            "pub fn f(state: &AppState) {\n    let n = state.tables.read().unwrap().len();\n    let names = state.sheet_names.read().unwrap();\n}\n",
+        ),
+        (
+            "released by scope",
+            "pub fn f(state: &AppState) {\n    {\n        let t = state.tables.read().unwrap();\n    }\n    let names = state.sheet_names.read().unwrap();\n}\n",
+        ),
+        (
+            "released by drop",
+            "pub fn f(state: &AppState) {\n    let t = state.tables.read().unwrap();\n    drop(t);\n    let names = state.sheet_names.read().unwrap();\n}\n",
+        ),
+        (
+            "a spawned closure is another thread",
+            "pub fn f(state: &AppState) {\n    let t = state.tables.read().unwrap();\n    std::thread::spawn(move || {\n        let names = state.sheet_names.read().unwrap();\n    });\n}\n",
+        ),
+        (
+            "a commented-out acquisition is not code",
+            "pub fn f(state: &AppState) {\n    let t = state.tables.read().unwrap();\n    // let names = state.sheet_names.read().unwrap();\n}\n",
+        ),
+    ];
+    for (label, src) in cases {
+        let found = pair_inversions("planted.rs", src, "tables", "sheet_names");
+        assert!(
+            found.is_empty(),
+            "the pair detector fired on the `{}` shape, which is CORRECT code: {:?}",
+            label,
+            found
+        );
+    }
+}
+
+/// Can something else acquire `tables` within `ms`? Same shape as
+/// `probe_can_take_grids`: a THREAD with a deadline, so a "no" is a timeout the
+/// test reports rather than a hang the test joins.
+fn probe_can_take_tables(state: &Arc<AppState>, ms: u64) -> bool {
+    let got = Arc::new(AtomicBool::new(false));
+    {
+        let state = Arc::clone(state);
+        let got = Arc::clone(&got);
+        std::thread::spawn(move || {
+            let guard = state.tables.read();
+            got.store(guard.is_ok(), Ordering::SeqCst);
+        });
+    }
+    wait_until(ms, || got.load(Ordering::SeqCst))
+}
+
+#[test]
+fn restamping_name_casing_does_not_hold_tables_while_it_waits_for_sheet_names() {
+    // THE MEASURED DEADLOCK OF BUG-0045, as a test that FAILS rather than hangs.
+    //
+    // This thread plays the background recalculation pass: it holds
+    // `sheet_names`, which the pass takes before `tables`. `restamp_workbook_name_casing`
+    // then runs on another thread and blocks — that is expected and harmless.
+    // The QUESTION is what it is holding while it blocks. Before the fix it held
+    // `tables` (and `table_names`, and `named_ranges`), so the pass's own
+    // `state.tables.read()` could never complete and the two threads sat there
+    // for as long as the process lived. After it, `sheet_names` is taken FIRST
+    // of the four, so nothing of the pass's is held while it waits.
+    let state = shared_state();
+
+    let pass_holds_sheet_names = state.sheet_names.read().unwrap();
+
+    {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let effect = test_seed_effect();
+            crate::persistence::restamp_workbook_name_casing(&state, &effect);
+        });
+    }
+    // Long enough for the spawned thread to reach whatever it blocks on.
+    std::thread::sleep(Duration::from_millis(250));
+
+    let tables_reachable = probe_can_take_tables(&state, 3_000);
+    // Release before asserting, so a failure does not leave the restamp thread
+    // parked for the rest of the binary.
+    drop(pass_holds_sheet_names);
+
+    assert!(
+        tables_reachable,
+        "`restamp_workbook_name_casing` is holding `tables` while it waits for \
+         `sheet_names`. The recalculation pass holds `sheet_names` and then asks \
+         for `tables`, and it runs on a BACKGROUND thread — so this is a cycle, \
+         and the app stops answering with no panic and nothing in the log \
+         (BUG-0045)."
+    );
+}
+
+#[test]
+fn the_tables_probe_itself_can_fail_the_way_the_defect_did() {
+    // NON-VACUITY. The assertion above is only worth something if the probe can
+    // return false — so reproduce the pre-fix shape directly: a thread that
+    // holds `tables` and then waits for a `sheet_names` this thread owns.
+    let state = shared_state();
+
+    let this_thread_holds_sheet_names = state.sheet_names.read().unwrap();
+
+    {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let _tables = state.tables.read().unwrap();
+            // ...and now wait for what the test thread is holding. This is the
+            // body `restamp_workbook_name_casing` used to have.
+            let _names = state.sheet_names.write(&test_seed_effect());
+        });
+    }
+    std::thread::sleep(Duration::from_millis(250));
+
+    let reachable = probe_can_take_tables(&state, 1_000);
+    drop(this_thread_holds_sheet_names);
+
+    assert!(
+        !reachable,
+        "the probe reported `tables` as reachable while a thread was holding it \
+         and waiting for `sheet_names` — it cannot detect the defect it exists \
+         for, and the test above is vacuous"
+    );
 }

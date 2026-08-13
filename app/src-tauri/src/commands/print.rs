@@ -59,10 +59,14 @@ pub fn set_page_setup(
 pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     let active_sheet = *state.active_sheet.read().unwrap();
     let grid = state.grid.read().unwrap();
+    // `sheet_names` BEFORE `style_registry` / `locale`: that is the order the
+    // recalculation pass takes them in, and the pass runs on a background
+    // thread, so the reverse closes a cycle that hangs the app silently
+    // (BUG-0045).
+    let sheet_names = state.sheet_names.read().unwrap();
     let styles = state.style_registry.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
     let page_setups = state.page_setups.read().unwrap();
     let col_widths_map = state.column_widths.read().unwrap();
     let row_heights_map = state.row_heights.read().unwrap();

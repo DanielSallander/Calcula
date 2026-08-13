@@ -2,6 +2,9 @@
 // PURPOSE: Deep tests for annotation store - threads, bulk ops, edge cases.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Mock @api backend calls
 import { createCoalescedRefresh as actualCoalescedRefresh } from "../../../../src/api/coalescedRefresh";
@@ -22,7 +25,7 @@ import {
   hasAnnotationAt,
   getAllCommentIndicatorsCached,
   getAllNoteIndicatorsCached,
-  invalidateAnnotationCache,
+  requestAnnotationRefresh,
   resetAnnotationStore,
   setShowAllNotes,
   getShowAllNotes,
@@ -193,25 +196,22 @@ describe("comment on merged cell ranges", () => {
 // ============================================================================
 
 describe("bulk operations", () => {
-  it("invalidateAnnotationCache clears all comments and notes at once", async () => {
-    mockGetComments.mockResolvedValue([
-      { row: 0, col: 0, authorName: "A", threadCount: 1 },
-      { row: 1, col: 1, authorName: "B", threadCount: 2 },
-      { row: 2, col: 2, authorName: "C", threadCount: 3 },
-    ]);
-    mockGetNotes.mockResolvedValue([
-      { row: 3, col: 3, preview: "note1" },
-      { row: 4, col: 4, preview: "note2" },
-    ]);
-    await refreshAnnotationState();
-
-    expect(getAllCommentIndicatorsCached()).toHaveLength(3);
-    expect(getAllNoteIndicatorsCached()).toHaveLength(2);
-
-    invalidateAnnotationCache();
-
-    expect(getAllCommentIndicatorsCached()).toHaveLength(0);
-    expect(getAllNoteIndicatorsCached()).toHaveLength(0);
+  it("the store exports NO way to empty itself without a refill", () => {
+    // The one function that did (invalidateAnnotationCache) had no production
+    // caller and exactly one effect: make every indicator vanish until
+    // something unrelated happened to refresh. Deleted; this keeps it deleted.
+    // resetAnnotationStore is exempt -- deactivate() unregisters the renderer
+    // and the click interceptor in the same breath, so nothing is left reading.
+    const source = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../annotationStore.ts"),
+      "utf8",
+    );
+    const clearers = source
+      .split(/\n(?=export function )/)
+      .filter((block) => /\.clear\(\)/.test(block))
+      .map((block) => block.match(/export function (\w+)/)?.[1])
+      .filter((name): name is string => !!name);
+    expect(clearers).toEqual(["resetAnnotationStore"]);
   });
 
   it("resetAnnotationStore clears data and toggles", async () => {
@@ -233,23 +233,22 @@ describe("bulk operations", () => {
     expect(getShowAllNotes()).toBe(false);
   });
 
-  it("refresh after invalidate repopulates correctly", async () => {
+  it("a later refresh replaces the previous answer wholesale", async () => {
     mockGetComments.mockResolvedValue([
       { row: 0, col: 0, authorName: "A", threadCount: 1 },
     ]);
     mockGetNotes.mockResolvedValue([]);
     await refreshAnnotationState();
-
-    invalidateAnnotationCache();
-    expect(getAllCommentIndicatorsCached()).toHaveLength(0);
+    expect(getCommentIndicatorAt(0, 0)).toBeDefined();
 
     mockGetComments.mockResolvedValue([
       { row: 5, col: 5, authorName: "New", threadCount: 2 },
     ]);
-    await refreshAnnotationState();
+    await requestAnnotationRefresh();
 
     expect(getAllCommentIndicatorsCached()).toHaveLength(1);
     expect(getCommentIndicatorAt(5, 5)!.authorName).toBe("New");
+    expect(getCommentIndicatorAt(0, 0), "the removed one is gone").toBeUndefined();
   });
 });
 

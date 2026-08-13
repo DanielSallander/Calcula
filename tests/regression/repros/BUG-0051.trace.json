@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "seed": 90080002,
+  "startedAt": "2026-08-13T10:22:07.620Z",
+  "actions": [
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "sheet.rename",
+      "params": {
+        "tabIndex": 0,
+        "name": "Blad_66"
+      }
+    },
+    {
+      "id": "table.select-into",
+      "params": {}
+    },
+    {
+      "id": "table.delete",
+      "params": {}
+    }
+  ]
+}

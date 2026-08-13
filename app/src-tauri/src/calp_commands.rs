@@ -3829,8 +3829,11 @@ fn apply_override_value_to_grid(
         Ok(g) => g,
         Err(_) => return false,
     };
-    let named_ranges = match state.named_ranges.read() {
-        Ok(n) => n,
+    // `sheet_names` BEFORE the other three, because the pass takes it before
+    // them too (BUG-0045): it holds `sheet_names` and then waits for `tables`,
+    // so a caller holding `tables` and waiting for `sheet_names` hangs the app.
+    let sheet_names = match state.sheet_names.read() {
+        Ok(s) => s.clone(),
         Err(_) => return false,
     };
     let tables = match state.tables.read() {
@@ -3841,8 +3844,8 @@ fn apply_override_value_to_grid(
         Ok(t) => t,
         Err(_) => return false,
     };
-    let sheet_names = match state.sheet_names.read() {
-        Ok(s) => s.clone(),
+    let named_ranges = match state.named_ranges.read() {
+        Ok(n) => n,
         Err(_) => return false,
     };
     let spellings = WorkbookSpellings {

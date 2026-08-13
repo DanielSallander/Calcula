@@ -321,11 +321,35 @@ export function domainsAnnounced(src: string, symbol: string): Set<string> {
     }
   };
   collect(body);
-  for (const callee of body.matchAll(/\b(announce\w*|\w*Cascade\w*)\s*\(/g)) {
-    const name = callee[1];
-    if (name === symbol) continue;
-    const helper = routeBody(src, name);
-    if (helper) collect(stripComments(helper));
+  // ...and TRANSITIVELY, but ONLY through announcement helpers.
+  //
+  // The original rule followed exactly one hop, on the reasoning that two hops
+  // make the closure the whole module and stop discriminating. That reasoning
+  // holds for arbitrary callees and not for these: the frontier is restricted
+  // to functions whose NAME says they announce, so the closure is "the
+  // announcement helpers this route reaches" however many of them are chained,
+  // and a route that calls anything else still gets no credit for it.
+  //
+  // One hop was not enough in practice. `announceObjectCascade` in
+  // `scriptHost/host.ts` delegates its own-domain half to
+  // `announceObjectsChanged`, so a broker route reaching "objects" through the
+  // pair looked as though it announced nothing of the kind — a FALSE report,
+  // which is the one thing a census must never produce (it teaches the next
+  // reader to disbelieve it).
+  const visited = new Set<string>([symbol]);
+  const frontier = [body];
+  while (frontier.length > 0) {
+    const text = frontier.pop()!;
+    for (const callee of text.matchAll(/\b(announce\w*|\w*Cascade\w*)\s*\(/g)) {
+      const name = callee[1];
+      if (visited.has(name)) continue;
+      visited.add(name);
+      const helper = routeBody(src, name);
+      if (!helper) continue;
+      const stripped = stripComments(helper);
+      collect(stripped);
+      frontier.push(stripped);
+    }
   }
   return seen;
 }
@@ -419,6 +443,34 @@ interface SelectionOwner {
    * walk gets taught too.
    */
   walkTabLabel: string;
+  /**
+   * The refresh DOMAIN whose fan-out reaches `reconcile`, or `null` when the
+   * delete path reaches it without an announcement.
+   *
+   * WHY THIS FIELD EXISTS (BUG-0051). The cascade half of this census asks only
+   * which OTHER stores a delete disturbs: `requiredDomainsFor` deliberately
+   * removes the owner's OWN domain, on the reasoning that a route which
+   * re-reads its own cache needs no announcement for itself. That reasoning
+   * covers the cache and nothing else -- and the contextual tab is not the
+   * cache. `deleteTableAsync` refreshed its own cache to empty and announced
+   * only ["slicer", "ribbonFilter"], so TABLE_DEFINITIONS_UPDATED never fired,
+   * `syncDesignTabToTables` never ran, and the "Table Design" tab survived a
+   * workbook with zero tables -- the exact end state BUG-0026 and this census's
+   * selection half exist to prevent, reached through the door the own-domain
+   * excuse left open. The two halves of one census contradicted each other: the
+   * cascade half excused `objects`, the selection half's own `why` depended on
+   * it being announced.
+   *
+   * So a reconciliation driven by an announcement now says so, and every delete
+   * route for that kind must make it -- own domain or not.
+   */
+  reconcileDomain: string | null;
+  /**
+   * Required when `reconcileDomain` is null: how the disappearance reaches the
+   * reconciliation instead. A null with no reason is the shape that let this
+   * defect through, so the type does not permit one.
+   */
+  reconcileDomainWhy: string;
   why: string;
 }
 
@@ -430,6 +482,11 @@ const SELECTION_OWNERS: SelectionOwner[] = [
     file: "app/extensions/Slicer/handlers/selectionHandler.ts",
     reconcile: "dropSlicerFromSelection",
     trigger: { file: "app/extensions/Slicer/lib/slicerStore.ts", symbol: "refreshCache" },
+    reconcileDomain: null,
+    reconcileDomainWhy:
+      "`deleteSlicerAsync` calls the store's OWN `refreshCache`, which diffs the " +
+      "id set and dispatches SLICER_DELETED for whatever vanished. No " +
+      "announcement is in the path, so no domain can be missing from one.",
     why:
       "BUG-0026 itself. The store's refresh diffs the id set and dispatches " +
       "SLICER_DELETED for whatever vanished; the extension's handler calls the " +
@@ -445,6 +502,11 @@ const SELECTION_OWNERS: SelectionOwner[] = [
       file: "app/extensions/TimelineSlicer/lib/timelineSlicerStore.ts",
       symbol: "refreshCache",
     },
+    reconcileDomain: null,
+    reconcileDomainWhy:
+      "There is no frontend delete route at all (NO_FRONTEND_DELETE_ROUTE), so " +
+      "there is no route that could owe an announcement. It dies with its pivot " +
+      "or its sheet, and both of those announce.",
     why: "The identical defect: a timeline dies with its last pivot, and with its sheet.",
   },
   {
@@ -454,10 +516,12 @@ const SELECTION_OWNERS: SelectionOwner[] = [
     file: "app/extensions/Table/handlers/selectionHandler.ts",
     reconcile: "syncDesignTabToTables",
     trigger: { file: "app/extensions/Table/index.ts", symbol: "activate" },
+    reconcileDomain: "objects",
+    reconcileDomainWhy: "",
     why:
       "Found first, by the soak walk (seed 20260810). The tab is re-derived from " +
       "the CURRENT table list on TABLE_DEFINITIONS_UPDATED, which the `objects` " +
-      "domain dispatches.",
+      "domain dispatches -- and which, until BUG-0051, no table delete announced.",
   },
   {
     contextKey: "pivot",
@@ -466,6 +530,10 @@ const SELECTION_OWNERS: SelectionOwner[] = [
     file: "app/extensions/Pivot/handlers/selectionHandler.ts",
     reconcile: "updateCachedRegions",
     trigger: { file: "app/extensions/Pivot/handlers/selectionHandler.ts", symbol: "updateCachedRegions" },
+    reconcileDomain: null,
+    reconcileDomainWhy:
+      "The regions ARE the store: `updateCachedRegions` is both the trigger and " +
+      "the reconciliation, so it cannot be reached without reconciling.",
     why:
       "Reconciles in place: the regions ARE the store, so the function that " +
       "receives them is the one that checks whether the active pivot survived. " +
@@ -478,6 +546,12 @@ const SELECTION_OWNERS: SelectionOwner[] = [
     file: "app/extensions/Charts/handlers/selectionHandler.ts",
     reconcile: "deselectChart",
     trigger: { file: "app/extensions/Charts/index.ts", symbol: "activate" },
+    reconcileDomain: null,
+    reconcileDomainWhy:
+      "`performChartDelete` -- THE one chart delete, which the context menu, the " +
+      "Delete key and the script broker all route through -- calls " +
+      "`deselectChart()` itself before removing the chart. The charts:refresh " +
+      "path below is a second, independent belt.",
     why:
       "Charts reconcile with the blunt instrument: `reloadCharts` (the " +
       "charts:refresh handler, and the file-open path) deselects unconditionally " +
@@ -517,6 +591,54 @@ function contextKeysInExtensions(): Map<string, string[]> {
   };
   walk(root);
   return found;
+}
+
+/**
+ * Which selection owners declare an announcement-driven reconciliation that
+ * some delete route fails to announce (BUG-0051).
+ *
+ * This is the check `auditRoutes` structurally cannot make: it works from
+ * `requiredDomainsFor`, which DELETES the owner's own domain from the required
+ * set. `objects` is the Table's own domain, so no amount of cascade analysis
+ * would ever ask a table delete to announce it -- and announcing it is the only
+ * thing that takes the contextual tab down.
+ */
+export function unannouncedReconciliations(
+  owners: SelectionOwner[],
+  routes: Record<string, Route[]>,
+  readFile: (rel: string) => string,
+): string[] {
+  const out: string[] = [];
+  for (const owner of owners) {
+    if (owner.reconcileDomain === null) {
+      if (owner.reconcileDomainWhy.trim().length === 0) {
+        out.push(
+          `${owner.contextKey}: reconcileDomain is null with no reason — say how the ` +
+            `disappearance reaches ${owner.reconcile} instead`,
+        );
+      }
+      continue;
+    }
+    const declared = routes[owner.kind] ?? [];
+    if (declared.length === 0) {
+      out.push(
+        `${owner.contextKey}: declares reconcileDomain "${owner.reconcileDomain}" but ` +
+          `DELETE_ROUTES has no route for ${owner.kind} to make the announcement`,
+      );
+      continue;
+    }
+    for (const route of declared) {
+      const announced = domainsAnnounced(readFile(route.file), route.symbol);
+      if (!announced.has(owner.reconcileDomain)) {
+        out.push(
+          `${route.symbol} (${route.file}) does not announce "${owner.reconcileDomain}", ` +
+            `so ${owner.reconcile} never runs and the "${owner.walkTabLabel}" tab ` +
+            `outlives the last ${owner.kind}`,
+        );
+      }
+    }
+  }
+  return out;
 }
 
 /** Which selection owners fail to reconcile, given a reader. */
@@ -754,6 +876,24 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
     ).toEqual([]);
   });
 
+  it("a reconciliation driven by an announcement is actually announced — BUG-0051", () => {
+    expect(
+      unannouncedReconciliations(SELECTION_OWNERS, DELETE_ROUTES, read),
+      "a contextual ribbon tab is re-derived by an event that the delete route " +
+        "does not fire. This is BUG-0051: `deleteTableAsync` announced only the " +
+        "stores it cascaded INTO, because `requiredDomainsFor` drops the owner's " +
+        "own domain — and `objects` is the one that dispatches " +
+        "TABLE_DEFINITIONS_UPDATED, the only thing that runs " +
+        "`syncDesignTabToTables`.",
+    ).toEqual([]);
+
+    // NON-VACUITY: at least one owner must actually be exercising this rule, or
+    // the assertion above is an empty loop that passes forever.
+    expect(
+      SELECTION_OWNERS.filter((o) => o.reconcileDomain !== null).map((o) => o.contextKey),
+    ).toEqual(["table"]);
+  });
+
   it("the walk that found BUG-0026 knows every contextual tab this census governs", () => {
     // `contextual-ribbon-tabs` skips unrecognised labels on purpose, so a tab
     // it has never heard of is invisible to the very harness that found this
@@ -903,6 +1043,8 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
             reconcile: "dropThingFromSelection",
             trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
             walkTabLabel: "Thing",
+            reconcileDomain: null,
+            reconcileDomainWhy: "planted",
             why: "planted",
           },
         ],
@@ -921,6 +1063,8 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
             reconcile: "dropThingFromSelection",
             trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
             walkTabLabel: "Thing",
+            reconcileDomain: null,
+            reconcileDomainWhy: "planted",
             why: "planted",
           },
         ],
@@ -949,12 +1093,74 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
             reconcile: "dropThingFromSelection",
             trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
             walkTabLabel: "Thing",
+            reconcileDomain: null,
+            reconcileDomainWhy: "planted",
             why: "planted",
           },
         ],
         () => real,
       ),
     ).toEqual([]);
+  });
+
+  it("the announcement-driven reconciliation rule fires — teeth for BUG-0051", () => {
+    // The synthetic store below is BUG-0051 exactly: it refreshes its own cache
+    // and announces the stores it cascaded into, but not the domain that drives
+    // its own contextual tab back down.
+    const broken = `
+      function announceTheCascade(): void {
+        emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["slicer"], source: "commit" });
+      }
+      export async function deleteThingAsync(id: string): Promise<boolean> {
+        await backendDeleteThing(id);
+        await refreshCache();
+        announceTheCascade();
+        return true;
+      }
+    `;
+    const owner: SelectionOwner = {
+      contextKey: "thing",
+      kind: "Thing",
+      file: "synthetic.ts",
+      reconcile: "dropThingFromSelection",
+      trigger: { file: "synthetic.ts", symbol: "dropThingFromSelection" },
+      walkTabLabel: "Thing",
+      reconcileDomain: "objects",
+      reconcileDomainWhy: "",
+      why: "planted",
+    };
+    const routes: Record<string, Route[]> = {
+      Thing: [{ file: "synthetic.ts", symbol: "deleteThingAsync", ownDomain: "objects", why: "planted" }],
+    };
+    expect(unannouncedReconciliations([owner], routes, () => broken)).toEqual([
+      'deleteThingAsync (synthetic.ts) does not announce "objects", so ' +
+        'dropThingFromSelection never runs and the "Thing" tab outlives the last Thing',
+    ]);
+
+    // The FIXED shape is accepted, so the rule discriminates rather than always
+    // failing — the other half of every teeth case in this file.
+    const fixed = broken.replace('["slicer"]', '["objects", "slicer"]');
+    expect(unannouncedReconciliations([owner], routes, () => fixed)).toEqual([]);
+
+    // `ownDomain` + a self-refresh must NOT excuse it. That excuse is exactly
+    // what `auditRoutes` grants and exactly why the cascade half could never
+    // have caught this: the route above refreshes its own cache and still
+    // fails.
+    expect(refreshesOwnCache(broken, "deleteThingAsync")).toBe(true);
+
+    // A null domain with no reason is reported rather than silently skipped.
+    expect(
+      unannouncedReconciliations(
+        [{ ...owner, reconcileDomain: null, reconcileDomainWhy: "   " }],
+        routes,
+        () => broken,
+      )[0],
+    ).toContain("reconcileDomain is null with no reason");
+
+    // ...and a declared domain with no delete route at all is a gap, not a pass.
+    expect(unannouncedReconciliations([owner], {}, () => broken)[0]).toContain(
+      "DELETE_ROUTES has no route for Thing",
+    );
   });
 
   it("a COMMENT that names a domain does not satisfy the rule", () => {

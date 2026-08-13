@@ -22,7 +22,8 @@ import {
   hasAnnotationAt,
   getAllCommentIndicatorsCached,
   getAllNoteIndicatorsCached,
-  invalidateAnnotationCache,
+  requestAnnotationRefresh,
+  invalidateAnnotationRefresh,
   resetAnnotationStore,
   setShowAllNotes,
   getShowAllNotes,
@@ -127,20 +128,63 @@ describe("hasAnnotationAt", () => {
 // Cache operations
 // ============================================================================
 
-describe("invalidateAnnotationCache", () => {
-  it("clears both maps", async () => {
+describe("the cache is never empty while it is being refilled", () => {
+  // BUG-0042's neighbourhood. Every reader of these maps is SYNCHRONOUS -- the
+  // triangle renderer, the cell-click interceptor, the hover preview -- and a
+  // map that answers "absent" mid-refill is indistinguishable from "deleted":
+  // no triangle, no editor, no preview, with nothing scheduled to correct it.
+  it("a reader during the refill still sees the previous answer", async () => {
     mockGetComments.mockResolvedValue([
       { row: 0, col: 0, authorName: "A", threadCount: 1 },
     ]);
-    mockGetNotes.mockResolvedValue([
-      { row: 1, col: 0, preview: "n" },
-    ]);
+    mockGetNotes.mockResolvedValue([{ row: 1, col: 0, preview: "n" }]);
     await refreshAnnotationState();
 
-    invalidateAnnotationCache();
+    let seenMidFlight: number | null = null;
+    mockGetNotes.mockImplementation(async () => {
+      // The refill is in flight right now; this is what a paint would read.
+      seenMidFlight = getAllNoteIndicatorsCached().length;
+      return [{ row: 2, col: 0, preview: "n2" }];
+    });
+    await requestAnnotationRefresh();
 
-    expect(getAllCommentIndicatorsCached()).toEqual([]);
-    expect(getAllNoteIndicatorsCached()).toEqual([]);
+    expect(seenMidFlight, "the old answer, not an empty map").toBe(1);
+    expect(getAllNoteIndicatorsCached()).toHaveLength(1);
+    expect(getNoteIndicatorAt(2, 0)).toBeDefined();
+  });
+
+  it("a failed read leaves the previous answer standing", async () => {
+    mockGetComments.mockResolvedValue([
+      { row: 0, col: 0, authorName: "A", threadCount: 1 },
+    ]);
+    mockGetNotes.mockResolvedValue([{ row: 1, col: 0, preview: "n" }]);
+    await refreshAnnotationState();
+
+    mockGetNotes.mockRejectedValue(new Error("ipc down"));
+    await requestAnnotationRefresh();
+
+    expect(getAllNoteIndicatorsCached()).toHaveLength(1);
+    expect(getAllCommentIndicatorsCached()).toHaveLength(1);
+  });
+
+  it("a pass abandoned by invalidateAnnotationRefresh writes nothing", async () => {
+    // The sheet changed under an in-flight read: its answer describes the sheet
+    // the user just left and must not land. invalidate() only means that if the
+    // read actually consults stillCurrent().
+    mockGetComments.mockResolvedValue([
+      { row: 0, col: 0, authorName: "A", threadCount: 1 },
+    ]);
+    mockGetNotes.mockResolvedValue([{ row: 1, col: 0, preview: "n" }]);
+    await refreshAnnotationState();
+
+    mockGetNotes.mockImplementation(async () => {
+      invalidateAnnotationRefresh();
+      return [{ row: 9, col: 9, preview: "other sheet" }];
+    });
+    await requestAnnotationRefresh();
+
+    expect(getNoteIndicatorAt(9, 9), "the stale sheet's note did not land").toBeUndefined();
+    expect(getNoteIndicatorAt(1, 0), "the previous answer survived").toBeDefined();
   });
 });
 

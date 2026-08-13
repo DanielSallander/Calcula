@@ -134,6 +134,60 @@ impl Transaction {
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
+
+    /// The sheet this transaction's action HAPPENED ON, if it can be told.
+    ///
+    /// Excel keeps one undo history and switches to the sheet the undone
+    /// action was performed on, so the user sees what changed rather than
+    /// having a value silently move on a sheet they are not looking at. That
+    /// switch needs a single answer to "which sheet", and this is it.
+    ///
+    /// THE FIRST RECORDED CHANGE WINS, not the first APPLIED one. A restore
+    /// replays `changes` in reverse, but the sheet a user would name as "where
+    /// I did that" is where the action STARTED -- the first cell a fill, a
+    /// paste or a grouped script batch wrote. The two differ only for a
+    /// transaction that spans sheets, which is rare and has no better answer;
+    /// picking the reverse order would make an ordinary single-sheet
+    /// transaction agree and a cross-sheet one point at its tail.
+    ///
+    /// `None` means the transaction carries no sheet at all: it is made only of
+    /// `CustomRestore` payloads (a comment, a hyperlink, a pivot definition),
+    /// whose sheet lives inside opaque bytes this layer must not parse. A
+    /// caller that gets `None` must leave the active sheet alone -- guessing
+    /// "the active one" would be exactly the sheet-blindness `SetCell.sheet`
+    /// was added to end.
+    pub fn target_sheet(&self) -> Option<usize> {
+        self.changes.iter().find_map(|change| match change {
+            CellChange::SetCell { sheet, .. }
+            | CellChange::SetColumnWidth { sheet, .. }
+            | CellChange::SetRowHeight { sheet, .. }
+            | CellChange::AddMergeRegion { sheet, .. }
+            | CellChange::RemoveMergeRegion { sheet, .. } => Some(*sheet),
+            CellChange::RestoreSnapshot(snapshot) => Some(snapshot.sheet),
+            CellChange::CustomRestore { .. } => None,
+        })
+    }
+
+    /// The top-left CELL this transaction restores on `sheet`, if any.
+    ///
+    /// Activating a sheet is only half of "so the user can see what changed":
+    /// the restored cells can sit far outside the viewport the sheet was left
+    /// at, and a switch that lands somewhere else shows nothing. This is the
+    /// coordinate the view is aimed at.
+    ///
+    /// `SetCell` only. The geometry variants describe a whole row or column
+    /// and `RestoreSnapshot` describes the whole sheet, so neither names a cell
+    /// worth pointing at; `CustomRestore` is opaque here for the reason
+    /// `target_sheet` gives.
+    pub fn restored_anchor_on(&self, sheet: usize) -> Option<(u32, u32)> {
+        self.changes
+            .iter()
+            .filter_map(|change| match change {
+                CellChange::SetCell { sheet: s, row, col, .. } if *s == sheet => Some((*row, *col)),
+                _ => None,
+            })
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+    }
 }
 
 /// The history stack for undo/redo operations.
@@ -166,6 +220,25 @@ pub struct UndoStack {
     /// to know WHICH of those happened, or it reports a product defect where
     /// Excel-parity behaviour is all it observed.
     cleared_total: u64,
+    /// How many times a wholesale `clear()` has HAPPENED, ever — regardless
+    /// of how much it discarded.
+    ///
+    /// `cleared_total` counts TRANSACTIONS, and it is zero when the stack was
+    /// already empty. That is exactly the case that makes correct behaviour
+    /// look like a defect: a sheet added while the history happens to be empty
+    /// ends nothing, so `cleared_total` does not move — and a caller comparing
+    /// two readings concludes the window is fully undoable. It is not. The
+    /// sheet ADD itself is not undoable, so no number of undo steps returns to
+    /// the earlier state.
+    ///
+    /// MEASURED on soak seed 1786446166374: `Undoing 22 steps did not restore
+    /// the checkpoint state ... sheetNames[2]: "<absent>" -> "Sheet3"` — where
+    /// Sheet3 was an EMPTY sheet the walk had added, and the two digest
+    /// differences were that sheet and nothing else. A report about undo,
+    /// produced by an action Excel does not let you undo, which is the exact
+    /// false alarm BUG-0005's fix removed for the non-empty case and left
+    /// standing for this one.
+    clears_total: u64,
 }
 
 impl UndoStack {
@@ -178,6 +251,7 @@ impl UndoStack {
             next_seq: 1,
             evicted_total: 0,
             cleared_total: 0,
+            clears_total: 0,
         }
     }
 
@@ -190,6 +264,7 @@ impl UndoStack {
             next_seq: 1,
             evicted_total: 0,
             cleared_total: 0,
+            clears_total: 0,
         }
     }
 
@@ -414,6 +489,12 @@ impl UndoStack {
         self.cleared_total
     }
 
+    /// How many times the history has been wholesale cleared, ever. Moves on
+    /// EVERY clear, including one that discarded nothing — see the field.
+    pub fn clears_total(&self) -> u64 {
+        self.clears_total
+    }
+
     /// The history cap -- how many transactions are kept before the oldest
     /// starts being dropped.
     pub fn max_size(&self) -> usize {
@@ -470,6 +551,9 @@ impl UndoStack {
     /// defect.
     pub fn clear(&mut self) {
         self.cleared_total += (self.undo_stack.len() + self.redo_stack.len()) as u64;
+        // Unconditional: a clear that discarded nothing still ENDED the history,
+        // and that is the fact a caller needs (see `clears_total`).
+        self.clears_total += 1;
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.current_transaction = None;
@@ -821,5 +905,112 @@ mod history_horizon_tests {
 
         assert!(!stack.undo_seqs().contains(&stale));
         assert!(stack.undo_seqs().iter().all(|s| *s > stale));
+    }
+
+    // -----------------------------------------------------------------------
+    // WHICH SHEET DOES THIS TRANSACTION BELONG TO? (undo sheet activation)
+    // -----------------------------------------------------------------------
+
+    fn snapshot_on(sheet: usize) -> GridSnapshot {
+        GridSnapshot {
+            sheet,
+            cells: Default::default(),
+            row_heights: HashMap::new(),
+            column_widths: HashMap::new(),
+            merged_regions: HashSet::new(),
+            max_row: 0,
+            max_col: 0,
+            row_styles: HashMap::new(),
+            column_styles: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn target_sheet_is_the_sheet_the_action_happened_on() {
+        let mut t = Transaction::new("edit");
+        t.add_change(CellChange::SetCell { sheet: 2, row: 4, col: 1, previous: None });
+        assert_eq!(t.target_sheet(), Some(2));
+    }
+
+    #[test]
+    fn target_sheet_reads_every_variant_that_carries_one() {
+        for (change, expected) in [
+            (CellChange::SetColumnWidth { sheet: 3, col: 0, previous: None }, 3),
+            (CellChange::SetRowHeight { sheet: 4, row: 0, previous: None }, 4),
+            (
+                CellChange::AddMergeRegion {
+                    sheet: 5,
+                    region: UndoMergeRegion { start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
+                },
+                5,
+            ),
+            (
+                CellChange::RemoveMergeRegion {
+                    sheet: 6,
+                    region: UndoMergeRegion { start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
+                },
+                6,
+            ),
+            (CellChange::RestoreSnapshot(snapshot_on(7)), 7),
+        ] {
+            let mut t = Transaction::new("x");
+            t.add_change(change);
+            assert_eq!(t.target_sheet(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_custom_restore_only_transaction_names_no_sheet() {
+        // Its sheet lives inside opaque bytes. `None` is the honest answer, and
+        // it is what stops the caller falling back to "the active sheet" --
+        // the exact sheet-blindness the sheet dimension was added to end.
+        let mut t = Transaction::new("comment");
+        t.add_change(CellChange::CustomRestore { kind: "comment".into(), data: vec![1, 2, 3] });
+        assert_eq!(t.target_sheet(), None);
+    }
+
+    #[test]
+    fn a_cross_sheet_transaction_names_where_the_action_started() {
+        // Recorded order, not application order: a restore replays in reverse,
+        // but "where I did that" is the first cell the action wrote.
+        let mut t = Transaction::new("batch");
+        t.add_change(CellChange::SetCell { sheet: 1, row: 0, col: 0, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 2, row: 0, col: 0, previous: None });
+        assert_eq!(t.target_sheet(), Some(1));
+    }
+
+    #[test]
+    fn a_custom_restore_does_not_hide_a_sheet_carrying_change_behind_it() {
+        // `find_map` skips the opaque payload rather than stopping at it: a
+        // grouped action that records a comment first and a cell second still
+        // knows which sheet it belongs to.
+        let mut t = Transaction::new("mixed");
+        t.add_change(CellChange::CustomRestore { kind: "comment".into(), data: vec![] });
+        t.add_change(CellChange::SetCell { sheet: 3, row: 9, col: 9, previous: None });
+        assert_eq!(t.target_sheet(), Some(3));
+    }
+
+    #[test]
+    fn the_anchor_is_the_top_left_cell_restored_on_that_sheet() {
+        let mut t = Transaction::new("fill");
+        t.add_change(CellChange::SetCell { sheet: 1, row: 9, col: 4, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 1, row: 6, col: 7, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 2, row: 0, col: 0, previous: None });
+        // Row from one change, column from another: the anchor is the corner of
+        // the bounding box, which is where Excel puts the selection.
+        assert_eq!(t.restored_anchor_on(1), Some((6, 4)));
+        assert_eq!(t.restored_anchor_on(2), Some((0, 0)));
+        assert_eq!(t.restored_anchor_on(3), None);
+    }
+
+    #[test]
+    fn a_geometry_only_transaction_has_no_anchor() {
+        // A column width describes a whole column and a snapshot the whole
+        // sheet; neither names a cell worth aiming the view at.
+        let mut t = Transaction::new("resize");
+        t.add_change(CellChange::SetColumnWidth { sheet: 1, col: 3, previous: Some(64.0) });
+        t.add_change(CellChange::RestoreSnapshot(snapshot_on(1)));
+        assert_eq!(t.target_sheet(), Some(1));
+        assert_eq!(t.restored_anchor_on(1), None);
     }
 }

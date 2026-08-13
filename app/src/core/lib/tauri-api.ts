@@ -1727,6 +1727,26 @@ export interface UndoResult {
    *  controls) are precisely the ones whose undo repainted nothing. Read this,
    *  not the flags, when deciding what to refresh. */
   refreshDomains: string[];
+  /** The sheet that is ACTIVE now the restore has finished.
+   *
+   *  Excel keeps one undo history and switches to the sheet the undone action
+   *  happened on, so the user can see what changed; the backend performs that
+   *  switch and reports it here. Reported UNCONDITIONALLY, not only when it
+   *  moved — the caller decides whether to follow by comparing it with the
+   *  sheet IT believes is active, which is the only comparison that can also
+   *  repair a disagreement. */
+  activeSheetIndex: number;
+  /** Name of `activeSheetIndex`. It rides along so following the switch costs
+   *  no second round trip: the tab strip, the grid's sheet context and the
+   *  SHEET_CHANGED announcement all need it, and fetching it separately would
+   *  open a window in which the app has switched sheets and cannot say which. */
+  activeSheetName: string;
+  /** Top-left cell the restore rewrote on `activeSheetIndex`, or null when it
+   *  named no cell (a column width, a whole-sheet snapshot, an opaque custom
+   *  payload). Switching sheets is only half of "so the user can see what
+   *  changed" — the restored cells can be far outside the viewport that sheet
+   *  was left at, and this is what the selection is aimed at. */
+  restoredAnchor: { row: number; col: number } | null;
 }
 
 /**

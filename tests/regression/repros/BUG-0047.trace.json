@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "seed": 1786446166374,
+  "startedAt": "2026-08-13T08:21:16.359Z",
+  "actions": [
+    {
+      "id": "sheet.add",
+      "params": {}
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 2
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "note.add",
+      "params": {
+        "text": "Note 65",
+        "row": 1,
+        "col": 2
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "B15",
+        "value": "-355"
+      }
+    },
+    {
+      "id": "sheet.hide",
+      "params": {
+        "tabIndex": 1
+      }
+    },
+    {
+      "id": "sheet.move",
+      "params": {
+        "fromIndex": 0,
+        "toIndex": 1
+      }
+    }
+  ]
+}

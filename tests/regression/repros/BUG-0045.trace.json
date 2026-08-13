@@ -1,0 +1,1121 @@
+{
+  "version": 1,
+  "seed": 1786446166374,
+  "startedAt": "2026-08-13T07:30:33.367Z",
+  "actions": [
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_1"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "merge.unmerge",
+      "params": {}
+    },
+    {
+      "id": "script.shape-render",
+      "params": {
+        "slotIndex": 1
+      }
+    },
+    {
+      "id": "cf.delete-rule",
+      "params": {}
+    },
+    {
+      "id": "slicer.create",
+      "params": {
+        "name": "Slicer_7"
+      }
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "freeze.clear",
+      "params": {}
+    },
+    {
+      "id": "merge.merge",
+      "params": {
+        "startRow": 62,
+        "startCol": 1,
+        "rows": 2,
+        "cols": 2
+      }
+    },
+    {
+      "id": "structure.delete-row",
+      "params": {
+        "row": 52
+      }
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "slicer.create",
+      "params": {
+        "name": "Slicer_13"
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "script.shape-mount",
+      "params": {
+        "slotIndex": 3,
+        "fill": "#1f6fff"
+      }
+    },
+    {
+      "id": "structure.insert-row",
+      "params": {
+        "row": 50
+      }
+    },
+    {
+      "id": "cell.clear",
+      "params": {
+        "ref": "B30"
+      }
+    },
+    {
+      "id": "slicer.delete",
+      "params": {}
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "A1",
+        "to": "J20"
+      }
+    },
+    {
+      "id": "filter.set-values",
+      "params": {
+        "value": "Open"
+      }
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": true,
+        "values": [
+          45,
+          22,
+          29,
+          78
+        ]
+      }
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "B15",
+        "to": "K20"
+      }
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 1
+      }
+    },
+    {
+      "id": "script.shape-mount",
+      "params": {
+        "slotIndex": 0,
+        "fill": "#e6a100"
+      }
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G10",
+        "formula": "=COUNT(A1:A30)"
+      }
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 2
+      }
+    },
+    {
+      "id": "names.delete",
+      "params": {}
+    },
+    {
+      "id": "undo",
+      "params": {}
+    },
+    {
+      "id": "freeze.set",
+      "params": {
+        "row": 1,
+        "col": 2
+      }
+    },
+    {
+      "id": "cf.add-rule",
+      "params": {
+        "threshold": 53
+      }
+    },
+    {
+      "id": "filter.remove",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A30"
+      }
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "fill.down",
+      "params": {
+        "value": "Fill37",
+        "count": 4
+      }
+    },
+    {
+      "id": "table.select-into",
+      "params": {}
+    },
+    {
+      "id": "slicer.delete",
+      "params": {}
+    },
+    {
+      "id": "script.shape-render",
+      "params": {
+        "slotIndex": 0
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "table.delete",
+      "params": {}
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_43"
+      }
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G11",
+        "formula": "=SUM(A1:A10)"
+      }
+    },
+    {
+      "id": "validation.clear",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "G4",
+        "value": "-913"
+      }
+    },
+    {
+      "id": "format.italic",
+      "params": {
+        "ref": "E2"
+      }
+    },
+    {
+      "id": "merge.unmerge",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "E5"
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "comment.add",
+      "params": {
+        "ref": "r1c0",
+        "text": "Comment 51",
+        "row": 1,
+        "col": 0
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "merge.merge",
+      "params": {
+        "startRow": 66,
+        "startCol": 4,
+        "rows": 2,
+        "cols": 2
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A10"
+      }
+    },
+    {
+      "id": "freeze.clear",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G12",
+        "formula": "=MAX(A1:E5)"
+      }
+    },
+    {
+      "id": "script.shape-render",
+      "params": {
+        "slotIndex": 1
+      }
+    },
+    {
+      "id": "note.add",
+      "params": {
+        "text": "Note 59",
+        "row": 1,
+        "col": 2
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "script.shape-mount",
+      "params": {
+        "slotIndex": 3,
+        "fill": "#1f6fff"
+      }
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 65
+      }
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "B15",
+        "value": "-355"
+      }
+    },
+    {
+      "id": "cf.add-rule",
+      "params": {
+        "threshold": 52
+      }
+    },
+    {
+      "id": "filter.remove",
+      "params": {}
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 55
+      }
+    },
+    {
+      "id": "sheet.add",
+      "params": {}
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "structure.resize-col",
+      "params": {
+        "col": 0,
+        "width": 70
+      }
+    },
+    {
+      "id": "fill.down",
+      "params": {
+        "value": "Fill72",
+        "count": 3
+      }
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "names.define",
+      "params": {
+        "name": "TestName_74"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "C20"
+      }
+    },
+    {
+      "id": "script.shape-mount",
+      "params": {
+        "slotIndex": 2,
+        "fill": "#ff0000"
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_78"
+      }
+    },
+    {
+      "id": "structure.resize-row",
+      "params": {
+        "row": 11,
+        "height": 62
+      }
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 2
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "freeze.clear",
+      "params": {}
+    },
+    {
+      "id": "fill.down",
+      "params": {
+        "value": "Fill84",
+        "count": 3
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "merge.unmerge",
+      "params": {}
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "chart.deselect",
+      "params": {}
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 2
+      }
+    },
+    {
+      "id": "structure.resize-row",
+      "params": {
+        "row": 11,
+        "height": 40
+      }
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 1
+      }
+    },
+    {
+      "id": "freeze.set",
+      "params": {
+        "row": 3,
+        "col": 2
+      }
+    },
+    {
+      "id": "structure.resize-row",
+      "params": {
+        "row": 16,
+        "height": 34
+      }
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "G4"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "undo",
+      "params": {}
+    },
+    {
+      "id": "sheet.switch",
+      "params": {
+        "tabIndex": 1
+      }
+    },
+    {
+      "id": "table.delete",
+      "params": {}
+    },
+    {
+      "id": "structure.insert-row",
+      "params": {
+        "row": 54
+      }
+    },
+    {
+      "id": "freeze.clear",
+      "params": {}
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 65
+      }
+    },
+    {
+      "id": "sparkline.delete",
+      "params": {}
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 61
+      }
+    },
+    {
+      "id": "cf.delete-rule",
+      "params": {}
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "B2"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": true,
+        "values": [
+          32,
+          23,
+          56,
+          96
+        ]
+      }
+    },
+    {
+      "id": "script.shape-render",
+      "params": {
+        "slotIndex": 2
+      }
+    },
+    {
+      "id": "structure.resize-col",
+      "params": {
+        "col": 10,
+        "width": 129
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "cell.clear",
+      "params": {
+        "ref": "B15"
+      }
+    },
+    {
+      "id": "nav.name-box",
+      "params": {
+        "ref": "A100"
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "C20"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A1"
+      }
+    },
+    {
+      "id": "table.select-away",
+      "params": {}
+    },
+    {
+      "id": "sheet.switch",
+      "params": {
+        "tabIndex": 0
+      }
+    },
+    {
+      "id": "sheet.delete",
+      "params": {}
+    },
+    {
+      "id": "structure.resize-row",
+      "params": {
+        "row": 12,
+        "height": 22
+      }
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "sparkline.delete",
+      "params": {}
+    },
+    {
+      "id": "slicer.create",
+      "params": {
+        "name": "Slicer_125"
+      }
+    },
+    {
+      "id": "table.select-into",
+      "params": {}
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 62
+      }
+    },
+    {
+      "id": "slicer.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "C20",
+        "value": "-968"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "C3"
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "table.select-away",
+      "params": {}
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "structure.resize-col",
+      "params": {
+        "col": 5,
+        "width": 172
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "freeze.clear",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "F3",
+        "value": "198"
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_139"
+      }
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "A10",
+        "to": "K21"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "script.shape-mount",
+      "params": {
+        "slotIndex": 0,
+        "fill": "#1f6fff"
+      }
+    },
+    {
+      "id": "table.delete",
+      "params": {}
+    },
+    {
+      "id": "comment.add",
+      "params": {
+        "ref": "r7c5",
+        "text": "Comment 145",
+        "row": 7,
+        "col": 5
+      }
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "H11",
+        "formula": "=IF(A1>0;1;0)"
+      }
+    },
+    {
+      "id": "cell.edit",
+      "params": {
+        "ref": "H5",
+        "value": "Test147"
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_148"
+      }
+    },
+    {
+      "id": "script.shape-render",
+      "params": {
+        "slotIndex": 3
+      }
+    },
+    {
+      "id": "script.shape-mount",
+      "params": {
+        "slotIndex": 0,
+        "fill": "#e6a100"
+      }
+    },
+    {
+      "id": "structure.delete-row",
+      "params": {
+        "row": 46
+      }
+    },
+    {
+      "id": "sheet.add",
+      "params": {}
+    },
+    {
+      "id": "freeze.clear",
+      "params": {}
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_154"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "E5"
+      }
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": true,
+        "values": [
+          91,
+          50,
+          27,
+          56
+        ]
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A30"
+      }
+    },
+    {
+      "id": "freeze.set",
+      "params": {
+        "row": 1,
+        "col": 0
+      }
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "comment.add",
+      "params": {
+        "ref": "r4c1",
+        "text": "Comment 160",
+        "row": 4,
+        "col": 1
+      }
+    },
+    {
+      "id": "cell.edit",
+      "params": {
+        "ref": "H5",
+        "value": "Test161"
+      }
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 65
+      }
+    },
+    {
+      "id": "script.shape-unmount",
+      "params": {
+        "slotIndex": 2
+      }
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "H5"
+      }
+    },
+    {
+      "id": "cell.edit",
+      "params": {
+        "ref": "D1",
+        "value": "Test165"
+      }
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "B2",
+        "value": "822"
+      }
+    },
+    {
+      "id": "undo",
+      "params": {}
+    },
+    {
+      "id": "merge.unmerge",
+      "params": {}
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_169"
+      }
+    },
+    {
+      "id": "cell.clear",
+      "params": {
+        "ref": "G4"
+      }
+    },
+    {
+      "id": "cf.add-rule",
+      "params": {
+        "threshold": 57
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A30"
+      }
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G10",
+        "formula": "=MAX(A1:E5)"
+      }
+    },
+    {
+      "id": "replace.all",
+      "params": {}
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "A30",
+        "to": "J21"
+      }
+    },
+    {
+      "id": "cell.edit",
+      "params": {
+        "ref": "H5",
+        "value": "Test177"
+      }
+    },
+    {
+      "id": "undo",
+      "params": {}
+    },
+    {
+      "id": "chart.select",
+      "params": {}
+    },
+    {
+      "id": "fill.down",
+      "params": {
+        "value": "Fill180",
+        "count": 2
+      }
+    },
+    {
+      "id": "validation.clear",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "sheet.delete",
+      "params": {}
+    },
+    {
+      "id": "filter.remove",
+      "params": {}
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": false,
+        "values": [
+          54,
+          54,
+          69,
+          49
+        ]
+      }
+    },
+    {
+      "id": "undo",
+      "params": {}
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_187"
+      }
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "F3"
+      }
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": true,
+        "values": [
+          83,
+          58,
+          79,
+          75
+        ]
+      }
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "sparkline.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "F3"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A10"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "C20"
+      }
+    },
+    {
+      "id": "filter.set-values",
+      "params": {
+        "value": "Open"
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "comment.add",
+      "params": {
+        "ref": "r1c5",
+        "text": "Comment 198",
+        "row": 1,
+        "col": 5
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "F3"
+      }
+    }
+  ]
+}

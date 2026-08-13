@@ -86,6 +86,12 @@ export interface ActionTiming {
   /** Set when `execute()` threw and the walk tolerated it. */
   error?: string;
   /**
+   * The workbook's sheet shape before and after this action, recorded ONLY
+   * when it actually changed. See `sheetShapeOf` for why an untouched action
+   * records nothing.
+   */
+  sheetChange?: { before: SheetShape; after: SheetShape };
+  /**
    * Elements covering most of the viewport at the moment an action threw.
    *
    * WHY. Playwright's `actionTimeout` turned an invisible hang into a reported
@@ -99,6 +105,46 @@ export interface ActionTiming {
    * walker takes the census itself, at the moment it still exists.
    */
   overlays?: OverlayCensusEntry[];
+}
+
+/**
+ * Everything about the workbook a sheet action is supposed to change.
+ *
+ * WHY IT EXISTS. The coverage summary answers "which families did this walk
+ * touch", and it answers it from the action list — an action that ran without
+ * throwing counts as explored. Half the sheet actions cannot throw: `sheet.add`
+ * probes `isVisible({timeout: 500})` and returns silently when the button is
+ * not there, `sheet.switch` and `sheet.delete` do the same. So `sheet=7` in a
+ * report has never distinguished seven sheet operations from seven no-ops, and
+ * that is precisely the reading that made BUG-0031 invisible for the whole
+ * programme (`chart.select`/`chart.delete` counted as explored while talking to
+ * nothing).
+ *
+ * The fix is to stop inferring effect from the action and start OBSERVING it.
+ * `count` catches add/delete, `active` catches switch, `names` catches rename —
+ * and a rename is the case a count could never have caught.
+ */
+export interface SheetShape {
+  count: number;
+  active: number;
+  names: string[];
+}
+
+export function sheetShapeOf(snapshot: StateSnapshot): SheetShape {
+  return {
+    count: snapshot.logical.sheetCount,
+    active: snapshot.logical.activeSheet,
+    names: [...(snapshot.logical.sheetNames ?? [])],
+  };
+}
+
+export function sheetShapesDiffer(a: SheetShape, b: SheetShape): boolean {
+  return (
+    a.count !== b.count ||
+    a.active !== b.active ||
+    a.names.length !== b.names.length ||
+    a.names.some((n, i) => n !== b.names[i])
+  );
 }
 
 /** One viewport-covering element, as seen when an action threw. */
@@ -183,6 +229,16 @@ export interface WalkResult {
   checkpoints: CheckpointTiming[];
   /** Per-action timings, in execution order. */
   timings: ActionTiming[];
+  /**
+   * What the oracle battery actually got to ASK across the run, already
+   * formatted (see `OracleBattery.formatCoverage`). Null when no battery ran.
+   *
+   * Carried on the RESULT rather than left on the battery, because the battery
+   * is not reachable from `formatWalkReport` — which is precisely why the
+   * counts it had been accumulating since it was written were never printed by
+   * anything.
+   */
+  oracleCoverage: string | null;
   elapsedMs: number;
 }
 
@@ -238,6 +294,7 @@ export class WalkRunner {
       failingSnapshot: snapshot,
       checkpoints,
       timings,
+      oracleCoverage: oracleBattery ? oracleBattery.formatCoverage() : null,
       elapsedMs: Date.now() - startedAt,
     });
 
@@ -409,7 +466,17 @@ export class WalkRunner {
           null
         );
       }
+      // Did this action actually move the workbook's sheet structure? Asked
+      // while `snapshot` is still the PRE-action reading. Recorded on any
+      // action, not just the `sheet` family: a non-sheet action that renames or
+      // drops a sheet is a finding in its own right, and the trace is the only
+      // place it would ever show.
+      const sheetBefore = sheetShapeOf(snapshot);
       snapshot = captured;
+      const sheetAfter = sheetShapeOf(snapshot);
+      if (sheetShapesDiffer(sheetBefore, sheetAfter)) {
+        timing.sheetChange = { before: sheetBefore, after: sheetAfter };
+      }
 
       // Cheap invariants
       const violations = invariants.flatMap((inv) => inv.check(snapshot));
@@ -498,6 +565,7 @@ export class WalkRunner {
       failingSnapshot: null,
       checkpoints,
       timings,
+      oracleCoverage: oracleBattery ? oracleBattery.formatCoverage() : null,
       elapsedMs: Date.now() - startedAt,
     };
   }
@@ -519,13 +587,48 @@ export class WalkRunner {
  * not show it. Coverage belongs in the PASS path precisely because that is
  * where an untested surface hides.
  */
-export function summarizeCoverage(
-  timings: ActionTiming[]
-): { families: Record<string, number>; byAction: Record<string, number>; threw: number } {
+export function summarizeCoverage(timings: ActionTiming[]): {
+  families: Record<string, number>;
+  byAction: Record<string, number>;
+  threw: number;
+  /**
+   * Sheet-structure accounting, MEASURED rather than inferred.
+   *
+   * `attempted` counts sheet actions the walk issued; `effective` counts the
+   * ones the workbook visibly answered (`ActionTiming.sheetChange`). The gap is
+   * the number that did nothing, and it is the only number in this report that
+   * can tell "the oracles found no sheet bug" apart from "the walker never
+   * changed a sheet". `byActionEffective` says WHICH ones, because
+   * `sheet.rename` failing while `sheet.add` works is a different defect from
+   * the whole surface being inert.
+   */
+  sheet: {
+    attempted: number;
+    effective: number;
+    byActionEffective: Record<string, number>;
+  };
+  /** Actions OUTSIDE the sheet family that moved the sheet structure anyway. */
+  unexpectedSheetChanges: Array<{ step: number; id: string }>;
+} {
   const families: Record<string, number> = {};
   const byAction: Record<string, number> = {};
+  const byActionEffective: Record<string, number> = {};
+  const unexpectedSheetChanges: Array<{ step: number; id: string }> = [];
   let threw = 0;
+  let sheetAttempted = 0;
+  let sheetEffective = 0;
+
   for (const t of timings) {
+    const isSheetAction = t.id.startsWith("sheet.");
+    if (isSheetAction) sheetAttempted++;
+    if (t.sheetChange) {
+      if (isSheetAction) {
+        sheetEffective++;
+        byActionEffective[t.id] = (byActionEffective[t.id] ?? 0) + 1;
+      } else {
+        unexpectedSheetChanges.push({ step: t.step, id: t.id });
+      }
+    }
     if (t.error) {
       threw++;
       continue;
@@ -534,18 +637,52 @@ export function summarizeCoverage(
     families[family] = (families[family] ?? 0) + 1;
     byAction[t.id] = (byAction[t.id] ?? 0) + 1;
   }
-  return { families, byAction, threw };
+
+  return {
+    families,
+    byAction,
+    threw,
+    sheet: {
+      attempted: sheetAttempted,
+      effective: sheetEffective,
+      byActionEffective,
+    },
+    unexpectedSheetChanges,
+  };
 }
 
 function formatCoverage(result: WalkResult): string[] {
-  const { families, threw } = summarizeCoverage(result.timings);
+  const { families, threw, sheet, unexpectedSheetChanges } = summarizeCoverage(
+    result.timings
+  );
   const entries = Object.entries(families).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return [];
-  return [
+  const lines = [
     `  --- Coverage (actions that ran, by family) ---`,
     `  ${entries.map(([k, n]) => `${k}=${n}`).join(" ")}` +
       (threw > 0 ? `  [${threw} threw]` : ""),
   ];
+  if (sheet.attempted > 0) {
+    const detail = Object.entries(sheet.byActionEffective)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${k}=${n}`)
+      .join(" ");
+    lines.push(
+      `  Sheet structure: ${sheet.attempted} action(s) issued, ` +
+        `${sheet.effective} changed the workbook` +
+        (detail ? ` (${detail})` : "") +
+        (sheet.effective === 0
+          ? `  [WARNING: every sheet action was a no-op — the sheet surface was NOT explored]`
+          : "")
+    );
+  }
+  if (unexpectedSheetChanges.length > 0) {
+    lines.push(
+      `  Sheet structure moved by NON-sheet actions: ` +
+        unexpectedSheetChanges.map((u) => `step ${u.step} ${u.id}`).join(", ")
+    );
+  }
+  return lines;
 }
 
 export function formatWalkReport(result: WalkResult): string {
@@ -559,6 +696,7 @@ export function formatWalkReport(result: WalkResult): string {
         `  Elapsed: ${Math.round(result.elapsedMs / 1000)}s`,
       ]
         .concat(formatCoverage(result))
+        .concat(result.oracleCoverage ? [result.oracleCoverage] : [])
         .join("\n")
     );
   }
@@ -592,6 +730,7 @@ export function formatWalkReport(result: WalkResult): string {
   }
 
   lines.push(...formatCoverage(result));
+  if (result.oracleCoverage) lines.push(result.oracleCoverage);
   lines.push(``);
   lines.push(`  --- Action trace (last 20 of ${result.trace.actions.length}) ---`);
   const actions = result.trace.actions;

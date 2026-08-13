@@ -34,10 +34,22 @@ type Baseline = Parameters<typeof stepsBackToBaseline>[0];
 type Now = Parameters<typeof stepsBackToBaseline>[1];
 
 function baseline(over: Partial<Baseline> = {}): Baseline {
-  return { undoTopSeq: null, evictedTotal: 0, clearedTotal: 0, ...over };
+  return {
+    undoTopSeq: null,
+    evictedTotal: 0,
+    clearedTotal: 0,
+    clearsTotal: 0,
+    ...over,
+  };
 }
 function now(over: Partial<Now> = {}): Now {
-  return { undoSeqs: [], evictedTotal: 0, clearedTotal: 0, ...over };
+  return {
+    undoSeqs: [],
+    evictedTotal: 0,
+    clearedTotal: 0,
+    clearsTotal: 0,
+    ...over,
+  };
 }
 
 describe("stepsBackToBaseline: the ordinary case", () => {
@@ -69,8 +81,8 @@ describe("stepsBackToBaseline: a sheet operation ended the history", () => {
   // to a renumbered sheet. The oracle must recognise that, not report it.
   it("says so when the remembered entry was discarded by a wholesale clear", () => {
     const result = stepsBackToBaseline(
-      baseline({ undoTopSeq: 4, clearedTotal: 0 }),
-      now({ undoSeqs: [11, 12], clearedTotal: 9 })
+      baseline({ undoTopSeq: 4, clearedTotal: 0, clearsTotal: 0 }),
+      now({ undoSeqs: [11, 12], clearedTotal: 9, clearsTotal: 1 })
     );
     expect(result).toHaveProperty("unreachable");
     const { unreachable } = result as { unreachable: string };
@@ -88,13 +100,48 @@ describe("stepsBackToBaseline: a sheet operation ended the history", () => {
     // cells, then inserted a sheet would be told to undo `undoSeqs.length`
     // steps and would compare against a digest it can no longer reach.
     const result = stepsBackToBaseline(
-      baseline({ undoTopSeq: null, clearedTotal: 2 }),
-      now({ undoSeqs: [30, 31], clearedTotal: 5 })
+      baseline({ undoTopSeq: null, clearedTotal: 2, clearsTotal: 1 }),
+      now({ undoSeqs: [30, 31], clearedTotal: 5, clearsTotal: 2 })
     );
     expect(result).toHaveProperty("unreachable");
     expect((result as { unreachable: string }).unreachable).toContain(
       "3 transaction(s) discarded"
     );
+  });
+
+  it("says so when the clear discarded NOTHING because the stack was empty", () => {
+    // THE CASE BUG-0005's FIX LEFT STANDING, and the one that produced a false
+    // undo defect on soak seed 1786446166374. `clearedTotal` counts
+    // TRANSACTIONS, so a sheet added while the history is already empty ends
+    // nothing and moves it by ZERO — while the sheet itself is just as
+    // un-undoable as any other. The oracle decided the window, wound the
+    // history back, and reported the sheet the walk had ADDED:
+    //   "Undoing 22 steps did not restore the checkpoint state.
+    //    2 differences; first: sheetNames[2]: <absent> -> Sheet3"
+    // Both differences were that empty sheet. `clearsTotal` counts the CLEARS,
+    // so it moves whether or not there was anything to discard.
+    const result = stepsBackToBaseline(
+      baseline({ undoTopSeq: null, clearedTotal: 4, clearsTotal: 1 }),
+      now({ undoSeqs: [30, 31], clearedTotal: 4, clearsTotal: 2 })
+    );
+    expect(result, "the window is NOT decidable").toHaveProperty("unreachable");
+    const { unreachable } = result as { unreachable: string };
+    expect(unreachable).toContain("workbook-structure change");
+    expect(unreachable).toContain("1 clear(s)");
+    expect(unreachable).toContain("0 transaction(s) discarded");
+  });
+
+  it("says so for a NON-empty baseline whose clear discarded nothing either", () => {
+    // The same case on the other branch: the remembered id is gone, and
+    // `clearedTotal` still has not moved. Without `clearsTotal` this reported
+    // "the walk undid past the checkpoint" — a mechanism that had not occurred.
+    const result = stepsBackToBaseline(
+      baseline({ undoTopSeq: 4, clearedTotal: 7, clearsTotal: 2 }),
+      now({ undoSeqs: [11, 12], clearedTotal: 7, clearsTotal: 3 })
+    );
+    const { unreachable } = result as { unreachable: string };
+    expect(unreachable).toContain("workbook-structure change");
+    expect(unreachable).not.toContain("undid past");
   });
 
   it("takes precedence over the cap when both moved", () => {
@@ -103,8 +150,8 @@ describe("stepsBackToBaseline: a sheet operation ended the history", () => {
     // all of them, and the remedy differs (raise the cap vs. do not checkpoint
     // across a sheet operation).
     const result = stepsBackToBaseline(
-      baseline({ undoTopSeq: 4, evictedTotal: 0, clearedTotal: 0 }),
-      now({ undoSeqs: [50], evictedTotal: 12, clearedTotal: 30 })
+      baseline({ undoTopSeq: 4, evictedTotal: 0, clearedTotal: 0, clearsTotal: 0 }),
+      now({ undoSeqs: [50], evictedTotal: 12, clearedTotal: 30, clearsTotal: 1 })
     );
     expect((result as { unreachable: string }).unreachable).toContain(
       "workbook-structure change"
@@ -136,13 +183,16 @@ describe("stepsBackToBaseline: the other two causes still answer for themselves"
     );
   });
 
-  it("survives a baseline written before clearedTotal existed", () => {
+  it("survives a baseline written before the clear counters existed", () => {
     // Defensive, and cheap: a baseline object round-tripped through an older
-    // report has no `clearedTotal`. `undefined - 0` is NaN, and `NaN > 0` is
-    // false, so the guard would silently never fire -- the exact shape of
-    // failure this whole file exists to prevent.
+    // report has no `clearedTotal` and no `clearsTotal`. `undefined - 0` is
+    // NaN, and `NaN > 0` is false, so the guard would silently never fire --
+    // the exact shape of failure this whole file exists to prevent.
     const stale = { undoTopSeq: 4, evictedTotal: 0 } as unknown as Baseline;
-    const result = stepsBackToBaseline(stale, now({ undoSeqs: [11], clearedTotal: 3 }));
+    const result = stepsBackToBaseline(
+      stale,
+      now({ undoSeqs: [11], clearedTotal: 3, clearsTotal: 1 })
+    );
     expect((result as { unreachable: string }).unreachable).toContain(
       "workbook-structure change"
     );
