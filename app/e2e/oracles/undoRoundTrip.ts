@@ -101,11 +101,22 @@ export async function getUndoState(page: Page): Promise<UndoStateJson> {
   })) as UndoStateJson;
 }
 
+/** EntityIds of the floating ranges currently alive ([] when the query
+ *  fails — degrade to "none", never manufacture objects). */
+export async function getFloatingRangeIds(page: Page): Promise<string[]> {
+  return (await page.evaluate(async () => {
+    const tauri = (window as any).__TAURI__;
+    const list = await tauri.core.invoke("list_floating_ranges").catch(() => []);
+    return ((list as Array<{ id?: unknown }>) ?? []).map((fr) => String(fr?.id ?? ""));
+  })) as string[];
+}
+
 /** Capture the baseline for a new checkpoint window. */
 export async function captureUndoBaseline(page: Page): Promise<OracleBaseline> {
-  const [digest, undoState] = [
+  const [digest, undoState, floatingRangeIds] = [
     await getWorkbookDigest(page),
     await getUndoState(page),
+    await getFloatingRangeIds(page),
   ];
   return {
     digest,
@@ -119,7 +130,30 @@ export async function captureUndoBaseline(page: Page): Promise<OracleBaseline> {
     evictedTotal: undoState.evictedTotal,
     clearedTotal: undoState.clearedTotal ?? 0,
     clearsTotal: undoState.clearsTotal ?? 0,
+    floatingRangeIds,
   };
+}
+
+/**
+ * Floating ranges alive NOW that the baseline never had.
+ *
+ * Non-empty means a floating range was CREATED inside this window, and FR
+ * creation is the product's one mutation that neither pushes an undo entry
+ * nor ends the history (add_sheet parity, §16): the object and its backing
+ * sheet survive every undo, so the checkpoint state is unreachable and the
+ * window is UNDECIDABLE — not an undo defect. (Delete and rename END the
+ * history, so `clearsTotal` already declines those windows; geometry, window
+ * and cell writes are ordinary undoable transactions and stay decidable.)
+ *
+ * Pure and exported so the decision can be tested without a running app,
+ * like `stepsBackToBaseline` above.
+ */
+export function frCreatedSinceBaseline(
+  baselineIds: readonly string[] | undefined,
+  nowIds: readonly string[]
+): string[] {
+  const base = new Set(baselineIds ?? []);
+  return nowIds.filter((id) => !base.has(id));
 }
 
 /**
@@ -279,6 +313,39 @@ export async function checkUndoRoundTrip(
   const after = await getWorkbookDigest(page);
   const undoState = await getUndoState(page);
   const distance = stepsBackToBaseline(baseline, undoState);
+
+  // A floating range CREATED in this window survives every undo (not undoable,
+  // not history-ending — §16's doctrine), so the checkpoint is unreachable no
+  // matter what the counters say. Asked BEFORE the counter arithmetic is
+  // trusted, for the same reason the wholesale-clear question is: deciding an
+  // undecidable window is how this oracle blames the product (BUG-0005, S12).
+  const frCreated = frCreatedSinceBaseline(
+    baseline.floatingRangeIds,
+    await getFloatingRangeIds(page)
+  );
+  if (!("unreachable" in distance) && frCreated.length > 0) {
+    return {
+      verdict: "undecided",
+      stepsUndone: 0,
+      violations: [
+        {
+          invariantId: "undo-history-unreachable",
+          oracleId: "undo-round-trip",
+          message:
+            `Undo round-trip skipped: ${frCreated.length} floating range(s) ` +
+            `were created in this window. Creating a floating range is not ` +
+            `undoable (add_sheet parity) and deliberately does not end the ` +
+            `undo history, so the created object survives every undo and no ` +
+            `number of steps returns to the checkpoint. Not an undo defect.`,
+          details: {
+            createdFloatingRangeIds: frCreated,
+            baselineFloatingRangeIds: baseline.floatingRangeIds ?? [],
+            currentDepth: undoState.undoDepth,
+          },
+        },
+      ],
+    };
+  }
 
   if ("unreachable" in distance) {
     // NOT a product defect, and deliberately not reported as one. The history

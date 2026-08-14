@@ -92,18 +92,61 @@ export function updateCachedRegions(regions: PivotRegionData[]): void {
   const activeGone =
     activePivotId !== null && !cachedRegions.some((r) => r.pivotId === activePivotId);
   if (cachedRegions.length === 0 || activeGone) {
-    lastCheckedSelection = null;
-    activePivotId = null;
-    if (analyzeTabRegistered) {
-      unregisterPanel(PIVOT_ANALYZE_TAB_ID);
-      analyzeTabRegistered = false;
-    }
-    if (designTabRegistered) {
-      unregisterPanel(PIVOT_DESIGN_TAB_ID);
-      designTabRegistered = false;
-    }
-    removeTaskPaneContextKey("pivot");
-    closeTaskPane(PIVOT_PANE_ID);
+    deselectPivotContext();
+  }
+}
+
+/**
+ * Tear down everything that addresses the active pivot: the contextual
+ * Analyze/Design tabs, the "pivot" context key and the editor pane.
+ *
+ * ONE implementation, shared by the announcement-driven reconciliation above
+ * and the synchronous structural-shift one below — the BUG-0026/BUG-0051
+ * family exists because this teardown lived in one reconciliation path and
+ * not the other.
+ */
+function deselectPivotContext(): void {
+  lastCheckedSelection = null;
+  activePivotId = null;
+  if (analyzeTabRegistered) {
+    unregisterPanel(PIVOT_ANALYZE_TAB_ID);
+    analyzeTabRegistered = false;
+  }
+  if (designTabRegistered) {
+    unregisterPanel(PIVOT_DESIGN_TAB_ID);
+    designTabRegistered = false;
+  }
+  removeTaskPaneContextKey("pivot");
+  closeTaskPane(PIVOT_PANE_ID);
+}
+
+/**
+ * The SYNCHRONOUS half of the reconciliation, for the structural-delete path.
+ *
+ * A row/column delete that fully covers a pivot region removes the pivot in
+ * the backend (`shift_pivot_regions_for_row_delete`, structure.rs) — a second
+ * pivot-delete path that never goes near `deletePivotTable`, exactly as
+ * convert-to-range was a second table-delete path (BUG-0051). The extension's
+ * ROWS_DELETED/COLUMNS_DELETED handlers DELIBERATELY do not call
+ * `refreshPivotRegions` (a concurrent in-flight refresh could overwrite the
+ * sync shift with pre-shift data), so `updateCachedRegions` never runs on this
+ * path, `handleSelectionChange` never runs under a stationary cursor, and the
+ * Analyze/Design tabs would outlive the pivot they address. The UI's own row
+ * delete needs a whole-ROW selection (which moves the cursor out of the pivot
+ * first), but a script's `api.deleteRows` or a macro replay deletes rows while
+ * the cursor stays wherever the user left it.
+ *
+ * Only the ACTIVE-id rule, deliberately: an empty cache with a null active id
+ * is the just-created-pivot state (`ensureDesignTabRegistered` runs before any
+ * selection sets the id), and tearing down on the count alone would kill the
+ * tabs of the pivot the user just made — the vacuity case the reconciliation
+ * tests pin.
+ */
+function reconcileActivePivotAfterShift(): void {
+  const activeGone =
+    activePivotId !== null && !cachedRegions.some((r) => r.pivotId === activePivotId);
+  if (activeGone) {
+    deselectPivotContext();
   }
 }
 
@@ -193,6 +236,9 @@ export function shiftCachedRegionsForColDelete(col: number, count: number): void
     }
   }
   lastCheckedSelection = null;
+  // The filter above may have removed the ACTIVE pivot's region — the backend
+  // deleted the pivot with it, and nothing else reconciles on this path.
+  reconcileActivePivotAfterShift();
 }
 
 /**
@@ -212,6 +258,9 @@ export function shiftCachedRegionsForRowDelete(row: number, count: number): void
     }
   }
   lastCheckedSelection = null;
+  // The filter above may have removed the ACTIVE pivot's region — the backend
+  // deleted the pivot with it, and nothing else reconciles on this path.
+  reconcileActivePivotAfterShift();
 }
 
 /**

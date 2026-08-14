@@ -28,6 +28,8 @@ struct Aux {
     pivots: PivotState,
     pane: crate::pane_control::PaneControlState,
     filters: crate::ribbon_filter::RibbonFilterState,
+    slicer: crate::slicer::SlicerState,
+    timeline: crate::timeline_slicer::TimelineSlicerState,
 }
 
 fn aux() -> Aux {
@@ -37,6 +39,8 @@ fn aux() -> Aux {
         pivots: PivotState::new(),
         pane: crate::pane_control::PaneControlState::new(),
         filters: crate::ribbon_filter::RibbonFilterState::new(),
+        slicer: crate::slicer::SlicerState::new(),
+        timeline: crate::timeline_slicer::TimelineSlicerState::new(),
     }
 }
 
@@ -131,7 +135,7 @@ fn off_sheet_insert_rows_lands_and_records_sheet_tagged_undo() {
     let a = aux();
 
     off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::RowInsert { at: 2, count: 3 },
     )
@@ -170,7 +174,7 @@ fn off_sheet_delete_rows_lands_and_snapshots_the_deleted_cells() {
     let a = aux();
 
     off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::RowDelete { at: 1, count: 2 },
     )
@@ -205,7 +209,7 @@ fn off_sheet_insert_columns_shifts_right_on_the_target_only() {
     let a = aux();
 
     off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::ColInsert { at: 0, count: 2 },
     )
@@ -225,7 +229,7 @@ fn off_sheet_delete_columns_shifts_left_on_the_target_only() {
     let a = aux();
 
     off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::ColDelete { at: 1, count: 2 },
     )
@@ -243,7 +247,7 @@ fn off_sheet_structural_edit_moves_the_target_sheets_row_heights() {
     let a = aux();
 
     off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::RowInsert { at: 0, count: 2 },
     )
@@ -263,7 +267,7 @@ fn off_sheet_structural_edit_is_blocked_by_target_protection_not_active() {
     protect_sheet(&state, 0);
     let a = aux();
     off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::RowInsert { at: 0, count: 1 },
     )
@@ -275,7 +279,7 @@ fn off_sheet_structural_edit_is_blocked_by_target_protection_not_active() {
     });
     protect_sheet(&state, 1);
     let err = off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         1,
         calp::writeback::StructuralEdit::RowInsert { at: 0, count: 1 },
     )
@@ -290,7 +294,7 @@ fn off_sheet_structural_edit_rejects_an_out_of_range_sheet() {
     let state = two_sheet_state(|_| {});
     let a = aux();
     let err = off_sheet_structural_edit(
-        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters,
+        &state, &a.file, &a.pivots, &a.files, &a.pane, &a.filters, &a.slicer, &a.timeline,
         7,
         calp::writeback::StructuralEdit::RowInsert { at: 0, count: 1 },
     )

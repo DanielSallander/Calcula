@@ -284,21 +284,110 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, effect: &crate::document
     }
 
     // Remove fully deleted regions and their associated pivot data
+    let mut removed_pivot_ids: Vec<pivot_engine::PivotId> = Vec::new();
     for region_id in &regions_to_remove {
         if let Some(region) = regions.iter().find(|r| &r.id == region_id) {
             if region.region_type == "pivot" {
                 let pid = region.owner_id;
                 pivot_tables.remove(&pid);
+                removed_pivot_ids.push(pid);
             }
         }
     }
     regions.retain(|r| !regions_to_remove.contains(&r.id));
+
+    // BUG-0054: a pivot removed HERE dies the same death `delete_pivot_table`
+    // gives one — cached view dropped, active-pivot pointer cleared, object
+    // script pruned. (The cascade and the undo restore are the caller's half:
+    // they must run before the transaction opens / inside it, respectively —
+    // see `collect_doomed_pivots`.) Views/active under the pivot_tables guard,
+    // matching delete_pivot_table's lock order.
+    if !removed_pivot_ids.is_empty() {
+        let mut views = pivot_state.views.lock().unwrap();
+        let mut active = pivot_state.active_pivot_id.lock().unwrap();
+        for pid in &removed_pivot_ids {
+            views.remove(pid);
+            if *active == Some(*pid) {
+                *active = None;
+            }
+        }
+    }
 
     // Report-specific: realign report definitions with their shifted regions
     // (definitions whose region was fully deleted are dropped).
     drop(pivot_tables);
     drop(regions);
     sync_report_definitions_to_regions(state, effect);
+
+    // C10, same as delete_pivot_table: a deleted pivot must not leave its
+    // object script mounted/persisted. After every guard above is dropped.
+    for pid in &removed_pivot_ids {
+        crate::scripting::object_script_commands::prune_scripts_for_instance(
+            state,
+            effect,
+            &pid.to_string(),
+        );
+    }
+}
+
+/// Everything BUG-0054 needs captured BEFORE a structural delete removes a
+/// pivot: the ids (for the slicer/timeline/ribbon-filter cascade) and the
+/// `pivot_delete` restore payloads (definition + cache, the exact bytes
+/// `delete_pivot_table` records).
+#[derive(Default)]
+pub(crate) struct DoomedPivots {
+    pub sources: Vec<crate::object_deps::DeletedSource>,
+    pub snapshots: Vec<(pivot_engine::PivotId, Vec<u8>)>,
+}
+
+/// The pivots a row/column delete will remove OUTRIGHT — the two
+/// `pivot_tables.remove(&pid)` sites in `shift_pivot_regions_for_row_delete` /
+/// `_col_delete` use exactly these covered-region tests, so this predicts them
+/// rather than re-deciding (BUG-0054: predicting differently is how the raw
+/// removal went unnoticed in the first place).
+///
+/// Takes and releases its own short read locks; call it BEFORE the caller's
+/// main lock phase.
+pub(crate) fn collect_doomed_pivots(
+    state: &AppState,
+    pivot_state: &PivotState,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) -> DoomedPivots {
+    use calp::writeback::StructuralEdit as SE;
+    let mut out = DoomedPivots::default();
+    let doomed_ids: Vec<pivot_engine::PivotId> = {
+        let regions = state.protected_regions.lock().unwrap();
+        regions
+            .iter()
+            .filter(|r| r.sheet_index == sheet_index && r.region_type == "pivot")
+            .filter(|r| match edit {
+                SE::RowDelete { at, count } => {
+                    r.start_row >= at && r.end_row < at + count
+                }
+                SE::ColDelete { at, count } => {
+                    r.start_col >= at && r.end_col < at + count
+                }
+                // Inserts never remove a pivot.
+                SE::RowInsert { .. } | SE::ColInsert { .. } => false,
+            })
+            .map(|r| r.owner_id)
+            .collect()
+    };
+    if doomed_ids.is_empty() {
+        return out;
+    }
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    for pid in doomed_ids {
+        if let Some((definition, cache)) = pivot_tables.get(&pid) {
+            out.sources.push(crate::object_deps::DeletedSource::pivot(pid));
+            out.snapshots.push((
+                pid,
+                crate::undo_commands::pivot_delete_snapshot_bytes(pid, definition, cache),
+            ));
+        }
+    }
+    out
 }
 
 /// ============================================================================
@@ -1178,21 +1267,50 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, effect: &crate::document
     }
 
     // Remove fully deleted regions and their associated pivot data
+    let mut removed_pivot_ids: Vec<pivot_engine::PivotId> = Vec::new();
     for region_id in &regions_to_remove {
         if let Some(region) = regions.iter().find(|r| &r.id == region_id) {
             if region.region_type == "pivot" {
                 let pid = region.owner_id;
                 pivot_tables.remove(&pid);
+                removed_pivot_ids.push(pid);
             }
         }
     }
     regions.retain(|r| !regions_to_remove.contains(&r.id));
+
+    // BUG-0054: a pivot removed HERE dies the same death `delete_pivot_table`
+    // gives one — cached view dropped, active-pivot pointer cleared, object
+    // script pruned. (The cascade and the undo restore are the caller's half:
+    // they must run before the transaction opens / inside it, respectively —
+    // see `collect_doomed_pivots`.) Views/active under the pivot_tables guard,
+    // matching delete_pivot_table's lock order.
+    if !removed_pivot_ids.is_empty() {
+        let mut views = pivot_state.views.lock().unwrap();
+        let mut active = pivot_state.active_pivot_id.lock().unwrap();
+        for pid in &removed_pivot_ids {
+            views.remove(pid);
+            if *active == Some(*pid) {
+                *active = None;
+            }
+        }
+    }
 
     // Report-specific: realign report definitions with their shifted regions
     // (definitions whose region was fully deleted are dropped).
     drop(pivot_tables);
     drop(regions);
     sync_report_definitions_to_regions(state, effect);
+
+    // C10, same as delete_pivot_table: a deleted pivot must not leave its
+    // object script mounted/persisted. After every guard above is dropped.
+    for pid in &removed_pivot_ids {
+        crate::scripting::object_script_commands::prune_scripts_for_instance(
+            state,
+            effect,
+            &pid.to_string(),
+        );
+    }
 }
 
 // ============================================================================
@@ -1459,6 +1577,8 @@ pub fn insert_rows(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -1470,6 +1590,8 @@ pub fn insert_rows(
         &user_files_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
         row,
         count,
         sheet_index,
@@ -1490,6 +1612,8 @@ pub(crate) fn insert_rows_impl(
     user_files_state: &crate::persistence::UserFilesState,
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -1504,6 +1628,7 @@ pub(crate) fn insert_rows_impl(
                 off_sheet_structural_edit(
                     &state, &file_state, &pivot_state, &user_files_state,
                     &pane_control_state, &ribbon_filter_state,
+                    slicer_state, timeline_state,
                     target, calp::writeback::StructuralEdit::RowInsert { at: row, count },
                 )?;
                 return Ok(Vec::new());
@@ -1823,6 +1948,22 @@ pub(crate) fn insert_rows_impl(
     // === UPDATE TABLE BOUNDARIES ===
     shift_table_boundaries_for_row_insert(&state, &effect, row, count, active_sheet);
 
+    // === BUG-0055: REBUILD THE EDGES, don't just shift them ===
+    //
+    // The in-place map maintenance above shifts only edges that ALREADY existed.
+    // A range that GREW across the insert (`=SUM(A1:A3)` -> `=SUM(A1:A4)`) needs
+    // an edge for each INSERTED cell, and no shifted copy exists to move into
+    // place — so a write into the inserted row recalculated NOTHING while a
+    // write to an originally-covered cell cascaded fine (measured; the value
+    // store had the number, only the edge was missing). Rebuilding from the
+    // re-pointed stored ASTs is the same one-authority answer the OFF-sheet
+    // structural path already uses (see `off_sheet_structural_edit`), and it
+    // expands defined names / structured refs, so a name-backed formula keeps
+    // its expanded cell edges too. Deliberately AFTER the table-boundary shift
+    // (structured refs must expand against post-shift tables) and after every
+    // guard above was dropped (`rebuild_all_dependencies` takes the grid lock).
+    crate::undo_commands::rebuild_all_dependencies(&state);
+
     // === D8 / §2s: RECALCULATE ===
     //
     // Everything above re-POINTED references and carried each cached value along
@@ -1903,6 +2044,8 @@ pub fn insert_columns(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -1914,6 +2057,8 @@ pub fn insert_columns(
         &user_files_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
         col,
         count,
         sheet_index,
@@ -1934,6 +2079,8 @@ pub(crate) fn insert_columns_impl(
     user_files_state: &crate::persistence::UserFilesState,
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -1947,6 +2094,7 @@ pub(crate) fn insert_columns_impl(
                 off_sheet_structural_edit(
                     &state, &file_state, &pivot_state, &user_files_state,
                     &pane_control_state, &ribbon_filter_state,
+                    slicer_state, timeline_state,
                     target, calp::writeback::StructuralEdit::ColInsert { at: col, count },
                 )?;
                 return Ok(Vec::new());
@@ -2254,6 +2402,11 @@ pub(crate) fn insert_columns_impl(
 
     // === UPDATE TABLE BOUNDARIES ===
     shift_table_boundaries_for_col_insert(&state, &effect, col, count, active_sheet);
+
+    // === BUG-0055 (column twin): REBUILD THE EDGES, don't just shift them ===
+    // A range that grew across the inserted columns has no edge for the
+    // inserted cells; see the row-insert site for the full mechanism.
+    crate::undo_commands::rebuild_all_dependencies(&state);
 
     // === D8 / §2s: RECALCULATE ===
     //
@@ -2729,6 +2882,8 @@ pub fn delete_rows(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -2740,6 +2895,8 @@ pub fn delete_rows(
         &user_files_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
         row,
         count,
         sheet_index,
@@ -2760,6 +2917,8 @@ pub(crate) fn delete_rows_impl(
     user_files_state: &crate::persistence::UserFilesState,
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -2773,6 +2932,7 @@ pub(crate) fn delete_rows_impl(
                 off_sheet_structural_edit(
                     &state, &file_state, &pivot_state, &user_files_state,
                     &pane_control_state, &ribbon_filter_state,
+                    slicer_state, timeline_state,
                     target, calp::writeback::StructuralEdit::RowDelete { at: row, count },
                 )?;
                 return Ok(Vec::new());
@@ -2821,6 +2981,36 @@ pub(crate) fn delete_rows_impl(
         }
     }
 
+    // BUG-0054: pivots FULLY COVERED by this delete die with their world, not
+    // raw. Capture their `pivot_delete` restore payloads and run the
+    // slicer/timeline/ribbon-filter cascade NOW — every refusal gate above has
+    // passed, so the delete is committed, and `delete_pivot_table` runs its
+    // cascade before its transaction opens for the same reason (the cascade
+    // takes the object-store locks, and the undo lock is never held across a
+    // store lock). The restores are recorded inside the transaction below.
+    let doomed_pivots = {
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        collect_doomed_pivots(
+            &state,
+            &pivot_state,
+            active,
+            calp::writeback::StructuralEdit::RowDelete { at: row, count },
+        )
+    };
+    let pivot_cascade = if doomed_pivots.sources.is_empty() {
+        crate::object_deps::SourceCascade::default()
+    } else {
+        let cascade_effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        crate::object_deps::cascade_deleted_sources(
+            &state,
+            slicer_state,
+            timeline_state,
+            &ribbon_filter_state,
+            &cascade_effect,
+            &doomed_pivots.sources,
+        )
+    };
+
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
@@ -2851,6 +3041,18 @@ pub(crate) fn delete_rows_impl(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Delete {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // BUG-0054: restores for the pivots this delete removes outright, INSIDE
+    // this transaction so one Ctrl+Z restores rows + pivot + slicers together.
+    // Cascade restores first: entries replay in reverse, so the pivot is
+    // recreated before the slicers that point at it.
+    crate::object_deps::record_source_cascade_undo_into(&mut undo_stack, &pivot_cascade);
+    for (_pid, bytes) in &doomed_pivots.snapshots {
+        undo_stack.record_custom_restore(
+            "pivot_delete".to_string(),
+            bytes.clone(),
+            "Delete pivot table",
+        );
+    }
     // Past every refusal gate above (sheet-protection options + the writeback
     // shift guard) and inside the open transaction: the edit is committed, and
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
@@ -3227,6 +3429,8 @@ pub fn delete_columns(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -3238,6 +3442,8 @@ pub fn delete_columns(
         &user_files_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
         col,
         count,
         sheet_index,
@@ -3258,6 +3464,8 @@ pub(crate) fn delete_columns_impl(
     user_files_state: &crate::persistence::UserFilesState,
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
@@ -3271,6 +3479,7 @@ pub(crate) fn delete_columns_impl(
                 off_sheet_structural_edit(
                     &state, &file_state, &pivot_state, &user_files_state,
                     &pane_control_state, &ribbon_filter_state,
+                    slicer_state, timeline_state,
                     target, calp::writeback::StructuralEdit::ColDelete { at: col, count },
                 )?;
                 return Ok(Vec::new());
@@ -3313,6 +3522,31 @@ pub(crate) fn delete_columns_impl(
         }
     }
 
+    // BUG-0054 (column twin): see delete_rows_impl — pivots fully covered by
+    // this delete die with their cascade and their undo restore, not raw.
+    let doomed_pivots = {
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        collect_doomed_pivots(
+            &state,
+            &pivot_state,
+            active,
+            calp::writeback::StructuralEdit::ColDelete { at: col, count },
+        )
+    };
+    let pivot_cascade = if doomed_pivots.sources.is_empty() {
+        crate::object_deps::SourceCascade::default()
+    } else {
+        let cascade_effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        crate::object_deps::cascade_deleted_sources(
+            &state,
+            slicer_state,
+            timeline_state,
+            &ribbon_filter_state,
+            &cascade_effect,
+            &doomed_pivots.sources,
+        )
+    };
+
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
@@ -3343,6 +3577,17 @@ pub(crate) fn delete_columns_impl(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Delete {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // BUG-0054: restores for the pivots this delete removes outright — see the
+    // row twin for ordering (cascade first; reverse replay recreates the pivot
+    // before its slicers).
+    crate::object_deps::record_source_cascade_undo_into(&mut undo_stack, &pivot_cascade);
+    for (_pid, bytes) in &doomed_pivots.snapshots {
+        undo_stack.record_custom_restore(
+            "pivot_delete".to_string(),
+            bytes.clone(),
+            "Delete pivot table",
+        );
+    }
     // Past every refusal gate above (sheet-protection options + the writeback
     // shift guard) and inside the open transaction: the edit is committed, and
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
@@ -5436,6 +5681,8 @@ pub(crate) fn off_sheet_structural_edit(
     user_files_state: &crate::persistence::UserFilesState,
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     target: usize,
     edit: calp::writeback::StructuralEdit,
 ) -> Result<(), String> {
@@ -5541,6 +5788,24 @@ pub(crate) fn off_sheet_structural_edit(
     // several sibling blocks.
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
 
+    // BUG-0054: pivots on the TARGET sheet fully covered by a delete die with
+    // their cascade and their undo restore — same recipe as the active-sheet
+    // paths, BEFORE the lock block (the cascade takes the object-store locks,
+    // and the undo lock is never held across a store lock).
+    let doomed_pivots = collect_doomed_pivots(state, pivot_state, target, edit);
+    let pivot_cascade = if doomed_pivots.sources.is_empty() {
+        crate::object_deps::SourceCascade::default()
+    } else {
+        crate::object_deps::cascade_deleted_sources(
+            state,
+            slicer_state,
+            timeline_state,
+            ribbon_filter_state,
+            &effect,
+            &doomed_pivots.sources,
+        )
+    };
+
     let description = match edit {
         SE::RowInsert { count, .. } => format!("Insert {} row(s) on sheet {}", count, target + 1),
         SE::RowDelete { count, .. } => format!("Delete {} row(s) on sheet {}", count, target + 1),
@@ -5573,6 +5838,17 @@ pub(crate) fn off_sheet_structural_edit(
             crate::undo_commands::sheet_structural_snapshot_bytes(&snapshot),
             &description,
         );
+        // BUG-0054: restores for the pivots this delete removes outright —
+        // cascade first (reverse replay recreates the pivot before its
+        // slicers), then one `pivot_delete` per pivot, all in THIS transaction.
+        crate::object_deps::record_source_cascade_undo_into(&mut undo_stack, &pivot_cascade);
+        for (_pid, bytes) in &doomed_pivots.snapshots {
+            undo_stack.record_custom_restore(
+                "pivot_delete".to_string(),
+                bytes.clone(),
+                "Delete pivot table",
+            );
+        }
 
         // Cell-type assignments move with the edit (same transaction).
         {

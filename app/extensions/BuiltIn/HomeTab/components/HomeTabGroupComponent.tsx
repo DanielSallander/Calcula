@@ -185,7 +185,11 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     }
 
     if (item.id === "fontName") {
-      const current = state.currentStyle?.fontFamily ?? "system-ui";
+      // Fallback mirrors the fontSize fallback of 11 below: the grid's default
+      // cell font is Calibri (theme cellFontFamily, backend default style), so
+      // a style that carries no explicit family renders in Calibri — the combo
+      // must say what the renderer does, not "system-ui" (BUG-0062).
+      const current = state.currentStyle?.fontFamily ?? "Calibri";
       const fonts = FONT_LIST.includes(current) ? FONT_LIST : [current, ...FONT_LIST];
       return (
         <Select

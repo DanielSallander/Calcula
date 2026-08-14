@@ -6642,6 +6642,55 @@ pub(crate) fn recalc_after_off_sheet_write(
             .filter(|i| !sheet_indices.contains(i))
             .collect()
     };
+    // BUG-0058: sheets holding CROSS-SHEET DEPENDENTS of anything on the
+    // written (or object) sheets. This pass re-evaluated the written sheets,
+    // the object sheets and the ACTIVE sheet — and no other user sheet, so a
+    // formula on a sheet the user was not looking at that read a floating
+    // range (or any off-sheet-written cell) stayed stale until F9 or a visit.
+    // Found by the first mixed floating+sheet soak walk: the dependent on the
+    // ACTIVE sheet updated while its twin on a non-active sheet held its old
+    // value. The closure is TRANSITIVE (a repaired dependent can feed a
+    // formula on yet another sheet), computed to a fixpoint over sheet NAMES
+    // — the dependents map is keyed by the workbook's official spelling.
+    //
+    // LOCKS ARE STRICTLY SEQUENTIAL here (snapshot, drop, lock, drop): this
+    // function's callers hold nothing, and taking `sheet_names` and the
+    // dependents map one after the other — never nested — contributes no
+    // ordering edge to the crate's lock graph.
+    let dependent_sheets: Vec<usize> = {
+        let sheet_names_snapshot: Vec<String> = state.sheet_names.read().unwrap().clone();
+        let dependents = state.cross_sheet_dependents.lock().unwrap();
+        let mut in_set: std::collections::BTreeSet<usize> = sheet_indices
+            .iter()
+            .copied()
+            .chain(object_sheets.iter().copied())
+            .collect();
+        loop {
+            let names_in_set: std::collections::HashSet<&str> = in_set
+                .iter()
+                .filter_map(|&i| sheet_names_snapshot.get(i).map(|s| s.as_str()))
+                .collect();
+            let mut grew = false;
+            for ((precedent_name, _r, _c), deps) in dependents.iter() {
+                if names_in_set.contains(precedent_name.as_str()) {
+                    for &(dep_sheet, _dr, _dc) in deps.iter() {
+                        if dep_sheet < sheet_names_snapshot.len() && in_set.insert(dep_sheet) {
+                            grew = true;
+                        }
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        in_set
+            .into_iter()
+            .filter(|i| {
+                !sheet_indices.contains(i) && !object_sheets.contains(i) && *i != active_sheet
+            })
+            .collect()
+    };
     // Cross-sheet cycle detection is memoised for this whole scope: the loop
     // below calls `recalculate_sheet_values` 2*(sheets+1) times and the answer
     // is a function of the ASTs, which recalculation never changes. Without
@@ -6649,7 +6698,11 @@ pub(crate) fn recalc_after_off_sheet_write(
     // calls. See calculation.rs `begin_circular_pass`.
     let _circular_pass = crate::calculation::begin_circular_pass();
     for _pass in 0..2 {
-        for &idx in sheet_indices.iter().chain(object_sheets.iter()) {
+        for &idx in sheet_indices
+            .iter()
+            .chain(object_sheets.iter())
+            .chain(dependent_sheets.iter())
+        {
             if idx == active_sheet {
                 continue;
             }
@@ -8054,3 +8107,11 @@ mod spill_ref_tests;
 #[cfg(test)]
 #[path = "d8_structural_recalc_tests.rs"]
 mod d8_structural_recalc_tests;
+
+/// BUG-0054 — a structural delete that fully covers a pivot region must give
+/// the pivot the same death `delete_pivot_table` gives one (cascade, undo
+/// restore, views/active cleanup). A CHILD module of `data` for the same
+/// reason as above.
+#[cfg(test)]
+#[path = "pivot_structural_delete_tests.rs"]
+mod pivot_structural_delete_tests;

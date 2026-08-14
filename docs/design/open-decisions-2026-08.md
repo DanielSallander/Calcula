@@ -13738,7 +13738,9 @@ one identifier, and it repairs the tab click as much as undo's switch.
   case too. Changing it is a one-line widening of the `switched &&` guard and a real Excel-parity
   gap, but it moves the cursor on every Ctrl+Z and several E2E journeys assert where the cursor is.
   Owner call, not a passing change.
-* **`TestRunner`'s `ctx.undo()` bypasses the whole frontend path.** It calls the `undo` command
+* **`TestRunner`'s `ctx.undo()` bypasses the whole frontend path.** ~~Reported rather than
+  changed~~ — **CLOSED 2026-08-14, §18a** (routed through `CommandRegistry.execute(CoreCommands
+  .UNDO)`, with `ctx.redo()` joining it; proved live via the fused CLI). It calls the `undo` command
   directly (`app/extensions/TestRunner/lib/runner.ts`), so an in-app suite that undoes an off-sheet
   change leaves the view where it was. Its own header says the direct call is deliberate. Routing it
   through `CommandRegistry.execute(CoreCommands.UNDO)` would make its undos faithful to Ctrl+Z, but
@@ -14293,7 +14295,7 @@ what made the tab appear so it could then survive its table. `table.create` now 
 perform was making the walk blind to the whole contextual-tab surface unless an unrelated action
 happened to refresh a cache.
 
-### 15c. BUG-0052 — the sheet switch is atomic in state and sequential in paint
+### 15c. BUG-0052 — the sheet switch is atomic in state and sequential in paint — **FIXED 2026-08-14 (addendum below)**
 
 §13 claimed the undo switch is atomic: "There is no `await` between the first dispatch and the last,
 so React cannot paint mid-switch." The instruction for this pass was to ATTACK that, so it was
@@ -14330,6 +14332,88 @@ ONE switch path every tab click, script, MCP tool and undo shares, and the regis
 warning about that path is that the last time it had two hydration paths, the second was mount-only
 and painted sheet 1's panes on sheet 2. The measurement, the probe and the bound are committed, so
 the day it is attempted there is already a test that fails before and passes after.
+
+---
+
+#### FIXED (2026-08-14) — by this section's own prescription, and the tear turned out to have TWO mechanisms
+
+**The canvas half — prime before the swap, commit in the dispatch turn, paint before the browser
+does.** Every switch initiator (SheetTabs' tab click, add sheet, delete sheet, `applySheetsResult`
+on both branches, and `applyRestoreToTheView` for undo/redo) now awaits **`primeSheetSwitch()`**
+strictly AFTER the backend switch — so the viewport read answers about the NEW sheet — and strictly
+BEFORE the first dispatch. The prime runs the prefetcher **GridCanvas itself registers** (the same
+`calculateFetchRange`, the same `getViewportCells` + `getSpillRanges` the post-switch fetch ran, so
+the payload is the identical commit, merely earlier) into a one-shot handoff slot
+(`app/src/core/lib/sheetSwitchPrefetch.ts`, re-exported to Shell through `@api`). Nothing new
+listens and nothing new dispatches: the **existing** `sheet:normalSwitch` handler takes the payload
+and commits it synchronously inside the dispatch turn, and a `useLayoutEffect` draws the canvas
+after React commits the DOM but before the browser paints. One flush, one frame. The heeded
+warnings, by name: the dispatch sequence `beforeSwitch -> context -> normalSwitch -> SHEET_CHANGED`
+still contains **no `await`** (§13's discipline — the await sits before the first dispatch, where
+the screen still shows the old sheet consistently); there is **no second hydration path** (the slot
+is a payload cache for the one path, consumed by its one consumer, refused on sheet-index mismatch
+or staleness, cleared on take); a same-sheet undo primes nothing; a missing or failed prime degrades
+to the old fetch-after-swap tear, never to a wrong or missing paint; and **no lock or synchronization
+was added anywhere** — the epoch guard below is a ref compare. That guard: `fetchCells` now stamps a
+sheet epoch before its IPC and discards a response that straddled a switch (the backend answers
+`get_viewport_cells` for whichever sheet is active when it SERVES the call, so such a response is
+undecidable), re-fetching through the existing deferral machinery.
+
+**The strip half, which the prime alone EXPOSED at 33 ms on undo — and which is why "reuse the tab
+click's channel" measured atomic in state and torn in paint.** The strip's bold weight rendered from
+SheetTabs' **local** `activeIndex`. A tab click sets that local state in its own handler, so the
+click became atomic the moment the canvas half landed (0 ms). A backend-initiated switch — undo —
+only reaches it through the `"Syncing activeIndex with Redux"` `useEffect`, which runs AFTER the
+browser has painted the flush that already carried the new sheet's cells: the canvas now LED the
+strip by the frames the effect took. §13's comment — "the tab strip has no state of its own to
+update: it syncs its highlight from this" — was true of the state and false of the pixels, exactly
+like the atomicity claim it accompanied. `paintedActiveIndex` now renders the highlight (and the
+formula-target/separator variants of it) from the grid sheet context; the local `activeIndex` stays
+for behaviour (click guards, drag, scroll-into-view).
+
+**Measured, committed probe, verified-cold launches.** Before: tab click 60-67 ms, undo 21-71 ms
+(three runs, §15c above). After: **0 ms / 0 ms on five consecutive runs**. Landed-at (first frame
+with the new tab AND the new ink — printed by the spec now): click 90-156 ms, undo 52-83 ms, against
+the pre-fix canvas catch-up of ~98 ms — the switch got no slower; the strip now waits for the same
+moment instead of leading it. The spec asserts the ABSOLUTE claim this section said would one day
+fail-before/pass-after: `tornWindowMs === 0` for BOTH gestures, with the comparative bound retained
+as the secondary contract.
+
+**Teeth, observed to fail.** With `primeSheetSwitch` sabotaged to a no-op on the running build, the
+raised test fails with `tab click 64 ms` and samples showing the strip at t=112 ms over ink at
+t=191 ms — the filed symptom, exactly. Restored byte-identically (sha256
+`a6b85099f95e07ebd43a6b1c0d8eba42484ad8f4139e3a961e955b60906873b7`) and green again. Ten unit tests
+pin the handoff slot (exactly-once take, foreign-sheet refusal, staleness, disposal ownership,
+renderSignal bracketing); `undoSheetActivation.test.tsx` passes **unchanged** — the event sequence
+and detail shapes were not touched.
+
+**A measurement trap this pass hit twice, recorded so the next one does not:** under `tauri dev`,
+HMR cycles that reload `sheetSwitchPrefetch.ts` can split its module-level state across stale
+importer instances — the prime writes into one instance, the take reads another — which resurrects a
+~30 ms tear on the very next run **on bytes that are hash-identical to a triple-zero run**. A
+verified cold relaunch (PID change + zero-count) makes it vanish and stay vanished (five runs).
+Measure this path only on a cold bundle.
+
+| suite | result | vs. baseline |
+|---|---|---|
+| `sheet-tab-state-undo.spec.ts` (journey, cold) | **4 / 4**, torn window 0 ms / 0 ms | 4 / 4 with the tear merely bounded |
+| BUG-0043 grep, repeated | **5 consecutive passes at 0 ms / 0 ms** | 60-67 ms torn before |
+| `npx vitest run` (full) | see §15c vitest row in the closing report | — |
+| `check-types` (tsc), `lint:boundaries` | clean | — |
+| visual project, cold | **9/18 fail — PRE-EXISTING, measured, not this fix's** (below) | 18/18 quoted 2026-08-13, before the 2026-08-13 landings |
+
+**The visual project is failing on this tree, and it is not this fix.** Measured on a verified cold
+launch: 9/18 fail (`sheet tabs - default state`, `formula bar shows formula`, `cell selection
+highlight`, `bold/italic/underline`, `grid with data`, `inline editor visible`, `copy formatted
+cells and paste`, and two workflow captures; the one test that actually SWITCHES sheets — `data
+entry across sheets` — passes). Attribution was measured, not argued: with BOTH halves of this fix
+sabotaged off (prime a no-op, `paintedActiveIndex` back to the local mirror), the same tests still
+fail identically; restored byte-identically afterwards (sha256s
+`a6b85099…` / `d267df76355f59468d6b50cb13ee3cf8ede7780426bdae244e561959bdb78181`). The diffs are
+cell-content and scrollbar-extent residue of the BUG-0053 class (goldens vs. a differently-populated
+workbook), surfacing across the visual corpus after the 2026-08-13 feature landings moved the tree.
+Left to the golden owners with BUG-0053; nothing was re-captured and nothing suppressed by this
+pass.
 
 ### 15d. Proved live, from a cold app
 
@@ -14418,9 +14502,10 @@ same lesson as §14a one level down: an action that CANNOT succeed is not covera
 #### Ledger
 
 **53 entries, 51 fixed, 2 open.** BUG-0050 and BUG-0051 carry populated `fix` blocks naming the
-files and the measured mechanism; BUG-0052 (the paint-order tear) and BUG-0053 (the contaminated
-scroll golden) are open, each with its measurement and its repro, and BUG-0052 with its committed
-probe. `EXCLUDED_UNTIL_FIXED` remains the empty array and no `KNOWN_ISSUES` entry was
+files and the measured mechanism; ~~BUG-0052 (the paint-order tear) and~~ BUG-0053 (the contaminated
+scroll golden) ~~are~~ is open, each with its measurement and its repro~~, and BUG-0052 with its
+committed probe~~ — **BUG-0052 FIXED 2026-08-14, see the §15c addendum; the probe's absolute claim
+is now asserted**. `EXCLUDED_UNTIL_FIXED` remains the empty array and no `KNOWN_ISSUES` entry was
 added for anything in this pass.
 
 
@@ -14485,3 +14570,882 @@ sit in the two coverage censuses.
 persisted, never rendered); v1 = core object + script API; data-driven row/col counts
 (computed_properties-style binding onto the plain u32 window fields), per-size-map UI, and
 `.calp` object carry are deferred and deliberately not precluded by the shapes above.
+
+
+---
+
+## 17. The 134-of-143 collection shortfall has a mechanism -- and a guard that fails the run (2026-08-14)
+
+Section 15e recorded a journey pass that said "Running 134 tests" while `--list` said 143,
+reported a clean `133 passed / 1 skipped`, and was filed as UNEXPLAINED. The check it prescribed
+-- compare the run's own collection against `--list` -- existed only as a sentence. Both halves
+are now closed: the check is implemented as a guard that FAILS the run, and the shortfall has a
+demonstrated mechanism.
+
+**THE MECHANISM, REPRODUCED: an empty spec file is collected silently.** A `.spec.ts` file that
+is EMPTY at collection time -- exactly what a truncate-then-write save or an interrupted sync
+leaves on disk mid-write -- is collected as a zero-test file with NO error, NO mention, and a
+clean total. Measured live, twice over:
+
+- Deterministic: truncating a 3-test probe spec to 0 bytes turned `Total: 152 tests in 30
+  files` into `Total: 149 tests in 29 files`, exit 0, nothing else printed. The file is not
+  even counted in "files".
+- Under race: a writer churning the probe with truncate-then-write saves (open 'w', write 5 ms
+  later) made 5 of 15 consecutive `--list` passes drop it silently; the other 10 saw all 152.
+
+The arithmetic of the original shortfall fits the mechanism exactly: the nine missing tests =
+the new 4-test `sheet-tab-state-undo.spec.ts` plus five more, and the only 5-test journey file
+also written on 2026-08-13 was `orphaned-sheet-state.spec.ts` (01:38) -- the two most recently
+written files in the project at the time. Twelve repeated `--list` passes on today's tree are
+stable at 149/29, so the drop was transient, which is what the churn measurement predicts and
+why the exact victim set beyond the new spec cannot be recovered from surviving artifacts. The
+attribution is therefore MECHANISM-CONFIRMED, VICTIM-PLAUSIBLE -- recorded as such rather than
+rationalised further.
+
+**THE GUARD: `app/e2e/collectionGuard.ts`, registered first in `playwright.config.ts`.**
+
+1. `onBegin` records the run's own collected suite -- the population behind "Running N tests" --
+   one identity per test (`[project] file :: title path`).
+2. `onEnd` spawns `playwright test <same filter args> --list --reporter=json` (~4-10 s; `--list`
+   never runs global-setup, so no app is involved) and compares MULTISETS. Any test in the
+   listing the run did not collect ("missing"), or vice versa ("phantom"), FAILS the run via the
+   reporter status override, naming every discrepancy grouped by file.
+3. A second, filter-independent check catches the persistent form the comparison alone would
+   wave through (both sides agreeing on a truncated population): for every project that ran, no
+   file matched by its `testMatch` may be 0 bytes, and -- where test registration is direct --
+   every matched file must contribute at least one listed test. The `scenario` project registers
+   through `lib/scenario.ts` (all 24 tests attribute to the lib), so per-file coverage is
+   undecidable there; the guard says so in one line and applies only the zero-byte floor rather
+   than reporting a verdict it cannot support. Measured against today's tree: functional 93/93
+   files, visual 2/2, journey 29/29, invariant 1/1, soak 6/6 -- zero false positives.
+4. A guard that cannot run is not a guard that passed: an unspawnable or unparseable `--list`
+   fails the run too.
+
+**THE HANDSHAKE, because the standard invocation would have dropped the guard.** A CLI
+`--reporter=...` flag REPLACES the config's reporter list, and `--reporter=dot,json` is exactly
+how this program drives suites (section 15e, finding 3). So global-setup now receives the
+RESOLVED config and REFUSES to start a run whose reporter list lost the guard, with the fix in
+the message: `--reporter=./e2e/collectionGuard.ts,dot,json`. Escape hatches are loud, never
+silent: `COLLECTION_GUARD=off` prints that the run is unverified; `--shard` / `--repeat-each` /
+`--last-failed` / `--only-changed` skip the comparison with a printed reason (they change the
+collected population, so "the same filter under --list" is undefined). Unit tier: 19 tests in
+`e2e/__tests__/collectionGuard.test.ts`, including firing self-tests for both failure shapes and
+the refusal. Proven live on real runs the same day: the guard verified collection on scoped
+functional runs (its "collection verified" line is in the run output), ran inside another
+session's `--project=visual` pass via the shared config, and the refusal path measured exit 1 on
+a `--reporter=dot` invocation.
+
+**BUG-0053 closed -- the contaminated scroll golden, recaptured deliberately.** The recorded
+one-line fix first: `scrolling.spec.ts` test 1 now calls `resetToNewWorkbook` before its
+captures. Then the recapture, in order: a COLD fail-before run reproduced the defect at exactly
+**255 differing pixels**; ink attribution off the old golden's bytes had predicted 256 px in two
+clusters -- "First second" at B6 (x 90-156, y 124-132) and "original" at B10 (x 90-132,
+y 204-215) -- plus the legitimate "Top" at A1 (x 27-45). The recapture removed exactly those two
+clusters and nothing else; `grid-scroll-after-wheel-down` additionally shed 1,300 dark px of
+multi-spec residue (rows 3-20) while keeping the same row-3 scroll offset the old baseline
+framed. The other two goldens in the file were never contaminated and are byte-identical. Two
+cold runs agree (4/4, then 4/4 against unchanged hashes); goldenCorpus provenance is green over
+the whole corpus (both new files read dpr2 -- 39,430 / 39,511 hairline px -- and sit in the
+no-chrome profile population, correct for bare grid crops); `validate-baselines.mjs` reviewed
+the four files: 4 PASS / 0 CONCERN / 0 FAIL. Residual, stated plainly: the wipe now runs
+MID-SUITE in a full ordered functional pass, so any downstream golden that ENCODED pre-scrolling
+residue would surface on the next full pass -- which was not runnable this session (below).
+
+**A RECAPTURE POISONED BY A CONTESTED MACHINE -- caught by attribution, reverted, and the
+protocol that came out of it.** The first recapture attempt ran on CDP 9222 while another
+session's auto-mode run owned the app: its global-setup had killed this session's cold app
+seconds earlier (`tauri dev exited code=4294967295` in app-dev.log), and the "recaptured" golden
+photographed the OTHER suite's Alpha/Beta/Gamma fixture mid-write. Ink attribution caught it
+immediately -- the capture held cell text the test never writes -- and all four goldens were
+reverted to their committed bytes before anything else ran; a golden for a DIFFERENT test that a
+FAILING test had rewritten in the same pass was reverted the same way. The recapture that
+LANDED ran on an isolated second instance: a COPY of the already-built debug `app.exe` (no lock
+on the shared target dir), its own `WEBVIEW2_USER_DATA_FOLDER` (without which WebView2 joins the
+other instance's browser process and ignores the CDP/pin arguments), a fake `src-tauri` marker
+directory as cwd (so the shared `context_manager/log.log` is not truncated under the other
+session), the full capture pins, and CDP 9223 via `CDP_PORT`. Worth keeping: attribution before
+acceptance is what turns a poisoned capture from a corpus defect into a reverted file, and an
+idle app on 9222 is NOT evidence the machine is free -- the other session's think-time between
+runs looks identical to a free machine from process state alone.
+
+---
+
+## 18. The recorded residuals close — and the pivot copy of BUG-0051 is caught before it ships (2026-08-14)
+
+§15 left four residuals recorded rather than implied: the TestRunner's private undo path, the
+pivot half of the own-domain question BUG-0051 answered only for tables, the live confirmation of
+BUG-0050's fix, and a sweep for suppressions that outlived their bugs. All four are closed in this
+pass. Closing the second one found the NEXT instance of the BUG-0051 shape before any walk did —
+in the census's own data, and then, one layer down, in the backend — and closing the fourth found
+a live recalculation defect behind a fixme nobody had re-read. Both are filed (**BUG-0054**,
+**BUG-0055**) rather than patched under cover of a residual.
+
+### 18a. `TestRunner.ctx.undo()` now observes the product's undo instead of bypassing it
+
+`ctx.undo()` called the `undo` Tauri command directly, so an in-app suite that undid an off-sheet
+change left the VIEW where it was while the backend switched sheets under it — exactly the
+divergence that once produced a false "monkey flake" classification. It now executes
+`CoreCommands.UNDO` through the `CommandRegistry`, i.e. the same `core.edit.undo` a user's Ctrl+Z
+runs, so the suite observes everything `applyRestoreToTheView` does — the sheet follow, the canvas
+refresh, the domain announcements. Two decisions inside the one-line-looking change:
+
+* **Absence fails LOUDLY.** `CommandRegistry.execute` on an unregistered command warns and returns
+  `undefined` — a silent no-op, and a swallowed undo is indistinguishable from a working one
+  (§10b's lesson verbatim). `ctx.undo()` therefore throws when `core.edit.undo` has no handler
+  instead of falling back to the raw invoke, because a fallback would silently reintroduce the
+  bypass on exactly the runs where the product path is broken.
+* **`ctx.redo()` exists now, and the raw `redo` import is gone.** §13d unified `handleUndo`/
+  `handleRedo` because "every gap this path has ever had was added to one of them and forgotten in
+  the other". The TestRunner had the same asymmetry one level up: suites imported the raw `redo`
+  and called it directly. Both directions now ride the product's commands
+  (`app/extensions/TestRunner/lib/runner.ts`, `lib/suites/undoRedo.ts`, `lib/types.ts`).
+
+Four new vitest cases pin the routing and both loud failures (`suiteRunner.test.ts`, 33 in the
+file). **Proved live**: the in-app "Undo / Redo" suite, driven on the running app through the
+fused CLI's escape hatch (`command test.runSuite = {"name":"Undo / Redo"}`), reports
+**5 passed, 0 failed, 0 errors** through the new routing. The E2E walker's `grid.undo()` was
+checked and needed nothing: it dispatches Ctrl+Z on the grid, which is the product path already.
+
+### 18b. The pivot's own-domain answer — and the second delete path the Table lesson predicted
+
+The residual asked whether `deletePivotTable` announces its domain or leaves a stale Pivot
+contextual tab. The direct answer is good: `deletePivotTable` (pivot-api) announces
+`["slicer", "pivot", "ribbonFilter"]`, and every frontend route funnels through it — the context
+menu, the Analyze tab's Delete, the broker's `api.deletePivot` (which calls the registered pivot
+API), even the TestRunner suites. MCP deletes announce from the backend via
+`object_deps::announce_cascade`, which includes the owner's own domain.
+
+**But the census had already excused the announcement it depends on.** The `SELECTION_OWNERS`
+entry for pivot declared `reconcileDomain: null` with the reason "the regions ARE the store:
+`updateCachedRegions` is both the trigger and the reconciliation, so it cannot be reached without
+reconciling." That conflates *when reached, it reconciles* with *it is reached*.
+`updateCachedRegions` only runs when something emits `PIVOT_REGIONS_UPDATED`, and on a delete the
+thing that does is `refreshPivotRegions` — triggered by the `pivot` domain's `pivot:refresh`
+fan-out. **Measured by sabotage:** with `"pivot"` deleted from `deletePivotTable`'s announcement,
+the whole census stayed GREEN — the ghost Analyze/Design tabs, reachable, with the guard written
+for exactly this shape watching. That is BUG-0051's contradiction one owner over, caught in the
+data rather than by a walk. The entry now declares `reconcileDomain: "pivot"`,
+`unannouncedReconciliations` demands the announcement of every pivot delete route, the
+non-vacuity pin grew to `["table", "pivot"]`, and the same sabotage now fails one test naming the
+missing domain, the reconciliation it starves and the tab that would survive. Restored
+byte-identically (sha256 `ee30907866566d4377cc3d355afe2bce3ad7be851ba9292191c6f60daf2a8b68`),
+census green again.
+
+**The second delete path exists, exactly as convert-to-range predicted — BUG-0054, filed open.**
+A row/column delete that fully covers a pivot region removes the pivot in the backend
+(`shift_pivot_regions_for_row_delete` / `_col_delete`, `commands/structure.rs` — two raw
+`pivot_tables.remove(&pid)` sites). Compared with `delete_pivot_table`, the structural path runs
+NO `cascade_deleted_sources` (slicers, timelines and ribbon-filter targets survive pointing at a
+dead pivot id — the §3bt orphan), records NO undo restore of the pivot (the structural snapshot
+carries cells only, so Ctrl+Z resurrects the pivot's RENDERING with no pivot behind it), cleans
+neither `views` nor `active_pivot_id`, and announces nothing. The object-deps census cannot see
+it because these sites are not a delete command — the same reasoning that hid `tables` from
+§3bn's sweep. Filed **open** with the mechanism and fix direction spelled out (thread
+`slicer_state`/`timeline_state` into `delete_rows`/`delete_columns`, collect removed ids, cascade
+after the locks drop, record the restores in the row-delete's own transaction); deliberately not
+fixed in-pass, because it reorders undo recording in a lock-heavy area this program has
+deadlocked in three times, and deliberately not suppressed anywhere.
+
+**The frontend half of that path IS fixed here.** The extension's ROWS/COLUMNS_DELETED handlers
+deliberately skip `refreshPivotRegions` (an in-flight refresh could overwrite the sync shift), so
+nothing reconciled the contextual tabs when the shift pruned the active pivot's region — ghost
+Analyze/Design tabs under a stationary cursor, reachable through a script's `api.deleteRows`
+(the UI's own row delete needs a whole-row selection, which moves the cursor out of the pivot
+first). The shift functions now call `reconcileActivePivotAfterShift`, which keys on the ACTIVE
+id being gone — not on the count, which would kill a just-created pivot's tabs, the vacuity case
+the reconciliation tests pin. One shared `deselectPivotContext()` implements the teardown for
+both reconciliation paths, because this family exists precisely where the teardown lived in one
+path and not the other. Four new cases in `activePivotReconciliation.test.ts`.
+
+### 18c. BUG-0050 confirmed live, and the walker taught the other two undoable operations
+
+`sheet-tab-state-undo.spec.ts`, from a COLD app (PID verified changed, zero Playwright processes
+first): **4 passed / 0 failed**, and the new collection guard (§17) verified 4-of-4 collected.
+The BUG-0043 sampler in that run additionally printed `torn window: tab click 0 ms, undo 0 ms` —
+the §17 pass's prefetch fix observed working from a second session's independent run.
+
+The oracle side needed no change and got none: `stepsBackToBaseline` decides from the backend's
+`clears_total`, not from an action list, so hide/unhide/tab-colour windows became decidable the
+moment the commands stopped ending the history. What WAS missing was generation: the catalog had
+`sheet.hide` and nothing else, so no walk could ever put an unhide or a tab colour inside an
+undo-oracle window — their undo entries were pinned by unit tests and exercised by nothing.
+
+* `sheet.unhide` drives the real route (context menu event -> the "Unhide Sheet" dialog -> OK),
+  gated on a hidden sheet existing — the refusal raises a native alert that blocks IPC
+  (BUG-0039's shape).
+* `sheet.tabColor` drives `sheet:requestTabColor` and always picks a colour DIFFERENT from the
+  sheet's current one, because recolouring to the same colour is a product-side no-op that
+  records nothing — an action that cannot change anything is not coverage (§15e's `table.create`
+  lesson).
+* **The sheet shape grew the axes that make all three observable.** `SheetShape` was
+  count/active/names, so a hide of a NON-active sheet, every unhide and every tab colour changed
+  nothing the §14a issued-vs-effective accounting could see — the blind spot §14a exists for,
+  re-created for precisely the three operations BUG-0050 made undoable. The snapshot now carries
+  `sheetTabColors` (visibility was already there), and `sheetShapesDiffer` compares both.
+  `walkerExclusions.test.ts` pins all three actions as generatable; `walkerSheetCoverage.test.ts`
+  pins the two new axes firing.
+
+**Measured live** (seed 90140001, 80 actions, `sheet:8`): walk PASSED with
+`Sheet structure: 28 action(s) issued, 22 changed the workbook (sheet.tabColor=6 sheet.hide=4
+sheet.add=3 ... sheet.unhide=2 ...)` — both new actions generate and are measurably effective on
+their first walk — and the undo oracle DECIDED a window containing the unhide (3 transactions
+wound back) while the true structure changes (add/delete/move/copy) still declined with the
+history-ending reason, exactly as §9 specified.
+
+### 18d. The suppression sweep — and the fixme that was hiding a real defect (BUG-0055)
+
+`EXCLUDED_UNTIL_FIXED` and `KNOWN_ISSUES` are both empty (checked against the source, not the
+comments); `walkerExclusions.test.ts` runs green against the 55-entry ledger;
+`STALE_PRODUCT_STATE_GOLDENS` is empty (the BUG-0029 quarantine expired itself, §12's design
+working); `MIS_RECORDED_CORPORA` is the environment-shaped two-sided quarantine and carries no
+bug linkage. The `test.skip`s in the E2E tree are env-gated conditionals (`CLOSE_CASE`,
+`SOAK_TRACE`), not suppressions. Of the eleven `test.fixme`s:
+
+* **Three carried a reason this program closed long ago.** `editing.spec.ts`'s undo/redo trio
+  said "Ctrl+Z via CDP does not reach the grid's onKeyDown handler" — stale since the harness
+  gained `dispatchKeyOnGrid`, which every soak walk's undo oracle has driven since. Re-enabled;
+  **green live from a cold app**, together with the two unstated-reason editing fixmes
+  (double-click edit, direct typing), which also pass and are re-enabled.
+* **One had a broken PROBE and nothing else.** `stress-tests.spec.ts`'s "changing the root
+  propagates through entire chain" read `getCellLiveValue`, which reads the FORMULA BAR — and a
+  formula cell's formula bar shows its formula text (`=B759+1`), never its value, so the test
+  could not pass on ANY build. Probe fixed to a display read; **green live**.
+* **One had the same broken probe AND a live product defect behind it — BUG-0055, filed open.**
+  `regression-scenarios.spec.ts`'s "inserting a row expands formula references": with the probe
+  fixed, the first assertion (the range expands to `=SUM(A840:A843)`) passes and the second
+  fails on a verified-clean cold app. Mechanism isolated by CDP probe: after `insert_rows`
+  inside a summed range, **the inserted row never joins the formula's dependency edges** — a
+  write into it recalculates nothing (SUM display stays 60), while a write to an
+  originally-covered cell recalculates fine and computes **80 = 10+15+25+30**, proving the
+  engine's value store held the 15 all along and only the edge is missing (a fresh identical
+  SUM also computes 80 immediately). D8's sibling: the re-pointing shipped; the re-registration
+  for the cells the range GREW over did not. The test is re-enabled and **deliberately left
+  failing** as the repro — the §14i discipline, applied to the functional suite.
+* **Five are upheld with their reasons intact:** `scriptable-objects.spec.ts` (the Object
+  Scripts editor opens in a separate OS window CDP cannot see — an architectural harness limit,
+  still true), the three workflow cascade fixmes (data contamination between specs sharing an
+  app — §17 closed BUG-0053's instance of that family; these tests' sensitivity is still real),
+  and `workflow-dashboard`'s variant of the same.
+
+### 18e. Verification — measured, on a tree two other passes were writing to
+
+| check | result |
+|---|---|
+| vitest, full | **779 files / 106,781 passed / 0 failed** (includes this pass's +14 unit cases) |
+| `cargo test --workspace` (core) | **1,349 passed / 0 failed, cargo exit 0** — after this pass's one-line fixture repair (below) |
+| app-lib `cargo test --lib --no-run` | compiles clean (this pass changes no Rust behaviour) |
+| `npm run check-types` | zero errors in anything this pass touched (see tree-state note) |
+| `npm run lint:boundaries` | clean |
+| `tsc -p e2e/tsconfig.json` | zero errors in anything this pass touched |
+| `npm run check:line-endings` | `[OK] no mixed line endings` |
+| journey `sheet-tab-state-undo.spec.ts`, cold | **4 / 4**, collection-guard verified |
+| functional `editing` + `stress-tests` + `regression-scenarios`, cold | **31 passed / 2 failed** -> after probe fixes **15 passed / 1 failed**, the 1 = BUG-0055's repro, deliberately red |
+| soak walk seed 90140001, 80 actions, `sheet:8` | **pass**; sheet.unhide + sheet.tabColor effective on first walk; undo oracle decided an unhide window |
+| in-app "Undo / Redo" suite via the fused CLI | **5 passed / 0 failed** through the new ctx.undo/ctx.redo |
+| census sabotage (`"pivot"` dropped from the delete announcement) | census fails naming the route, the domain and the tab; restored byte-identically and green |
+
+Three tree-state notes, stated so the numbers can be reconciled later:
+
+* **The §17 pass ran concurrently with this one for its whole duration**, on the same machine and
+  the same app port. This pass's first cold takeover — made after every quiescence signal it had
+  (six minutes of file silence, zero Playwright processes) — still landed in that session's
+  think-time and killed its app mid-pass, which §17 records from the receiving end. §17's
+  protocol (an isolated second instance on CDP 9223) is the right answer; until it is the norm,
+  the standing rule stands: an idle app on 9222 is NOT evidence the machine is free.
+* Mid-pass runs of `npm run check-types` and `tsc -p e2e` reported errors ONLY in the two files
+  the §17 pass had open in its editor at that moment (`sheetSwitchPrefetch.ts`,
+  `collectionGuard.ts`); both were green in that pass's own final state.
+* **The core workspace's test build was BROKEN on the tree this pass found** — the Floating
+  Ranges work (§16) added `floating_ranges` to `persistence::Workbook` and missed the one
+  test-fixture initializer in `calcula-format/src/zip_io.rs`, so `cargo test --workspace` in
+  `core/` failed with E0063 before running anything. Fixed here (one line in the fixture); the
+  workspace then reconciles exactly with §13g's baseline.
+
+#### Ledger
+
+**55 entries, 53 fixed, 2 open** — BUG-0052 and BUG-0053 closed by the §17 pass; **BUG-0054**
+(the structural pivot delete's missing cascade/undo/announcement) and **BUG-0055** (the inserted
+row that never joins the expanded range's dependency edges) newly filed with populated repro
+blocks. `EXCLUDED_UNTIL_FIXED` and `KNOWN_ISSUES` remain empty; the one deliberately-failing
+functional test is BUG-0055's repro, named in the spec's own comment; nothing in this pass added
+a suppression of any kind.
+
+
+---
+
+## 19. The invariant project meets the moved tree — floating ranges become walkable, and their first three walks pay for the work three times over (2026-08-14)
+
+The brief for this pass: run the `invariant` project (explicitly unexamined by the previous
+passes), verify the oracle reads BUG-0050's new undo semantics correctly, and establish whether
+the walker can reach the Floating Ranges feature the 2026-08-13 landings introduced. The answer
+to the last question was NO — so the reach was BUILT, and the first walks through it found a
+harness bug, a product frontend race and a product recalculation defect, all filed, two fixed
+in-pass along with the harness bug.
+
+### 19a. The known seeds, re-measured on the moved tree
+
+`--project=invariant`, manual mode against a warm dev app, collection guard verifying every run
+(its "collection verified" line is in each log):
+
+| seed | result | notes |
+|---|---|---|
+| 1786396152029 (+ derived rapid-fire) | 2 passed | walk 1: **3 decided undo checkpoints, 140 transactions wound back**; rapid-fire's two windows correctly DECLINED (sheet.add / sheet.copy in-window) |
+| 20260811 | 2 passed | ran on the pre-floating catalog (before the fr actions landed mid-pass) |
+| 1786421716252 | 2 passed | same |
+| 1786456498740 | 1 failed -> **2 passed** | the failure was BUG-0056 (below), found by the FIRST fr-generating walk; green after the reset fix, with fr coverage measured effective |
+| 90010001 | 2 failed -> **2 passed** | failed at STEP 1 on the previous seed's session poison — the measurement that proved BUG-0056 poisons across walks; green after the fix |
+| 20260814 (`sheet:8`, fresh) | 2 passed | all 29 sheet actions effective; every window drew a structure-ender so all 5 windows declined — the honest outcome for that weighting |
+
+**BUG-0050's semantics read correctly through the shared oracle code, verified two ways.** The
+decidability logic is one implementation (`stepsBackToBaseline`, decided off `clearsTotal`), so
+the section-18c soak evidence already covered this project's code path; measured directly anyway:
+a deterministic trace replay `[cell.edit, sheet.tabColor, cell.edit]` through the battery
+**DECIDED the window and wound back 3 transactions** — the tab-colour undo entry restoring
+alongside the cell edits, digests equal — while true structure changes keep declining with the
+history-ending reason. The random `sheet:8` runs never produced a window containing
+hide/unhide/tabColor WITHOUT an add/delete/rename/copy alongside (nine boosted actions share the
+category), which is a sampling property, not an instrument property; the mis-reporting class
+BUG-0049 came from is absent.
+
+### 19b. Floating ranges become walkable — reach, observation, and the oracle rule
+
+No walker-reachable route existed: the catalog had no fr action, the fused CLI has no
+floating-range command, and the TestRunner exposes none. Built in this pass, on the section-18c
+precedent (sheet.unhide/tabColor):
+
+* **Six catalog actions**, category `floating`, all through the ANNOUNCED @api wrapper
+  (`/src/api/floatingRanges.ts` — the product's own route, which makes the extension reload and
+  paint): `fr.create` (capped at 3 live objects), `fr.setCell` (typed values + quoted
+  cross-sheet formulas), `fr.resize`, `fr.rename` (seq-unique names), `fr.refFromGrid`
+  (`='Name'!A1+n` into the AW60..AW64 safe area — the float->grid direction where rename repair
+  and delete->#REF! surface), `fr.delete`. Replay preconditions re-check RECORDED params
+  (BUG-0039's rule: a shrunk trace's out-of-window write is refused, not executed).
+* **Observation, not inference (section 14a).** The snapshot carries a `floatingRanges` axis
+  (id, name, host, window, position, and a bounded `cellStamp` of non-empty displays);
+  `ActionTiming.frChange` is recorded from pre/post snapshots; `summarizeCoverage` reports
+  issued-vs-effective per action (`fr.refFromGrid` deliberately excluded — its effect is a grid
+  cell, unobserved like every `cell.*` action) and names NON-fr actions that move the object
+  store (undo of a resize and `sheet.delete` of a host sheet both showed up, correctly, on the
+  first walks). The `walker-action-effects` generic create/delete net gained the fr family.
+* **The undo oracle learned the one mutation that is neither undoable nor history-ending.** FR
+  CREATE keeps the history but cannot be undone (section 16's add_sheet-parity doctrine), so a
+  window that created one can never be wound back to its checkpoint — and an oracle that decides
+  it anyway reports the surviving object as an undo defect (BUG-0005/S12's shape).
+  `OracleBaseline` now carries `floatingRangeIds`; `frCreatedSinceBaseline` (pure, unit-tested)
+  declares such windows UNDECIDED with the doctrine in the message. Fired correctly on its first
+  walks; rename/delete windows keep declining via `clearsTotal` (they run the sheet machinery),
+  and resize/cell-write windows stay decidable.
+* Unit tier: `walkerFloatingCoverage.test.ts` (16 cases — generatability, cap gating, replay
+  precondition refusals, shape axes incl. the cellStamp and order-insensitivity, fr accounting,
+  the oracle rule) and `frRendererFetchVerdict.test.ts` (below). tsc, lint:boundaries,
+  check:line-endings, check-types clean.
+
+### 19c. What the first three fr walks found — BUG-0056, BUG-0057, BUG-0058
+
+**BUG-0056 (test-bug, FIXED): the walker reset never tears down floating ranges, and the stale
+frontend store poisons every later walk in the session.** `deepResetForWalk` relies on `new_file`
+for anything not in its teardown list, and `resetToNewWorkbook` invokes `new_file` RAW — no
+AFTER_NEW is ever emitted (the product's File > New reloads the whole window, so no product route
+sees this state). The FloatingRange extension's store kept the three FRs walk 1 created; every
+subsequent walk failed `no-console-errors` at step 1 on "[FloatingRange] Failed to fetch cells"
+for the dead ids — including seed 90010001, which generated no fr action at all. BUG-0004's exact
+class, recreated for the newest object family. Fix: the reset tears FRs down through the
+announced wrapper, then unconditionally resets and reloads the extension store, so an
+already-poisoned session heals even when the backend has nothing left to delete — verified live
+on the poisoned session itself. `repros/BUG-0056.trace.json` (the 1-action minimized trace; the
+entry records plainly that it only fails in a poisoned session, because the defect IS the state
+surviving the reset boundary).
+
+**BUG-0057 (product-bug, FIXED): a backend-initiated FR delete renders — and fetches — the
+deleted row for one repaint window.** The wrapper (and a script's `api.deleteFloatingRange`)
+deletes, announces, and emits CELLS_UPDATED; the extension prunes in an ASYNC reload, but the
+redraw has already been requested, so `frRenderer` fetches a row the backend dropped and logged
+`console.error` for a benign race. The extension's own delete path prunes synchronously before
+repainting, which is why the product UI never showed it. Fix: the failure VERDICT is deferred,
+not softened — a row gone from the store by verdict time lost a delete race (silent prune +
+redraw); a row still present is a real inconsistency and errors exactly as before, so BUG-0056's
+loud class stays loud. Two unit cases pin both branches.
+
+**BUG-0058 (product-bug, FIXED): a cross-sheet dependent on a NON-ACTIVE user sheet goes stale
+when a floating-range cell — or ANY off-sheet-written cell — changes.** The first mixed
+floating+sheet walk (seed 90140202) failed recalc-consistency: "sheet 1 cell 60:48: 46 -> 4",
+with the SAME formula on the active sheet updating correctly — the asymmetry that named the
+mechanism. `recalc_after_off_sheet_write` re-evaluated the written sheets, the object sheets and
+the ACTIVE sheet, twice — and never consulted the cross-sheet dependents map, so an edge into any
+other user sheet was simply outside its scope. Every off-sheet write route funnels through it
+(FR cell writes, scripts' update_cell_on_sheets / clear_range_on_sheets, the QuickJS bulk path),
+so this was never FR-specific. Fix: the recalc set now extends to every sheet holding a
+cross-sheet dependent of anything written, computed to a TRANSITIVE fixpoint over sheet names,
+with strictly sequential lock use (snapshot, drop, lock, drop — nothing nested; the
+three-deadlocks history is why the code says so). Pinned by
+`a_non_active_sheet_dependent_follows_a_floating_range_write` (one-hop AND two-hop assertions;
+sabotage-verified red, restored byte-identically, sha256 4353afe3...); verified live by the
+17-action trace flipping fail->pass and the finding seed running 150 actions green.
+`repros/BUG-0058.trace.json`.
+
+### 19d. The moved tree's invariants, probed live with a floating range present
+
+* Raw engine list `["Sheet1","Float1"]` (backing sheet at the tail — the partition invariant);
+  `get_sheets` filters to user sheets with `sheets[i].index == i` (contiguity measured true);
+  the DOM holds exactly one Sheet1 tab leaf and ZERO Float1 leaves — the tab strip never renders
+  a backing sheet (by design, section 16).
+* `='Float1'!A1*2` from the grid: evaluates (42), follows a precedent edit (100), F9-stable.
+* `new_file` wipes the FR rows AND the backing sheet (raw names back to `["Sheet1"]`) —
+  `reset_document_scoped_stores` covers the M1-M3 store; the save-source census already carried
+  `floating_ranges` (section 16).
+* Save/reload with FRs alive: the round-trip oracle ran once on the floating-weighted walk and
+  compared equal — `floating_ranges.json` persistence round-trips under the digest.
+
+### 19e. Verification
+
+| check | result |
+|---|---|
+| invariant project, 5 known seeds + 2 fresh | all green after the in-pass fixes (table in 19a) |
+| soak seed 90140201 (`floating:8`, 150 actions) | pass; 69 object actions / 67 effective; save/reload 1 run; recalc x6 |
+| soak seed 90140202 (`floating:5,sheet:5`) | found BUG-0058 -> green post-fix end-to-end |
+| BUG-0058 trace replay | FAIL pre-fix (SOAK_EXPECT_FAIL=1 green), PASS post-fix |
+| app-lib `cargo test --lib` | **1626 passed / 0 failed** (incl. the new regression test; sabotage teeth verified) |
+| e2e unit tier (walker/oracle/floating files) | green |
+| `npm run check-types`, `lint:boundaries`, `check:line-endings`, `tsc -p e2e` | clean |
+| full vitest | **781 files / 106,799 passed / 0 failed** (includes this pass's two new test files) |
+
+`EXCLUDED_UNTIL_FIXED` and `KNOWN_ISSUES` remain empty; nothing was suppressed anywhere in this
+pass. Ledger: **58 entries, 56 fixed, open = BUG-0054, BUG-0055** (both deliberately deferred by
+section 18 with fix directions recorded). The bug-ledger.md tail was also reconciled with the
+JSON (it had drifted: 0053 still read open, 0054/0055 were missing).
+
+## 20. The ledger closes again — the two section-18 deferrals land (2026-08-14)
+
+The verification pass over the section 17/18/19 handovers. Every baseline was re-measured before
+anything was touched (all matched the handoffs: vitest 781/106,799/0; core 1,349/0; app-lib
+1,626/0+5 ignored; test_pivot 56/0; model-engine-lib 2,156/0 + 9/0 doctests — the first
+model-engine run in this pass exited -1 with all-ok results because the machine ran OUT OF DISK
+mid-run; `calcula-target` had grown to 118 GB across sessions and was pruned to ~85 GB
+(incremental cache + >5-day deps + examples deleted), after which the clean rerun exits 0).
+
+### 20a. BUG-0055 closed — the inserts rebuild their edges instead of shifting them
+
+The mechanism as filed, confirmed in source: `insert_rows_impl` / `insert_columns_impl` maintain
+the six dependency maps by SHIFTING existing entries, and no shifted copy can exist for a cell
+the range never covered before — a range that GREW across the insert is deaf to the inserted
+cells. The fix is the one the tree already used one path over: `off_sheet_structural_edit` has
+always called `rebuild_all_dependencies` after its shifts ("its dependency maps are stale now"),
+and the two active-sheet INSERT paths now do the same, after the table-boundary shift (structured
+refs must expand against post-shift tables) and after every guard drops (the rebuild takes the
+grid lock). The rebuild expands names/tables, so the expanded cell edges a name-backed formula
+registered at entry SURVIVE — the regression the cut/paste-relocation precedent (raw re-parse,
+no expansion) would have introduced; a test pins that too. Deletes need no change (ranges only
+shrink or shift; the shifted edge set stays complete — the partial-cover pin in 20b holds it).
+
+Teeth: with both rebuild calls sabotaged out, both new tests fail with the exact filed symptom
+(`left: 60.0, right: 75.0` — the SUM deaf to the inserted cell); restored byte-identically
+(sha256 `edd4effa001bfa7dde2285b69d35ec82db960a75c31541b719945078c200be55`), 1,633/0.
+
+### 20b. BUG-0054 closed — the structural deletes give a pivot the delete_pivot_table death
+
+The section-18 deferral reason was the lock-heavy reordering; the shape that avoids inventing a
+new order is to copy `delete_pivot_table`'s own: run `cascade_deleted_sources` AFTER every
+refusal gate and BEFORE the lock phase (the undo lock is never held across a store lock), then
+record the restores INSIDE the one structural transaction. Concretely:
+
+* `collect_doomed_pivots` (structure.rs) predicts the two `pivot_tables.remove(&pid)` sites with
+  their exact covered-region predicate and captures `pivot_delete` payloads through the new
+  `pivot_delete_snapshot_bytes` (undo_commands.rs) — one authority, no copied payload struct.
+* The restores land via the new `record_source_cascade_undo_into` (object_deps.rs) — the same
+  recording over a guard the caller already holds; the state-locking wrapper delegates to it.
+  Cascade restores first, so reverse replay recreates the pivot before the slicers that point at
+  it. One Ctrl+Z restores rows + pivot OBJECT + slicers together (pinned).
+* `shift_pivot_regions_for_{row,col}_delete` now also clean `views`/`active_pivot_id` (under the
+  pivot_tables guard, delete_pivot_table's order) and prune the object script after guards drop.
+* The off-sheet path (`off_sheet_structural_edit`) got the identical treatment — its pivot
+  removal had the identical gap.
+* Frontend half: `deleteRows`/`deleteColumns` (tauri-api.ts) announce
+  `MUTATION_REFRESH [slicer, pivot, ribbonFilter]` on BOTH branches (the `deleteSheet` recipe) —
+  without it a cascaded slicer keeps painting and eating clicks. Pinned by a source-scan test
+  that also pins that INSERTS do not pay for a cascade that cannot happen.
+* Blast radius of the signature change: the four structural commands + impls +
+  `off_sheet_structural_edit` gain `slicer_state`/`timeline_state`; the shared `Workbook`
+  harness carries a `TimelineSlicerState`; d8/off-sheet test call sites extended.
+* Declared gap INHERITED, not introduced: timeline slicers have no restore arm
+  (`TimelineSlicerState` is not persisted — noted on `delete_timeline_slicer`), so a cascaded
+  timeline does not return on undo. Same gap as the interactive delete path.
+
+New tests: `pivot_structural_delete_tests.rs` (row / column / off-sheet full-cover each with
+undo round-trip, plus the partial-cover control pinning the doom predicate from both sides) and
+`structuralDeleteCascadeAnnouncement.test.ts`.
+
+### 20c. Surfaced along the way
+
+* **Disk exhaustion is a real hazard on this machine now**: 4.4 GB free at pass start; an
+  attempted second datafusion build target filled it and produced LNK1102/LLVM-OOM noise that
+  looks like toolchain breakage. `calcula-target` pruned; model-engine-lib builds in its own
+  in-repo `target/` (24 GB, warm, com.dropbox.ignored) — do NOT point it at a fresh dir.
+* **`bi::model_editor::tests::an_abandoned_script_batch_is_reclaimed_and_rolled_back` flaked
+  once** (1 of 3 full app-lib runs, "the wedge must be cleared", first-run cold-I/O load; passes
+  twice in isolation and in both later full runs). Load-sensitive, global
+  `script_batch_registry()` involved; watch it — if it fails a second time in any full pass it
+  gets a ledger id. *(It did — second strike 2026-08-14, run 3 of 3. CLOSED as **BUG-0060**, §22:
+  the "test isolation" half of this characterisation was wrong — the reclaim's record-then-heal
+  gap was a real production wedge reachable through connection delete and document reset.)*
+
+Ledger after this section: **58 entries, 58 fixed, open = NONE.** `EXCLUDED_UNTIL_FIXED` /
+`KNOWN_ISSUES` still empty; nothing suppressed.
+
+### 20d. The live pass — every project cold, and what it surfaced (2026-08-14)
+
+Every run below is auto-mode (`global-setup` launches its own app; each invocation is a cold
+launch) with the collection guard verifying the collected population.
+
+| run | result |
+|---|---|
+| functional (554 collected) | 549 passed / **1 failed** / 4 upheld fixmes, 38.3m — the one failure was the BUG-0055 repro SPEC's own off-by-one (below); corrected and green on an isolated cold rerun (1/1, 46s) |
+| journey (149 collected) | 148 passed / 1 env-gated skip (CLOSE_CASE), 28.8m — **the BUG-0052 tear probe is green** (`tornWindowMs === 0` asserted, both gestures) and the macro journey (`macro-model-recording.spec.ts`, 1 test) is green |
+| scenario (24) | first run: 24/24 passed and the GUARD failed the run — **BUG-0059**, below; after the guard fix: 24/24, guard verified, twice invoked (2.1m) |
+| visual (18) | first run 17/18 — the `grid-workflow-copy-paste-result` golden was STALE (below); after deliberate recapture: **18/18 on two consecutive cold runs**, golden hash stable across both |
+| invariant, seed 1786456498740 | 2/2 (walk + rapid-fire), guard verified |
+| invariant, seed 90010001 | 2/2 |
+| soak: BUG-0058 trace replay | 1/1 PASS (post-fix, as the ledger records) |
+| soak: seed 90140202, `floating:5,sheet:5` | 1/1, 6 oracle checkpoints |
+| BUG-0053 golden (scrolling.spec.ts) | two isolated cold runs, 4/4 each, all four golden hashes byte-identical before and after |
+| collection-guard teeth, live | a 0-byte spec file failed a functional run naming the file while its 1 executed test passed — the exact filed mechanism, refused |
+
+**BUG-0059 (filed + fixed in-pass): the guard false-positively failed every scenario run.**
+`listedIdentities` used `spec.file` (the `test()` call site — `scenarios/lib/scenario.ts` for every
+lib-registered test) while the run side uses `titlePath()[2]` (the imported spec file). Identical
+24-test sets compared as "24 missing + 24 phantom". The scenario project was the one project the
+guard's zero-false-positive measurement never covered live. Fix: the listing side takes the
+FILE-SUITE title (the guard's own docstring had recorded the correspondence); `spec.file` stays
+the axis for the zero-test-file coverage check. 21/21 unit (2 new), then 24/24 live.
+
+**The BUG-0055 repro spec's off-by-one.** `insert_rows` takes a RAW 0-indexed row; the spec
+passed 841 (= display **A842**) but wrote its probe value into **A841** — overwriting the 20 —
+so its "75" expectation could never hold, and post-fix it failed with 55, the CORRECT answer to
+the write it actually performed. The backend fix's necessity is pinned by the unit sabotage
+(60 stays without the rebuild); the spec now writes into the actually-inserted row and passes.
+
+**The stale copy-paste golden.** `grid-workflow-copy-paste-result.png` encoded the PRE-deselect
+state (C1:C3 still selected) — captured from a run where the spec's `clickCell("E1")` deselect
+was swallowed (the documented clickCell selection-drift gotcha). Every run where the click lands
+disagreed with it by 7,768 px, all selection overlay, zero content. The spec now deselects via
+`navigateTo` (asserted through the Name Box) and the golden was deliberately recaptured on a
+cold app: fail-before 7,768 px, corpus provenance green after (36/36), 18/18 twice.
+
+**Left standing, deliberately.** `validate-baselines.mjs` over the visual corpus reads
+**17 PASS / 9 CONCERN / 1 FAIL** — the §15c contamination class (cross-test data bleed, stray
+copy marquees, "system-ui" vs Calibri in the font combo on freshly-booted states) plus one FAIL
+(`grid-fmt-number-formats.png` documents number formats NOT applied: raw `0,75`, raw serial
+`45000`). These goldens PASS their specs (18/18 twice), so the suite is self-consistent; whether
+each verdict is a contaminated golden or a real product defect (the number-format one especially)
+is per-golden attribution work this pass did not do. Nothing was recaptured beyond the one
+stale golden above; nothing suppressed. *(CLOSED: §21 did the attribution — the FAIL was a
+spec that never formatted PLUS a real product defect on the untested dialog-date route
+(**BUG-0061**) and three CONCERNs were the ribbon lying "system-ui" (**BUG-0062**); §22 closed
+the watched flake (**BUG-0060**) and the functional failure (**BUG-0063**); §23 verified both
+passes on one tree and, re-driving the §21 routes live, found and fixed two more dialog defects
+(**BUG-0064**, **BUG-0065** — the second corrupted number formats on an untouched OK).)*
+
+Final ledger: **59 entries, 59 fixed, open = NONE.** `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` /
+`STALE_PRODUCT_STATE_GOLDENS` all empty.
+
+## 21. The number-format golden gets its attribution — and the product was broken on the one route nothing tested (2026-08-14)
+
+Section 20d left the visual corpus with **1 FAIL + 9 CONCERN** standing, deliberately, because
+"whether each verdict is a contaminated golden or a real product defect is per-golden attribution
+work this pass did not do." This pass did it. Method as briefed: **drive every live route first,
+before touching any golden** — on an ISOLATED cold app (own `app.exe` copy, own
+`WEBVIEW2_USER_DATA_FOLDER`, CDP 9223, the deterministic-capture pins), each route measured by
+backend display read AND a rendered-pixel crop of the cell.
+
+### 21a. The FAIL's verdict: BOTH hypotheses were half-right — and a third cause held the golden
+
+`grid-fmt-number-formats.png` documented number formats NOT applied because **the spec never
+applied any**: the "number format rendering" test seeded raw values (`0.75`, `45000`, `-500`) and
+photographed them, formatting nothing. Not golden contamination (§15c class) — the golden
+faithfully matched a spec whose body never did what its name says. The spec now applies a format
+per row through the new `grid.setNumberFormatDirect` helper (measured to repaint before it was
+trusted: `apply_formatting` + the `setCellValueDirect` event dispatch, crop read back), asserts
+every FORMATTED display backend-side before capture, and parks the selection via the Name Box.
+
+**And hypothesis (a) was also true, on the one route no suite exercised.** The live sweep — ribbon
+percent/comma/decimals, Format Cells dialog date/currency/number/time, `update_cell` + format —
+found the dialog's date presets rendering the FORMAT STRING ITSELF: type 45000, Ctrl+1 → Date →
+ISO → OK, and the cell displays the literal text `yyyy-mm-dd` (pixels and backend agree).
+
+**BUG-0061 (filed + fixed).** Two date formatters existed. `number_format.rs::format_date_number`
+was an uppercase-only `.replace("YYYY",..)` chain — the dialog's presets are stored lowercase
+(`"yyyy-mm-dd"`, styles.rs), so every dialog date fell through every replace untouched; the
+engine's own `presets::date_iso()` says `"YYYY-MM-DD"`, which is why nothing in-repo ever hit it.
+Same chain: xlsx builtin `D-MMM-YY` produced digit salad (no MMM token), datetime combos left the
+time half raw, and lowercase `hh:mm` rendered 13:00 as "01:00" (Excel's rule: `h` is 24-hour
+unless AM/PM is present). Meanwhile the REAL formatter — `custom_format.rs`, case-insensitive,
+full token set — was sitting one module over, and had its own latent defect found while pinning
+the fix: in date sections it DROPPED `/` (lexed as FractionSeparator) and `.` (DecimalPoint), so
+`MM/DD/YYYY` came out `01152024`. One formatter now: `Date`/`Time` delegate to
+`custom_format::format_custom_value`; the datetime renderer emits `/` and `.` as literals.
+Pinned by 5 new unit tests (both files); core workspace fully green; verified live post-fix
+(dialog date on 45000 → `2023-03-15`, dialog time → `13:30:00`, every ribbon route unchanged;
+functional `number-formatting.spec.ts` 12/12 — that suite covers only ribbon percent/comma/
+decimals, which is exactly why this survived).
+
+**Recapture, attributed.** Old→new golden diffs: `grid-fmt-number-formats.png`,
+`grid-fmt-alignment.png`, `sheets-default-tabs.png` — **the identical 1,350 px in all three**
+(bbox x[89..147] y[44..115] grid-relative; the same region offset by panel+ribbon in the
+full-page tab shot), i.e. the four value cells B2:B5 going raw→formatted, nothing else. The
+alignment and tabs goldens photograph the fmt block by the suite's ordered design, so they moved
+with it. 18/18 on two consecutive cold runs, hashes byte-stable, corpus provenance suite green.
+
+### 21b. The 9 CONCERNs, each to a named cause
+
+| CONCERN | attribution |
+|---|---|
+| `core-empty-grid` "system-ui" font combo | **BUG-0062, filed + fixed** (below) |
+| `ribbon-core-default-ribbon` "system-ui" | same defect, second photograph |
+| `workflow-multisheet-sheet1` "system-ui" | same defect, third photograph |
+| `grid-core-selection-single` "stray marquee" on B3 | **not a marquee**: the passive formula-reference highlight (`rendering/references.ts` — faint dotted borders around the ACTIVE formula cell's references; C3 is `=B3*2`). Deliberate product feature, correctly photographed |
+| `grid-core-selection-range` "marquee segments" | same feature: the extended selection's active formula cell highlighting its B-column references |
+| `core-formula-bar-display` data bleed | the suite's ordered-state design (§15c class): the spec overwrites two cells of the shared block and photographs the rest ambiently; self-consistent, asserted, 18/18 cold |
+| `grid-fmt-alignment` fmt-block rows 2–5 | same ordered-state design; recaptured with 21a, diff fully attributed |
+| `sheets-default-tabs` grid content | same; recaptured with 21a |
+| `grid-core-editing-mode` "overlay artifact" + `#VALUE!` | the "artifact" IS the inline editor (the golden's subject); `#VALUE!` in A2 is the CORRECT recalculation of `=A1+5` after A1 became text — Excel does the same |
+
+**BUG-0062 (filed + fixed): the ribbon reported "system-ui" for every empty cell.** BUG-0028's
+fix set `currentStyle = null` when `getCell` resolves null (an empty cell) so stale formatting
+stopped leaking — but null is not the truth either: the font combo's fallback was
+`?? "system-ui"`, a font no cell in the document renders in (backend `get_style(0)` says Calibri
+11; the canvas paints exactly that). Cleared and default are different things. An empty cell now
+loads the DOCUMENT DEFAULT style (index 0): BUG-0028's clearing preserved (nothing lit,
+`currentCellData` stays null), combo says Calibri — and the vertical-align **Middle** toggle now
+lights truthfully for default cells (`VerticalAlign::Middle` IS Calcula's default,
+`style.rs:358`), where before it lit only for non-empty ones. HomeTab vitest 60/60 (the BUG-0028
+pinning test now asserts the default style instead of null, so both defects stay pinned
+together). Six goldens recaptured deliberately (`core-empty-grid`, `ribbon-core-default-ribbon`,
+`menu-file-open`, `menu-edit-open`, `workflow-multisheet-sheet1`, and functional
+`empty-grid-full-window`): every changed pixel inside the ribbon's font-combo +
+alignment-toggle band (the identical 1,046 px, y[69..94] full-page / y[41..66] ribbon crop; the
+menu goldens move only in the toggle cluster because the open dropdown covers the combo).
+18/18 twice cold, hashes byte-stable; grid-rendering 4/4 twice cold.
+
+**The corpus product-state axis moved with the product — deliberately, and it caught the fix
+itself first.** `goldenCorpus.ts`'s BUG-0028 axis asserted "no toggle may be lit on an
+empty-workbook golden", and failed the recaptures within minutes — correctly, by its own rules,
+because "unlit" stopped being the fixed build's face the moment BUG-0062 landed: the document
+default IS `VerticalAlign::Middle`, so the truthful ribbon lights Center Vertically on a
+brand-new workbook exactly as Excel lights Bottom Align. The axis now pins each declared
+empty-document golden's EXPECTED pressed-accent reading (546 with the toggle visible, ~29 where
+the open Data menu covers the cluster, ±150 — one toggle box is ~500 px, so the band cannot
+absorb a box appearing or disappearing) and fires in BOTH directions: below the band is the
+pre-BUG-0062 null-style face, above it a BUG-0028-style latch. The reader's non-vacuity pair
+was re-anchored to a geometric contrast (covered vs visible toggle, same product state) after
+losing its behavioural one twice to fixed defects. goldenCorpus 37/37; full vitest 106,807
+green.
+
+### 21c. Surfaced, not built — owner calls
+
+- **The ribbon numberFormat dropdown has no date/time/currency options** (General, Number,
+  Thousands, Percentage, Scientific, Text only — `HomeTabGroupComponent.tsx NUMBER_FORMATS`).
+  Excel's dropdown has Short Date / Long Date / Time / Currency / Accounting / Fraction. Dates
+  are dialog-only today, which is why BUG-0061's route was the dialog. Excel-parity gap, small
+  to add (values feed `parse_number_format`, which already knows `date_iso` etc.).
+- **Default vertical alignment is Middle; Excel's is Bottom** (`CellStyle` default,
+  `style.rs:358`). Deliberate-looking, near-invisible at 20px rows, but it is a parity deviation
+  the ribbon now makes visible (Middle lights on every default cell).
+- **Overflow rendering: Calcula ellipsizes (`1234,5…`); Excel shows `####` for too-narrow
+  numerics and overflows text into empty neighbors.** Deliberate (pinned by
+  `truncatedTextDecoration.test.ts`), flagged by the validator; parity decision, not a defect
+  filing.
+- **`workflow-multisheet-sheet1` is a placeholder**: the "data entry across sheets" spec writes
+  to ONE sheet and says so in a comment ("when sheet creation E2E helpers are available" — they
+  are, now). Coverage gap, not contamination; the golden truthfully shows one sheet tab.
+
+Ledger after this pass: **62 entries, 62 fixed, open = NONE** (BUG-0060 was filed by the
+concurrent watched-flake pass; this pass filed BUG-0061 and BUG-0062).
+`EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS` all empty. The corpus
+validator's standing sheet is now: FAIL resolved (spec fixed + product fixed + recapture
+attributed), all 9 CONCERNs attributed — three fixed (BUG-0062), two product features
+photographed correctly, three the suite's documented ordered-state design, one a placeholder
+spec awaiting real multi-sheet coverage.
+
+## 22. The watched flake strikes twice, the seeds re-run, and the functional suite reaches 550/0 (2026-08-14)
+
+The follow-up pass to §20d: the four seeds §20d did not re-run, the full functional pass after its
+spec fix, and the §20c watched flake. Every E2E run below is auto-mode COLD (global-setup launches
+its own app, teardown kills it — post-run `app.exe` count verified 0 each time) with the collection
+guard verifying the collected population. Machine handover honored: this pass idled ~2h until the
+§21 pass's instruments went quiet, then took the machine deliberately, killing an idle dev host
+(14:47 chain) and one standing app (pid 35460, CPU 4.7s total over 2h) — recorded here so a
+returning session knows who took its instances.
+
+### 22a. The watched flake struck on run 3 of 3 — BUG-0060, and §20c's "not product behaviour" was wrong
+
+Three full app-lib runs, default parallelism (12 threads), one manifest dance, exe reused: run 1
+**1,633/0** (2.65s), run 2 **1,633/0**, run 3 — `an_abandoned_script_batch_is_reclaimed_and_rolled_back`
+FAILED "the wedge must be cleared" (model_editor.rs:9103), **1,632 passed / 1 failed**. Second
+strike → ledger id, per the recorded rule. Not cold-I/O (third, warm, consecutive run) and not
+wall-clock (the deadline is back-dated a full second): it is scheduling-order between threads
+sharing the process-global registry.
+
+**Root cause, confirmed from source — and it is a production defect, not test isolation.**
+`reclaim_expired_script_batches` removed EVERY expired entry from the global
+`script_batch_registry()` and only then attempted `rollback_model_batch` against the CALLER's
+BiState. A rollback that fails left `in_batch` set in the global `model_undo_store` with the
+registry record already destroyed — nothing can ever reclaim it again: every later batch on that
+ModelKey refuses to open and `record_model_undo` silently suppresses every later edit's undo
+snapshot. ModelKey outlives connections AND documents. Production routes, no concurrency needed:
+`bi_delete_connection` removed a connection with a batch open (trusted or script) and never
+released it; `reset_bi_connections` (File > New / Open) drained all connections likewise. The test
+binary's cross-BiState theft (a sibling's reclaim stealing the freshly-expired zombie, rollback
+failing against the wrong state) is the same record-then-heal gap, made frequent.
+
+**Fix** (`bi/model_editor.rs` + `bi/commands.rs`): reclaim takes ONLY batches whose connection
+lives in the calling BiState — removing an entry it cannot roll back is destroying the last healing
+record; a rollback that still fails clears the interlock instead of stranding it;
+`bi_delete_connection` now runs `prepare_connection_delete` before removal (reclaims expired script
+batches, REFUSES the delete while a live script batch owns the model — same rationale and bound as
+`guard_no_live_script_batch` — and rolls back a trusted batch left open on the model's last
+connection); document reset calls `forget_batches_for_model_key` per torn-down connection (no
+rollback — the document is being discarded; the pre-batch snapshot stays as one undoable step,
+never a silent commit).
+
+**Proof:** 4 new pinning tests, including `reclaim_leaves_batches_whose_connection_it_cannot_resolve`
+(the flake's interleaving made deterministic); full app-lib **3× consecutive post-fix green**;
+`bi::model_editor` module **30× full-parallel: 0 failures**; build clean, 0 warnings.
+
+### 22b. The seeds not re-run by §20d — all green on the final tree, plus one fresh per project
+
+| run (auto-mode cold, guard verified each) | result |
+|---|---|
+| invariant, seed 1786396152029 | 2/2 (walk 75 + rapid-fire 50), 3.1m |
+| invariant, seed 20260811 | 2/2, 2.7m |
+| invariant, seed 1786421716252 | 2/2, 2.7m |
+| invariant, FRESH seed 1786719923213 | 2/2, 2.7m |
+| soak, seed 90140201 (`floating:8`, 150 actions, oracleEvery 25) | 1/1, 6 checkpoints, save/reload 1, 2.5m |
+| soak, FRESH seed 90140301 (default weights, 150 actions) | 1/1, 6 checkpoints, save/reload 1, 2.7m |
+
+Stated, not hidden: the same seeds now generate DIFFERENT walks than their 2026-08-11 runs — the
+action pool grew (`fr.*`, `note.*` families), so a seed's green is evidence about the current
+generator, not a byte-replay of the old walk. And the undo round-trip oracle decided **0**
+round-trips in 5 of these 6 runs (1 decided in the first): the new mixes hit workbook-structure
+actions that clear the undo stack (Excel parity, the oracle explains itself in-log). A green
+invariant run currently carries thin undo evidence — the walker's own [WARNING] says so per run.
+Left as a known evidentiary gap, not a defect.
+
+### 22c. The full functional pass — one failure, and it was a real MCP race (BUG-0063); then 550/0
+
+**Run 1 (post-BUG-0060 tree): 549 passed / 1 failed / 4 upheld fixmes of 554 collected, 38.4m,
+guard verified.** The failure: `mcp-create-named-range.spec.ts` — the FIRST MCP spec in the
+ordered run — `ECONNREFUSED 127.0.0.1:8787` at the handshake, 1.2s in, on a server `mcp_status`
+had just reported running with a valid token.
+
+**Attributed from the run's own interleaved backend log, not replayed blind:** `Server starting`
+(8266) → the spec's cleanup `Server stop requested` (8267) → `Server listening` (8268) → `Server
+shutting down` (8269). `mcp_start` returned success and set `running=true` BEFORE its freshly
+spawned thread had created a Tokio runtime and bound the port; under 265-tests-in load the client's
+start → status → connect beat the bind. A real user pasting the MCP config into Claude Desktop can
+lose the same race — and an actual bind failure (port in use) was only a background log line after
+"started" had already been returned. Filed **BUG-0063**, fixed: `mcp_start` now binds
+synchronously (`bind_mcp_listener`) before touching running/token/cancel state and hands the bound
+listener to the server thread — the kernel backlog accepts from the moment the command returns, so
+the race is structurally gone, and a port conflict is the command's own `Err`. Pinned by
+`mcp::bind_tests::a_successful_bind_accepts_before_any_accept_loop_and_a_conflict_is_an_err`, plus
+a green isolated cold replay (1/1, 1.6m).
+
+**Run 2 (final tree, cold): 550 passed / 0 failed / 4 upheld fixmes of 554 collected, 38.6m,
+guard verified — the full functional suite is green with zero failures.**
+
+**The §20d residual question is answered:** no downstream golden encoded BUG-0053's pre-scrolling
+residue. Both full ordered runs passed every golden-bearing spec (scrolling.spec.ts 4/4 in order,
+zero screenshot mismatches anywhere); the only failure either run produced was the MCP race above.
+
+Ledger after this section: **63 entries, 63 fixed, open = NONE** (this pass filed BUG-0060 and
+BUG-0063; §21's concurrent pass filed BUG-0061 and BUG-0062 — the allocator kept the ids straight
+across the two live passes). `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS`
+all empty; nothing suppressed.
+
+## 23. The close-out: both passes verified on one tree, and the dialog's number formats were lying twice more (2026-08-14)
+
+The §20d attribution (§21) and the seeds/flake follow-up (§22) ran concurrently; this pass closed
+them out on the merged tree: verified every claim it could measure, re-ran the full verification
+battery, and re-drove the §21 routes live. The machine was free at start (0 `app.exe`, 0 node/
+Playwright, nothing on 9222/9223); a dev app was launched on CDP 9222 for the live work and is
+LEFT RUNNING at the end of the pass, deliberately.
+
+### 23a. Verification of §21/§22 — everything checked, one probe artifact attributed
+
+- **Ledger**: ids contiguous BUG-0001..0063 (0059 exists), all `fixed`, entries 0060–0063 fully
+  populated (mechanism + repro + fix + validation).
+- **Recapture ordering**: file mtimes pin every §21 golden AFTER its product fix (BUG-0061 fix
+  15:10–15:11 → its 3 goldens 15:36; BUG-0062 fix 15:50 → its 6 goldens 15:56–16:18).
+- **Live re-verification on 9222** (fresh dev app, backend display read + rendered-pixel ink per
+  route): ribbon percent `75%` / comma `1 234 567` / increaseDecimal `3,1`; dialog Date ISO on
+  45000 → `2023-03-15` (ink 478→679); dialog Currency `$1 234,50`; dialog Number+separator
+  `-500,00`; `update_cell` + ribbon `50%`. BUG-0062 re-proved: empty cell → ribbon Calibri 11,
+  Center-Vertically lit, agreeing with backend style 0.
+- **One §21-probe artifact found**: the probe's Number+separator phase FAILED with "no visible
+  thousands-separator preset" — its `clickVisibleText("Number")` hit the dialog's own **Number
+  TAB** (first visible match), not the category entry, so the preset list never rendered.
+  Currency/Date worked because those words exist only in the category list. Probe selector
+  ambiguity, not product; the route is green when the CATEGORY is clicked.
+
+### 23b. BUG-0064 + BUG-0065 — found by looking at what the probe photographed
+
+The forensic dump of the actual preset labels (taken to fix the probe) showed `1,234.00` on a
+document whose grid renders `-500,00`. Chasing that surfaced two real defects, both fixed:
+
+- **BUG-0064 (filed + fixed): the dialog's preset labels/examples ignore the locale.**
+  `getNumberFormatCategories(dec, thou)` was locale-aware and unit-tested with locale args — and
+  had NO production caller passing them; the tab rendered the US-default constant. The sample
+  text lied about the result it produces (Excel's samples are locale-correct). Fix: the Number
+  tab rebuilds its categories from `@api/locale` (cached-sync at mount, async load, LOCALE_CHANGED
+  re-render). 5 pins (`numberTabLocale.test.tsx`), sabotage-verified; live post-HMR the sv-SE
+  document shows `1 234,00`.
+- **BUG-0065 (filed + fixed): an untouched OK in Format Cells silently corrupts the cell's
+  number format.** Measured live BOTH ways before fixing: `-500,00` reverted to `-500`
+  (Number+sep → General), and a date cell rendered **`15ate (2023-03-15)`** — get_style emits
+  DISPLAY NAMES (`format_number_format_name`, api_types.rs), the dialog loads and re-sends them
+  on OK, and `parse_number_format` could not read its own serializer's output: no-format-char
+  names fell to General, the rest became garbage Custom formats (the leading `D` of "Date (…)"
+  consumed as a day token) — while the style read-back still said `Date (yyyy-mm-dd)`, hiding the
+  corruption. Same defect class `parse_text_rotation` in the SAME file documents having fixed.
+  Fix: `try_parse_display_name` — the full inverse, tried before format-code guessing; the
+  23-format round-trip + re-emission canonicality pinned
+  (`every_display_name_the_serializer_emits_round_trips`). Frontend half: the dialog compared
+  display names against preset values AT MOUNT (before the async style load), so a formatted
+  cell always reopened on General with nothing lit — `categoryForFormat` /
+  `normalizeToPresetValue` + a re-derive effect fix category selection, highlight, and preview
+  (6 pins, `numberTabDisplayName.test.tsx`). Proven live post-fix: untouched OK preserves both
+  formats and the dialog opens on Date/Number respectively.
+
+### 23c. The full battery on the final tree (every number below measured by this pass)
+
+| check | result |
+|---|---|
+| check-types | clean (before and after the fixes) |
+| lint:boundaries | clean (×2) |
+| check:script-typings | `[OK] 39 interfaces verified, 741 members probed, 361 carry generated broker policy` (×2) |
+| check:line-endings | `[OK] no mixed line endings` (×2) |
+| vitest FULL | pre-fix **106,807/106,807** (782 files); post-fix **106,819/106,819** (784 files) — delta = exactly the 12 new pins in 2 new files |
+| cargo check core --all-targets | exit 0, no warnings |
+| cargo check app --all-targets | exit 0, no warnings (×2, before and after) |
+| core workspace cargo test | **1,355 passed / 0 failed** (engine 551) |
+| app-lib (manifest dance, exe run directly) | pre-fix **1,638/0**; post-fix **1,641/0** (+ the 3 BUG-0065 pins) |
+| test_pivot | **56/0** (×2) |
+| model-engine-lib --all-targets | 20 suites, **2,156 passed / 0 failed** (72 ignored: credentialed connectors) |
+| model-engine-lib doctests (`--test-threads=1`) | **36/0** |
+
+One environment note for the next pass: `cargo test` into the shared `calcula-target` FAILS with
+os error 5 while the 9222 dev app runs — the dev chain executes `debug/app.exe` from that same
+target dir and cargo cannot replace it. Kill the dev chain (`npm run dev:kill` + stray
+`app`/`cargo`), build, then relaunch.
+
+### 23d. Standing sheet after this pass
+
+Ledger: **65 entries, 65 fixed, open = NONE** (this pass filed BUG-0064 and BUG-0065).
+`EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS` all empty; nothing
+suppressed. NOT re-run after the BUG-0064/0065 fixes: the E2E projects (functional/journey/
+visual/invariant/scenario/soak) — the changed surfaces are FormatCellsDialog internals and the
+`parse_number_format` display-name arm, which no golden photographs and no spec drives (the
+functional number-formatting spec covers ribbon routes, re-verified live here); §22's 550/554 and
+§21's 18/18 stand for the pre-fix tree. Still watched: §22b's undo-oracle evidentiary gap (0
+round-trips decided in 5 of 6 seed runs), and §21c's owner calls (ribbon dropdown date/currency
+options, default vertical-align Middle vs Excel Bottom, ellipsis vs `####`). The dev app is LEFT
+RUNNING on CDP 9222.

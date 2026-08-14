@@ -9,8 +9,10 @@ import * as fs from "fs";
 import * as path from "path";
 import * as http from "http";
 import { fileURLToPath } from "url";
+import type { FullConfig } from "@playwright/test";
 import { webview2BrowserArguments } from "./webview2Args.mjs";
 import { APP_DIED_MARKER } from "./appDiedMarker";
+import { assertCollectionGuardPresent } from "./collectionGuard";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
@@ -53,7 +55,15 @@ function waitForCDP(port: number, timeoutMs: number): Promise<void> {
   });
 }
 
-export default async function globalSetup() {
+export default async function globalSetup(config: FullConfig) {
+  // REFUSE a run whose resolved reporter list lost the collection guard (a CLI
+  // --reporter flag replaces the config's reporters). Without the guard, a run
+  // that silently collects fewer tests than `--list` reports can produce a
+  // clean green number for a suite it did not run — measured 2026-08-13:
+  // 134 of 143 journey tests collected, reported as a clean pass. `--list`
+  // itself never executes global-setup, so listing stays cheap and unguarded.
+  assertCollectionGuardPresent(config);
+
   // Clear the "the application went away" marker from any earlier run, so the
   // banner the teardown prints can only ever be about THIS one. Written by
   // e2e/fixtures.ts the moment a CDP connect proves the app is gone.

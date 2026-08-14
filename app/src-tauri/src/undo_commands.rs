@@ -2678,6 +2678,23 @@ struct PivotFullSnapshot {
     cache: pivot_engine::PivotCache,
 }
 
+/// The `pivot_delete` restore payload, built through the ONE struct the restore
+/// arm deserializes. BUG-0054: the structural delete paths record the same
+/// restore `delete_pivot_table` does, and a copied payload shape would be a
+/// second source of truth that drifts on the first field change.
+pub(crate) fn pivot_delete_snapshot_bytes(
+    pivot_id: pivot_engine::PivotId,
+    definition: &PivotDefinition,
+    cache: &pivot_engine::PivotCache,
+) -> Vec<u8> {
+    serde_json::to_vec(&PivotFullSnapshot {
+        pivot_id,
+        definition: definition.clone(),
+        cache: cache.clone(),
+    })
+    .unwrap_or_default()
+}
+
 /// Restore a pivot definition for undo/redo.
 /// Replaces the current definition, recalculates the view, and rewrites the grid.
 fn apply_pivot_definition_restore(

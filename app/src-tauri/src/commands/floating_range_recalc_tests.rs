@@ -282,3 +282,50 @@ fn the_edge_installer_revives_a_loaded_floating_range() {
         "the installer must re-register the backing sheet's edges (GAP B / §2z)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0058: a dependent on a NON-ACTIVE user sheet must follow an FR write
+// ---------------------------------------------------------------------------
+
+/// Found by the first mixed floating+sheet soak walk (seed 90140202,
+/// `tests/regression/repros/BUG-0058.trace.json`, minimized to 17 actions):
+/// `recalc_after_off_sheet_write` re-evaluated the WRITTEN sheets, every
+/// OBJECT sheet and the ACTIVE sheet -- and no other user sheet. A formula on
+/// a sheet the user is not looking at that reads a floating range therefore
+/// went stale when a script/UI wrote the FR cell while a THIRD sheet was
+/// active; the dependent on the active sheet updated, which is exactly the
+/// asymmetry the walk's digest showed (46 stale vs 4 recalculated).
+#[test]
+fn a_non_active_sheet_dependent_follows_a_floating_range_write() {
+    let wb = Workbook::new(3);
+    let info = create(&wb, "Float1");
+    set_fr(&wb, info.range.id, 0, 0, "42");
+
+    // Sheet1!B1 reads the FR (registered while Sheet1 is active)...
+    wb.set(0, 1, "=Float1!A1+4");
+    assert_eq!(number(&wb, 0, 0, 1), 46.0);
+
+    // ...and Sheet2!C1 reads Sheet1!B1 (registered while Sheet2 is active),
+    // so the repair must extend TRANSITIVELY, not one hop.
+    wb.switch_to(1);
+    wb.set(0, 2, "=Sheet1!B1*10");
+    assert_eq!(number(&wb, 1, 0, 2), 460.0);
+
+    // The user works on Sheet3; the FR cell is rewritten off-sheet.
+    wb.switch_to(2);
+    set_fr(&wb, info.range.id, 0, 0, "10");
+
+    assert_eq!(
+        number(&wb, 0, 0, 1),
+        14.0,
+        "the NON-ACTIVE sheet's dependent went stale: recalc_after_off_sheet_write \
+         never re-evaluates a user sheet that is neither written nor active \
+         (BUG-0058)"
+    );
+    assert_eq!(
+        number(&wb, 1, 0, 2),
+        140.0,
+        "the SECOND-hop dependent (non-active sheet reading another non-active \
+         sheet) must follow too -- the dependent-sheet closure is transitive"
+    );
+}

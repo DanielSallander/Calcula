@@ -1,7 +1,47 @@
 {
   "version": 1,
-  "nextId": 54,
+  "nextId": 66,
   "bugs": [
+    {
+      "id": "BUG-0059",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "first live --project=scenario run through the collection guard (the 2026-08-14 verification pass): 24/24 tests passed and the guard FAILED the run"
+      },
+      "violation": {
+        "oracleId": "collection-guard",
+        "message": "THE COLLECTION GUARD FALSE-POSITIVELY FAILED EVERY SCENARIO RUN: 24 tests listed, 24 collected, all passed -- and the run exits 1 with '24 missing + 24 phantom'. Mechanism: listedIdentities used spec.file (where test() was CALLED -- scenarios/lib/scenario.ts for every lib-registered test) as the identity's file component, while the run side (collectedIdentities) uses titlePath()[2] -- the file-suite of the spec the runner imported (scenarios/budget-model.scenario.ts). For direct-registration projects the two spellings agree, which is why the guard's measured zero-false-positive claim (functional/visual/journey/invariant/soak) held; the scenario project was the one project never live-verified, and its lib-indirection is exactly where the two attributions diverge. A guard that cannot pass on a healthy suite trains people to expect red, which is how suppression starts.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pre-fix: npx playwright test --project=scenario on a healthy tree -- all tests pass, run exits 1, guard names all 24 tests as both missing (under scenarios/lib/scenario.ts) and phantom (under the three .scenario.ts files). Unit-level: the lib-registered listing fixture in collectionGuard.test.ts.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "CONFIRMED from source: identity attribution mismatch between the two sides of the comparison for lib-registered tests. The file-suite title is the run side's exact spelling (the guard's own docstring recorded the correspondence: 'the file-level suite's title ... corresponds to titlePath()[2]') -- the listing side simply did not use it.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/collectionGuard.ts (listedIdentities takes the FILE-SUITE title as the identity file component, spec.file as fallback; spec.file remains the axis for the zero-test-file coverage check, where lib-indirection is deliberately detected and declined)",
+          "app/e2e/__tests__/collectionGuard.test.ts (+2: the lib-registered fixture pins the file-suite attribution; the empty-title fallback pins spec.file)"
+        ],
+        "diffSummary": "One function: the listing-side identity now uses the same file attribution the run side has always used. The guard's strength is unchanged: a dropped or truncated spec file still produces missing identities under its own file-suite title, and the zero-byte/zero-test coverage checks are untouched.",
+        "validatedBy": [
+          "collectionGuard.test.ts 21/21 (19 existing + 2 new)",
+          "live: --project=scenario rerun on a cold app -- guard verifies 24/24 (the pre-fix invocation is the repro)",
+          "live: the guard's teeth re-proven the same day -- a 0-byte spec file fails a functional run naming the file (sabotage run, this pass)"
+        ]
+      }
+    },
     {
       "id": "BUG-0023",
       "discovered": "2026-08-11",
@@ -2212,7 +2252,7 @@
     },
     {
       "id": "BUG-0052",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-08-13",
       "source": {
         "kind": "manual",
@@ -2237,14 +2277,22 @@
         "suggestedFixArea": "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts (followBackendSheetActivation) and whatever consumes `sheet:normalSwitch` to refetch the viewport. NOT undo-specific: fixing it in applyRestoreToTheView alone would make undo differ from the tab click, which is the split BUG-0043 closed."
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "NOT FIXED IN THIS PASS, and deliberately not suppressed. It is cosmetic -- a two-frame flicker, no wrong answer, no data loss, and the settled state is asserted to agree -- while the fix is a change to the single sheet-switch path the whole app shares. The measurement, the probe and the bound are committed, so the day it is attempted there is already a test that fails before and passes after."
+        "status": "fixed",
+        "filesChanged": [
+          "app/src/core/lib/sheetSwitchPrefetch.ts",
+          "app/src/core/components/Grid/GridCanvas.tsx",
+          "app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts",
+          "app/src/shell/SheetTabs/SheetTabs.tsx",
+          "app/src/api/index.ts",
+          "app/src/core/lib/__tests__/sheetSwitchPrefetch.test.ts",
+          "app/e2e/journeys/sheet-tab-state-undo.spec.ts"
+        ],
+        "diffSummary": "FIXED 2026-08-14, by the register's own prescription -- fetch the target sheet's viewport BEFORE the context swap and commit both in one batch -- and the measurement found the tear had TWO mechanisms, not one. (1) THE CANVAS HALF: every switch initiator (SheetTabs' click/add/delete/applySheetsResult and applyRestoreToTheView for undo/redo) now awaits `primeSheetSwitch()` AFTER the backend switch and BEFORE the first dispatch; the prime runs GridCanvas's own registered prefetcher (same calculateFetchRange, same getViewportCells+getSpillRanges) into a one-shot handoff slot (`app/src/core/lib/sheetSwitchPrefetch.ts`, exposed to Shell via @api), and the EXISTING `sheet:normalSwitch` handler -- no second channel, no second hydration path -- takes the payload and commits it synchronously inside the dispatch turn; a `useLayoutEffect` then paints the canvas before the browser paints, so React commits strip and cells in ONE flush. The dispatch sequence itself still contains no `await` (the §13 atomicity discipline; the prime sits strictly before the first dispatch), a same-sheet undo primes nothing, and a missing/failed prime degrades to the old fetch-after-swap path, never to a wrong paint. A sheet-epoch guard in fetchCells discards any viewport response that straddled a switch (the backend answers for whichever sheet is active when it SERVES the call) and re-fetches via the existing deferral machinery. (2) THE STRIP HALF, which the prime alone exposed at 33 ms on undo: the strip's bold weight rendered from SheetTabs' LOCAL activeIndex, which a backend-initiated switch only reaches through the 'Syncing activeIndex with Redux' useEffect -- one flush AFTER the canvas painted. `paintedActiveIndex` now renders the highlight from the grid sheet context, making followBackendSheetActivation's standing comment ('the tab strip has no state of its own... it syncs its highlight from this') true of the pixels; local activeIndex remains for behaviour only. MEASURED with the committed probe, cold app, consistent bundle: before 60-67 ms (click) / 21-71 ms (undo); after 0 ms / 0 ms across five consecutive runs, and the spec now asserts the ABSOLUTE claim (tornWindowMs === 0 for both gestures) it could not before. Switch latency unmoved: landed-at 90-156 ms (click) / 52-83 ms (undo) vs the pre-fix canvas catch-up at ~98 ms. TEETH: with the prime sabotaged to a no-op on the running build, the raised test fails with 'tab click 64 ms' and samples showing the strip at t=112 ms over ink at t=191 ms -- the filed symptom exactly; restored byte-identically (sha256 a6b85099f95e07ebd43a6b1c0d8eba42484ad8f4139e3a961e955b60906873b7) and green again. 10 unit tests pin the handoff slot (exactly-once take, foreign-sheet refusal, staleness, disposal ownership, renderSignal bracketing). The atomicity unit suite (undoSheetActivation) passes unchanged -- the event sequence and detail shapes are untouched. CAUTION FOR FUTURE MEASUREMENT: under `tauri dev`, HMR cycles that reload sheetSwitchPrefetch.ts can split its module state across stale importer instances (prime writes into one, take reads another), which resurrects a ~30 ms tear that does NOT exist on a cold bundle -- measure this bug only on a verified cold launch."
       }
     },
     {
       "id": "BUG-0053",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-08-13",
       "source": {
         "kind": "manual",
@@ -2269,9 +2317,449 @@
         "suggestedFixArea": "app/e2e/tests/scrolling.spec.ts -- start the test from a known workbook (the `new_file` wipe every journey spec uses) and RE-CAPTURE `grid-scroll-before.png` and `grid-scroll-after-wheel-down.png` through the review flow (`npm run e2e:visual:baseline` / `node tests/regression/validate-baselines.mjs`), not by hand."
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "NOT FIXED IN THIS PASS, deliberately. The fix requires REPLACING A CHECKED-IN GOLDEN, which is a change to evidence rather than to code, and this repo has a review flow for exactly that. Silently re-capturing a baseline at the end of an unrelated pass is how evidence-free goldens got into the tree the first time (§12 found 75 of them). The measurement, the contaminating spec and the one-line fix are recorded above so the recapture can be done deliberately and reviewed. Pre-existing: the pass that filed this measured functional at 542/1/11 against a stated baseline of 541/2/11 -- one FEWER failure than the baseline, with the same 554 total."
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/tests/scrolling.spec.ts",
+          "app/e2e/tests/__screenshots__/scrolling.spec.ts/grid-scroll-before.png",
+          "app/e2e/tests/__screenshots__/scrolling.spec.ts/grid-scroll-after-wheel-down.png"
+        ],
+        "diffSummary": "THE RECORDED ONE-LINE FIX, THEN A DELIBERATE RECAPTURE. (1) scrolling.spec.ts test 1 now calls resetToNewWorkbook before its captures, so the golden is a function of the test alone. (2) Both contaminated goldens recaptured 2026-08-14 on a COLD app under the asserted capture environment (webview2Args pins; isolated instance on CDP 9223 because the shared 9222 machine was contested -- a first recapture attempt on 9222 photographed ANOTHER suite mid-run and was caught by ink attribution and reverted). DIFF ATTRIBUTED PIXEL-FOR-PIXEL: grid-scroll-before lost exactly the two contamination clusters -- \"First second\" at B6 (x90-156, y124-132) and \"original\" at B10 (x90-132, y204-215), 256 ink px, matching the comparator's measured 255 differing px -- and kept \"Top\" at A1 (x27-45); grid-scroll-after-wheel-down lost 1,300 dark px of multi-spec residue (rows 3-20) and now shows the clean scrolled grid at the same row-3 offset the old baseline framed. grid-scroll-distant-cell-z100 and grid-scroll-row-5000 were never contaminated and are byte-identical (a mid-recapture rewrite of row-5000 by a FAILING test on the contested app was detected and reverted). VERIFIED: two cold runs agree (4/4 then 4/4 with unchanged hashes); goldenCorpus provenance 44/44 (both new files read dpr2, 39,430/39,511 hairline px, no-chrome profile population); validate-baselines.mjs review flow: 4 PASS / 0 CONCERN / 0 FAIL. Residual, stated plainly: the wipe now runs MID-SUITE in the full ordered functional pass; downstream specs that encoded pre-scrolling residue in their own goldens would surface on the next full pass, which was not runnable this session because another agent held the machine."
+      }
+    },
+    {
+      "id": "BUG-0054",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "found by reading, while auditing the pivot-delete announcement gap (the BUG-0051 residual): the hunt for a SECOND pivot-delete path -- the convert-to-range lesson -- found one in structure.rs"
+      },
+      "violation": {
+        "oracleId": "backend-cascade-integrity",
+        "message": "A ROW/COLUMN DELETE THAT FULLY COVERS A PIVOT REGION DELETES THE PIVOT WITHOUT THE CASCADE, WITHOUT AN UNDO RESTORE AND WITHOUT AN ANNOUNCEMENT. `shift_pivot_regions_for_row_delete` / `_col_delete` (app/src-tauri/src/commands/structure.rs, the two `pivot_tables.remove(&pid)` sites) remove the pivot RAW. Compare `delete_pivot_table` (pivot/commands.rs), which (1) runs `object_deps::cascade_deleted_sources` so the slicers, timeline slicers and ribbon-filter targets bound to the pivot die with it, (2) records `pivot_delete` + the cascade restores on the undo stack, and (3) cleans `views` and `active_pivot_id`. The structural path does NONE of these: slicers/timelines survive pointing at a dead pivot id (the exact orphan §3bt's cascade exists to prevent), `pivot_state.views` keeps the dead entry, undoing the row delete restores the pivot's CELLS (via the structural snapshot / engine RestoreSnapshot, which carry cells only) but not the pivot object -- a region that looks like a pivot and answers to nothing -- and no announcement reaches the frontend stores. The object_deps census does not see it because these sites are not a delete COMMAND; the same reasoning that hid `tables` from §3bn's sweep (BUG-0047: 'it has its own re-key, so it looked handled').",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "FOUR STEPS, no scripting needed for the backend half. (1) Create a pivot whose destination occupies, say, rows 10-15. (2) Bind a slicer to it. (3) Select rows 8-20 (whole rows) and Delete Sheet Rows. (4) Observe: get_pivot_tables no longer lists the pivot; the slicer still lists it as its source (orphan); Ctrl+Z brings the ROWS back with the pivot's rendered cells but `get_pivot_at_cell` finds nothing -- the pivot object is gone for good. The FRONTEND ghost-tab half (Analyze/Design tabs surviving under a stationary cursor when the rows are deleted by a script's api.deleteRows) was fixed 2026-08-14 by `reconcileActivePivotAfterShift` in the Pivot selection handler, pinned by activePivotReconciliation.test.ts; the backend halves are what stay open.",
+        "trace": null,
+        "actionCount": 4
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 0.9,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The structural shift helpers pre-date the object-dependency cascade and were never onboarded: they hold `protected_regions` + `pivot_tables` for their whole pass, so the cascade (which takes the slicer/timeline/ribbon locks) cannot run inline -- it has to collect the removed pivot ids and run after the drops, the way `delete_pivot_table` runs it FIRST for the same lock-discipline reason. The undo half needs the removed pivots recorded as `pivot_delete` restores inside the row-delete's own transaction (cascade restores first, then the pivot, then the rows -- reverse-replay order), and the frontend told via the `pivot`+`slicer`+`ribbonFilter` domains. `delete_rows`/`delete_columns` already thread pivot_state and ribbon_filter_state; slicer_state and timeline_state would need to join the signatures (delete_rows_impl exists over plain references, so the behaviour is unit-testable).",
+        "suggestedFixArea": "app/src-tauri/src/commands/structure.rs (shift_pivot_regions_for_row_delete / _col_delete: return removed pivot ids; delete_rows_impl / delete_columns_impl: cascade + undo-record + announce after locks drop)"
+      },
+      "notes": "Deliberately NOT suppressed anywhere: no KNOWN_ISSUES entry, no walker exclusion. A walk that deletes rows across a pivot with a slicer bound to it should fail loudly on the orphan. Filed open rather than fixed in-pass because the fix threads two more State handles through two structural commands and reorders undo recording in a lock-heavy area this program has deadlocked in three times -- it deserves its own pass with the app-lib suite run against it.",
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/commands/structure.rs (collect_doomed_pivots predicts the two remove sites; delete_rows_impl / delete_columns_impl / off_sheet_structural_edit run the slicer/timeline/ribbon-filter cascade BEFORE their lock phase and record cascade + pivot_delete restores INSIDE their transaction; shift_pivot_regions_for_row_delete / _col_delete clean views + active_pivot_id and prune object scripts; insert paths + all four Tauri wrappers gain slicer_state/timeline_state pass-through)",
+          "app/src-tauri/src/object_deps.rs (record_source_cascade_undo_into: same recording over a guard the caller already holds -- the structural paths hold the undo lock for their whole transaction)",
+          "app/src-tauri/src/undo_commands.rs (pivot_delete_snapshot_bytes: the restore payload built through the ONE struct the restore arm deserializes)",
+          "app/src/core/lib/tauri-api.ts (deleteRows/deleteColumns announce MUTATION_REFRESH [slicer, pivot, ribbonFilter] on both branches -- the deleteSheet recipe)",
+          "app/src-tauri/src/commands/pivot_structural_delete_tests.rs (new, 4 tests)",
+          "app/src/core/lib/__tests__/structuralDeleteCascadeAnnouncement.test.ts (new, 4 tests)",
+          "app/src-tauri/src/commands/cross_sheet_recalc_tests.rs + d8_structural_recalc_tests.rs + off_sheet_tests.rs (harness gains the timeline state; call sites extended)"
+        ],
+        "diffSummary": "The structural delete paths now give a fully-covered pivot the SAME death delete_pivot_table gives one: collect_doomed_pivots captures the pivot_delete payloads and the DeletedSource list using the exact covered-region predicate the remove sites use; cascade_deleted_sources runs after every refusal gate and before the lock phase (the delete_pivot_table ordering -- the undo lock is never held across a store lock); the restores land inside the ONE structural transaction (cascade first, so reverse replay recreates the pivot before its slicers); the shift helpers clean views/active_pivot_id under the pivot_tables guard and prune the object script after every guard drops; and the frontend routes announce the slicer/pivot/ribbonFilter domains on both the active-sheet and off-sheet branches. Declared gap inherited from delete_pivot_table: timeline slicers still have no restore arm (TimelineSlicerState is not persisted), so a cascaded timeline does not come back on undo -- noted on delete_timeline_slicer.",
+        "validatedBy": [
+          "pivot_structural_delete_tests: a_row_delete_covering_a_pivot_cascades_cleans_and_restores_on_undo (views + active + slicer + region + one-Ctrl-Z restore), a_column_delete_covering_a_pivot_cascades_and_restores_on_undo, an_off_sheet_row_delete_covering_a_pivot_takes_the_same_path, a_partial_cover_keeps_the_pivot_and_its_slicer (the doom predicate pinned from both sides)",
+          "structuralDeleteCascadeAnnouncement.test.ts: both routes announce on both branches; inserts do not",
+          "app-lib full suite 1633/0 (baseline 1626 + 7 new)"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0055",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "surfaced by the stale-fixme sweep: re-enabling regression-scenarios.spec.ts 'inserting a row expands formula references' failed on a verified-clean cold app; mechanism isolated by a CDP probe (scratchpad probe-insert-shift.mjs transcript in the register, section 17d)"
+      },
+      "violation": {
+        "oracleId": "recalc-consistency",
+        "message": "A ROW INSERTED INSIDE A FORMULA'S RANGE NEVER JOINS THAT FORMULA'S DEPENDENCY EDGES, so writing into the inserted row recalculates NOTHING. Measured on a clean workbook: A900=10, A901=20, A902=30, A903=SUM(A900:A902)=60. insert_rows at 900 shifts everything correctly and re-points the formula to =SUM(A900:A903) - the D8 re-pointing works. Then update_cell A901=15: the SUM's display STAYS 60 (expected 75). Control 1: writing 25 over the shifted 20 at A902 (a cell the range covered BEFORE the insert) recalculates to 80 - and that 80 = 10+15+25+30 proves the engine's value store has the 15; only the EDGE is missing. Control 2: a fresh =SUM(A900:A903) entered afterwards computes 80 immediately. So insert_rows re-points the AST and shifts the EXISTING edges but registers no edges for the cells the range GREW over; every formula whose range was expanded across an insert is deaf to the inserted cells until some originally-covered cell changes.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "FOUR STEPS on a cold app. (1) A840=10, A841=20, A842=30, A843=SUM(A840:A842). (2) insert_rows at 841. (3) update_cell into the inserted A841 = 15. (4) Read A844's display: stays at its pre-write value instead of 75. Automated: E2E_MANUAL=1 npx playwright test --project=functional e2e/tests/regression-scenarios.spec.ts --grep 'inserting a row expands' - re-enabled 2026-08-14 and DELIBERATELY LEFT FAILING (no fixme, no suppression); its first assertion (range expansion to SUM(A840:A843)) passes, its second (recalc on write to the inserted row) is this bug.",
+        "trace": null,
+        "actionCount": 4
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The D8 family, one edge over: D8 shipped re-pointing + re-evaluating the formulas structural edits MOVE, but the dependency-map maintenance for a RANGE that grew across the inserted rows registers edges only for the shifted copies of edges that already existed - the inserted cells were never inside the old range, so no edge is shifted into place for them, and nothing walks the re-pointed AST to register the widened span. The fix direction is to re-register (normalize_cross_sheet_refs-aware, one shared helper) the dependents of every formula whose range a structural insert widened - or simply re-register the re-pointed formula's dependencies wholesale after the rewrite, which is what entering the same formula fresh does (control 2 proves that path is correct).",
+        "suggestedFixArea": "app/src-tauri/src/commands/structure.rs (insert_rows/insert_columns formula re-pointing) + the dependency-map registration it should re-run per rewritten formula"
+      },
+      "notes": "Found because the stale-suppression sweep re-enabled a fixme whose test had ALSO been written with a broken probe (getCellLiveValue reads the formula bar, which shows a formula cell's formula text, never its value) - the probe was fixed first, and the test then failed for this real reason. The sibling stress-tests fixme ('changing the root propagates through entire chain') had ONLY the probe defect and is green after the same one-line probe fix, live from a cold app.",
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/commands/structure.rs (insert_rows_impl + insert_columns_impl call crate::undo_commands::rebuild_all_dependencies after the table-boundary shift and before recalc_structural_side_effects)",
+          "app/src-tauri/src/commands/d8_structural_recalc_tests.rs (3 new tests, section 7)",
+          "app/e2e/tests/regression-scenarios.spec.ts (the repro spec itself had an off-by-one: it inserted at RAW row 841 -- display A842 -- but wrote into A841, overwriting the 20, so its 75 expectation could never hold; corrected to write into the actually-inserted row)"
+        ],
+        "diffSummary": "The active-sheet insert paths were the only structural edits maintaining dependency edges by SHIFTING alone, and a shifted copy cannot exist for a cell the range never covered before -- so a range that GREW across the insert had no edge for the inserted cells. They now rebuild the edge maps from the re-pointed stored ASTs via rebuild_all_dependencies -- the same one-authority call the off-sheet structural path has always made -- which also expands defined names and structured references, so a name-backed formula keeps its expanded cell edges (the regression a raw-parse re-extraction would have introduced). Deliberately after the table-boundary shift (structured refs must expand against post-shift tables) and after every guard is dropped (the rebuild takes the grid lock). Deletes need no change: a delete only shrinks or shifts ranges, and the shifted edges remain complete -- pinned by the partial-cover test staying green.",
+        "validatedBy": [
+          "d8_structural_recalc_tests: a_write_into_an_inserted_row_recalculates_the_grown_range (10/20/30, SUM, insert, write 15 into the inserted row -> 75; control write proves the value store had the number all along), a_write_into_an_inserted_column_recalculates_the_grown_range, a_name_backed_formula_keeps_its_expanded_edges_across_an_insert",
+          "app-lib full suite 1633/0",
+          "LIVE 2026-08-14: the corrected repro passes on a cold app (1/1, collection-guard verified). The backend fix was necessary AND the spec was wrong: post-fix the spec failed with 55 -- the CORRECT answer to the write it actually performed (overwriting the 20), which is what exposed the off-by-one."
+        ]
+      }
+    },
+    {
+      "id": "BUG-0056",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "walk",
+        "seed": 1786456498740,
+        "runId": "first invariant walk generated from the new floating-range catalog actions (fr.create et al., added 2026-08-14); the poisoned session then failed seed 90010001's BOTH tests at step 1 with the same errors"
+      },
+      "violation": {
+        "oracleId": "no-console-errors",
+        "message": "THE WALKER RESET NEVER TEARS DOWN FLOATING RANGES, AND THE STALE FRONTEND STORE POISONS EVERY LATER WALK IN THE SESSION. deepResetForWalk tears down slicers/charts/sparklines/pivots/tables through their own APIs and relies on new_file for the rest -- but resetToNewWorkbook invokes new_file RAW and never emits AFTER_NEW (the product's File > New does a full window.location.reload(), so the product never sees this state). new_file clears the backend floating-range rows and tells the FloatingRange extension nothing: its store keeps the dead rows, the overlay keeps their regions, and on the next redraw frRenderer fetches cells for ids the backend no longer has -- '[FloatingRange] Failed to fetch cells for <uuid>: No floating range with id <uuid>' x3, tripping no-console-errors at step 1 of WHATEVER walk runs next. Measured: seed 1786456498740's walk 1 created 3 FRs (the new fr.create cap) and passed; its rapid-fire walk then failed at step 1 fr.create, and seed 90010001 -- run next in the same app session, generating NO fr actions at all -- failed both tests at step 1 (table.create / sparkline.create) on the same three stale uuids. BUG-0004's exact class (reset leaves frontend object stores unnotified), recreated for the newest object family.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "PRE-FIX, one invocation: E2E_MANUAL=1 INVARIANT_SEED=1786456498740 npx playwright test --project=invariant. Walk 1 creates floating ranges and passes; the rapid-fire walk fails at step 1 with the stale-id console errors, and any seed run afterwards in the same session fails at step 1 too. tests/regression/repros/BUG-0056.trace.json is the bundle's 1-action minimized trace (fr.create) -- NOTE it only fails in a session already poisoned across the reset boundary; on a clean session it replays green, because the defect IS the state that survives the reset, not the action.",
+        "trace": "tests/regression/repros/BUG-0056.trace.json",
+        "actionCount": 1
+      },
+      "triage": {
+        "verdict": "test-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "reset.ts's own header states the rule -- 'new_file leaves ... frontend object stores not notified, so walks explicitly tear down all objects through their own APIs first' -- and the FloatingRange extension (landed 2026-08-13) was never added to that teardown list. The product is unaffected: every product route to a new/opened document either reloads the window (File > New) or emits AFTER_NEW/AFTER_OPEN (file-api), both of which resync the store.",
+        "suggestedFixArea": "test"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/e2e/walker/reset.ts"
+        ],
+        "diffSummary": "deepResetForWalk tears floating ranges down through the ANNOUNCED @api wrapper (listFloatingRanges + deleteFloatingRange, the same route the product's menus use), then unconditionally resets and reloads the extension's store (resetFloatingRangeStore + loadFloatingRangesFromBackend + syncFloatingRangeRegions) so a session ALREADY poisoned by an earlier raw new_file is healed even when the backend has nothing left to delete. Verified live on the poisoned session itself: re-running seeds 1786456498740 and 90010001 immediately after the fix, without restarting the app, went from '1 failed / both failed at step 1' to green."
+      },
+      "notes": "Found by the FIRST walk ever generated from the new floating-range catalog actions -- the coverage added this pass (fr.create/setCell/resize/rename/refFromGrid/delete, snapshot axis, frChange effectiveness accounting, and the undo-oracle rule that FR creation makes a window undecidable). The failure was in the harness, not the product; the product-side lifecycle was proven by the floating-range journey before this."
+    },
+    {
+      "id": "BUG-0057",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "walk",
+        "seed": 1786456498740,
+        "runId": "the rapid-fire invariant walk (derived seed 1786456498741) on the same run that exposed BUG-0056: fr.create at step 1, fr.delete at step 18, no-console-errors tripped by a fetch for the freshly deleted row"
+      },
+      "violation": {
+        "oracleId": "no-console-errors",
+        "message": "A BACKEND-INITIATED FLOATING-RANGE DELETE LEAVES A REPAINT WINDOW THAT RENDERS -- AND FETCHES -- THE DELETED ROW, LOGGING console.error FOR A BENIGN RACE. The @api wrapper's deleteFloatingRange (and a script's api.deleteFloatingRange through the broker -- both routes confirmed in source) deletes the backend row, announces MUTATION_REFRESH['floatingRanges'], and emits CELLS_UPDATED. The FloatingRange extension prunes its store in an ASYNC reload (reloadForBackendChange awaits a backend list), but the CELLS_UPDATED handler has already invalidated caches and requested an overlay redraw -- so the overlay renders the store's still-present row, frRenderer fetches its cells, the backend answers 'No floating range with id <uuid>', and frRenderer.ts logged console.error. The extension's OWN delete path (menus, keyboard, provider seam) prunes the store synchronously before any repaint, which is why the product UI never showed it; a restricted script deleting an on-screen FR hits it every time. Severity: transient one-repaint ghost + console noise; self-heals when the reload lands.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Walk-level, pre-fix: E2E_MANUAL=1 INVARIANT_SEED=1786456498740 npx playwright test --project=invariant --grep 'rapid create-delete' (with the BUG-0056 reset fix in place, so the failure left is this one) -- fails no-console-errors on the id fr.delete removed at step 18. Product-level: run a script that calls api.deleteFloatingRange on a floating range currently on screen and watch the console.",
+        "trace": null,
+        "actionCount": 2
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 0.9,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The announce-then-reload architecture makes a stale-render window unavoidable for backend-initiated deletes; the defect is that the renderer treats a fetch failure inside that window as an error. The distinction that matters is not the failure but its PERSISTENCE: a row gone from the store by the time the dust settles lost a delete race (silent); a row still cached is a real store/backend inconsistency (loud -- that loud path is what caught BUG-0056 and must not be weakened).",
+        "suggestedFixArea": "app/extensions/FloatingRange/rendering/frRenderer.ts"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/extensions/FloatingRange/rendering/frRenderer.ts",
+          "app/extensions/FloatingRange/rendering/__tests__/frRendererFetchVerdict.test.ts"
+        ],
+        "diffSummary": "fetchFrCells DEFERS the verdict on a failed fetch (1 s) instead of softening it: if the row has left the store by then, the fetch lost a delete race -- prune its cache silently and redraw; if the row is STILL in the store, console.error exactly as before, so a persistent stale store (BUG-0056's class) keeps failing walks loudly, one settle later. Two unit cases pin both branches (fake timers; the loud branch asserts the error still names the id). Verified live: the rapid-fire walk on seed 1786456498740 that failed on this exact race is green after the fix, with fr.create/fr.delete exercised."
+      },
+      "notes": "Found by the walker's SECOND-ever fr walk, ten minutes after BUG-0056 -- the two are the same architecture examined from opposite sides: 0056 is the store never told about a wipe (harness reset), 0057 is the store told asynchronously about a delete (product routes). The deferred verdict serves both: silence for the benign race, unchanged loudness for real inconsistency."
+    },
+    {
+      "id": "BUG-0058",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "walk",
+        "seed": 90140202,
+        "runId": "first mixed floating+sheet soak (SOAK_CATEGORY_WEIGHTS=floating:5,sheet:5, 150 actions) -- the first walk to combine floating-range lifecycle with sheet structure; failed recalc-consistency at the checkpoint after step 75; shrinker-confirmed at 17 actions over 30 replays"
+      },
+      "violation": {
+        "oracleId": "recalc-consistency",
+        "message": "A CROSS-SHEET DEPENDENT ON A NON-ACTIVE USER SHEET GOES STALE WHEN A FLOATING-RANGE CELL (OR ANY OFF-SHEET-WRITTEN CELL) CHANGES. Measured on the minimized trace: two grid cells hold ='Float1'!A1+4 on two different sheets; a script-path write rewrites Float1!A1 while a THIRD sheet is active; full recalculation then changes exactly one cell -- 'sheet 1 cell 60:48: 46 -> 4' -- and the post-F9 probe proves F9's value is the correct one (Float1!A1 = 'Sheet1 (2)'!B2*2 = 0, so +4 = 4). The dependent on the ACTIVE sheet updated; its twin on the non-active sheet held the pre-write value. MECHANISM (read from source, then pinned by a unit test): `recalc_after_off_sheet_write` (app/src-tauri/src/commands/data.rs) re-evaluates the WRITTEN sheets, every OBJECT-backed sheet, and the ACTIVE sheet, twice -- and never any other user sheet. The cross-sheet dependents map is not consulted at all, so a registered edge into a non-active, non-written user sheet is simply outside the pass's scope. Every off-sheet write route funnels here: floating-range cell writes, a script's update_cell_on_sheets/clear_range_on_sheets, the QuickJS bulk path.",
+        "digestDiffPaths": [
+          "sheets[1].cells.60:48.v"
+        ]
+      },
+      "repro": {
+        "description": "tests/regression/repros/BUG-0058.trace.json (17 actions, shrinker-confirmed over 30 replays). Replay: E2E_MANUAL=1 SOAK_TRACE=tests/regression/repros/BUG-0058.trace.json SOAK_EXPECT_FAIL=1 npx playwright test --project=soak --grep 'Trace replay' (pre-fix). Unit-level, no app: floating_range_recalc_tests::a_non_active_sheet_dependent_follows_a_floating_range_write -- three sheets, an FR dependent registered on Sheet1, a second-hop dependent on Sheet2, the write made while Sheet3 is active.",
+        "trace": "tests/regression/repros/BUG-0058.trace.json",
+        "actionCount": 17
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "CONFIRMED from source: recalc_after_off_sheet_write's sheet set is written+object+active, a hand-fixed scope that predates cross-sheet edges reaching arbitrary user sheets. GAP A made the edges exist; nothing made this pass walk them. The class is the standing CLAUDE.md rule ('a command that writes without recalculating dependents'), one function over.",
+        "suggestedFixArea": "app/src-tauri/src/commands/data.rs (recalc_after_off_sheet_write)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/commands/data.rs",
+          "app/src-tauri/src/commands/floating_range_recalc_tests.rs"
+        ],
+        "diffSummary": "recalc_after_off_sheet_write now extends its recalc set with every sheet holding a cross-sheet DEPENDENT of anything on the written/object sheets, computed to a TRANSITIVE fixpoint over sheet names (a repaired dependent can feed a formula on yet another sheet). Lock use is strictly sequential -- snapshot sheet_names, drop; lock the dependents map, collect, drop -- so no nesting is added to the crate's lock graph (the three-deadlocks history is why that is stated in the code). Regression pinned by a_non_active_sheet_dependent_follows_a_floating_range_write (fails pre-fix on both the one-hop and the two-hop assertion); verified live by replaying the 17-action trace (fails pre-fix, passes post-fix) and re-running the finding walk seed 90140202 to completion."
+      },
+      "notes": "Found by the walker on the FIRST mixed floating+sheet walk, minutes after the floating actions were added -- the exact 'sheet identity is where this program finds bugs' prediction. Not FR-specific: any script off-sheet write into a workbook where a third sheet reads the written sheet had the same staleness; the FR walk simply made the pattern (write to a never-active sheet while looking at another) common enough to hit."
+    },
+    {
+      "id": "BUG-0060",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "runId": "watched-flake verification (the 20d follow-up pass): full app-lib suite x3 on the final tree -- run 3 of 3 failed 'the wedge must be cleared' (1632/1633). Second strike under the 20c watch rule; first strike was 1-of-3 full runs on 2026-08-13.",
+        "seed": null
+      },
+      "violation": {
+        "oracleId": "rust-unit",
+        "digestDiffPaths": [],
+        "message": "SCRIPT-BATCH RECLAIM DESTROYS ITS OWN HEALING RECORD, AND CONNECTION TEARDOWN STRANDS THE BATCH INTERLOCK. reclaim_expired_script_batches (bi/model_editor.rs) removed EVERY expired entry from the process-global script_batch_registry() and only then attempted rollback_model_batch against the CALLER's BiState -- so a rollback that fails (connection not resolvable by that caller) left `in_batch` set in the global model_undo_store with the registry record already gone: nothing can ever reclaim it again. That is the PERMANENT form of the exact wedge the deadline exists to heal -- every later batch on that ModelKey refuses to open and record_model_undo silently suppresses every later edit's undo snapshot; ModelKey outlives both connections and documents, so a reconnect or a reopened workbook inherits the wedge. Reachable in production two ways: (1) bi_delete_connection removed a connection with a batch open (trusted OR script) and never released it; (2) reset_bi_connections (File > New / Open) drained all connections while a batch was open, leaving both globals set. Manifested in the test binary as the watched flake: many BiStates run concurrently against the same globals, and a sibling test's reclaim stole the freshly-expired zombie batch of an_abandoned_script_batch_is_reclaimed_and_rolled_back in the window between the test back-dating the deadline and its own healing edit; the thief's rollback failed against the wrong BiState ('Connection not found'), the record was gone, and the zombie's model stayed wedged -> 'the wedge must be cleared' at model_editor.rs:9103."
+      },
+      "repro": {
+        "actionCount": null,
+        "trace": null,
+        "description": "Deterministic: bi::model_editor::tests::reclaim_leaves_batches_whose_connection_it_cannot_resolve pins the exact interleaving (two BiStates; B's reclaim runs while A's expired batch is on record -- pre-fix it steals and strands, post-fix it must not touch it). Stochastic pre-fix: full app-lib suite at default parallelism (12 threads) failed ~1 in 3 runs; NOT cold-I/O -- the 2026-08-14 strike was on the third (warm) consecutive run, and it is not wall-clock/tokio-timing either: the deadline is back-dated a full second, the window is scheduling-order between threads sharing the global registry."
+      },
+      "triage": {
+        "behaviorIds": [],
+        "confidence": 1,
+        "verdict": "app-bug",
+        "suggestedFixArea": "app",
+        "rootCauseHypothesis": "CONFIRMED from source. Three defects, one root: the reclaim consumed the registry record before knowing the rollback could succeed; rollback resolves the batch's connection_id in the caller's BiState; and neither bi_delete_connection nor reset_bi_connections released a live batch while a rollback was still possible. The 20c characterisation ('load-sensitive test isolation, not product behaviour') was HALF right: the trigger is test-binary concurrency, but the record-then-heal gap it exposes is a real production wedge via connection delete / document reset."
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/bi/model_editor.rs (reclaim_expired_script_batches now takes ONLY batches whose connection lives in the calling BiState -- removing an entry it cannot roll back is destroying the last healing record; on a rollback that still fails, clear_batch_interlock() heals the in_batch flag instead of logging and stranding it; new prepare_connection_delete() gate: reclaims expired script batches, REFUSES the delete while a live script batch owns the model (same rationale + bound as guard_no_live_script_batch), and rolls back a trusted batch left open on the model's last connection; new forget_batches_for_model_key() for document reset; + 4 pinning tests)",
+          "app/src-tauri/src/bi/commands.rs (bi_delete_connection runs prepare_connection_delete before removing the connection; reset_bi_connections forgets batch state per torn-down connection's model key)"
+        ],
+        "diffSummary": "The reclaim can no longer steal what it cannot heal, a failed rollback clears the interlock instead of stranding it, and the two connection-teardown paths release batch state while release is still possible. Semantics preserved: a reclaimed batch is still rolled back (never committed); when no engine remains to reinstall into, the pre-batch snapshot stays as one undoable step. Deleting a connection while a LIVE script batch owns the model is now refused with the same bounded error the trusted end/cancel paths give.",
+        "validatedBy": [
+          "4 new unit tests: reclaim_leaves_batches_whose_connection_it_cannot_resolve (the flake's mechanism, deterministic), deleting_the_last_connection_rolls_back_an_open_trusted_batch, connection_delete_refuses_a_live_script_batch_and_reclaims_an_expired_one, document_reset_forgets_batches_and_clears_the_interlock",
+          "full app-lib suite 3x consecutive post-fix: 1637 passed / 0 failed each (pre-fix same day: run 3 of 3 failed)",
+          "bi::model_editor module 30x consecutive full-parallel: 0 failures",
+          "cargo build clean, 0 warnings"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0061",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "the grid-fmt-number-formats.png attribution pass (open-decisions section 20d): before touching the golden, every live number-format route was driven on an ISOLATED cold app (CDP 9223, own WebView2 user-data folder) with backend display reads AND rendered-pixel crops per route"
+      },
+      "violation": {
+        "oracleId": "live-route-probe",
+        "message": "A DATE NUMBER FORMAT APPLIED THROUGH THE FORMAT CELLS DIALOG RENDERS THE FORMAT STRING ITSELF, NOT A DATE. Measured live: type 45000, Ctrl+1 > Date > '2024-01-15 (ISO)' > OK -- the cell displays the literal text 'yyyy-mm-dd' (backend display AND rendered pixels agree; crop saved). MECHANISM (read from source, then pinned by unit tests): the dialog stores its date presets LOWERCASE ('yyyy-mm-dd', styles.rs parse_number_format), while core/engine/src/number_format.rs::format_date_number was a hand-rolled .replace chain that only knew the UPPERCASE spellings YYYY/YY/MM/DD/M/D -- any other spelling fell through every replace untouched and the format string became the display. The engine's own presets::date_iso() uses 'YYYY-MM-DD', which is why nothing in-repo ever hit it. Same class one level down: xlsx builtin numFmt 15-17 ('D-MMM-YY') produced digit salad (MMM is not a token the chain knew), datetime combos ('M/D/YYYY HH:mm') left the time half raw, and lowercase 'hh:mm' rendered 13:00 as '01:00' (h was unconditionally 12-hour; Excel's rule is 24-hour unless AM/PM is present). SECOND DEFECT found while pinning the fix: the full custom-format engine (custom_format.rs), whose lexer is case-insensitive and was the delegation target, DROPPED '/' and '.' in date sections -- '/' lexes as FractionSeparator and '.' as DecimalPoint, and format_datetime_section rendered neither -- so 'MM/DD/YYYY' came out '01152024'.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Live: cold app, type 45000 into any cell, Ctrl+1 > Date > ISO > OK -- pre-fix the cell shows 'yyyy-mm-dd'. Unit, no app: number_format::tests::date_format_lowercase_dialog_spelling_formats_a_date (45000 + Date{'yyyy-mm-dd'} must be '2023-03-15'), date_format_never_echoes_the_format_string, date_format_xlsx_builtin_month_names, time_format_h_is_24_hour_without_am_pm; custom_format::tests::test_date_format_slash_and_dot_separators_are_literal. All fail pre-fix.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "CONFIRMED from source: two date formatters existed -- a token-replace toy in number_format.rs (uppercase-only, no month names, no datetime combos, 12-hour always) and the real case-insensitive engine in custom_format.rs -- and the dialog's lowercase presets only ever reached the toy. One formatter now: Date/Time delegate to custom_format, which also had its date-section '/' and '.' literals restored.",
+        "suggestedFixArea": "core/engine/src/number_format.rs (format_date_number/format_time_number), core/engine/src/custom_format.rs (format_datetime_section)"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "core/engine/src/number_format.rs",
+          "core/engine/src/custom_format.rs"
+        ],
+        "diffSummary": "format_date_number and format_time_number now delegate to custom_format::format_custom_value -- the case-insensitive, full-token engine (month/day names, datetime combos, elapsed [h], AM/PM-driven 12/24h) -- instead of an uppercase-only .replace chain; their dead helpers (chrono_lite_date, is_leap_year, the token chain) are gone. format_datetime_section renders FractionSeparator as literal '/' and DecimalPoint as literal '.' in date/time context ('m/d/yyyy', 'dd.mm.yyyy', 'mm:ss.0'). Pinned by 5 new unit tests across the two files; full core workspace green (engine 551 passing incl. 20 number_format + 66 custom_format). Verified live post-fix on a cold isolated app: dialog Date ISO on 45000 renders '2023-03-15' (pixels + backend), dialog Time renders '13:30:00', every ribbon route unchanged."
+      },
+      "notes": "Found by section 20d's method: drive the feature live through every real route BEFORE touching the failing golden. The golden's own FAIL (raw '0,75', raw serial '45000') turned out to be a spec defect -- the visual spec 'number format rendering' never applies any format -- but the route-sweep the attribution demanded surfaced this real wrong-answer defect on the one route the functional corpus never exercises (the dialog's date presets; number-formatting.spec.ts covers only ribbon percent/comma/decimals). Excel-parity note left open for the owner: the ribbon numberFormat dropdown has no date option at all (Excel's has Short Date/Long Date/Time), so dates are dialog-only today."
+    },
+    {
+      "id": "BUG-0062",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "triage of the corpus validator's 9 CONCERN verdicts (open-decisions section 20d follow-up): the 'system-ui vs Calibri in the font combo on freshly-booted states' theme, measured live on an isolated cold app before touching any golden"
+      },
+      "violation": {
+        "oracleId": "visual-golden",
+        "message": "THE RIBBON'S FONT BOX REPORTS 'system-ui' FOR EVERY EMPTY CELL -- a font no cell in the document renders in. Measured live: backend get_style(0) returns fontFamily 'Calibri', fontSize 11 (the Excel-parity default; the canvas renderer paints exactly that via theme.cellFontFamily) -- yet selecting any EMPTY cell shows 'system-ui' in the combo, and a cold-booted document (A1 empty) shows it from the first frame, which is how it got baked into three committed goldens (core-empty-grid, ribbon-core-default-ribbon, workflow-multisheet-sheet1) and flagged as a validator CONCERN. MECHANISM: BUG-0028's fix made useHomeTabState set currentStyle = null when getCell resolves null (an empty cell), so stale formatting stopped leaking -- but null is not the truth either: the font combo's fallback was '?? \"system-ui\"' (the fontSize combo's was already the correct '?? 11'). Cleared and default are different things; the ribbon showed neither the previous cell nor the actual default.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Live: cold app, click any empty cell (or just boot -- A1 is empty), read the ribbon font combo: 'system-ui' pre-fix, 'Calibri' post-fix. Unit: homeTabStyleFollowsDocument.test.tsx -- 'reports the DEFAULT style over an empty cell' (asserts getStyle(0) is loaded and fontFamily/fontSize read Calibri/11); the BUG-0028 clearing arm now asserts the default style rather than null, so both defects stay pinned together.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "CONFIRMED from source: the empty-cell branch of useHomeTabState's style read set null where the document default belongs, and the font combo's fallback named a font that exists nowhere in the document. BUG-0028 (ribbon state must be a function of the document) was fixed by clearing; the truthful function of the document for an empty cell is style index 0.",
+        "suggestedFixArea": "app/extensions/BuiltIn/HomeTab/components/useHomeTabState.ts, HomeTabGroupComponent.tsx"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/extensions/BuiltIn/HomeTab/components/useHomeTabState.ts",
+          "app/extensions/BuiltIn/HomeTab/components/HomeTabGroupComponent.tsx",
+          "app/extensions/BuiltIn/HomeTab/__tests__/homeTabStyleFollowsDocument.test.tsx",
+          "app/e2e/goldenCorpus.ts",
+          "app/e2e/__tests__/goldenCorpus.test.ts"
+        ],
+        "diffSummary": "An empty cell now loads the DOCUMENT DEFAULT style (getStyle(0)) instead of null -- BUG-0028's clearing is preserved (nothing lit, currentCellData stays null) and the combo reports Calibri 11, matching what typing into the cell would produce. The font combo's fallback for styles without an explicit family is 'Calibri' (what the renderer actually paints via theme.cellFontFamily), mirroring the fontSize combo's '?? 11'. HomeTab vitest 60/60; SIX goldens were deliberately recaptured with every changed pixel attributed to the ribbon combo/alignment-toggle band: core-empty-grid, ribbon-core-default-ribbon, menu-file-open, menu-edit-open, workflow-multisheet-sheet1 (visual) and empty-grid-full-window (functional). The corpus product-state axis (goldenCorpus.ts) was re-aimed with the fix: an empty workbook on the FIXED build now paints exactly ONE lit toggle (Center Vertically -- VerticalAlign::Middle IS the document default), so each empty-document golden pins its expected pressed-accent reading (546 visible / ~29 covered, +/-150) instead of asserting unlit, and the axis fires in BOTH directions -- below the band is the pre-BUG-0062 null-style face, above it a BUG-0028-style latch. goldenCorpus suite 37/37, full vitest 106,807 green."
+      },
+      "notes": "Found while attributing the validator's 9 CONCERNs over the visual corpus. Three of those CONCERNs ('system-ui' in core-empty-grid, ribbon-core-default-ribbon, workflow-multisheet-sheet1) are this one defect photographed three times."
+    },
+    {
+      "id": "BUG-0063",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "runId": "full functional pass on the post-BUG-0060 tree (this pass): 549 passed / 1 failed / 4 upheld fixmes of 554 collected, 38.4m -- the one failure was mcp-create-named-range.spec.ts at the MCP handshake, ECONNREFUSED 127.0.0.1:8787, 1.2s into test 265 of 554",
+        "seed": null
+      },
+      "violation": {
+        "oracleId": "functional-e2e",
+        "digestDiffPaths": [],
+        "message": "MCP START CLAIMS SUCCESS BEFORE THE SERVER CAN ACCEPT, AND A BIND FAILURE IS INVISIBLE. mcp_start (app/src-tauri/src/mcp/mod.rs) set running=true, returned 'MCP server started on port N', and only THEN -- on a freshly spawned thread that first creates a whole Tokio runtime -- bound the TCP listener. A client following the documented start -> status -> connect sequence can beat the bind and get ECONNREFUSED from a server that mcp_status reports as running:true with a valid bearer token. Under a loaded machine (test 265 of a 554-test ordered run) the E2E spec lost exactly that race; the run's own backend log shows the spec's cleanup mcp_stop ('Server stop requested', line 8267) landing BETWEEN 'Server starting' (8266) and 'Server listening' (8268), after the fetch had already been refused -- the newborn server then shut down having served nothing. Worse: an actual bind failure (port in use) was only a background log line -- the command had already returned success and `running` silently flapped back to false. A real user pasting the MCP config into Claude Desktop hits the same refused connection with no error surfaced anywhere."
+      },
+      "repro": {
+        "actionCount": null,
+        "trace": null,
+        "description": "Stochastic in-suite: full --project=functional, the first MCP spec in alpha order fails its handshake when the server thread loses the race (passes isolated -- 1/1 cold, 1.6m). Deterministic contract pin: mcp::bind_tests::a_successful_bind_accepts_before_any_accept_loop_and_a_conflict_is_an_err (a bound listener accepts with NO accept loop running; a port conflict is an Err naming the port)."
+      },
+      "triage": {
+        "behaviorIds": [],
+        "confidence": 1,
+        "verdict": "app-bug",
+        "suggestedFixArea": "app",
+        "rootCauseHypothesis": "CONFIRMED from source and from the run's interleaved backend log: the bind happened asynchronously after the success reply, so 'started' and running:true never meant 'accepting'. The 1.2s in-suite failure, the green isolated replay, and the 8266/8267/8268 log interleaving are all the same mechanism."
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/mcp/mod.rs (bind_mcp_listener(): the listener is bound -- and listening, kernel backlog live -- SYNCHRONOUSLY inside mcp_start before running/token/cancel state is touched; the bound socket is handed to the server thread and converted with TcpListener::from_std; a bind failure is now the command's own Err naming the port; + bind_tests contract test)"
+        ],
+        "diffSummary": "Success from mcp_start (and running:true from mcp_status) now means the port accepts connections at that instant -- the kernel backlog holds connections arriving before the accept loop spins up, so the race is structurally gone rather than narrowed. Port conflicts became caller-visible errors. No protocol or security-model change: token issuance, origin/host hardening and shutdown are untouched.",
+        "validatedBy": [
+          "unit: mcp::bind_tests::a_successful_bind_accepts_before_any_accept_loop_and_a_conflict_is_an_err",
+          "app-lib suite 3x consecutive on the final tree: 1,638 passed / 0 failed each",
+          "live isolated cold replay of the failing spec: 1/1 (1.6m), collection guard verified",
+          "live full functional re-run on the final tree: 550 passed / 0 failed / 4 upheld fixmes of 554 collected, 38.6m, collection guard verified"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0064",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "the 20d close-out pass: live re-verification of BUG-0061's dialog routes on CDP 9222 -- the number_sep preset matcher missed, and the forensic dump of the actual preset labels showed US separators on a sv-SE document"
+      },
+      "violation": {
+        "oracleId": "live-route-probe",
+        "digestDiffPaths": [],
+        "message": "THE FORMAT CELLS DIALOG'S PRESET LABELS AND EXAMPLES DO NOT USE THE CURRENT LOCALE'S SEPARATORS. Measured live on a sv-SE document: the Number category advertises '1,234.00' while clicking that preset renders '1 234,00' in the cell, and General's example showed '1234.5' against a grid that displays '1234,5' -- the sample text lies about the result it produces. Excel's samples are locale-correct. MECHANISM: getNumberFormatCategories(dec, thou) (numberFormats.ts) is locale-aware and unit-tested with locale arguments, but the ONLY production consumer was the NUMBER_FORMAT_CATEGORIES constant built with the US-English defaults; @api/locale (getLocaleSettings/getCachedLocale/onLocaleChanged) existed and no dialog code called it."
+      },
+      "repro": {
+        "actionCount": null,
+        "trace": null,
+        "description": "Live: on a sv-SE locale, select a cell, Ctrl+1, Number category -- pre-fix the presets read '1,234.00', post-fix '1 234,00'. Pinned by numberTabLocale.test.tsx (5 tests, both locale directions + async load + locale-change re-render + fallback); sabotage-verified (reverting the categories.find to the static constant fails 3 of 5)."
+      },
+      "triage": {
+        "behaviorIds": [],
+        "confidence": 1,
+        "verdict": "app-bug",
+        "suggestedFixArea": "app",
+        "rootCauseHypothesis": "CONFIRMED from source: the locale-aware builder had no production caller with locale arguments; the tab rendered the US-default constant unconditionally."
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/extensions/BuiltIn/FormatCellsDialog/tabs/NumberTab.tsx (categories are rebuilt from getNumberFormatCategories(locale.decimalSeparator, locale.thousandsSeparator): cached locale synchronously at mount, async getLocaleSettings when nothing is cached, onLocaleChanged re-render; US defaults only as the cannot-read-locale fallback)",
+          "app/extensions/BuiltIn/FormatCellsDialog/tabs/__tests__/numberTabLocale.test.tsx (new, 5 pins)"
+        ],
+        "diffSummary": "The Number tab's preset labels/examples now carry the document locale's separators, matching what clicking them actually produces. Preset VALUES are unchanged (locale-independent identifiers), so applied formats, persistence and the backend are untouched.",
+        "validatedBy": [
+          "unit: numberTabLocale.test.tsx 5/5 (sabotage-verified: static-constant revert fails 3/5)",
+          "live on CDP 9222 post-HMR: General example reads '1234,5' on the sv-SE document; number_sep preset applied from the dialog renders '-500,00'",
+          "FormatCellsDialog suite 88/88; full vitest green on the final tree"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0065",
+      "status": "fixed",
+      "discovered": "2026-08-14",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "the 20d close-out pass: while re-verifying the number_sep dialog route live on CDP 9222, reopening Format Cells on the just-formatted cell and clicking OK reverted '-500,00' to '-500' -- measured, then chased to source"
+      },
+      "violation": {
+        "oracleId": "live-route-probe",
+        "digestDiffPaths": [],
+        "message": "AN UNTOUCHED OK IN FORMAT CELLS SILENTLY CORRUPTS THE CELL'S NUMBER FORMAT -- opening the dialog on a formatted cell to change ANYTHING (font, border) and clicking OK destroys the number format. Measured live, two shapes: (1) 'Number (2 decimals, with separators)' RESET to General ('-500,00' became '-500'); (2) 'Date (yyyy-mm-dd)' degraded to a Custom format that rendered '15ate (2023-03-15)' -- the leading D of the NAME consumed as a day token -- while get_style still reported 'Date (yyyy-mm-dd)' (Custom serializes as its format string), so even the style read-back hid the corruption. MECHANISM: get_style emits DISPLAY NAMES via format_number_format_name (api_types.rs); FormatCellsDialog.loadCurrentStyle stores that name and handleOK sends it back through apply_formatting -> parse_number_format (commands/styles.rs), which only knew preset values and format codes: names without format characters fell to General, names with them ('Percentage (0 decimals)', 'Date (yyyy-mm-dd)') became garbage Custom formats. The serializer's vocabulary did not round-trip through its own parser -- the exact defect class parse_text_rotation in the SAME FILE documents having fixed for text rotation. FRONTEND HALF: the dialog compared display names against preset values AT MOUNT (before the async style load), so a formatted cell always reopened on the General category with no preset highlighted."
+      },
+      "repro": {
+        "actionCount": null,
+        "trace": null,
+        "description": "Live: format a cell via Ctrl+1 (e.g. Number with separators, or Date ISO on 45000), reopen Ctrl+1, click OK without touching anything -- pre-fix the format resets to General or renders the display name as a custom format ('15ate (2023-03-15)'). Deterministic pins: every_display_name_the_serializer_emits_round_trips + the_untouched_ok_corruption_shapes_stay_dead + custom_format_strings_still_parse_as_custom (commands/styles.rs); numberTabDisplayName.test.tsx (6 pins) for category selection/highlight."
+      },
+      "triage": {
+        "behaviorIds": [],
+        "confidence": 1,
+        "verdict": "app-bug",
+        "suggestedFixArea": "app",
+        "rootCauseHypothesis": "CONFIRMED from source and live in both directions: parse_number_format could not read format_number_format_name's output, and the dialog round-trips that output on every OK."
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/commands/styles.rs (try_parse_display_name: the full inverse of format_number_format_name, tried before format-code guessing; symbol_position reconstructed 'kr'->After, fixed-fraction max_digits from the preset table; + 3 pinning tests)",
+          "app/src-tauri/src/api_types.rs (format_number_format_name pub(crate) + the round-trip contract documented on the serializer)",
+          "app/extensions/BuiltIn/FormatCellsDialog/utils/numberFormats.ts (normalizeToPresetValue + categoryForFormat: display names -> preset value/category, prefix mapping for no-preset shapes like 'Number (5 decimals)')",
+          "app/extensions/BuiltIn/FormatCellsDialog/tabs/NumberTab.tsx (category re-derives when the async style load lands; preset highlight and preview match display names too)",
+          "app/extensions/BuiltIn/FormatCellsDialog/tabs/__tests__/numberTabDisplayName.test.tsx (new, 6 pins)"
+        ],
+        "diffSummary": "parse_number_format now accepts everything its serializer emits, so the dialog's read-modify-write is lossless; the dialog additionally opens on the owning category with the preset lit. No wire-format change: the emitted names are byte-identical (re-emission canonicality asserted in the round-trip test).",
+        "validatedBy": [
+          "unit: every_display_name_the_serializer_emits_round_trips (23-format vocabulary, parse and re-emit) + the_untouched_ok_corruption_shapes_stay_dead + custom_format_strings_still_parse_as_custom",
+          "unit: numberTabDisplayName.test.tsx 6/6 (display-name mapping + reopen category/highlight + custom prefill)",
+          "live on CDP 9222 post-fix: untouched OK preserves '2023-03-15'/'Date (yyyy-mm-dd)' and '-500,00'/'Number (2 decimals, with separators)'; the dialog opens on the Date/Number category respectively (dialog text captured)"
+        ]
       }
     }
   ]

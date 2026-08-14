@@ -231,30 +231,35 @@ test.describe("Hiding a sheet is undoable (BUG-0050)", () => {
 
 test.describe("Undo of an off-sheet edit lands the strip and the grid together (BUG-0043)", () => {
   test("the undo switch is no less atomic than the app's own tab click", async ({ grid }) => {
-    // WHAT THIS MEASURED, AND WHY THE ASSERTION IS A COMPARISON.
+    // WHAT THIS MEASURED, AND WHAT THE ASSERTION NOW IS.
     //
     // The first version of this test asserted the absolute claim — that NO
     // sampled frame shows one sheet's tab over the other sheet's data — and it
     // FAILED, on a build where every unit test of the switch passes. Measured,
     // per animation frame: the strip repainted as Sheet2 at t=60 ms while the
     // canvas was still painting Sheet1's (empty) D1; the canvas caught up at
-    // t=98 ms. A ~38 ms, two-frame window.
+    // t=98 ms. A ~38 ms, two-frame window, on EVERY switch — tab click
+    // 60-67 ms across three runs — because the strip repainted on the next
+    // frame while the canvas waited out a backend round trip. That residual
+    // was filed as BUG-0052 and the assertion here was, honestly, only a
+    // COMPARISON: undo introduces no disagreement the tab click does not
+    // already have.
     //
-    // That window is not undo's. `applyRestoreToTheView` follows the backend
-    // through `followBackendSheetActivation`, which dispatches
-    // `sheet:beforeSwitch` -> the grid sheet context -> `sheet:normalSwitch`
-    // with no `await` between them — the tab strip therefore repaints on the
-    // very next frame — and the canvas cannot repaint until `refreshCells()`
-    // has fetched the new sheet's cells from the backend, which is a round
-    // trip. That is the TAB CLICK's channel, reused deliberately, and it has
-    // the same window: a click is measured here as the control, in the same
-    // run, on the same machine.
-    //
-    // So the contract this file can honestly hold undo to is the one the fix
-    // actually claims: undo introduces no disagreement that the app's own sheet
-    // switch does not already have. The residual is filed as BUG-0052 rather
-    // than asserted away — closing it means fetching the new sheet's cells
-    // BEFORE the context swap, which is a change to every switch in the app.
+    // BUG-0052 IS NOW FIXED, and this test asserts the ABSOLUTE claim it
+    // could not before. The fix has two halves, both on the one switch path
+    // every gesture shares:
+    //   * every initiator (SheetTabs' click/add/delete, `applyRestoreToTheView`)
+    //     awaits `primeSheetSwitch()` AFTER the backend switch and BEFORE the
+    //     first dispatch, so the target sheet's viewport rides the
+    //     `sheet:normalSwitch` handler as a synchronous commit — the dispatch
+    //     sequence itself still contains no `await` — and a layout effect
+    //     paints the canvas in the same flush React commits the context;
+    //   * the strip's bold weight renders from that same context
+    //     (`paintedActiveIndex`), not from SheetTabs' local mirror, which only
+    //     caught up in a post-paint effect (that lag was undo's extra frames).
+    // Measured after the fix, same probe, same machine: tab click 0 ms,
+    // undo 0 ms. The comparison stays as a secondary bound; the absolute
+    // assertions below are the ones that fail if either half regresses.
     const page = grid.page;
     test.setTimeout(300_000);
     await wipeWorkbook(page);
@@ -280,6 +285,16 @@ test.describe("Undo of an off-sheet edit lands the strip and the grid together (
       clickSamples.some((s) => s.tab === 1 && s.ink),
       "the control gesture never landed on Sheet2 — the probe is broken, not the app",
     ).toBe(true);
+    // BUG-0052, the absolute claim: no sampled frame may show Sheet2's bold
+    // tab over Sheet1's cells (or the reverse). Before the fix this measured
+    // 60-67 ms; the prefetch-then-commit switch makes it exactly zero, and
+    // anything above zero means a frame REACHED THE SCREEN torn.
+    expect(
+      clickTearMs,
+      `a tab click let the strip and the canvas disagree on screen for ` +
+        `${clickTearMs} ms — the primed switch no longer commits both in one ` +
+        `flush (BUG-0052). Samples: ${JSON.stringify(clickSamples)}`,
+    ).toBe(0);
     await clickSheetTab(page, 0);
 
     // Undo #1 reverses the SAME-sheet edit: no switch, and the probe is shown
@@ -298,11 +313,27 @@ test.describe("Undo of an off-sheet edit lands the strip and the grid together (
     });
     const undoTearMs = tornWindowMs(undoSamples);
 
+    // How long each gesture took to LAND (first frame showing Sheet2's tab
+    // AND Sheet2's ink) — the number that would move if the prime made
+    // switching slower. Before the fix the canvas caught up at ~98 ms.
+    const clickLandedMs = landedAtMs(clickSamples);
+    const undoLandedMs = landedAtMs(undoSamples);
     console.log(
-      `[BUG-0043] torn window: tab click ${clickTearMs} ms, undo ${undoTearMs} ms`,
+      `[BUG-0043] torn window: tab click ${clickTearMs} ms, undo ${undoTearMs} ms; ` +
+        `landed at: tab click ${clickLandedMs} ms, undo ${undoLandedMs} ms`,
     );
 
     expect(undoSamples.length, "the sampler collected no frames").toBeGreaterThan(3);
+    // BUG-0052, the absolute claim, for the switch undo rides.
+    expect(
+      undoTearMs,
+      `undo's sheet switch let the strip and the canvas disagree on screen for ` +
+        `${undoTearMs} ms (BUG-0052) — either the primed commit or the strip's ` +
+        `context-painted highlight has regressed. Samples: ` +
+        `${JSON.stringify(undoSamples)}`,
+    ).toBe(0);
+    // The original comparative bound stays as the secondary contract: undo
+    // introduces no disagreement the app's own tab click does not have.
     expect(
       undoTearMs,
       `undo disagrees with itself for LONGER than the app's own tab click ` +
@@ -332,6 +363,17 @@ test.describe("Undo of an off-sheet edit lands the strip and the grid together (
     ).toEqual([]);
   });
 });
+
+/**
+ * When the gesture LANDED: the first sample showing Sheet2's tab AND ink,
+ * relative to the sampler start. -1 if it never landed (other assertions
+ * catch that). This is the switch's visible latency — the number that would
+ * regress if the pre-swap prime cost anything the post-swap fetch did not.
+ */
+function landedAtMs(samples: Array<{ t: number; tab: number; ink: boolean }>): number {
+  const landed = samples.find((s) => s.tab === 1 && s.ink);
+  return landed ? landed.t : -1;
+}
 
 /** Milliseconds over which any sampled frame showed strip and grid disagreeing. */
 function tornWindowMs(samples: Array<{ t: number; tab: number; ink: boolean }>): number {

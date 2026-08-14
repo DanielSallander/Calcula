@@ -105,11 +105,19 @@ export function useHomeTabState() {
     getCell(sel.startRow, sel.startCol).then((cell) => {
       if (cancelled) return;
       if (!cell) {
-        // The cell holds nothing: the ribbon must say so, not keep the last
-        // cell that did.
+        // The cell holds nothing: the ribbon must not keep the last cell that
+        // did (BUG-0028) — but a null style is not the truth either. A null
+        // made the font box fall back to "system-ui", a font no cell in the
+        // document renders in, for EVERY empty cell (BUG-0062; the default
+        // grid font is Calibri 11 and the renderer paints exactly that). What
+        // an empty cell truly carries is the DOCUMENT DEFAULT style — style
+        // index 0 — which is also what a value typed here will be written
+        // with. Loading it clears Bold/Italic/etc. just as BUG-0028 requires,
+        // and reports Calibri 11 as Excel does.
         setCurrentCellData(null);
-        setCurrentStyle(null);
-        return;
+        return getStyle(0).then((style) => {
+          if (!cancelled) setCurrentStyle(style);
+        });
       }
       setCurrentCellData(cell);
       return getStyle(cell.styleIndex).then((style) => {

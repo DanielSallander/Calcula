@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "seed": 90140202,
+  "startedAt": "2026-08-14T09:16:38.543Z",
+  "actions": [
+    {
+      "id": "fr.delete",
+      "params": {
+        "frIndex": 1
+      }
+    },
+    {
+      "id": "sheet.add",
+      "params": {}
+    },
+    {
+      "id": "sheet.copy",
+      "params": {
+        "tabIndex": 0
+      }
+    },
+    {
+      "id": "fr.create",
+      "params": {
+        "x": 366,
+        "y": 200
+      }
+    },
+    {
+      "id": "fr.setCell",
+      "params": {
+        "frIndex": 0,
+        "row": 0,
+        "col": 0,
+        "value": "42"
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_28"
+      }
+    },
+    {
+      "id": "fr.refFromGrid",
+      "params": {
+        "frIndex": 0,
+        "ref": "AW61",
+        "offset": 4
+      }
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": false,
+        "values": [
+          17,
+          12,
+          17,
+          12
+        ]
+      }
+    },
+    {
+      "id": "sheet.copy",
+      "params": {
+        "tabIndex": 2
+      }
+    },
+    {
+      "id": "fill.down",
+      "params": {
+        "value": "Fill57",
+        "count": 4
+      }
+    },
+    {
+      "id": "fr.delete",
+      "params": {
+        "frIndex": 1
+      }
+    },
+    {
+      "id": "fr.refFromGrid",
+      "params": {
+        "frIndex": 0,
+        "ref": "AW60",
+        "offset": 4
+      }
+    },
+    {
+      "id": "sheet.unhide",
+      "params": {}
+    },
+    {
+      "id": "script.shape-render",
+      "params": {
+        "slotIndex": 0
+      }
+    },
+    {
+      "id": "format.italic",
+      "params": {
+        "ref": "B30"
+      }
+    },
+    {
+      "id": "fr.setCell",
+      "params": {
+        "frIndex": 0,
+        "row": 0,
+        "col": 0,
+        "value": "='Sheet1 (2)'!B2*2"
+      }
+    },
+    {
+      "id": "table.delete",
+      "params": {}
+    }
+  ]
+}

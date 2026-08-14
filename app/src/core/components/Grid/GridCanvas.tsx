@@ -5,7 +5,7 @@
 // automatic resizing, fetching cell data from the backend, and delegates
 // actual grid drawing to the gridRenderer module.
 
-import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
 import { getViewportCells, getSpillRanges } from "../../lib/tauri-api";
 import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SplitConfig, SpillRangeInfo, ViewMode } from "../../types";
@@ -21,6 +21,10 @@ import {
   markPainted,
   markRefetchQueued,
 } from "../../lib/renderSignal";
+import {
+  registerSheetSwitchPrefetcher,
+  takePrefetchedSheetSwitch,
+} from "../../lib/sheetSwitchPrefetch";
 import * as S from "./GridCanvas.styles";
 
 /**
@@ -231,6 +235,18 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     // after a deferred fetch completes (works around stale-closure issues).
     const [fetchGeneration, setFetchGeneration] = useState(0);
 
+    // BUG-0052: which sheet the cell cache describes, as an epoch. Bumped by
+    // every `sheet:normalSwitch`; a fetch that was in flight ACROSS the bump
+    // fetched under the previous sheet's identity and must not be committed
+    // over the new sheet's cells (the backend answers `get_viewport_cells`
+    // for whatever sheet is active WHEN IT SERVES the call, so a response
+    // that straddles a switch is undecidable — discard and re-fetch).
+    const sheetEpochRef = useRef(0);
+    // BUG-0052: a prefetched sheet switch was just committed to state, and the
+    // canvas owes a SYNCHRONOUS repaint in the same flush (layout effect
+    // below), so the bold tab and the new cells reach the screen in one paint.
+    const syncPaintOwedRef = useRef(false);
+
     // Animation state for marching ants
     const animationFrameRef = useRef<number | null>(null);
     const animationOffsetRef = useRef<number>(0);
@@ -405,6 +421,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       markRefetchQueued(false);
       markFetchStarted();
       const perfT0 = performance.now();
+      // BUG-0052: remember which sheet this fetch was issued FOR.
+      const epochAtStart = sheetEpochRef.current;
 
       try {
         const cellData = await getViewportCells(
@@ -413,6 +431,20 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           fetchRange.endRow,
           fetchRange.endCol
         );
+
+        // BUG-0052: a sheet switch landed while this fetch was in flight. The
+        // response may describe EITHER sheet (whichever was active when the
+        // backend served it), so committing it could paint the old sheet's
+        // cells over the new sheet's — the exact tear this epoch exists to
+        // close. Discard, and schedule a re-fetch under the current epoch via
+        // the existing deferral machinery (the finally block below).
+        if (epochAtStart !== sheetEpochRef.current) {
+          console.log(
+            "[GridCanvas] fetchCells result discarded - sheet switched while in flight; re-fetching",
+          );
+          pendingRefreshRef.current = true;
+          return;
+        }
         const perfT1Ipc = performance.now();
 
         // Update last fetch reference
@@ -882,8 +914,49 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [fetchCells]);
 
     /**
+     * BUG-0052: the prefetcher a switch initiator uses to fetch the TARGET
+     * sheet's viewport before the visible swap. Runs after the backend has
+     * switched, so `getViewportCells` answers about the new sheet; the range
+     * is the same one `fetchCells` would compute, so the payload is exactly
+     * what the post-switch fetch used to commit — just fetched earlier.
+     * The renderSignal in-flight bracket lives in `primeSheetSwitch` itself.
+     */
+    useEffect(() => {
+      return registerSheetSwitchPrefetcher(async () => {
+        const fetchRange = calculateFetchRange();
+        if (!fetchRange) {
+          return null;
+        }
+        const cellData = await getViewportCells(
+          fetchRange.startRow,
+          fetchRange.startCol,
+          fetchRange.endRow,
+          fetchRange.endCol
+        );
+        let prefetchedSpills: SpillRangeInfo[] = [];
+        try {
+          prefetchedSpills = await getSpillRanges();
+        } catch {
+          // Non-critical: same tolerance as fetchCells.
+        }
+        return { fetchRange, cells: cellData, spillRanges: prefetchedSpills };
+      });
+    }, [calculateFetchRange]);
+
+    /**
      * Listen for normal sheet switch events (non-formula mode).
      * This replaces the page reload with a proper cell refresh.
+     *
+     * BUG-0052: when the initiator primed this switch (fetched the target
+     * sheet's viewport BEFORE dispatching), commit the payload SYNCHRONOUSLY,
+     * inside the same dispatch turn as the sheet-context change. React batches
+     * both into one flush, and the layout effect below repaints the canvas in
+     * that same flush — so the bold tab and the new sheet's cells hit the
+     * screen in ONE paint instead of the strip leading the canvas by the
+     * length of a backend round trip. Without a primed payload (formula-mode
+     * bar switches, a prime that failed, no canvas), fall back to the old
+     * fetch-after-swap path, which is the old two-frame tear but never a
+     * wrong or missing paint.
      */
     useEffect(() => {
       const handleNormalSheetSwitch = async (event: Event) => {
@@ -892,6 +965,25 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           newSheetName: string;
         }>;
         console.log(`[GridCanvas] Normal sheet switch to: ${customEvent.detail.newSheetName}`);
+
+        // Whatever happens next, a fetch that is IN FLIGHT right now was
+        // issued for the previous sheet and must not be committed (see the
+        // epoch check in fetchCells).
+        sheetEpochRef.current += 1;
+
+        const prefetched = takePrefetchedSheetSwitch(customEvent.detail.newSheetIndex);
+        if (prefetched) {
+          lastFetchRef.current = { ...prefetched.fetchRange };
+          const newCells: CellDataMap = new Map();
+          for (const cell of prefetched.cells) {
+            newCells.set(cellKey(cell.row, cell.col), cell);
+          }
+          setCells(newCells);
+          setSpillRanges(prefetched.spillRanges);
+          syncPaintOwedRef.current = true;
+          markDataCommitted();
+          return;
+        }
 
         // Clear the fetch cache and reload cells from the new active sheet
         lastFetchRef.current = null;
@@ -904,6 +996,22 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         window.removeEventListener("sheet:normalSwitch", handleNormalSheetSwitch);
       };
     }, [fetchCells]);
+
+    /**
+     * BUG-0052: the synchronous half of a prefetched sheet switch. Layout
+     * effects run after React commits the DOM (the tab strip's bold weight)
+     * but BEFORE the browser paints, so drawing here puts the new sheet's
+     * cells on the canvas in the SAME paint as the new sheet's tab. Only runs
+     * when a prefetched commit owes it — every other repaint keeps the
+     * ordinary post-paint path.
+     */
+    useLayoutEffect(() => {
+      if (!syncPaintOwedRef.current) {
+        return;
+      }
+      syncPaintOwedRef.current = false;
+      draw(animationOffsetRef.current, insertionAnimation);
+    }, [draw, insertionAnimation]);
 
     /**
      * Redraw when dependencies change (but not during animation).

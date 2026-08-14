@@ -530,14 +530,27 @@ const SELECTION_OWNERS: SelectionOwner[] = [
     file: "app/extensions/Pivot/handlers/selectionHandler.ts",
     reconcile: "updateCachedRegions",
     trigger: { file: "app/extensions/Pivot/handlers/selectionHandler.ts", symbol: "updateCachedRegions" },
-    reconcileDomain: null,
-    reconcileDomainWhy:
-      "The regions ARE the store: `updateCachedRegions` is both the trigger and " +
-      "the reconciliation, so it cannot be reached without reconciling.",
+    // BUG-0051's lesson applied BEFORE the pivot copy of it shipped. This used
+    // to be null with the reason "the regions ARE the store: updateCachedRegions
+    // is both the trigger and the reconciliation, so it cannot be reached
+    // without reconciling" — which conflates "when reached, it reconciles" with
+    // "it is reached". `updateCachedRegions` only runs when something emits
+    // PIVOT_REGIONS_UPDATED, and on a delete the thing that does is
+    // `refreshPivotRegions`, triggered by the `pivot` domain's "pivot:refresh"
+    // fan-out. A pivot delete route that dropped "pivot" from its announcement
+    // would leave the Analyze/Design tabs standing on a workbook with zero
+    // pivots — and this census would have stayed green, exactly as the two
+    // halves disagreed for the Table. So the dependency is declared, and every
+    // pivot delete route must announce it, own domain or not.
+    reconcileDomain: "pivot",
+    reconcileDomainWhy: "",
     why:
-      "Reconciles in place: the regions ARE the store, so the function that " +
-      "receives them is the one that checks whether the active pivot survived. " +
-      "It used to fire only when the sheet had no pivots left at all.",
+      "The reconciliation lives inside the region-cache update, but the cache " +
+      "update is DRIVEN by the `pivot` domain on a delete (pivot:refresh -> " +
+      "refreshPivotRegions -> PIVOT_REGIONS_UPDATED). The structural second " +
+      "path (a row/col delete swallowing the pivot, which announces nothing) " +
+      "reconciles synchronously in the shift handlers instead — " +
+      "reconcileActivePivotAfterShift, pinned by activePivotReconciliation.test.ts.",
   },
   {
     contextKey: "chart",
@@ -890,11 +903,14 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
         "`syncDesignTabToTables`.",
     ).toEqual([]);
 
-    // NON-VACUITY: at least one owner must actually be exercising this rule, or
-    // the assertion above is an empty loop that passes forever.
+    // NON-VACUITY: these owners must actually be exercising this rule, or
+    // the assertion above is an empty loop that passes forever. "pivot" joined
+    // when its reconciliation was recognised as announcement-driven (the
+    // pivot-domain fan-out is what reaches updateCachedRegions on a delete);
+    // silently dropping either from the announced set must fail HERE.
     expect(
       SELECTION_OWNERS.filter((o) => o.reconcileDomain !== null).map((o) => o.contextKey),
-    ).toEqual(["table"]);
+    ).toEqual(["table", "pivot"]);
   });
 
   it("the walk that found BUG-0026 knows every contextual tab this census governs", () => {

@@ -234,33 +234,51 @@ test.describe("Find-replace then undo then redo", () => {
 });
 
 test.describe("Insert row in middle of formula range", () => {
-  test.fixme("inserting a row expands formula references", async ({ grid }) => {
+  // fixme removed 2026-08-14 by the stale-suppression sweep, and DELIBERATELY
+  // LEFT FAILING — it is the repro for BUG-0055 (open): insert_rows re-points
+  // =SUM(A840:A842) to =SUM(A840:A843) correctly (the first assertion passes),
+  // but the inserted row never joins the formula's dependency edges, so the
+  // write of 15 into A841 recalculates nothing and the second assertion fails.
+  // The original probe was also broken (getCellLiveValue reads the formula
+  // bar, which shows a formula cell's FORMULA text) — fixed to display reads,
+  // which is what made the real defect measurable. Do not fixme this again;
+  // it goes green when BUG-0055 is fixed.
+  test("inserting a row expands formula references", async ({ grid }) => {
     await grid.setCellValueDirect("A840", "10");
     await grid.setCellValueDirect("A841", "20");
     await grid.setCellValueDirect("A842", "30");
     await grid.setCellValueDirect("A843", "=SUM(A840:A842)");
     expect(await grid.getCellDisplayValue("A843")).toBe("60");
 
-    // Insert row at 841 (between 10 and 20)
+    // Insert one row. `insert_rows` takes a RAW 0-indexed row, so 841 inserts
+    // at 0-idx 841 = display row 842 — between the 20 (A841) and the 30
+    // (A842). The old comment here claimed the inserted row was A841, and the
+    // write below went to A841 accordingly — OVERWRITING the 20, so the sum's
+    // correct answer for what the test actually did was 55, and the 75
+    // expectation could never hold. That is why this spec still read red
+    // after BUG-0055's fix landed: the fix made the backend give the right
+    // answer to the wrong question.
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("insert_rows", { row: 841, count: 1 });
     });
     await grid.page.waitForTimeout(500);
 
-    // The new row is empty, SUM range should have expanded to include it
-    // Original data shifted: A840=10, A841=empty, A842=20, A843=30
-    // SUM formula (now in A844) should reference A840:A843
-    // Sum = 10 + 0 + 20 + 30 = 60 (same total, range expanded)
-    const sum = await grid.getCellLiveValue("A844");
+    // The new row is empty, SUM range should have expanded to include it.
+    // Data now: A840=10, A841=20, A842=empty (inserted), A843=30.
+    // SUM formula (now in A844) references A840:A843 = 10 + 20 + 0 + 30 = 60.
+    // getCellDisplayValue, NOT getCellLiveValue: the live probe reads the
+    // formula bar, which shows a formula cell's FORMULA text, never its value.
+    const sum = await grid.getCellDisplayValue("A844");
     expect(sum).toBe("60");
 
-    // Add a value in the inserted row
-    await grid.setCellValueDirect("A841", "15");
+    // Add a value in the INSERTED row — the cell the old range never covered,
+    // which is exactly the edge BUG-0055 was missing.
+    await grid.setCellValueDirect("A842", "15");
     await grid.page.waitForTimeout(300);
 
-    // Sum should now include it: 10+15+20+30 = 75
-    expect(await grid.getCellLiveValue("A844")).toBe("75");
+    // Sum should now include it: 10+20+15+30 = 75
+    expect(await grid.getCellDisplayValue("A844")).toBe("75");
 
     // Clean up: delete the inserted row
     await grid.page.evaluate(async () => {

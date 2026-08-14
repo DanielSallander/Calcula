@@ -95,13 +95,17 @@ test.describe("Deep formula chains", () => {
     expect(result).toBe("100");
   });
 
-  test.fixme("changing the root propagates through entire chain", async ({ grid }) => {
+  // fixme removed 2026-08-14 by the stale-suppression sweep. The test was
+  // WRITTEN with a probe that cannot succeed: `getCellLiveValue` reads the
+  // formula BAR, which for a formula cell shows the formula text ("=B759+1"),
+  // never the computed value. The display value is what recalculation writes.
+  test("changing the root propagates through entire chain", async ({ grid }) => {
     // Change B661 from 1 to 10
     await grid.setCellValueDirect("B661", "10");
     await grid.page.waitForTimeout(1000);
 
     // B760 should now be 109 (10 + 99)
-    const result = await grid.getCellLiveValue("B760");
+    const result = await grid.getCellDisplayValue("B760");
     expect(result).toBe("109");
   });
 });

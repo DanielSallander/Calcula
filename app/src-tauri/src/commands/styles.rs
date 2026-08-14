@@ -747,10 +747,23 @@ pub(crate) fn parse_number_format(format: &str) -> NumberFormat {
             format: "hh:mm:ss AM/PM".to_string(),
         },
         _ => {
-            // Try to recognize common Excel-style format codes before falling
-            // through to the custom format engine (which has known issues with
-            // large numbers).
-            if let Some(recognized) = try_parse_format_code(format) {
+            // BUG-0065: accept everything format_number_format_name() emits
+            // (api_types.rs) BEFORE guessing. get_style hands the frontend
+            // display names like "Number (2 decimals, with separators)" or
+            // "Date (yyyy-mm-dd)"; the Format Cells dialog sends the loaded
+            // string straight back on OK, so a parser that cannot read its own
+            // serializer's output silently RESET the format to General (the
+            // name carries no format characters) or, worse, degraded it to a
+            // garbage Custom format ("Date (yyyy-mm-dd)" rendered
+            // "15ate (2023-03-15)" -- the leading D consumed as a day token).
+            // Same rationale and precedent as parse_text_rotation below: the
+            // full vocabulary the app itself emits must round-trip here.
+            if let Some(named) = try_parse_display_name(format) {
+                named
+            } else if let Some(recognized) = try_parse_format_code(format) {
+                // Try to recognize common Excel-style format codes before
+                // falling through to the custom format engine (which has known
+                // issues with large numbers).
                 recognized
             } else if is_custom_format_string(format) {
                 NumberFormat::Custom {
@@ -761,6 +774,97 @@ pub(crate) fn parse_number_format(format: &str) -> NumberFormat {
             }
         }
     }
+}
+
+/// Inverse of `format_number_format_name` (api_types.rs): parses the display
+/// names that `get_style` emits back into the typed `NumberFormat`, so a
+/// read-modify-write through the style API is lossless. Returns None for
+/// anything that is not one of the serializer's shapes.
+///
+/// Two fields are not present in the names and are reconstructed:
+/// - Currency/Accounting `symbol_position`: "kr" is the only suffix currency
+///   the app emits, so it maps to After and everything else to Before --
+///   matching every preset above.
+/// - Fixed-fraction `max_digits`: reconstructed from the preset table
+///   (2/4/8/10 -> 1, 16/100 -> 2), falling back to the denominator's digit
+///   count; the engine ignores it when the denominator is fixed.
+pub(crate) fn try_parse_display_name(format: &str) -> Option<NumberFormat> {
+    let s = format.trim();
+    let inner = |prefix: &str| -> Option<&str> {
+        s.strip_prefix(prefix)?.strip_suffix(')')
+    };
+
+    let parse_decimals = |text: &str| -> Option<u8> {
+        text.trim().strip_suffix(" decimals")?.trim().parse::<u8>().ok()
+    };
+
+    if let Some(rest) = inner("Number (") {
+        let (dec_part, with_sep) = match rest.strip_suffix(", with separators") {
+            Some(d) => (d, true),
+            None => (rest, false),
+        };
+        return Some(NumberFormat::Number {
+            decimal_places: parse_decimals(dec_part)?,
+            use_thousands_separator: with_sep,
+        });
+    }
+
+    // "Currency ($, 2 decimals)" / "Accounting (kr, 2 decimals)" -- the
+    // decimals clause never contains ", ", so split at the LAST occurrence
+    // and the symbol keeps any commas of its own.
+    let parse_money = |rest: &str| -> Option<(String, u8, CurrencyPosition)> {
+        let (symbol, dec_part) = rest.rsplit_once(", ")?;
+        let decimals = parse_decimals(dec_part)?;
+        let position = if symbol.trim() == "kr" {
+            CurrencyPosition::After
+        } else {
+            CurrencyPosition::Before
+        };
+        Some((symbol.to_string(), decimals, position))
+    };
+    if let Some(rest) = inner("Currency (") {
+        let (symbol, decimal_places, symbol_position) = parse_money(rest)?;
+        return Some(NumberFormat::Currency { decimal_places, symbol, symbol_position });
+    }
+    if let Some(rest) = inner("Accounting (") {
+        let (symbol, decimal_places, symbol_position) = parse_money(rest)?;
+        return Some(NumberFormat::Accounting { decimal_places, symbol, symbol_position });
+    }
+
+    if let Some(rest) = inner("Percentage (") {
+        return Some(NumberFormat::Percentage { decimal_places: parse_decimals(rest)? });
+    }
+    if let Some(rest) = inner("Scientific (") {
+        return Some(NumberFormat::Scientific { decimal_places: parse_decimals(rest)? });
+    }
+
+    if let Some(rest) = inner("Fraction (") {
+        if let Some(digits) = rest.strip_prefix("up to ").and_then(|r| r.strip_suffix(" digits")) {
+            return Some(NumberFormat::Fraction {
+                denominator: None,
+                max_digits: digits.trim().parse::<u8>().ok()?,
+            });
+        }
+        if let Some(denom) = rest.strip_prefix('/').and_then(|r| r.strip_suffix(" fixed")) {
+            let d: u32 = denom.trim().parse().ok()?;
+            let max_digits = match d {
+                2 | 4 | 8 | 10 => 1,
+                16 | 100 => 2,
+                other => other.to_string().len() as u8,
+            };
+            return Some(NumberFormat::Fraction { denominator: Some(d), max_digits });
+        }
+        return None;
+    }
+
+    if let Some(rest) = inner("Date (") {
+        return Some(NumberFormat::Date { format: rest.to_string() });
+    }
+    if let Some(rest) = inner("Time (") {
+        return Some(NumberFormat::Time { format: rest.to_string() });
+    }
+
+    None
 }
 
 /// Attempts to parse a format code string (e.g., "0.00", "#,##0", "$#,##0.00")
@@ -1418,5 +1522,112 @@ mod tests {
         assert_eq!(parse_text_rotation("custom:-500"), TextRotation::Rotate270);
         // Garbage still degrades to None rather than erroring the whole apply.
         assert_eq!(parse_text_rotation("sideways"), TextRotation::None);
+    }
+
+    // ------------------------------------------------------------------
+    // BUG-0065: the number-format display names get_style emits must parse
+    // back to the identical NumberFormat -- the Format Cells dialog sends the
+    // loaded name straight back on OK, so a lossy loop silently reset
+    // "Number (2 decimals, with separators)" to General and degraded
+    // "Date (yyyy-mm-dd)" to a Custom format that RENDERED the name
+    // ("15ate (2023-03-15)", the leading D consumed as a day token).
+    // Measured live on 2026-08-14 before the fix.
+    // ------------------------------------------------------------------
+    use super::parse_number_format;
+    use crate::api_types::format_number_format_name;
+    use engine::{CurrencyPosition, NumberFormat};
+
+    #[test]
+    fn every_display_name_the_serializer_emits_round_trips() {
+        let vocabulary = [
+            NumberFormat::General,
+            NumberFormat::Number { decimal_places: 2, use_thousands_separator: false },
+            NumberFormat::Number { decimal_places: 2, use_thousands_separator: true },
+            NumberFormat::Number { decimal_places: 0, use_thousands_separator: true },
+            NumberFormat::Number { decimal_places: 5, use_thousands_separator: false },
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+            },
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "EUR".to_string(),
+                symbol_position: CurrencyPosition::Before,
+            },
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "kr".to_string(),
+                symbol_position: CurrencyPosition::After,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 0,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "kr".to_string(),
+                symbol_position: CurrencyPosition::After,
+            },
+            NumberFormat::Percentage { decimal_places: 0 },
+            NumberFormat::Percentage { decimal_places: 2 },
+            NumberFormat::Scientific { decimal_places: 2 },
+            NumberFormat::Fraction { denominator: None, max_digits: 1 },
+            NumberFormat::Fraction { denominator: None, max_digits: 3 },
+            NumberFormat::Fraction { denominator: Some(2), max_digits: 1 },
+            NumberFormat::Fraction { denominator: Some(8), max_digits: 1 },
+            NumberFormat::Fraction { denominator: Some(16), max_digits: 2 },
+            NumberFormat::Fraction { denominator: Some(100), max_digits: 2 },
+            NumberFormat::Date { format: "yyyy-mm-dd".to_string() },
+            NumberFormat::Date { format: "mm/dd/yyyy".to_string() },
+            NumberFormat::Time { format: "hh:mm:ss".to_string() },
+            NumberFormat::Time { format: "hh:mm:ss AM/PM".to_string() },
+        ];
+        for nf in vocabulary {
+            let emitted = format_number_format_name(&nf);
+            let parsed = parse_number_format(&emitted);
+            assert_eq!(
+                parsed, nf,
+                "display name \"{}\" must parse back to {:?}",
+                emitted, nf
+            );
+            // And re-emission is canonical (byte-identical name).
+            assert_eq!(format_number_format_name(&parsed), emitted);
+        }
+    }
+
+    /// The two live-measured corruption shapes stay dead: the separator name
+    /// must not collapse to General, and the date name must not become a
+    /// Custom format that renders its own text.
+    #[test]
+    fn the_untouched_ok_corruption_shapes_stay_dead() {
+        assert_eq!(
+            parse_number_format("Number (2 decimals, with separators)"),
+            NumberFormat::Number { decimal_places: 2, use_thousands_separator: true }
+        );
+        assert_eq!(
+            parse_number_format("Date (yyyy-mm-dd)"),
+            NumberFormat::Date { format: "yyyy-mm-dd".to_string() }
+        );
+        assert_eq!(
+            parse_number_format("Percentage (0 decimals)"),
+            NumberFormat::Percentage { decimal_places: 0 }
+        );
+    }
+
+    /// Custom formats serialize as their own format string and must keep
+    /// taking the custom path, not the display-name path.
+    #[test]
+    fn custom_format_strings_still_parse_as_custom() {
+        assert_eq!(
+            parse_number_format("#,##0.00;[Red]-#,##0.00"),
+            NumberFormat::Custom { format: "#,##0.00;[Red]-#,##0.00".to_string() }
+        );
     }
 }

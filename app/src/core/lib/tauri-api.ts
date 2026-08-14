@@ -1625,13 +1625,34 @@ export async function insertColumns(col: number, count: number, sheetIndex?: num
 export async function deleteRows(row: number, count: number, sheetIndex?: number): Promise<CellData[]> {
   console.log(`[tauri-api] deleteRows(${row}, ${count})`);
   if (await isOffSheetTarget(sheetIndex)) {
-    return invoke<CellData[]>("delete_rows", { row, count, sheetIndex });
+    const result = await invoke<CellData[]>("delete_rows", { row, count, sheetIndex });
+    announceStructuralDeleteCascade();
+    return result;
   }
   const result = await invoke<CellData[]>("delete_rows", { row, count });
   console.log(`[tauri-api] deleteRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_DELETED, { startRow: row, count });
+  announceStructuralDeleteCascade();
   recordGridEvent({ kind: "deleteRows", startRow: row, count });
   return result;
+}
+
+/**
+ * BUG-0054: a row/column delete that fully covers a pivot region removes the
+ * pivot in the backend AND cascades the slicers / timeline slicers / ribbon
+ * filter targets bound to it (`shift_pivot_regions_for_row_delete` +
+ * `collect_doomed_pivots`) — and each of those stores is cached by its own
+ * extension, so without an announcement a dead slicer keeps painting and
+ * eating clicks. Same recipe as `deleteSheet` above: Core names DOMAINS,
+ * never features; the Shell translator owns the mapping. Emitted
+ * unconditionally because the frontend cannot know whether a pivot died
+ * without re-asking, which is exactly what the refresh does.
+ */
+function announceStructuralDeleteCascade(): void {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["slicer", "pivot", "ribbonFilter"],
+    source: "commit",
+  });
 }
 
 /**
@@ -1643,11 +1664,14 @@ export async function deleteRows(row: number, count: number, sheetIndex?: number
 export async function deleteColumns(col: number, count: number, sheetIndex?: number): Promise<CellData[]> {
   console.log(`[tauri-api] deleteColumns(${col}, ${count})`);
   if (await isOffSheetTarget(sheetIndex)) {
-    return invoke<CellData[]>("delete_columns", { col, count, sheetIndex });
+    const result = await invoke<CellData[]>("delete_columns", { col, count, sheetIndex });
+    announceStructuralDeleteCascade();
+    return result;
   }
   const result = await invoke<CellData[]>("delete_columns", { col, count });
   console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_DELETED, { startCol: col, count });
+  announceStructuralDeleteCascade();
   recordGridEvent({ kind: "deleteColumns", startCol: col, count });
   return result;
 }

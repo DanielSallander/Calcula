@@ -27,8 +27,14 @@ export interface TestContext {
   setSelection: (sel: { startRow: number; startCol: number; endRow: number; endCol: number }) => void;
   /** Set selection and wait until it is reflected in the grid state snapshot */
   setSelectionAndWait: (sel: { startRow: number; startCol: number; endRow: number; endCol: number }, timeoutMs?: number) => Promise<void>;
-  /** Undo the last action (calls Tauri backend directly) */
+  /** Undo the last action through the product's own command
+   *  (`core.edit.undo`, the same path Ctrl+Z runs), so the suite observes
+   *  everything the product does on undo — including following the sheet
+   *  switch an off-sheet restore makes. Throws if the grid has not
+   *  registered the handler. */
   undo: () => Promise<void>;
+  /** Redo through `core.edit.redo` — same contract as undo(). */
+  redo: () => Promise<void>;
   /** Small delay (50ms) to allow frontend to process IPC responses */
   settle: () => Promise<void>;
   /** Custom delay in ms for cases needing longer settling */

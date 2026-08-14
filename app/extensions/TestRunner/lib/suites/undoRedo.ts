@@ -1,12 +1,13 @@
 //! FILENAME: app/extensions/TestRunner/lib/suites/undoRedo.ts
 // PURPOSE: Undo/Redo test suite.
 // CONTEXT: Tests multi-step undo, redo, batch undo, and redo invalidation.
-//          Uses ctx.undo() which calls the Tauri backend directly.
+//          ctx.undo()/ctx.redo() run the product's own commands
+//          (core.edit.undo / core.edit.redo), so the view follows exactly
+//          as it does for a user's Ctrl+Z / Ctrl+Y.
 
 import type { TestSuite } from "../types";
 import { expectCellValue, expectCellEmpty, assertTrue } from "../assertions";
 import { AREA_UNDO_REDO } from "../testArea";
-import { redo as tauriRedo } from "@api";
 
 const A = AREA_UNDO_REDO;
 
@@ -56,7 +57,7 @@ export const undoRedoSuite: TestSuite = {
         await ctx.settle();
         expectCellEmpty(await ctx.getCell(A.row, A.col), "after undo");
 
-        await tauriRedo();
+        await ctx.redo();
         await ctx.settle();
         expectCellValue(await ctx.getCell(A.row, A.col), "RedoMe", "after redo");
       },
@@ -141,7 +142,7 @@ export const undoRedoSuite: TestSuite = {
         await ctx.settle();
 
         // Redo should have no effect — redo stack was cleared
-        await tauriRedo();
+        await ctx.redo();
         await ctx.settle();
         expectCellValue(await ctx.getCell(A.row, A.col), "C", "after redo (should stay C)");
       },

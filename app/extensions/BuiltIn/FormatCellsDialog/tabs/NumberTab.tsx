@@ -6,36 +6,58 @@ import styled from "styled-components";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import {
   NUMBER_FORMAT_CATEGORIES,
+  getNumberFormatCategories,
+  normalizeToPresetValue,
+  categoryForFormat,
 } from "../utils/numberFormats";
-import { previewNumberFormat } from "@api";
+import type { NumberFormatCategory } from "../utils/numberFormats";
+import {
+  previewNumberFormat,
+  getCachedLocale,
+  getLocaleSettings,
+  onLocaleChanged,
+} from "@api";
+import type { LocaleSettings } from "@api";
 
 const v = (name: string) => `var(${name})`;
 
-const KNOWN_PRESET_VALUES = new Set(
-  NUMBER_FORMAT_CATEGORIES.flatMap((cat) =>
-    cat.id !== "custom" ? cat.formats.map((f) => f.value) : []
-  )
-);
+/**
+ * Categories with the CURRENT locale's separators baked into every label and
+ * example. BUG-0064: the tab used the static US-default NUMBER_FORMAT_CATEGORIES,
+ * so on a sv-SE document the dialog advertised "1,234.00" while clicking it
+ * produced "1 234,00" -- the sample text lied about the result. Excel's samples
+ * are locale-correct; getNumberFormatCategories(dec, thou) existed for exactly
+ * this and had no production caller passing the locale.
+ */
+function localeCategories(loc: LocaleSettings | null): NumberFormatCategory[] {
+  if (!loc) return NUMBER_FORMAT_CATEGORIES;
+  return getNumberFormatCategories(loc.decimalSeparator, loc.thousandsSeparator);
+}
 
 export function NumberTab(): React.ReactElement {
   const { numberFormat, setNumberFormat } = useFormatCellsStore();
 
-  // Find which category the current format belongs to
-  const findCurrentCategory = (): string => {
-    for (const cat of NUMBER_FORMAT_CATEGORIES) {
-      if (cat.id === "custom") continue;
-      for (const fmt of cat.formats) {
-        if (fmt.value === numberFormat || fmt.value === numberFormat.toLowerCase()) {
-          return cat.id;
-        }
-      }
+  const [categories, setCategories] = useState<NumberFormatCategory[]>(() =>
+    localeCategories(getCachedLocale())
+  );
+  useEffect(() => {
+    let live = true;
+    if (!getCachedLocale()) {
+      getLocaleSettings()
+        .then((loc) => { if (live) setCategories(localeCategories(loc)); })
+        .catch(() => { /* keep defaults if locale cannot be read */ });
     }
-    // If not in any known category, it's a custom format
-    if (numberFormat && !KNOWN_PRESET_VALUES.has(numberFormat) && !KNOWN_PRESET_VALUES.has(numberFormat.toLowerCase())) {
-      return "custom";
-    }
-    return "general";
-  };
+    const unsubscribe = onLocaleChanged((loc) => {
+      if (live) setCategories(localeCategories(loc));
+    });
+    return () => { live = false; unsubscribe(); };
+  }, []);
+
+  // Which category the current format belongs to. categoryForFormat also
+  // understands the backend DISPLAY NAMES get_style emits ("Date (yyyy-mm-dd)")
+  // -- before BUG-0065 the dialog compared them against preset values, so a
+  // formatted cell always reopened on General with nothing highlighted.
+  const findCurrentCategory = (): string => categoryForFormat(numberFormat);
 
   const [selectedCategory, setSelectedCategory] = useState(findCurrentCategory);
   const [customInput, setCustomInput] = useState(() => {
@@ -43,12 +65,28 @@ export function NumberTab(): React.ReactElement {
     if (findCurrentCategory() === "custom") return numberFormat;
     return "";
   });
+
+  // The dialog loads the cell's style asynchronously AFTER mount
+  // (FormatCellsDialog.loadCurrentStyle), so re-derive the selected category
+  // when the format lands or changes. Selecting a preset maps to its own
+  // category, so this never yanks the user away while browsing categories.
+  useEffect(() => {
+    const next = categoryForFormat(numberFormat);
+    setSelectedCategory((prev) => (prev === next ? prev : next));
+    if (next === "custom") setCustomInput(numberFormat);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- track the format only
+  }, [numberFormat]);
   const [preview, setPreview] = useState<{ display: string; color?: string }>({ display: "Sample" });
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const currentCategory = NUMBER_FORMAT_CATEGORIES.find(
+  const currentCategory = categories.find(
     (c) => c.id === selectedCategory
   );
+
+  // The store may hold a preset value ("number_sep") or the backend display
+  // name the dialog loaded ("Number (2 decimals, with separators)"); both
+  // must light the same preset row.
+  const currentPresetValue = normalizeToPresetValue(numberFormat);
 
   // Fetch preview for custom format input
   const fetchPreview = useCallback(async (formatStr: string) => {
@@ -100,7 +138,7 @@ export function NumberTab(): React.ReactElement {
         <CategoryList>
           <SectionLabel>Category:</SectionLabel>
           <CategoryListBox>
-            {NUMBER_FORMAT_CATEGORIES.map((cat) => (
+            {categories.map((cat) => (
               <CategoryItem
                 key={cat.id}
                 $selected={selectedCategory === cat.id}
@@ -160,8 +198,7 @@ export function NumberTab(): React.ReactElement {
                     {currentCategory.formats.map((fmt) => (
                       <FormatItem
                         key={fmt.value}
-                        $selected={numberFormat === fmt.value ||
-                          numberFormat.toLowerCase() === fmt.value}
+                        $selected={currentPresetValue === fmt.value}
                         onClick={() => handlePresetClick(fmt.value)}
                       >
                         <FormatLabel>{fmt.label}</FormatLabel>
@@ -176,7 +213,7 @@ export function NumberTab(): React.ReactElement {
                     <SectionLabel>Preview:</SectionLabel>
                     <PreviewBox>
                       {currentCategory.formats.find(
-                        (f) => f.value === numberFormat || f.value === numberFormat.toLowerCase()
+                        (f) => f.value === currentPresetValue
                       )?.example || "Sample"}
                     </PreviewBox>
                   </PreviewSection>

@@ -1656,6 +1656,16 @@ fn format_datetime_section(value: f64, section: &FormatSection) -> FormatResult 
                 // In date/time context, commas are literal
                 result.push(',');
             }
+            FormatToken::FractionSeparator => {
+                // In date/time context, '/' is a literal separator ("m/d/yyyy"),
+                // never a fraction bar. Dropping it rendered "MM/DD/YYYY" as
+                // "01152024".
+                result.push('/');
+            }
+            FormatToken::DecimalPoint => {
+                // Likewise literal: "dd.mm.yyyy", "mm:ss.0".
+                result.push('.');
+            }
             _ => {}
         }
     }
@@ -2267,6 +2277,17 @@ mod tests {
         // Jan 15, 2024 = serial 45306
         let result = format_custom_value(45306.0, "yyyy-mm-dd", &LocaleSettings::invariant());
         assert_eq!(result.text, "2024-01-15");
+    }
+
+    #[test]
+    fn test_date_format_slash_and_dot_separators_are_literal() {
+        // '/' lexes as FractionSeparator and '.' as DecimalPoint; in a DATE
+        // section both are literal separators. Dropping them rendered
+        // "MM/DD/YYYY" as "01152024".
+        let us = format_custom_value(45306.0, "mm/dd/yyyy", &LocaleSettings::invariant());
+        assert_eq!(us.text, "01/15/2024");
+        let eu = format_custom_value(45306.0, "dd.mm.yyyy", &LocaleSettings::invariant());
+        assert_eq!(eu.text, "15.01.2024");
     }
 
     #[test]

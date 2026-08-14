@@ -62,9 +62,13 @@ const backend = {
   /** null = the cell holds nothing and carries no style. */
   cell: null as { row: number; col: number; styleIndex: number } | null,
   style: { bold: false } as Record<string, unknown>,
+  /** Style index 0 — the document default an EMPTY cell reports (BUG-0062). */
+  defaultStyle: { bold: false, fontFamily: "Calibri", fontSize: 11 } as Record<string, unknown>,
 };
 const getCell = vi.fn(async () => backend.cell);
-const getStyle = vi.fn(async () => backend.style);
+const getStyle = vi.fn(async (index: number) =>
+  index === 0 ? backend.defaultStyle : backend.style
+);
 
 vi.mock("@api/lib", () => ({
   getCell: (row: number, col: number) => getCell(row, col),
@@ -147,8 +151,25 @@ describe("the Home tab's formatting state follows the document", () => {
       "Bold stayed lit over an empty cell: the null branch stopped clearing " +
         "`currentStyle`, which is BUG-0028's first half",
     ).toBe(false);
-    expect(latest!.currentStyle).toBeNull();
+    // BUG-0062: cleared does NOT mean null. A null style made the font box
+    // fall back to "system-ui" — a font no cell renders in — for every empty
+    // cell. An empty cell reports the DOCUMENT DEFAULT style (index 0):
+    // nothing lit, Calibri 11, which is what typing here would produce.
+    expect(latest!.currentStyle).toEqual(backend.defaultStyle);
     expect(latest!.currentCellData).toBeNull();
+  });
+
+  it("reports the DEFAULT style over an empty cell — Calibri 11, not a null the font box renders as 'system-ui' (BUG-0062)", async () => {
+    backend.cell = null;
+    selection = { startRow: 8, startCol: 25, endRow: 8, endCol: 25 };
+    await act(async () => {
+      root.render(<Probe />);
+    });
+    await flush();
+
+    expect(getStyle).toHaveBeenCalledWith(0);
+    expect(latest!.currentStyle?.fontFamily).toBe("Calibri");
+    expect(latest!.currentStyle?.fontSize).toBe(11);
   });
 
   it("RE-READS when the document changes under a selection that did not move", async () => {

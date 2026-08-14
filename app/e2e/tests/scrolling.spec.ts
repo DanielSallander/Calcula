@@ -6,6 +6,7 @@
  */
 import { test, expect } from "../fixtures";
 import {
+  resetToNewWorkbook,
   takeGridScreenshot,
   waitForGridStable,
   softly,
@@ -16,6 +17,15 @@ test.describe("Scrolling & Virtualization", () => {
     appPage,
     grid,
   }) => {
+    // BUG-0053: this test's goldens photograph the WHOLE grid at A1, and the
+    // functional suite shares one accumulating workbook, so a capture taken
+    // over ambient residue encodes whatever the specs before it happened to
+    // leave (the old `grid-scroll-before.png` held "First second"/"original"
+    // from inline-editor-live.spec.ts and could only pass right after that
+    // exact residue). Start from a known workbook so the golden is a function
+    // of THIS test alone, whatever ran before it.
+    await resetToNewWorkbook(appPage);
+
     // Put data at A1 so we know we're starting at the top
     await grid.setCellValue("A1", "Top");
     await waitForGridStable(appPage);

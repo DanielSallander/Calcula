@@ -70,7 +70,9 @@ function alignmentForType(cell: TypedCellData): CanvasTextAlign {
   }
 }
 
-async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
+/** Exported for the unit tier: the failure verdict below must be pinned
+ *  (silent on a lost delete race, loud on a persistent inconsistency). */
+export async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
   const frId = entry.id;
   pendingFetches.add(frId);
   try {
@@ -93,11 +95,39 @@ async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
     staleEntries.delete(frId);
     requestOverlayRedraw();
   } catch (err) {
-    console.error(`[FloatingRange] Failed to fetch cells for ${frId}:`, err);
+    // A fetch can legitimately lose a race with DELETION. Backend-initiated
+    // deletes (the @api wrapper, a script's api.deleteFloatingRange) announce
+    // first and the store prunes in an ASYNC reload, so a redraw inside that
+    // window renders — and fetches — a row the backend has already dropped
+    // (BUG-0057, caught by the walker's fr.delete on its first day). That
+    // transient must stay SILENT. But a row STILL in the store once the dust
+    // settles is a real inconsistency and must stay LOUD — a session-wide
+    // stale store is exactly what BUG-0056 was caught by, on this very line.
+    // So the verdict is deferred, not softened.
+    setTimeout(() => {
+      if (getFloatingRangeById(frId)) {
+        console.error(`[FloatingRange] Failed to fetch cells for ${frId}:`, err);
+      } else {
+        // The row is gone from the store too: the fetch lost the delete race.
+        cellCache.delete(frId);
+        staleEntries.delete(frId);
+        requestOverlayRedraw();
+      }
+    }, FR_FETCH_FAILURE_VERDICT_MS);
   } finally {
     pendingFetches.delete(frId);
   }
 }
+
+/**
+ * How long a failed cell fetch waits before deciding whether it lost a
+ * benign delete race (row gone from the store — silent) or found a real
+ * store/backend inconsistency (row still cached — console.error). The
+ * announce-to-reload window measured well under 200 ms on the walks that
+ * exposed it; 1 s is comfortably past it and still inside any watcher's
+ * settle time.
+ */
+const FR_FETCH_FAILURE_VERDICT_MS = 1000;
 
 /** Mark one FR's cell cache stale (kept visible until the re-fetch lands). */
 export function invalidateFrCache(frId: string): void {

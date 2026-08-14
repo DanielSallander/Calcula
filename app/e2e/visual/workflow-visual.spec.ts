@@ -246,8 +246,13 @@ test.describe("Workflow: Copy-Paste Roundtrip", () => {
     await grid.paste();
     await appPage.waitForTimeout(500);
 
-    // Deselect
-    await grid.clickCell("E1");
+    // Deselect. `navigateTo`, not `clickCell`: the click can be swallowed
+    // (the documented clickCell selection-drift gotcha), and the OLD golden
+    // for this test was captured from exactly that miss — it encoded the
+    // pre-deselect state (C1:C3 still selected) while every run where the
+    // click landed disagreed with it. navigateTo asserts through the Name
+    // Box, so the captured state is the state the spec describes.
+    await grid.navigateTo("E1");
     await appPage.waitForTimeout(300);
 
     await expectCells(grid, [

@@ -28,8 +28,14 @@ import {
 import type { ActionTiming, SheetShape } from "../walker/walkRunner";
 import type { StateSnapshot } from "../invariants/stateSnapshot";
 
-function shape(count: number, active: number, names: string[]): SheetShape {
-  return { count, active, names };
+function shape(
+  count: number,
+  active: number,
+  names: string[],
+  visibility: string[] = [],
+  tabColors: string[] = []
+): SheetShape {
+  return { count, active, names, visibility, tabColors };
 }
 
 function timing(
@@ -77,6 +83,31 @@ describe("sheet-structure coverage is measured, not inferred", () => {
     const summary = summarizeCoverage([timing(1, "sheet.rename", renamed)]);
     expect(summary.sheet.effective).toBe(1);
     expect(summary.sheet.byActionEffective["sheet.rename"]).toBe(1);
+  });
+
+  it("sees a HIDE of a NON-active sheet, which count+active+names never could", () => {
+    // The three operations BUG-0050 made undoable move nothing the old shape
+    // carried: hiding a non-active sheet changes no count, no name and no
+    // active index. Without the visibility axis, sheet.hide of a background
+    // sheet — and EVERY unhide — was issued-but-never-effective (§14a).
+    const hidden = {
+      before: shape(2, 0, ["Sheet1", "Sheet2"], ["visible", "visible"]),
+      after: shape(2, 0, ["Sheet1", "Sheet2"], ["visible", "hidden"]),
+    };
+    expect(sheetShapesDiffer(hidden.before, hidden.after)).toBe(true);
+    const summary = summarizeCoverage([timing(1, "sheet.hide", hidden)]);
+    expect(summary.sheet.effective).toBe(1);
+  });
+
+  it("sees a TAB COLOUR, which nothing else in the shape ever could", () => {
+    const recoloured = {
+      before: shape(1, 0, ["Sheet1"], ["visible"], [""]),
+      after: shape(1, 0, ["Sheet1"], ["visible"], ["#C00000"]),
+    };
+    expect(sheetShapesDiffer(recoloured.before, recoloured.after)).toBe(true);
+    const summary = summarizeCoverage([timing(1, "sheet.tabColor", recoloured)]);
+    expect(summary.sheet.effective).toBe(1);
+    expect(summary.sheet.byActionEffective["sheet.tabColor"]).toBe(1);
   });
 
   it("sees a SWITCH, which no list of names ever could", () => {
@@ -144,11 +175,13 @@ describe("the sheet shape reads what the snapshot actually holds", () => {
       logical: { sheetCount: count, activeSheet: active, sheetNames: names },
     }) as unknown as StateSnapshot;
 
-  it("carries names, count and active index", () => {
+  it("carries names, count, active index, visibility and tab colours", () => {
     expect(sheetShapeOf(snap(2, 1, ["A", "B"]))).toEqual({
       count: 2,
       active: 1,
       names: ["A", "B"],
+      visibility: [],
+      tabColors: [],
     });
   });
 

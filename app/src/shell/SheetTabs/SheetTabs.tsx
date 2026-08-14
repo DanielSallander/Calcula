@@ -35,6 +35,8 @@ import {
   toggleSheetInGroup,
   isSheetGroupingActive,
   getSelectedSheetIndices,
+  // Sheet-switch prefetch (BUG-0052)
+  primeSheetSwitch,
 } from "../../api";
 import { isGlobalFormulaMode, getGlobalCursorPosition } from "../../api/editing";
 import type {
@@ -158,7 +160,11 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     setSheets(result.sheets);
     if (switchSheet && result.activeIndex !== activeIndex) {
       if (backendHandledSwitch) {
-        // Backend already swapped - just sync frontend state
+        // Backend already swapped - just sync frontend state.
+        // BUG-0052: prime the canvas with the new sheet's viewport BEFORE any
+        // visible state moves, so strip and grid repaint in one flush. The
+        // dispatch sequence below stays free of awaits.
+        await primeSheetSwitch(result.activeIndex);
         setActiveIndex(result.activeIndex);
         const newActive = result.sheets[result.activeIndex];
         if (newActive) {
@@ -175,6 +181,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       } else {
         // Need to actually switch sheets in backend
         const switchResult = await setActiveSheetApi(result.activeIndex);
+        // BUG-0052: backend is on the new sheet now — prime before the
+        // visible commit below, which then runs without awaits.
+        await primeSheetSwitch(switchResult.activeIndex);
         setSheets(switchResult.sheets);
         setActiveIndex(switchResult.activeIndex);
         const newActive = switchResult.sheets[switchResult.activeIndex];
@@ -500,6 +509,11 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }));
 
         const result: SheetsResult = await setActiveSheetApi(index);
+        // BUG-0052: the backend is on the new sheet — fetch its viewport
+        // BEFORE the visible swap so the tab strip and the canvas commit in
+        // ONE paint. Everything from here to SHEET_CHANGED runs without an
+        // await, which is what keeps the switch atomic on screen.
+        await primeSheetSwitch(result.activeIndex);
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
 
@@ -550,6 +564,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       }));
 
       const result = await addSheet();
+      // BUG-0052: same prime-before-commit as a tab click — a new sheet's
+      // empty viewport still has to replace the old sheet's cells in the
+      // same paint as the tab that claims it.
+      await primeSheetSwitch(result.activeIndex);
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
 
@@ -602,6 +620,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }));
 
         const result = await deleteSheet(index);
+        // BUG-0052: prime-before-commit; deleting the active sheet lands the
+        // user on a NEIGHBOUR whose cells must arrive with its tab.
+        await primeSheetSwitch(result.activeIndex);
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
 
@@ -943,11 +964,25 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   // Visible tabs in render order; shared by the tab map and drag indicator.
   const visibleSheets = sheets.filter(s => s.visibility === "visible");
 
+  // BUG-0052: the index the strip PAINTS as active. The grid sheet context,
+  // not the local mirror: every switch — tab click, add/delete, and the
+  // backend-initiated follow undo/redo uses — dispatches the context in the
+  // same synchronous batch as the canvas's prefetched cell commit, so painting
+  // from it puts the bold tab and the new sheet's cells in ONE flush. The
+  // local `activeIndex` only catches up via the sync effect above, which runs
+  // AFTER the browser has painted — rendering from it gave undo's switch a
+  // two-frame window with the new sheet's cells under the old sheet's bold
+  // tab. `followBackendSheetActivation` has always said "the tab strip has no
+  // state of its own to update: it syncs its highlight from this"; this makes
+  // that sentence true of the pixels, not only of the state. The local
+  // `activeIndex` remains for behaviour (click guards, drag, scroll-into-view).
+  const paintedActiveIndex = isLoading ? activeIndex : sheetContext.activeSheetIndex;
+
   // True when a tab renders "selected" (raised on the grid background) —
   // used to hide the Excel-style separators next to selected tabs.
   const isTabSelected = (s?: SheetInfo): boolean =>
     !!s && (
-      s.index === activeIndex ||
+      s.index === paintedActiveIndex ||
       groupedSheets.has(s.index) ||
       (isInFormulaMode && editing?.sourceSheetIndex === s.index)
     );
@@ -982,7 +1017,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
             const isSourceSheet = isInFormulaMode &&
               editing?.sourceSheetIndex === sheet.index;
             const isTargetSheet = isInFormulaMode &&
-              sheet.index === activeIndex &&
+              sheet.index === paintedActiveIndex &&
               !isSourceSheet;
 
             // Excel-style separators: only between two unselected neighbors.
@@ -997,7 +1032,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 type="button"
                 tabIndex={-1}
                 data-sheet-tab={sheet.index}
-                $isActive={sheet.index === activeIndex}
+                $isActive={sheet.index === paintedActiveIndex}
                 $isGrouped={groupedSheets.has(sheet.index)}
                 $isFormulaSource={isSourceSheet}
                 $isFormulaTarget={isTargetSheet}

@@ -7,7 +7,7 @@ import {
   getViewportCells,
   updateCellsBatch,
   CommandRegistry,
-  undo as tauriUndo,
+  CoreCommands,
   dispatchGridAction,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
@@ -146,8 +146,35 @@ function createTestContext(logs: string[]): { ctx: TestContext; internals: Conte
       throw new Error(`setSelectionAndWait timed out waiting for selection to propagate`);
     },
 
+    // Undo/redo go through the SAME command Ctrl+Z / Ctrl+Y run
+    // (`core.edit.undo` / `core.edit.redo`), NOT the raw backend invoke.
+    // The product's handler follows the backend's sheet activation (an undo
+    // of an off-sheet edit switches to that sheet, register §13), refreshes
+    // the canvas and announces the refresh domains. The old direct call did
+    // none of that, so a suite that undid an off-sheet change kept observing
+    // the sheet the backend had already left — exactly the shape that once
+    // produced a false "monkey flake" classification. The runner OBSERVES
+    // the switch the product makes; it does not re-implement it.
+    //
+    // `CommandRegistry.execute` on an unregistered command is a silent no-op
+    // (it warns and returns undefined), and a swallowed undo is
+    // indistinguishable from a working one — so absence fails LOUDLY.
     async undo() {
-      await tauriUndo();
+      if (!CommandRegistry.has(CoreCommands.UNDO)) {
+        throw new Error(
+          "ctx.undo: no handler registered for core.edit.undo (grid not mounted?)"
+        );
+      }
+      await CommandRegistry.execute(CoreCommands.UNDO);
+    },
+
+    async redo() {
+      if (!CommandRegistry.has(CoreCommands.REDO)) {
+        throw new Error(
+          "ctx.redo: no handler registered for core.edit.redo (grid not mounted?)"
+        );
+      }
+      await CommandRegistry.execute(CoreCommands.REDO);
     },
 
     async settle() {

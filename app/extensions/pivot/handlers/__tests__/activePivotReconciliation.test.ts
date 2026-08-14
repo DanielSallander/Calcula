@@ -63,6 +63,8 @@ import {
   handleSelectionChange,
   ensureDesignTabRegistered,
   getActivePivotId,
+  shiftCachedRegionsForRowDelete,
+  shiftCachedRegionsForColDelete,
 } from "../selectionHandler";
 import type { PivotRegionData } from "../../types";
 
@@ -144,6 +146,73 @@ describe("the contextual pivot tabs follow the ACTIVE pivot, not the pivot count
     updateCachedRegions([]);
 
     expect(tabsAreRegistered()).toBe(false);
+  });
+
+  it("a row delete that swallows the active pivot closes the tabs — the SECOND delete path", () => {
+    // A row/column delete fully covering a pivot region removes the pivot in
+    // the backend (structure.rs), and the extension's structural handlers
+    // deliberately do NOT call refreshPivotRegions — so `updateCachedRegions`
+    // never runs on this path. The sync shift itself must reconcile, or a
+    // script's api.deleteRows under a stationary cursor leaves ghost tabs
+    // (the convert-to-range/BUG-0051 shape, one object over).
+    const a = region("pivot-a", 10); // rows 10..15
+    const b = region("pivot-b", 40);
+    updateCachedRegions([a, b]);
+    selectInside(a);
+    expect(getActivePivotId()).toBe("pivot-a");
+    expect(tabsAreRegistered(), "precondition: the pivot tabs are showing").toBe(true);
+
+    // Delete rows 8..20 — pivot-a's region is fully inside; the cursor never moves.
+    shiftCachedRegionsForRowDelete(8, 13);
+
+    expect(getActivePivotId()).toBeNull();
+    expect(tabsAreRegistered(), "the tabs outlived the pivot the row delete removed").toBe(false);
+    expect(mockRemoveContextKey).toHaveBeenCalledWith("pivot");
+    expect(mockCloseTaskPane).toHaveBeenCalledWith("pivot-pane");
+  });
+
+  it("a column delete that swallows the active pivot closes the tabs too", () => {
+    const a = region("pivot-a", 0); // cols 0..3
+    updateCachedRegions([a]);
+    selectInside(a);
+    expect(tabsAreRegistered()).toBe(true);
+
+    shiftCachedRegionsForColDelete(0, 5);
+
+    expect(getActivePivotId()).toBeNull();
+    expect(tabsAreRegistered(), "the tabs outlived the pivot the column delete removed").toBe(false);
+  });
+
+  it("a row delete that only SHIFTS the active pivot keeps its tabs", () => {
+    // The reconciliation must key on the active id being GONE, not on the
+    // shift having run: deleting rows above the pivot moves it and must not
+    // tear anything down.
+    const a = region("pivot-a", 10);
+    updateCachedRegions([a]);
+    selectInside(a);
+    vi.clearAllMocks();
+
+    shiftCachedRegionsForRowDelete(0, 3); // rows above; pivot-a shifts up
+
+    expect(getActivePivotId()).toBe("pivot-a");
+    expect(mockUnregisterPanel).not.toHaveBeenCalled();
+    expect(mockRemoveContextKey).not.toHaveBeenCalled();
+  });
+
+  it("a structural shift with no active pivot leaves the just-created tabs alone", () => {
+    // Same vacuity guard as below, for the shift path: the create handler
+    // registers tabs before any selection sets the active id, and a row
+    // delete elsewhere must not kill them.
+    ensureDesignTabRegistered();
+    expect(tabsAreRegistered()).toBe(true);
+    expect(getActivePivotId()).toBeNull();
+
+    shiftCachedRegionsForRowDelete(0, 5);
+
+    expect(
+      tabsAreRegistered(),
+      "the shift reconciliation tore down tabs it had no evidence against",
+    ).toBe(true);
   });
 
   it("a freshly created pivot keeps its tabs — the naive condition would kill them", () => {

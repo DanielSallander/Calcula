@@ -1005,6 +1005,13 @@ pub(crate) fn reset_bi_connections(bi_state: &BiState) {
     };
 
     for conn in torn_down {
+        // Forget any model batch bound to this connection's model. The batch
+        // registry and the `in_batch` interlock are process-global and keyed
+        // by ModelKey, which outlives the document — left set, the same model
+        // reopened in a later document is permanently wedged: batches refuse
+        // to open and per-edit undo snapshots are suppressed (BUG-0060). No
+        // rollback here: the document is being discarded.
+        super::model_editor::forget_batches_for_model_key(&conn.model_key);
         if let Some(key) = conn.model_key.as_ref() {
             // Flushes this engine's cache and drops it when the last connection
             // using that model goes away.
@@ -2028,6 +2035,14 @@ pub async fn bi_delete_connection(
     connection_id: ConnectionId,
 ) -> Result<(), String> {
     log_info!("BI", "bi_delete_connection: id={}", connection_id);
+
+    // Reclaim expired script batches, refuse while a LIVE script batch owns
+    // the model, and roll back a trusted batch left open on the model's last
+    // connection — all while the connection can still perform the rollback.
+    // Without this, deleting the connection mid-batch strands `in_batch` for a
+    // ModelKey that outlives it: every later batch on a reconnect fails and
+    // every later edit's undo snapshot is silently suppressed (BUG-0060).
+    super::model_editor::prepare_connection_delete(&bi_state, connection_id).await?;
 
     let (model_key, is_local, region_ids) = {
         let mut connections = bi_state.connections.lock().unwrap();

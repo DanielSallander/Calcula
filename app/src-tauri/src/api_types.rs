@@ -1088,7 +1088,15 @@ pub struct FormulaShiftResult {
 }
 
 /// Convert NumberFormat to a display name.
-fn format_number_format_name(format: &NumberFormat) -> String {
+///
+/// BUG-0065: everything this emits MUST be readable by
+/// `commands::styles::try_parse_display_name` (its inverse) -- get_style hands
+/// these names to the frontend and the Format Cells dialog sends them straight
+/// back through parse_number_format on OK. A shape added here without its
+/// inverse there silently corrupts the cell's format on an untouched OK.
+/// Pinned by `every_display_name_the_serializer_emits_round_trips` in
+/// commands/styles.rs.
+pub(crate) fn format_number_format_name(format: &NumberFormat) -> String {
     match format {
         NumberFormat::General => "General".to_string(),
         NumberFormat::Number {

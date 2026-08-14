@@ -59,6 +59,7 @@ import {
 } from "../../state/gridActions";
 import { getExternalFormulaTarget } from "../../lib/formulaEditTarget";
 import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
+import { primeSheetSwitch } from "../../lib/sheetSwitchPrefetch";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry, CoreCommands } from "../../../api/commands";
@@ -772,6 +773,18 @@ export function useSpreadsheetSelection({
       // domain refreshes below all describe the same sheet the tab strip does.
       // Doing it later would repaint the new sheet's cells under the old
       // sheet's chrome for one frame.
+      //
+      // BUG-0052: prime the canvas with the target sheet's viewport BEFORE the
+      // follow, so the tab strip and the grid commit in ONE paint. The await
+      // sits strictly BEFORE the first dispatch — the follow's own
+      // beforeSwitch -> context -> normalSwitch -> SHEET_CHANGED sequence
+      // stays free of awaits, which is the atomicity §13 pinned. While the
+      // prime is in flight the screen still shows the old sheet consistently.
+      // Guarded by the same "did the backend actually move" test the follow
+      // makes, so a same-sheet undo — the common case — fetches nothing.
+      if (result.activeSheetIndex !== sheetContext.activeSheetIndex) {
+        await primeSheetSwitch(result.activeSheetIndex);
+      }
       const switched = followBackendSheetActivation(
         result.activeSheetIndex,
         result.activeSheetName,
@@ -885,6 +898,7 @@ export function useSpreadsheetSelection({
       refreshDimensionsFromBackend,
       recalcControlValueCells,
       scrollToCell,
+      sheetContext.activeSheetIndex,
     ]
   );
 

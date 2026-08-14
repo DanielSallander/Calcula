@@ -367,6 +367,11 @@ export { columnToLetter, letterToColumn, isFormulaExpectingReference, ZOOM_MIN, 
 export { parseFormulaReferences } from "../core/lib/formulaRefParser";
 export type { FormulaReferenceWithPosition } from "../core/lib/formulaRefParser";
 
+// Sheet-switch prefetch (BUG-0052): a switch initiator awaits this AFTER the
+// backend switch and BEFORE dispatching sheet:beforeSwitch/normalSwitch, so
+// the tab strip and the canvas commit the new sheet in ONE paint.
+export { primeSheetSwitch } from "../core/lib/sheetSwitchPrefetch";
+
 // ============================================================================
 // Grid Dispatch Bridge (for non-React code)
 // ============================================================================

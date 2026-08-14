@@ -92,6 +92,14 @@ export interface ActionTiming {
    */
   sheetChange?: { before: SheetShape; after: SheetShape };
   /**
+   * The workbook's floating-range shape before and after this action,
+   * recorded only when it changed — the same measured-not-inferred rule as
+   * `sheetChange`, applied to the object family the 2026-08-13 landings
+   * introduced. Without it, every `fr.*` action would be issued-but-never-
+   * observed on its first walk, the §14a blind spot re-created wholesale.
+   */
+  frChange?: { before: FloatingShape; after: FloatingShape };
+  /**
    * Elements covering most of the viewport at the moment an action threw.
    *
    * WHY. Playwright's `actionTimeout` turned an invisible hang into a reported
@@ -128,6 +136,14 @@ export interface SheetShape {
   count: number;
   active: number;
   names: string[];
+  /**
+   * Per-sheet visibility and tab colours. Without these, `sheet.hide` of a
+   * NON-active sheet, every `sheet.unhide` and every `sheet.tabColor` change
+   * nothing the shape can see — issued-but-never-effective, the §14a blind
+   * spot re-created for exactly the three operations BUG-0050 made undoable.
+   */
+  visibility: string[];
+  tabColors: string[];
 }
 
 export function sheetShapeOf(snapshot: StateSnapshot): SheetShape {
@@ -135,15 +151,51 @@ export function sheetShapeOf(snapshot: StateSnapshot): SheetShape {
     count: snapshot.logical.sheetCount,
     active: snapshot.logical.activeSheet,
     names: [...(snapshot.logical.sheetNames ?? [])],
+    visibility: [...(snapshot.logical.sheetVisibility ?? [])],
+    tabColors: [...(snapshot.logical.sheetTabColors ?? [])],
   };
+}
+
+function stringArraysDiffer(a: string[], b: string[]): boolean {
+  return a.length !== b.length || a.some((v, i) => v !== b[i]);
+}
+
+/**
+ * Everything about the workbook a floating-range action is supposed to
+ * change, one line per object, ORDER-INSENSITIVE (sorted by id): create and
+ * delete move the count, resize moves rows/cols, a move moves x/y, rename
+ * moves the name — and a rename is the case a count could never catch, the
+ * same reasoning as `SheetShape.names`.
+ */
+export interface FloatingShape {
+  /** One canonical line per FR: `id|name|host|rows x cols|x,y` — sorted. */
+  entries: string[];
+}
+
+export function frShapeOf(snapshot: StateSnapshot): FloatingShape {
+  const frs = snapshot.logical.floatingRanges ?? [];
+  return {
+    entries: frs
+      .map(
+        (fr) =>
+          `${fr.id}|${fr.name}|${fr.hostSheetIndex}|${fr.rows}x${fr.cols}|` +
+          `${Math.round(fr.x)},${Math.round(fr.y)}|${fr.cellStamp ?? ""}`
+      )
+      .sort(),
+  };
+}
+
+export function frShapesDiffer(a: FloatingShape, b: FloatingShape): boolean {
+  return stringArraysDiffer(a.entries, b.entries);
 }
 
 export function sheetShapesDiffer(a: SheetShape, b: SheetShape): boolean {
   return (
     a.count !== b.count ||
     a.active !== b.active ||
-    a.names.length !== b.names.length ||
-    a.names.some((n, i) => n !== b.names[i])
+    stringArraysDiffer(a.names, b.names) ||
+    stringArraysDiffer(a.visibility, b.visibility) ||
+    stringArraysDiffer(a.tabColors, b.tabColors)
   );
 }
 
@@ -472,10 +524,15 @@ export class WalkRunner {
       // drops a sheet is a finding in its own right, and the trace is the only
       // place it would ever show.
       const sheetBefore = sheetShapeOf(snapshot);
+      const frBefore = frShapeOf(snapshot);
       snapshot = captured;
       const sheetAfter = sheetShapeOf(snapshot);
       if (sheetShapesDiffer(sheetBefore, sheetAfter)) {
         timing.sheetChange = { before: sheetBefore, after: sheetAfter };
+      }
+      const frAfter = frShapeOf(snapshot);
+      if (frShapesDiffer(frBefore, frAfter)) {
+        timing.frChange = { before: frBefore, after: frAfter };
       }
 
       // Cheap invariants
@@ -609,14 +666,30 @@ export function summarizeCoverage(timings: ActionTiming[]): {
   };
   /** Actions OUTSIDE the sheet family that moved the sheet structure anyway. */
   unexpectedSheetChanges: Array<{ step: number; id: string }>;
+  /**
+   * Floating-range accounting, same measured-not-inferred contract as `sheet`.
+   * `unexpectedFrChanges` names non-`fr.` actions that moved the object store
+   * — undo/redo of a geometry change legitimately does; anything else is a
+   * finding.
+   */
+  fr: {
+    attempted: number;
+    effective: number;
+    byActionEffective: Record<string, number>;
+  };
+  unexpectedFrChanges: Array<{ step: number; id: string }>;
 } {
   const families: Record<string, number> = {};
   const byAction: Record<string, number> = {};
   const byActionEffective: Record<string, number> = {};
   const unexpectedSheetChanges: Array<{ step: number; id: string }> = [];
+  const frByActionEffective: Record<string, number> = {};
+  const unexpectedFrChanges: Array<{ step: number; id: string }> = [];
   let threw = 0;
   let sheetAttempted = 0;
   let sheetEffective = 0;
+  let frAttempted = 0;
+  let frEffective = 0;
 
   for (const t of timings) {
     const isSheetAction = t.id.startsWith("sheet.");
@@ -627,6 +700,21 @@ export function summarizeCoverage(timings: ActionTiming[]): {
         byActionEffective[t.id] = (byActionEffective[t.id] ?? 0) + 1;
       } else {
         unexpectedSheetChanges.push({ step: t.step, id: t.id });
+      }
+    }
+    // `fr.refFromGrid`'s effect lands in a GRID cell, outside the fr shape —
+    // like every `cell.*` action, its effect is not shape-observed, so it is
+    // excluded from the attempted/effective accounting (it still counts in
+    // `families`). Everything else `fr.` is observable: geometry/name via the
+    // row store, cell writes via the snapshot's cellStamp.
+    const isFrAction = t.id.startsWith("fr.") && t.id !== "fr.refFromGrid";
+    if (isFrAction) frAttempted++;
+    if (t.frChange) {
+      if (isFrAction) {
+        frEffective++;
+        frByActionEffective[t.id] = (frByActionEffective[t.id] ?? 0) + 1;
+      } else {
+        unexpectedFrChanges.push({ step: t.step, id: t.id });
       }
     }
     if (t.error) {
@@ -648,13 +736,18 @@ export function summarizeCoverage(timings: ActionTiming[]): {
       byActionEffective,
     },
     unexpectedSheetChanges,
+    fr: {
+      attempted: frAttempted,
+      effective: frEffective,
+      byActionEffective: frByActionEffective,
+    },
+    unexpectedFrChanges,
   };
 }
 
 function formatCoverage(result: WalkResult): string[] {
-  const { families, threw, sheet, unexpectedSheetChanges } = summarizeCoverage(
-    result.timings
-  );
+  const { families, threw, sheet, unexpectedSheetChanges, fr, unexpectedFrChanges } =
+    summarizeCoverage(result.timings);
   const entries = Object.entries(families).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return [];
   const lines = [
@@ -680,6 +773,26 @@ function formatCoverage(result: WalkResult): string[] {
     lines.push(
       `  Sheet structure moved by NON-sheet actions: ` +
         unexpectedSheetChanges.map((u) => `step ${u.step} ${u.id}`).join(", ")
+    );
+  }
+  if (fr.attempted > 0) {
+    const detail = Object.entries(fr.byActionEffective)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${k}=${n}`)
+      .join(" ");
+    lines.push(
+      `  Floating ranges: ${fr.attempted} action(s) issued, ` +
+        `${fr.effective} changed the workbook` +
+        (detail ? ` (${detail})` : "") +
+        (fr.effective === 0
+          ? `  [WARNING: every floating-range action was a no-op — the surface was NOT explored]`
+          : "")
+    );
+  }
+  if (unexpectedFrChanges.length > 0) {
+    lines.push(
+      `  Floating ranges moved by NON-fr actions: ` +
+        unexpectedFrChanges.map((u) => `step ${u.step} ${u.id}`).join(", ")
     );
   }
   return lines;

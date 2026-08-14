@@ -31,8 +31,8 @@ pub fn format_number(value: f64, format: &NumberFormat, locale: &LocaleSettings)
         } => format_fraction(value, *denominator, *max_digits),
         NumberFormat::Percentage { decimal_places } => format_percentage(value, *decimal_places, locale),
         NumberFormat::Scientific { decimal_places } => format_scientific(value, *decimal_places),
-        NumberFormat::Date { format: date_fmt } => format_date_number(value, date_fmt),
-        NumberFormat::Time { format: time_fmt } => format_time_number(value, time_fmt),
+        NumberFormat::Date { format: date_fmt } => format_date_number(value, date_fmt, locale),
+        NumberFormat::Time { format: time_fmt } => format_time_number(value, time_fmt, locale),
         NumberFormat::Custom { format: custom_fmt } => format_custom(value, custom_fmt, locale),
     }
 }
@@ -338,103 +338,32 @@ fn format_scientific(value: f64, decimal_places: u8) -> String {
 }
 
 /// Format a number as a date (Excel serial date number).
-/// Excel dates: 1 = January 1, 1900
-fn format_date_number(value: f64, format: &str) -> String {
-    // Excel serial date conversion
-    // Note: Excel has a bug where it thinks 1900 was a leap year
-    let days = value.floor() as i64;
-    
-    if days < 1 {
-        return value.to_string(); // Not a valid date
-    }
-
-    // Calculate date from serial number
-    // Adjust for Excel's leap year bug (day 60 = Feb 29, 1900 which didn't exist)
-    let adjusted_days = if days >= 60 { days - 1 } else { days };
-    
-    // Days since Dec 31, 1899
-    let base_date = chrono_lite_date(adjusted_days);
-    
-    match base_date {
-        Some((year, month, day)) => {
-            format
-                .replace("YYYY", &format!("{:04}", year))
-                .replace("YY", &format!("{:02}", year % 100))
-                .replace("MM", &format!("{:02}", month))
-                .replace("DD", &format!("{:02}", day))
-                .replace("M", &month.to_string())
-                .replace("D", &day.to_string())
-        }
-        None => value.to_string(),
-    }
-}
-
-/// Simple date calculation without external dependencies.
-/// Returns (year, month, day) for a given number of days since Dec 31, 1899.
-fn chrono_lite_date(days: i64) -> Option<(i32, u32, u32)> {
-    if days < 1 {
-        return None;
-    }
-
-    let mut remaining = days;
-    let mut year = 1900i32;
-
-    // Find the year
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining <= days_in_year as i64 {
-            break;
-        }
-        remaining -= days_in_year as i64;
-        year += 1;
-    }
-
-    // Find the month and day
-    let months_days: [u32; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month = 1u32;
-    for &days_in_month in &months_days {
-        if remaining <= days_in_month as i64 {
-            return Some((year, month, remaining as u32));
-        }
-        remaining -= days_in_month as i64;
-        month += 1;
-    }
-
-    None
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+/// Excel dates: 1 = January 1, 1900.
+///
+/// Delegates to the full custom-format engine (`custom_format.rs`), whose
+/// lexer is CASE-INSENSITIVE and knows every Excel date token — "yyyy-mm-dd",
+/// "D-MMM-YY", month/day NAMES, datetime combos like "M/D/YYYY HH:mm".
+///
+/// It replaces a hand-rolled `.replace("YYYY", ..)` chain that only knew the
+/// UPPERCASE spellings `YYYY/YY/MM/DD/M/D`: any other spelling fell through
+/// every `replace` untouched and the cell displayed the FORMAT STRING ITSELF —
+/// the Format Cells dialog's presets are stored lowercase ("yyyy-mm-dd"), so
+/// every date format applied through the dialog rendered as the literal text
+/// "yyyy-mm-dd" instead of a date (BUG-0060). The lowercase spellings are also
+/// what .xlsx custom format codes carry.
+fn format_date_number(value: f64, format: &str, locale: &LocaleSettings) -> String {
+    custom_format::format_custom_value(value, format, locale).text
 }
 
 /// Format a number as time (fraction of a day).
-fn format_time_number(value: f64, format: &str) -> String {
-    let fraction = value.fract();
-    let total_seconds = (fraction * 86400.0).round() as u32;
-    
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-
-    let is_pm = hours >= 12;
-    let hours_12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
-
-    format
-        .replace("HH", &format!("{:02}", hours))
-        .replace("H", &hours.to_string())
-        .replace("hh", &format!("{:02}", hours_12))
-        .replace("h", &hours_12.to_string())
-        .replace("MM", &format!("{:02}", minutes))
-        .replace("mm", &format!("{:02}", minutes))
-        .replace("SS", &format!("{:02}", seconds))
-        .replace("ss", &format!("{:02}", seconds))
-        .replace("AM/PM", if is_pm { "PM" } else { "AM" })
-        .replace("am/pm", if is_pm { "pm" } else { "am" })
+///
+/// Same delegation as dates, for the same reason. The custom-format engine
+/// additionally gets the Excel rules right that the old token-replace chain
+/// did not: `h` is 24-hour unless the format carries an AM/PM token (the old
+/// code rendered lowercase `hh:mm` at 13:00 as "01:00"), and elapsed
+/// `[h]`/`[mm]`/`[ss]` work.
+fn format_time_number(value: f64, format: &str, locale: &LocaleSettings) -> String {
+    custom_format::format_custom_value(value, format, locale).text
 }
 
 /// Format a number using a custom format string (full Excel-compatible engine).
@@ -699,5 +628,69 @@ mod tests {
         assert_eq!(gcd(15, 10), 5);
         assert_eq!(gcd(7, 3), 1);
         assert_eq!(gcd(0, 5), 5);
+    }
+
+    // --- Date/Time formats through format_number (BUG-0060 regression) ---
+    //
+    // The Format Cells dialog stores its date presets LOWERCASE ("yyyy-mm-dd");
+    // the old date formatter only replaced the UPPERCASE tokens YYYY/YY/MM/DD,
+    // so every dialog-applied date rendered as the literal format string. These
+    // pin BOTH spellings, plus the xlsx builtin shapes the old code mangled.
+
+    #[test]
+    fn date_format_lowercase_dialog_spelling_formats_a_date() {
+        // 45000 = 2023-03-15 — the visual corpus's own probe value.
+        let out = format_number(
+            45000.0,
+            &NumberFormat::Date { format: "yyyy-mm-dd".to_string() },
+            &us(),
+        );
+        assert_eq!(out, "2023-03-15");
+    }
+
+    #[test]
+    fn date_format_never_echoes_the_format_string() {
+        for fmt in ["yyyy-mm-dd", "mm/dd/yyyy", "dd/mm/yyyy", "D-MMM-YY", "M/D/YYYY HH:mm"] {
+            let out = format_number(
+                45306.0,
+                &NumberFormat::Date { format: fmt.to_string() },
+                &us(),
+            );
+            assert_ne!(out, fmt, "format string echoed verbatim for {fmt:?}");
+            assert!(out.contains("15") || out.contains("Jan"), "no day in {out:?} for {fmt:?}");
+        }
+    }
+
+    #[test]
+    fn date_format_uppercase_engine_spelling_still_works() {
+        // 45306 = 2024-01-15
+        assert_eq!(format_number(45306.0, &presets::date_iso(), &us()), "2024-01-15");
+        assert_eq!(format_number(45306.0, &presets::date_us(), &us()), "01/15/2024");
+    }
+
+    #[test]
+    fn date_format_xlsx_builtin_month_names() {
+        // Builtin numFmt 15 ("D-MMM-YY"): the old replace-chain produced digit
+        // salad for MMM. 45306 = Jan 15, 2024.
+        let out = format_number(
+            45306.0,
+            &NumberFormat::Date { format: "D-MMM-YY".to_string() },
+            &us(),
+        );
+        assert_eq!(out, "15-Jan-24");
+    }
+
+    #[test]
+    fn time_format_h_is_24_hour_without_am_pm() {
+        // Excel rule: `h`/`hh` is 24-hour UNLESS the format carries AM/PM.
+        // 0.5625 = 13:30:00. The old code showed lowercase hh as 12-hour.
+        let time = |fmt: &str| {
+            format_number(0.5625, &NumberFormat::Time { format: fmt.to_string() }, &us())
+        };
+        assert_eq!(time("hh:mm:ss"), "13:30:00");
+        assert_eq!(time("h:mm AM/PM"), "1:30 PM");
+        // The engine constructor's own spelling (HH:MM:SS — MM resolves to
+        // minutes after an hour token).
+        assert_eq!(format_number(0.5625, &presets::time_24h(), &us()), "13:30:00");
     }
 }

@@ -5128,23 +5128,43 @@ fn script_batch_registry() -> &'static Mutex<HashMap<Option<ModelKey>, ScriptBat
 }
 
 /// Roll back every script batch whose deadline has passed. Returns how many
-/// were reclaimed. Never fails the caller: a batch that cannot be rolled back
-/// (connection gone) is dropped from the registry and logged.
+/// were reclaimed.
+///
+/// ONLY batches whose connection lives in THIS `bi_state` are taken. Removing
+/// a registry entry destroys the last record that the batch exists, and a
+/// caller that cannot resolve `b.connection_id` cannot roll the model back —
+/// dropping the record anyway leaves `in_batch` set in the undo store with
+/// nothing left to reclaim it: the permanent form of the exact wedge the
+/// deadline exists to heal. Measured (BUG-0060): the unit-test binary runs
+/// many BiStates concurrently against these process-global stores, and this
+/// theft made `an_abandoned_script_batch_is_reclaimed_and_rolled_back` flake —
+/// a sibling test's reclaim stole the freshly-expired entry, its rollback
+/// failed against the wrong BiState, and the zombie's model stayed wedged. In
+/// production the same record-then-heal gap was reachable by deleting (or
+/// document-resetting away) a batch's connection before its deadline passed.
 async fn reclaim_expired_script_batches(bi_state: &BiState) -> usize {
-    let expired: Vec<ScriptBatch> = {
+    // Snapshot the connection ids first: never hold `connections` and the
+    // registry lock together (the lock-pair rule this register keeps relearning).
+    let live_connections: Vec<ConnectionId> = match bi_state.connections.lock() {
+        Ok(conns) => conns.keys().copied().collect(),
+        Err(_) => return 0,
+    };
+    let expired: Vec<(Option<ModelKey>, ScriptBatch)> = {
         let Ok(mut reg) = script_batch_registry().lock() else {
             return 0;
         };
         let now = std::time::Instant::now();
         let keys: Vec<Option<ModelKey>> = reg
             .iter()
-            .filter(|(_, b)| b.deadline <= now)
+            .filter(|(_, b)| b.deadline <= now && live_connections.contains(&b.connection_id))
             .map(|(k, _)| k.clone())
             .collect();
-        keys.iter().filter_map(|k| reg.remove(k)).collect()
+        keys.into_iter()
+            .filter_map(|k| reg.remove(&k).map(|b| (k, b)))
+            .collect()
     };
     let mut reclaimed = 0usize;
-    for b in expired {
+    for (key, b) in expired {
         match rollback_model_batch(bi_state, &b.connection_id, Some(b.script_id.clone())).await {
             Ok(_) => {
                 reclaimed += 1;
@@ -5156,15 +5176,93 @@ async fn reclaim_expired_script_batches(bi_state: &BiState) -> usize {
                     b.edits
                 );
             }
-            Err(e) => crate::log_warn!(
-                "BI",
-                "could not reclaim the expired script model batch (script {}): {}",
-                b.script_id,
-                e
-            ),
+            Err(e) => {
+                // The connection vanished between the snapshot above and the
+                // rollback (its registry record is already consumed). Healing
+                // by rollback is impossible now, so clear the interlock: a
+                // stuck `in_batch` blocks every later batch and silently
+                // suppresses every later edit's undo snapshot for a ModelKey
+                // that outlives connections and documents.
+                clear_batch_interlock(&key);
+                crate::log_warn!(
+                    "BI",
+                    "could not roll back the expired script model batch (script {}): {} — interlock cleared instead",
+                    b.script_id,
+                    e
+                );
+            }
         }
     }
     reclaimed
+}
+
+/// Clear the `in_batch` interlock for a model key WITHOUT reinstalling the
+/// pre-batch snapshot — the heal of last resort, for when no live connection
+/// can perform a rollback. The snapshot stays on the undo stack: the design
+/// says a reclaimed batch is rolled back, never committed, and with no engine
+/// to reinstall into, leaving the half-applied batch as ONE undoable step is
+/// the closest remaining approximation (the user's next Undo reverts it).
+fn clear_batch_interlock(model_key: &Option<ModelKey>) {
+    let Ok(mut store) = model_undo_store().lock() else {
+        return;
+    };
+    let stacks = store.entry(model_key.clone()).or_default();
+    stacks.in_batch = false;
+}
+
+/// Forget any batch state bound to a model key whose connections are being
+/// torn down WITHOUT individual deletes (document reset: File > New / Open).
+/// The models are going away with the document, so no rollback is possible or
+/// wanted — but `script_batch_registry` and the `in_batch` interlock are keyed
+/// by ModelKey, which OUTLIVES the document (the same model reopened later
+/// resolves to the same key), so leaving them set wedges every future session
+/// against that model. Sync on purpose: `reset_bi_connections` is sync.
+pub(crate) fn forget_batches_for_model_key(model_key: &Option<ModelKey>) {
+    if let Ok(mut reg) = script_batch_registry().lock() {
+        reg.remove(model_key);
+    }
+    clear_batch_interlock(model_key);
+}
+
+/// The gate + release `bi_delete_connection` runs BEFORE removing the
+/// connection, while a rollback is still possible:
+///  1. expired script batches are reclaimed (heals a dead script's wedge),
+///  2. a LIVE script batch refuses the delete — same rationale as
+///     `guard_no_live_script_batch`: closing the model out from under a
+///     running script would silently roll back its transaction; the refusal
+///     is bounded by `SCRIPT_BATCH_MAX_SECS`,
+///  3. a trusted (Model Editor) batch left open is rolled back — the user is
+///     deleting the model's LAST connection, so nothing could ever end or
+///     cancel that batch again and `in_batch` would stay set forever.
+/// A connection that shares its model with another live connection leaves the
+/// batch alone: the surviving connection can still drive it.
+pub(crate) async fn prepare_connection_delete(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+) -> Result<(), String> {
+    reclaim_expired_script_batches(bi_state).await;
+    guard_no_live_script_batch(bi_state, connection_id)?;
+    let key = model_key_of(bi_state, connection_id)?;
+    let shared = {
+        let conns = bi_state.connections.lock().map_err(|e| e.to_string())?;
+        conns
+            .iter()
+            .any(|(id, c)| *id != connection_id && c.model_key == key)
+    };
+    if shared {
+        return Ok(());
+    }
+    match rollback_model_batch(bi_state, &connection_id, None).await {
+        Ok(_) => crate::log_warn!(
+            "BI",
+            "rolled back the open model batch before deleting its last connection ({})",
+            connection_id
+        ),
+        // The common case: no batch open. Any other failure still must not
+        // strand the interlock past the connection's death.
+        Err(_) => clear_batch_interlock(&key),
+    }
+    Ok(())
 }
 
 /// Refuse a trusted end/cancel while a LIVE script batch owns the model:
@@ -9119,6 +9217,146 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("may have expired"), "got: {}", err);
+    }
+
+    /// THE FLAKE'S MECHANISM, pinned deterministically (BUG-0060). The batch
+    /// registry is process-global; the unit-test binary (and nothing else)
+    /// runs many BiStates against it concurrently. Reclaim used to remove
+    /// EVERY expired entry and then roll back against the CALLER's BiState —
+    /// so a sibling's reclaim could steal a freshly-expired zombie batch in
+    /// the window between the test back-dating the deadline and its own next
+    /// edit, fail the rollback against the wrong state, and leave the
+    /// zombie's model wedged with no record left to heal it ("the wedge must
+    /// be cleared", ~1 in 3 full parallel runs). Reclaim must not touch a
+    /// batch whose connection it cannot resolve.
+    #[tokio::test]
+    async fn reclaim_leaves_batches_whose_connection_it_cannot_resolve() {
+        let (bi_a, conn_a) = test_bi_state("unit-test-batch-theft-a", &base_model());
+        let (bi_b, _conn_b) = test_bi_state("unit-test-batch-theft-b", &base_model());
+        let file = FileState::default();
+        let key_a = model_key_of(&bi_a, conn_a).unwrap();
+
+        gateway_batch(&bi_a, &file, conn_a, "script:zombie", "batchBegin")
+            .await
+            .unwrap();
+        add_measure(&bi_a, conn_a, "TheftHalfDone").await;
+        {
+            let mut reg = script_batch_registry().lock().unwrap();
+            reg.get_mut(&key_a).unwrap().deadline =
+                std::time::Instant::now() - std::time::Duration::from_secs(1);
+        }
+
+        // The OTHER state's reclaim runs first — exactly the interleaving the
+        // flake needed. It must not steal what it cannot roll back.
+        assert_eq!(reclaim_expired_script_batches(&bi_b).await, 0);
+        assert!(
+            script_batch_registry().lock().unwrap().get(&key_a).is_some(),
+            "the zombie batch must still be on record"
+        );
+        assert!(in_batch(&bi_a, conn_a));
+
+        // The owning state's next edit still heals as designed.
+        add_measure(&bi_a, conn_a, "TheftUserEdit").await;
+        assert!(!in_batch(&bi_a, conn_a), "the wedge must be cleared");
+        let base = read_base_and_calculated(&bi_a, conn_a).unwrap().0;
+        assert!(base.measures().iter().all(|m| m.name() != "TheftHalfDone"));
+        assert!(base.measures().iter().any(|m| m.name() == "TheftUserEdit"));
+    }
+
+    /// Deleting a model's LAST connection with a trusted batch still open
+    /// used to strand `in_batch` forever — the interlock is keyed by
+    /// ModelKey, which outlives connections, so a reconnect to the same model
+    /// could never open a batch again and every later edit's undo snapshot
+    /// was silently suppressed. The delete gate rolls the batch back while
+    /// the connection can still do it.
+    #[tokio::test]
+    async fn deleting_the_last_connection_rolls_back_an_open_trusted_batch() {
+        let (bi, conn) = test_bi_state("unit-test-batch-delete-heal", &base_model());
+        begin_model_batch(&bi, conn).unwrap();
+        add_measure(&bi, conn, "DoomedByDelete").await;
+        assert!(in_batch(&bi, conn));
+
+        prepare_connection_delete(&bi, conn).await.unwrap();
+
+        assert!(
+            !in_batch(&bi, conn),
+            "the interlock must not outlive the connection"
+        );
+        assert_eq!(
+            undo_depth(&bi, conn),
+            0,
+            "the rollback consumes the pre-batch snapshot"
+        );
+        let base = read_base_and_calculated(&bi, conn).unwrap().0;
+        assert!(
+            base.measures().iter().all(|m| m.name() != "DoomedByDelete"),
+            "an uncommitted batch is rolled back, not committed"
+        );
+    }
+
+    /// A LIVE script batch refuses the connection delete (same rationale as
+    /// the trusted end/cancel guard: closing the model out from under a
+    /// running script would silently roll back its transaction; bounded by
+    /// the deadline) — and an EXPIRED one is reclaimed by the same gate.
+    #[tokio::test]
+    async fn connection_delete_refuses_a_live_script_batch_and_reclaims_an_expired_one() {
+        let (bi, conn) = test_bi_state("unit-test-batch-delete-script", &base_model());
+        let file = FileState::default();
+        let key = model_key_of(&bi, conn).unwrap();
+        gateway_batch(&bi, &file, conn, "script:slow", "batchBegin")
+            .await
+            .unwrap();
+
+        let err = prepare_connection_delete(&bi, conn).await.unwrap_err();
+        assert!(err.contains("script:slow"), "got: {}", err);
+        assert!(
+            in_batch(&bi, conn),
+            "a refused delete leaves the live batch untouched"
+        );
+
+        {
+            let mut reg = script_batch_registry().lock().unwrap();
+            reg.get_mut(&key).unwrap().deadline =
+                std::time::Instant::now() - std::time::Duration::from_secs(1);
+        }
+        prepare_connection_delete(&bi, conn).await.unwrap();
+        assert!(!in_batch(&bi, conn));
+        assert!(script_batch_registry().lock().unwrap().get(&key).is_none());
+    }
+
+    /// Document reset (File > New / Open) tears connections down without
+    /// individual deletes. The registry entry and the interlock must not
+    /// survive it: both are keyed by ModelKey, which the same model reopened
+    /// in a LATER document resolves to again. The pre-batch snapshot stays on
+    /// the undo stack — with no engine to reinstall into, the half-applied
+    /// batch is left as one undoable step, never silently committed as a
+    /// suppressed-undo tail.
+    #[tokio::test]
+    async fn document_reset_forgets_batches_and_clears_the_interlock() {
+        let (bi, conn) = test_bi_state("unit-test-batch-reset", &base_model());
+        let file = FileState::default();
+        let key = model_key_of(&bi, conn).unwrap();
+        gateway_batch(&bi, &file, conn, "script:doomed", "batchBegin")
+            .await
+            .unwrap();
+        add_measure(&bi, conn, "ResetHalfDone").await;
+        assert!(in_batch(&bi, conn));
+
+        forget_batches_for_model_key(&key);
+
+        assert!(
+            script_batch_registry().lock().unwrap().get(&key).is_none(),
+            "the batch record must not survive the document"
+        );
+        assert!(
+            !in_batch(&bi, conn),
+            "the interlock must not survive the document"
+        );
+        assert_eq!(
+            undo_depth(&bi, conn),
+            1,
+            "the pre-batch snapshot stays as the one undoable step"
+        );
     }
 
     /// A live script batch must not be closed out from under the script by the

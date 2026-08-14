@@ -58,6 +58,38 @@ export interface SelectionInfo {
   endCol: number;
 }
 
+/**
+ * One floating range (a shape-like object whose cells are a REAL hidden
+ * backing sheet, referenced `=Float1!A1`). Captured from
+ * `list_floating_ranges` so walker preconditions can gate on existence and
+ * the issued-vs-effective accounting (§14a) can OBSERVE create / resize /
+ * rename / move / delete rather than infer them — the blind spot that made
+ * `chart.select`/`chart.delete` count as explored for a whole programme
+ * while talking to nothing (BUG-0031).
+ */
+export interface FloatingRangeSnapshotInfo {
+  /** EntityId (uuid) of the object row — stable across sheet renumbering. */
+  id: string;
+  /** The FR's name — lives in the SHARED sheet namespace (`=Name!A1`). */
+  name: string;
+  /** Live index of the sheet the object floats over. */
+  hostSheetIndex: number;
+  /** Visible window. */
+  rows: number;
+  cols: number;
+  /** Sheet-pixel position on the host sheet. */
+  x: number;
+  y: number;
+  /**
+   * Canonical stamp of the FR's non-empty cell DISPLAYS inside its visible
+   * window ("r,c=display;..." sorted). Without it, `fr.setCell` is
+   * issued-but-never-observed — the §14a blind spot — because a cell write
+   * moves neither geometry nor name. Bounded: the walker caps windows at a
+   * few rows/cols, and only non-empty cells come back.
+   */
+  cellStamp: string;
+}
+
 export interface LogicalState {
   slicers: SlicerInfo[];
   charts: ChartInfo[];
@@ -97,6 +129,20 @@ export interface LogicalState {
   backendActiveSheet: number;
   /** Per-sheet visibility, in index order ("visible" | "hidden" | "veryHidden"). */
   sheetVisibility: string[];
+  /**
+   * Per-sheet tab colour, in index order ("" when none is set).
+   *
+   * Same reasoning as `sheetNames`: `sheet.tabColor` changes no count, no
+   * name, no active index and no visibility, so without this field the walk
+   * report could never distinguish a tab-colour action that worked from one
+   * that silently did nothing (§14a). `get_sheets` already reports it.
+   */
+  sheetTabColors: string[];
+  /**
+   * Floating ranges in the workbook (all sheets). Empty when the query fails
+   * — a snapshot must degrade to "none visible", never manufacture state.
+   */
+  floatingRanges: FloatingRangeSnapshotInfo[];
   isEditing: boolean;
 }
 
@@ -377,11 +423,12 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
     const gridState = (window as any).__CALCULA_GRID_STATE__;
 
     // Fetch backend state in parallel
-    const [slicers, charts, tables, sheetsResult] = await Promise.all([
+    const [slicers, charts, tables, sheetsResult, floatingRanges] = await Promise.all([
       tauri.core.invoke("get_all_slicers").catch(() => []),
       tauri.core.invoke("get_charts").catch(() => []),
       tauri.core.invoke("get_all_tables", {}).catch(() => []),
       tauri.core.invoke("get_sheets").catch(() => null),
+      tauri.core.invoke("list_floating_ranges").catch(() => []),
     ]);
 
     // Pivot regions from frontend cache (no backend command for "get all pivots")
@@ -464,6 +511,42 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
       backendActiveSheet: (sheetsResult as any)?.activeIndex ?? 0,
       sheetVisibility: (((sheetsResult as any)?.sheets ?? []) as any[]).map((s: any) =>
         String(s?.visibility ?? "visible")
+      ),
+      sheetTabColors: (((sheetsResult as any)?.sheets ?? []) as any[]).map((s: any) =>
+        String(s?.tabColor ?? "")
+      ),
+      floatingRanges: await Promise.all(
+        (((floatingRanges as any[]) ?? [])).map(async (fr: any) => {
+          // Content stamp: bounded fetch (the window is small by product cap
+          // and walker practice; only non-empty cells return). A failed fetch
+          // degrades to "" rather than inventing content.
+          let cellStamp = "";
+          try {
+            const cells = (await tauri.core.invoke("get_floating_range_cells", {
+              id: fr.id,
+              startRow: 0,
+              startCol: 0,
+              endRow: Math.min((fr?.rowCount ?? 1) - 1, 19),
+              endCol: Math.min((fr?.colCount ?? 1) - 1, 9),
+            })) as any[];
+            cellStamp = cells
+              .map((c) => `${c.row},${c.col}=${c.display ?? c.value ?? ""}`)
+              .sort()
+              .join(";");
+          } catch {
+            cellStamp = "";
+          }
+          return {
+            id: String(fr?.id ?? ""),
+            name: String(fr?.name ?? ""),
+            hostSheetIndex: fr?.hostSheetIndex ?? 0,
+            rows: fr?.rowCount ?? 1,
+            cols: fr?.colCount ?? 1,
+            x: fr?.x ?? 0,
+            y: fr?.y ?? 0,
+            cellStamp,
+          };
+        })
       ),
       isEditing: gridState?.editing === true,
     };

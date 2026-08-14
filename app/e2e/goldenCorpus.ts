@@ -593,20 +593,33 @@ export function describeProfileSplit(
 //
 // Nothing looked at the OTHER projects. `tests/.../empty-grid-full-window.png`
 // photographs the same brand-new workbook through the same
-// `resetToNewWorkbook` helper, in the `functional` project, and still carries
-// the residue: 546 pressed-accent pixels where the fixed build paints 36. The
-// pressed fill alone is 590 differing pixels against a 200-pixel budget, so it
-// cannot pass -- and no test in the tree could say so, because every guard was
-// about the capture environment and this is about the application.
+// `resetToNewWorkbook` helper, in the `functional` project, and still carried
+// the residue at the time: 546 pressed-accent pixels where THAT fixed build
+// painted 36. The pressed fill alone is 590 differing pixels against a
+// 200-pixel budget, so it could not pass -- and no test in the tree could say
+// so, because every guard was about the capture environment and this is about
+// the application.
+//
+// THE TARGET MOVED ONCE, DELIBERATELY (2026-08-14, open-decisions §21).
+// BUG-0028's fix cleared to a NULL style, which was its own defect one layer
+// down: the font box fell back to "system-ui" and every toggle went dark,
+// where the document default (style 0, Calibri 11, VerticalAlign::Middle) is
+// what an empty cell truly carries. BUG-0062 made the ribbon report that
+// default, so the CURRENT build paints exactly ONE lit toggle (Center
+// Vertically, ~546 px) on a brand-new workbook. "Unlit" stopped being the
+// fixed build's face; every empty-document golden was re-recorded with the
+// diff attributed, and the axis below pins each file's expected reading
+// instead of asserting zero.
 //
 // HOW THE STATE IS READ OFF THE BYTES. A latched Home-tab toggle paints
 // `rgba(16,185,129,0.14)` over white -- (222,245,237) -- inside a 30x26 box.
 // Counting that fill recovers "was a format toggle lit" from the file alone,
 // with no run involved, exactly as the hairline recovers the device pixel
-// ratio. Measured over all 71 committed goldens: an UNLIT capture holds 23..36
-// such pixels (stray anti-aliasing in the ribbon iconography) and a LIT one
-// holds 546 or more. There is no golden between 36 and 546, so the floor below
-// sits an order of magnitude clear of both sides.
+// ratio. Measured over the committed goldens: a capture with no lit toggle in
+// frame holds 0..36 such pixels (stray anti-aliasing in the ribbon
+// iconography) and one lit box reads ~533..546 depending on what overlaps it.
+// There is no golden between 36 and 533, so the floor below sits an order of
+// magnitude clear of both sides.
 
 /** The fill a latched Home-tab toggle paints: `rgba(16,185,129,0.14)` on white. */
 export const PRESSED_ACCENT_FILL: readonly [number, number, number] = [222, 245, 237];
@@ -649,7 +662,27 @@ export interface RibbonStateReading {
 
 /**
  * A golden whose capture is taken on a BRAND-NEW, EMPTY workbook, so the Home
- * tab must read unlit.
+ * tab must read the DEFAULT-STATE ribbon — which, since BUG-0062, is NOT
+ * unlit.
+ *
+ * WHAT THE DEFAULT STATE LOOKS LIKE, and why this axis pins a NUMBER now
+ * instead of asserting zero. BUG-0028 made the ribbon stop keeping the
+ * PREVIOUS cell's format state over an empty cell — but its fix cleared to
+ * null, and a null style made the font box read "system-ui" (a font no cell
+ * renders in) with every toggle dark. BUG-0062 replaced the null with the
+ * DOCUMENT DEFAULT style (index 0), and Calcula's default carries
+ * `VerticalAlign::Middle` — so the fixed build paints exactly ONE lit toggle
+ * (Center Vertically, 546 pressed-accent px when fully visible) on a
+ * brand-new workbook, the same way Excel shows Bottom Align pressed on a
+ * fresh sheet. "Unlit everywhere" is therefore no longer the fixed build's
+ * face: it is the PRE-BUG-0062 build's face, and a golden reading it is
+ * stale in the other direction.
+ *
+ * Each entry pins the reading its file measures against the CURRENT build,
+ * captured deliberately and attributed pixel-by-pixel (open-decisions §21).
+ * A future build change in either direction — a toggle un-lighting, a
+ * BUG-0028-style latch adding a second box (~+500 px) — leaves the band and
+ * fails with a sentence instead of a mystery diff.
  *
  * Declared rather than inferred, and then CHECKED AGAINST THE SPEC in
  * `goldenCorpus.test.ts`: every entry must name a test that really calls
@@ -664,38 +697,60 @@ export interface EmptyDocumentGolden {
   spec: string;
   /** The exact capture name passed to the helper. */
   capture: string;
+  /**
+   * The pressed-accent reading this file measures against the CURRENT build.
+   * 546 = the one default-lit toggle fully visible; the two menu goldens dip
+   * slightly where the open dropdown's shadow grazes the box; menu-data-open
+   * reads near zero because the Data menu covers the toggle cluster entirely.
+   */
+  expectedPressedAccent: number;
 }
+
+/**
+ * How far a reading may drift from its pinned value before the axis fails.
+ * A whole toggle is ~500 px, so the band cannot absorb one appearing or
+ * disappearing; it exists for antialiasing-level variance only.
+ */
+export const PRESSED_ACCENT_BAND = 150;
 
 export const EMPTY_DOCUMENT_GOLDENS: EmptyDocumentGolden[] = [
   {
     file: "visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-empty-grid",
+    expectedPressedAccent: 546,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/ribbon-core-default-ribbon.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-default-ribbon",
+    expectedPressedAccent: 546,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-file-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-file-open",
+    expectedPressedAccent: 534,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-edit-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-edit-open",
+    expectedPressedAccent: 533,
   },
   {
+    // The open Data menu covers the alignment-toggle cluster, so the lit
+    // toggle is not in frame at all — the reading is ribbon-iconography AA.
     file: "visual/__screenshots__/core-visual.spec.ts/menu-data-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-data-open",
+    expectedPressedAccent: 29,
   },
   {
     file: "tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png",
     spec: "tests/grid-rendering.spec.ts",
     capture: "empty-grid-full-window",
+    expectedPressedAccent: 546,
   },
 ];
 
@@ -756,34 +811,43 @@ export function describeStaleRibbonState(
   population: EmptyDocumentGolden[] = EMPTY_DOCUMENT_GOLDENS,
   quarantine: StaleProductStateGolden[] = STALE_PRODUCT_STATE_GOLDENS,
 ): string | null {
-  const declared = new Set(population.map((p) => p.file));
-  const lit = readings.filter(
-    (r) =>
-      declared.has(r.file) &&
-      r.pressedAccentPixels > PRESSED_ACCENT_FLOOR &&
-      staleProductStateFor(r.file, quarantine) === undefined,
-  );
-  if (lit.length === 0) return null;
+  const byFile = new Map(readings.map((r) => [r.file, r.pressedAccentPixels]));
+  const off = population
+    .filter((p) => staleProductStateFor(p.file, quarantine) === undefined)
+    .map((p) => ({ ...p, measured: byFile.get(p.file) }))
+    .filter(
+      (p) =>
+        p.measured !== undefined &&
+        Math.abs(p.measured - p.expectedPressedAccent) > PRESSED_ACCENT_BAND,
+    );
+  if (off.length === 0) return null;
 
   return (
     `[goldens] A GOLDEN PHOTOGRAPHS A PRODUCT STATE THIS BUILD NO LONGER ` +
     `PRODUCES.\n` +
-    `  - ${lit.length} golden(s) taken on a BRAND-NEW, EMPTY workbook show a ` +
-    `LATCHED Home-tab toggle:\n` +
-    lit
-      .map((s) => `      ${s.file}  (${s.pressedAccentPixels} pressed-accent px)`)
+    `  - ${off.length} empty-workbook golden(s) read a Home-tab state off the ` +
+    `pinned band:\n` +
+    off
+      .map(
+        (s) =>
+          `      ${s.file}  (${s.measured} pressed-accent px, pinned ` +
+          `${s.expectedPressedAccent} +/- ${PRESSED_ACCENT_BAND})`,
+      )
       .join("\n") +
-    `\n  An empty cell has no format, so no toggle may be lit. Until BUG-0028, ` +
-    `useHomeTabState returned without clearing when getCell resolved to null and ` +
-    `the ribbon kept the PREVIOUS cell's state; a golden recorded then is a ` +
-    `picture of the defect.\n` +
+    `\n  The FIXED build paints exactly ONE lit toggle on a brand-new workbook ` +
+    `-- Center Vertically, because the document default style is ` +
+    `VerticalAlign::Middle and the ribbon reports the DEFAULT style for an ` +
+    `empty cell since BUG-0062 (~546 px when fully visible). A reading far ` +
+    `BELOW the pin is the pre-BUG-0062 face (null style, everything dark, ` +
+    `font box "system-ui"); a reading far ABOVE it is a BUG-0028-style latch ` +
+    `(the PREVIOUS cell's toggles still lit, ~+500 px per extra box).\n` +
     `  THIS AXIS IS INVISIBLE TO BOTH CHECKS ABOVE: dpr and colour profile ask ` +
     `which MACHINE took the picture. This asks which BUILD did. A corpus can be ` +
     `perfectly consistent about the display and still contain a screenshot of a ` +
     `bug that has been fixed.\n` +
-    `  The latched fill is ${PRESSED_ACCENT_FILL.join(",")} over a 30x26 box -- ` +
-    `about 590 pixels against a 200-pixel comparator budget, so these cannot pass. ` +
-    `Re-record them against the fixed build with --update-snapshots=changed, ` +
-    `never "all".`
+    `  The toggle fill is ${PRESSED_ACCENT_FILL.join(",")} over a 30x26 box -- ` +
+    `one box is ~590 pixels against a 200-pixel comparator budget, so a golden ` +
+    `on the wrong side cannot pass its spec either. Re-record with ` +
+    `--update-snapshots=changed, never "all", and attribute the diff first.`
   );
 }

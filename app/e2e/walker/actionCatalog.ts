@@ -139,7 +139,8 @@ const FORMULAS = [
 //   chart data Z1:AA3 (cols 25-26), table AE1:AG3 (cols 30-32),
 //   sparkline AP1:AT1 (cols 41-45), structure ops row 50 / col 60,
 //   merge A60:F70, fill AH60 (col 33), sort AJ60:AK63 (cols 35-36),
-//   validation AM60:AM65 (col 38), CF AN60:AN65 (col 39).
+//   validation AM60:AM65 (col 38), CF AN60:AN65 (col 39),
+//   floating-range grid refs AW60:AW64 (col 48).
 
 // ============================================================================
 // Slicer actions
@@ -1260,6 +1261,74 @@ const sheetHide: ActionDef<{ tabIndex: number }> = {
   },
 };
 
+// The other two operations BUG-0050 made undoable. Until they existed here,
+// no walk could put an unhide or a tab colour inside an undo-oracle window at
+// all — hide's undo entry was tested and the other two were asserted. Both are
+// observable in the sheet shape (visibility / tabColors), so §14a's
+// issued-vs-effective accounting covers them from the first walk.
+
+const sheetUnhide: ActionDef<Record<string, never>> = {
+  id: "sheet.unhide",
+  category: "sheet",
+  weight: 1,
+  // At least one hidden sheet, or the handler raises a native alert ("No
+  // hidden sheets to unhide.") that blocks Tauri IPC — BUG-0039's shape.
+  precondition: (s) =>
+    (s.logical.sheetVisibility ?? []).some((v) => v === "hidden"),
+  pickParams: () => ({}),
+  async execute(page) {
+    // The real route: context menu > Unhide opens the "Unhide Sheet" dialog
+    // with the first hidden sheet pre-selected; OK confirms it. The OK button
+    // is only clicked when the dialog's own title is on screen, because the
+    // label is generic and a stray OK elsewhere must not be swallowed.
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("sheet:requestUnhide", { detail: {} }));
+    });
+    await page.waitForTimeout(300);
+    const title = page.getByText("Unhide Sheet", { exact: true });
+    if (await title.isVisible({ timeout: 2000 }).catch(() => false)) {
+      const ok = page.locator("button").filter({ hasText: /^OK$/ });
+      if (await ok.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await ok.click();
+      }
+      await page.waitForTimeout(500);
+    }
+  },
+};
+
+const TAB_COLOR_PALETTE = ["#C00000", "#00B050", "#4472C4", "#FFC000"];
+
+const sheetTabColor: ActionDef<{ tabIndex: number; color: string }> = {
+  id: "sheet.tabColor",
+  category: "sheet",
+  weight: 1,
+  // Any sheet that exists on replay. Recolouring to the colour a sheet
+  // already has records no undo entry (a deliberate no-op product-side), so
+  // the pick below avoids the sheet's current colour to keep the action
+  // effective — an action that CANNOT change anything is not coverage.
+  precondition: (s, p) =>
+    p?.tabIndex === undefined || p.tabIndex < s.logical.sheetCount,
+  pickParams: (rng, s) => {
+    const tabIndex = pickInt(rng, 0, Math.max(0, s.logical.sheetCount - 1));
+    const current = (s.logical.sheetTabColors ?? [])[tabIndex] ?? "";
+    const options = TAB_COLOR_PALETTE.filter((c) => c !== current);
+    return { tabIndex, color: pick(rng, options.length ? options : TAB_COLOR_PALETTE) };
+  },
+  async execute(page, _grid, p) {
+    await page.evaluate(
+      ({ tabIndex, color }) => {
+        window.dispatchEvent(
+          new CustomEvent("sheet:requestTabColor", {
+            detail: { index: tabIndex, color },
+          })
+        );
+      },
+      { tabIndex: p.tabIndex, color: p.color }
+    );
+    await page.waitForTimeout(400);
+  },
+};
+
 // ============================================================================
 // Named range actions
 // ============================================================================
@@ -1800,6 +1869,214 @@ const scriptShapeUnmount: ActionDef<{ slotIndex: number }> = {
 };
 
 // ============================================================================
+// Floating-range actions (the 2026-08-13 landings: object-backed sheets,
+// `=Float1!A1`). All mutations ride the @api WRAPPER module — the product's
+// own announced route (`/src/api/floatingRanges.ts`), which fans out
+// MUTATION_REFRESH so the FloatingRange extension reloads and paints. A raw
+// invoke would mutate the backend and draw nothing (proven live by the
+// floating-range journey's own first run).
+//
+// UNDO DOCTRINE the oracle must respect (backend-decided, §16):
+//   create        keeps the history but is NOT undoable (add_sheet parity)
+//                 -> the undo oracle declares such windows undecided via the
+//                    baseline's floatingRangeIds (see oracles/undoRoundTrip.ts)
+//   rename/delete END the history (sheet machinery) -> clearsTotal catches it
+//   resize/move/cell writes are UNDOABLE -> decided windows exercise them
+// ============================================================================
+
+/** Cap on concurrently live FRs — a bounded object population keeps walks
+ *  exploring lifecycle transitions instead of accumulating hundreds. */
+const FR_MAX_OBJECTS = 3;
+
+/** Import the @api wrapper in the page and call one of its functions. */
+async function frApiCall(
+  page: Page,
+  fn: string,
+  args: unknown[]
+): Promise<unknown> {
+  return page.evaluate(
+    async ({ fn, args }) => {
+      const mod = await (window as any).__calcImport(
+        new URL("/src/api/floatingRanges.ts", document.baseURI).href
+      );
+      return await mod[fn](...args);
+    },
+    { fn, args }
+  );
+}
+
+/** Resolve the FR at a snapshot-order index to its live row, or null. */
+async function frAt(
+  page: Page,
+  frIndex: number
+): Promise<{ id: string; name: string } | null> {
+  return (await page.evaluate(async (idx: number) => {
+    const tauri = (window as any).__TAURI__;
+    const list = await tauri.core.invoke("list_floating_ranges").catch(() => []);
+    const fr = list?.[idx];
+    return fr ? { id: fr.id, name: fr.name } : null;
+  }, frIndex)) as { id: string; name: string } | null;
+}
+
+const frCreate: ActionDef<{ x: number; y: number }> = {
+  id: "fr.create",
+  category: "floating",
+  weight: 4,
+  precondition: (s) => (s.logical.floatingRanges ?? []).length < FR_MAX_OBJECTS,
+  // Viewport-visible position; name auto-mints ("Float1", "Float2", ...) which
+  // is deterministic given the workbook state the replay reconstructs.
+  pickParams: (rng) => ({
+    x: 150 + pickInt(rng, 0, 12) * 24,
+    y: 60 + pickInt(rng, 0, 8) * 20,
+  }),
+  async execute(page, _grid, p) {
+    await frApiCall(page, "createFloatingRange", [p.x, p.y]);
+    await page.waitForTimeout(150);
+  },
+};
+
+const frSetCell: ActionDef<{
+  frIndex: number;
+  row: number;
+  col: number;
+  value: string;
+}> = {
+  id: "fr.setCell",
+  category: "floating",
+  weight: 5,
+  precondition: (s, params) => {
+    const frs = s.logical.floatingRanges ?? [];
+    if (frs.length === 0) return false;
+    if (!params) return true;
+    const fr = frs[params.frIndex];
+    // Replay/shrink fidelity: the write must still land inside the window, or
+    // the backend refuses and the step proves nothing (BUG-0039's lesson).
+    return !!fr && params.row < fr.rows && params.col < fr.cols;
+  },
+  pickParams: (rng, s) => {
+    const frs = s.logical.floatingRanges ?? [];
+    const frIndex = pickInt(rng, 0, frs.length - 1);
+    const fr = frs[frIndex];
+    const gridSheet = s.logical.sheetNames?.[0] ?? "Sheet1";
+    // Bare refs inside an FR resolve against its OWN backing sheet; the quoted
+    // cross-sheet form exercises grid->float (GAP A's class). sv-SE ';'.
+    const value = pick(rng, [
+      "7",
+      "42",
+      "-3",
+      "=A1*2",
+      `='${gridSheet}'!B2*2`,
+      "=SUM(A1:A3)",
+    ]);
+    return {
+      frIndex,
+      row: pickInt(rng, 0, Math.max(0, (fr?.rows ?? 1) - 1)),
+      col: pickInt(rng, 0, Math.max(0, (fr?.cols ?? 1) - 1)),
+      value,
+    };
+  },
+  async execute(page, _grid, p) {
+    const fr = await frAt(page, p.frIndex);
+    if (!fr) return; // raced away — the fr accounting shows the no-op
+    await frApiCall(page, "updateFloatingRangeCell", [fr.id, p.row, p.col, p.value]);
+    await page.waitForTimeout(100);
+  },
+};
+
+const frResize: ActionDef<{ frIndex: number; rows: number; cols: number }> = {
+  id: "fr.resize",
+  category: "floating",
+  weight: 3,
+  precondition: (s, params) => {
+    const frs = s.logical.floatingRanges ?? [];
+    if (frs.length === 0) return false;
+    return params ? params.frIndex < frs.length : true;
+  },
+  pickParams: (rng, s) => ({
+    frIndex: pickInt(rng, 0, (s.logical.floatingRanges ?? []).length - 1),
+    rows: pickInt(rng, 1, 5),
+    cols: pickInt(rng, 1, 3),
+  }),
+  async execute(page, _grid, p) {
+    const fr = await frAt(page, p.frIndex);
+    if (!fr) return;
+    await frApiCall(page, "updateFloatingRange", [
+      fr.id,
+      { rowCount: p.rows, colCount: p.cols },
+    ]);
+    await page.waitForTimeout(100);
+  },
+};
+
+const frRename: ActionDef<{ frIndex: number; name: string }> = {
+  id: "fr.rename",
+  category: "floating",
+  weight: 2,
+  precondition: (s, params) => {
+    const frs = s.logical.floatingRanges ?? [];
+    if (frs.length === 0) return false;
+    return params ? params.frIndex < frs.length : true;
+  },
+  // `seq` keeps the name unique across the walk; the shared sheet namespace
+  // refuses collisions, and a refused rename is a wasted step, not coverage.
+  pickParams: (rng, s, seq) => ({
+    frIndex: pickInt(rng, 0, (s.logical.floatingRanges ?? []).length - 1),
+    name: `Fl_${seq}`,
+  }),
+  async execute(page, _grid, p) {
+    const fr = await frAt(page, p.frIndex);
+    if (!fr || fr.name === p.name) return;
+    await frApiCall(page, "renameFloatingRange", [fr.id, p.name]);
+    await page.waitForTimeout(150);
+  },
+};
+
+const frRefFromGrid: ActionDef<{ frIndex: number; ref: string; offset: number }> = {
+  id: "fr.refFromGrid",
+  category: "floating",
+  weight: 3,
+  precondition: (s, params) => {
+    const frs = s.logical.floatingRanges ?? [];
+    if (frs.length === 0) return false;
+    return params ? params.frIndex < frs.length : true;
+  },
+  // Safe area AW60..AW64 (col 48) — see the safe-areas comment at the top.
+  pickParams: (rng, s) => ({
+    frIndex: pickInt(rng, 0, (s.logical.floatingRanges ?? []).length - 1),
+    ref: `AW${60 + pickInt(rng, 0, 4)}`,
+    offset: pickInt(rng, 1, 9),
+  }),
+  async execute(page, grid, p) {
+    const fr = await frAt(page, p.frIndex);
+    if (!fr) return;
+    // The float->grid direction: a live formula on the ACTIVE sheet against
+    // the FR's A1. Rename repair and delete->#REF! both surface exactly here.
+    await grid.setCellValueDirect(p.ref, `='${fr.name}'!A1+${p.offset}`);
+    await page.waitForTimeout(100);
+  },
+};
+
+const frDelete: ActionDef<{ frIndex: number }> = {
+  id: "fr.delete",
+  category: "floating",
+  weight: 2,
+  precondition: (s, params) => {
+    const frs = s.logical.floatingRanges ?? [];
+    if (frs.length === 0) return false;
+    return params ? params.frIndex < frs.length : true;
+  },
+  pickParams: (rng, s) => ({
+    frIndex: pickInt(rng, 0, (s.logical.floatingRanges ?? []).length - 1),
+  }),
+  async execute(page, _grid, p) {
+    const fr = await frAt(page, p.frIndex);
+    if (!fr) return;
+    await frApiCall(page, "deleteFloatingRange", [fr.id]);
+    await page.waitForTimeout(150);
+  },
+};
+
+// ============================================================================
 // Export: Full Action Catalog
 // ============================================================================
 
@@ -1847,6 +2124,13 @@ const ALL_ACTIONS: AnyActionDef[] = [
   scriptShapeMount,
   scriptShapeRender,
   scriptShapeUnmount,
+  // Floating ranges (object-backed sheets, 2026-08-13)
+  frCreate,
+  frSetCell,
+  frResize,
+  frRename,
+  frRefFromGrid,
+  frDelete,
   // Structure
   insertRow,
   deleteRow,
@@ -1885,6 +2169,8 @@ const ALL_ACTIONS: AnyActionDef[] = [
   sheetMove,
   sheetCopy,
   sheetHide,
+  sheetUnhide,
+  sheetTabColor,
   // Names
   nameDefine,
   nameDelete,

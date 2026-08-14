@@ -46,6 +46,16 @@ export interface OracleBaseline {
    *  transactions and stays at zero when the stack was already empty, which
    *  left one case of the same family standing — see `UndoStateJson`. */
   clearsTotal: number;
+  /**
+   * EntityIds of the floating ranges alive at the baseline. Floating-range
+   * CREATE is the one mutation in the product that is neither undoable NOR
+   * history-ending (add_sheet parity without the clear — §16's doctrine), so
+   * a window that created one can never be wound back to its checkpoint: the
+   * FR and its backing sheet survive every undo. Without this list the oracle
+   * DECIDES such a window and reports the surviving FR as an undo defect —
+   * the same instrument-blames-the-product shape as BUG-0005/S12.
+   */
+  floatingRangeIds: string[];
 }
 
 export interface OracleCheckpointResult {

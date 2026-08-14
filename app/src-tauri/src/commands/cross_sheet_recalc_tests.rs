@@ -48,6 +48,7 @@ pub(super) struct Workbook {
     pub(super) pivots: PivotState,
     pub(super) pane: crate::pane_control::PaneControlState,
     pub(super) filters: crate::ribbon_filter::RibbonFilterState,
+    pub(super) timeline: crate::timeline_slicer::TimelineSlicerState,
 }
 
 impl Workbook {
@@ -82,6 +83,7 @@ impl Workbook {
             pivots: PivotState::new(),
             pane: crate::pane_control::PaneControlState::new(),
             filters: crate::ribbon_filter::RibbonFilterState::new(),
+            timeline: crate::timeline_slicer::TimelineSlicerState::new(),
         }
     }
 

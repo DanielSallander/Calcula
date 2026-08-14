@@ -1337,6 +1337,7 @@ mod tests {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            floating_ranges: Vec::new(),
             format_version: 0,
         }
     }

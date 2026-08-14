@@ -162,6 +162,41 @@ async function resetBody(page: Page): Promise<void> {
     } catch { /* none */ }
 
     try {
+      // Floating ranges: the same BUG-0004/BUG-0035 discipline — tear down
+      // through the ANNOUNCED @api wrapper so the extension prunes its store,
+      // then force one reload so a store already stale from an earlier raw
+      // `new_file` re-syncs to the backend truth even when there was nothing
+      // left to delete. MEASURED 2026-08-14 (BUG-0056): the reset relied on
+      // `new_file` alone, which clears the backend rows and tells the
+      // extension nothing (`resetToNewWorkbook` never emits AFTER_NEW — the
+      // product's File > New reloads the whole window instead), so the three
+      // FRs one walk created poisoned EVERY later walk in the session at
+      // step 1 with "[FloatingRange] Failed to fetch cells" console errors.
+      const frApi = (await (window as any).__calcImport(
+        new URL("/src/api/floatingRanges.ts", document.baseURI).href,
+      )) as {
+        listFloatingRanges: () => Promise<Array<{ id: string }>>;
+        deleteFloatingRange: (id: string) => Promise<void>;
+      };
+      for (const fr of await frApi.listFloatingRanges().catch(() => [])) {
+        await frApi.deleteFloatingRange(fr.id).catch(() => {});
+      }
+      const frStore = (await (window as any).__calcImport(
+        new URL(
+          "/extensions/FloatingRange/lib/floatingRangeStore.ts",
+          document.baseURI,
+        ).href,
+      )) as {
+        resetFloatingRangeStore?: () => void;
+        loadFloatingRangesFromBackend?: () => Promise<void>;
+        syncFloatingRangeRegions?: () => void;
+      };
+      frStore.resetFloatingRangeStore?.();
+      await frStore.loadFloatingRangesFromBackend?.();
+      frStore.syncFloatingRangeRegions?.();
+    } catch { /* extension absent */ }
+
+    try {
       await tauri.core.invoke("remove_auto_filter", {}).catch(() => {});
     } catch { /* none */ }
 

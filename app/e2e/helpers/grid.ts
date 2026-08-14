@@ -696,6 +696,43 @@ export class GridHelper {
   }
 
   /**
+   * Apply a NUMBER FORMAT to a cell directly via the Tauri API, bypassing the
+   * ribbon and the Format Cells dialog. `format` takes what the backend's
+   * `parse_number_format` accepts: a dialog preset id ("percentage",
+   * "number_sep", "date_iso", "currency_usd", ...) or a raw code ("0.00%").
+   *
+   * Same event dispatch as `setCellValueDirect`, and measured the same way
+   * (2026-08-14, isolated cold app): the apply_formatting round trip plus
+   * cell:updated + grid:refresh repaints the canvas with the formatted
+   * display — the rendered crop was read back to confirm, not assumed.
+   * The application ROUTES themselves (ribbon buttons, Format Cells dialog)
+   * are functional-suite territory (number-formatting.spec.ts); this helper
+   * exists so a visual spec can put a format on screen without dragging the
+   * whole dialog flow into a screenshot test.
+   */
+  async setNumberFormatDirect(ref: string, format: string) {
+    const { row, col } = parseCellRef(ref);
+    await this.page.evaluate(
+      async ({ r, c, f }) => {
+        const tauri = (window as any).__TAURI__;
+        const result = await tauri.core.invoke("apply_formatting", {
+          params: { rows: [r], cols: [c], numberFormat: f },
+        });
+        if (result?.cells) {
+          for (const cell of result.cells) {
+            window.dispatchEvent(new CustomEvent("cell:updated", {
+              detail: { row: cell.row, col: cell.col },
+            }));
+          }
+        }
+        window.dispatchEvent(new Event("grid:refresh"));
+      },
+      { r: row, c: col, f: format }
+    );
+    await this.page.waitForTimeout(200);
+  }
+
+  /**
    * Select a cell and check if a specific format is active.
    * First tries reading the style directly via Tauri API (most reliable),
    * falls back to checking the ribbon button state.

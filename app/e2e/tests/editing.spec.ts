@@ -78,7 +78,7 @@ test.describe("Edit mode entry methods", () => {
     await grid.page.keyboard.press("Escape");
   });
 
-  test.fixme("double-click enters edit mode", async ({ grid }) => {
+  test("double-click enters edit mode", async ({ grid }) => {
     await grid.setCellValue("B2", "DblClick");
     // Navigate away to ensure B2 is not in edit mode
     await grid.clickCell("B4");
@@ -95,7 +95,7 @@ test.describe("Edit mode entry methods", () => {
     await grid.page.waitForTimeout(200);
   });
 
-  test.fixme("typing directly on selected cell starts editing", async ({ grid }) => {
+  test("typing directly on selected cell starts editing", async ({ grid }) => {
     await grid.clickCell("B3");
     await grid.page.keyboard.type("DirectType", { delay: 20 });
     await grid.page.keyboard.press("Enter");
@@ -106,10 +106,14 @@ test.describe("Edit mode entry methods", () => {
 });
 
 test.describe("Undo and Redo", () => {
-  // FIXME: Ctrl+Z via CDP does not reach the grid's onKeyDown handler.
-  // WebView2 may intercept it before it reaches the app. Needs investigation
-  // outside of Playwright — works fine when tested manually.
-  test.fixme("undo reverts the last cell edit", async ({ grid }) => {
+  // These three carried a fixme whose stated reason — "Ctrl+Z via CDP does not
+  // reach the grid's onKeyDown handler" — went stale when the harness gained
+  // `dispatchKeyOnGrid` (grid.undo()/grid.redo() dispatch the key event on the
+  // grid element itself, not through CDP's input domain). Every soak walk's
+  // undo oracle and journeys/sheet-tab-state-undo.spec.ts have driven undo
+  // through exactly this path since; re-enabled 2026-08-14 by the stale-
+  // suppression sweep and proved live from a cold app.
+  test("undo reverts the last cell edit", async ({ grid }) => {
     await grid.setCellValue("C1", "Before");
     await grid.setCellValue("C1", "After");
 
@@ -117,7 +121,7 @@ test.describe("Undo and Redo", () => {
     await grid.expectFormulaBar("C1", "Before");
   });
 
-  test.fixme("redo re-applies the undone edit", async ({ grid }) => {
+  test("redo re-applies the undone edit", async ({ grid }) => {
     await grid.setCellValue("C2", "Step1");
     await grid.setCellValue("C2", "Step2");
 
@@ -128,7 +132,7 @@ test.describe("Undo and Redo", () => {
     await grid.expectFormulaBar("C2", "Step2");
   });
 
-  test.fixme("undo a Delete operation", async ({ grid }) => {
+  test("undo a Delete operation", async ({ grid }) => {
     await grid.setCellValue("C3", "Preserved");
     await grid.clickCell("C3");
     await grid.delete();

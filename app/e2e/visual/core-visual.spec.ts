@@ -215,23 +215,68 @@ test.describe("Formatting Visual Regression", () => {
     await takeGridScreenshot(appPage, "fmt-bold-italic-underline");
   });
 
+  /**
+   * The subject of this golden is FORMATTED number rendering, so each value
+   * cell carries a format and its FORMATTED display is asserted before the
+   * picture is taken. The original spec seeded the raw values and never
+   * applied a single format — the golden faithfully documented "number
+   * formats NOT applied" (raw 0,75; raw serial 45000) for as long as it
+   * existed, and the corpus validator finally called it. Attributing that
+   * FAIL (open-decisions §20d) meant driving every live format route first,
+   * which surfaced BUG-0061: dates applied through the Format Cells dialog
+   * rendered the format string itself ("yyyy-mm-dd"). The date row below is
+   * that bug's visual pin.
+   *
+   * Displays are asserted with locale-tolerant patterns (this machine is
+   * sv-SE: decimal comma, NBSP thousands groups); the golden itself encodes
+   * the machine's locale like every other golden in the corpus.
+   */
   test("number format rendering", async ({ grid, appPage }) => {
     await appPage.keyboard.press("Control+Home");
     await appPage.waitForTimeout(300);
 
+    const FORMAT_BLOCK: Array<
+      [label: string, ref: string, raw: string, format: string, expected: RegExp]
+    > = [
+      // "number_sep" = Number, 2 decimals, thousands separators
+      ["Number",   "B2", "1234.5678", "number_sep",   /^1[\s,. ]234[.,]57$/],
+      // "percentage" = Percentage, 2 decimals
+      ["Percent",  "B3", "0.75",      "percentage",   /^75[.,]00\s?%$/],
+      // "date_iso" — BUG-0061's route: pre-fix this displayed "yyyy-mm-dd"
+      ["Date",     "B4", "45000",     "date_iso",     /^2023-03-15$/],
+      // negative through the separator format
+      ["Negative", "B5", "-500",      "number_sep",   /^-500[.,]00$/],
+    ];
+
     await grid.setCellValue("A1", "Format");
     await grid.setCellValue("B1", "Value");
-    await grid.setCellValue("A2", "Number");
-    await grid.setCellValueDirect("B2", "1234.5678");
-    await grid.setCellValue("A3", "Percent");
-    await grid.setCellValueDirect("B3", "0.75");
-    await grid.setCellValue("A4", "Date");
-    await grid.setCellValueDirect("B4", "45000");
-    await grid.setCellValue("A5", "Negative");
-    await grid.setCellValueDirect("B5", "-500");
+    for (const [label, ref, raw] of FORMAT_BLOCK) {
+      await grid.setCellValue(`A${ref.slice(1)}`, label);
+      await grid.setCellValueDirect(ref, raw);
+    }
+    for (const [, ref, , format] of FORMAT_BLOCK) {
+      await grid.setNumberFormatDirect(ref, format);
+    }
 
-    await grid.clickCell("A1");
-    await appPage.waitForTimeout(500);
+    // The formatted displays are the subject of the picture — asserted from
+    // the backend before capture, same discipline as expectDataBlock above.
+    for (const [label, ref, , , expected] of FORMAT_BLOCK) {
+      await expect
+        .poll(async () => await grid.getCellDisplayValue(ref), {
+          timeout: 10_000,
+          message: `${ref} (${label}) is not showing the formatted value this golden photographs`,
+        })
+        .toMatch(expected);
+    }
+
+    // Park the selection on A1 via the Name Box (not clickCell): the canvas
+    // click's geometry drift can leave an ambient range selection behind, and
+    // the selection rectangle is the largest block of pixels in the capture.
+    await grid.navigateTo("A1");
+    expect(
+      (await grid.getNameBoxValue()).toUpperCase(),
+      "the golden is a picture of the block with A1 selected"
+    ).toBe("A1");
 
     await takeGridScreenshot(appPage, "fmt-number-formats");
   });

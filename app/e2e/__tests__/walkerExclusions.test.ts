@@ -129,6 +129,17 @@ describe("the walker's action exclusions expire with the bugs that justify them"
     }
   });
 
+  it("covers all three operations BUG-0050 made undoable — hide, unhide, tab colour", () => {
+    // BUG-0050 gave hide/unhide/set_tab_color real undo entries. `sheet.hide`
+    // existed already; until `sheet.unhide` and `sheet.tabColor` joined, no
+    // walk could ever put the other two inside an undo-oracle window, so their
+    // undo entries were asserted by unit tests and exercised by nothing.
+    const generated = new Set(ACTION_CATALOG.map((a) => a.id));
+    for (const id of ["sheet.hide", "sheet.unhide", "sheet.tabColor"]) {
+      expect(generated.has(id), `${id} is not generatable`).toBe(true);
+    }
+  });
+
   it("has a detector that fires — a closed bug's exclusion is caught", () => {
     // The self-test the fourteen census families all carry: prove the check
     // can fail, using a synthetic list rather than the real one.

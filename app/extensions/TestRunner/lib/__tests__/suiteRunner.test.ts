@@ -8,8 +8,11 @@ vi.mock("@api", () => ({
   getCell: vi.fn(),
   getViewportCells: vi.fn().mockResolvedValue([]),
   updateCellsBatch: vi.fn(),
-  CommandRegistry: { execute: vi.fn() },
-  undo: vi.fn(),
+  CommandRegistry: {
+    execute: vi.fn().mockResolvedValue(undefined),
+    has: vi.fn().mockReturnValue(true),
+  },
+  CoreCommands: { UNDO: "core.edit.undo", REDO: "core.edit.redo" },
   dispatchGridAction: vi.fn(),
 }));
 vi.mock("@api/grid", () => ({
@@ -29,6 +32,7 @@ import {
   onResultsChange,
 } from "../runner";
 import type { TestSuite, TestContext } from "../types";
+import { CommandRegistry } from "@api";
 
 // Suppress console output during tests
 beforeEach(() => {
@@ -370,6 +374,68 @@ describe("runMacroByName", () => {
   it("returns null for unknown test name", async () => {
     const result = await runMacroByName("ghost");
     expect(result).toBeNull();
+  });
+});
+
+// ============================================================================
+// ctx.undo()/ctx.redo() route through the product's own commands
+// ============================================================================
+//
+// The direct `undo` invoke bypassed the whole frontend path: the product's
+// handler follows the backend's sheet activation (an undo of an off-sheet
+// edit switches there), refreshes the canvas and announces refresh domains.
+// A suite undoing through the raw invoke observed the WRONG sheet afterwards.
+// These tests pin the routing and the loud failure when the handler is absent
+// (execute() on an unregistered command is a silent no-op).
+
+describe("ctx.undo and ctx.redo", () => {
+  it("undo() executes core.edit.undo through the CommandRegistry", async () => {
+    vi.mocked(CommandRegistry.has).mockReturnValue(true);
+    registerSuite({
+      name: "UndoRoute",
+      tests: [{ name: "t", run: async (ctx: TestContext) => { await ctx.undo(); } }],
+    });
+    const results = await runAllSuites();
+    expect(results[0].results[0].status).toBe("pass");
+    expect(CommandRegistry.execute).toHaveBeenCalledWith("core.edit.undo");
+  });
+
+  it("redo() executes core.edit.redo through the CommandRegistry", async () => {
+    vi.mocked(CommandRegistry.has).mockReturnValue(true);
+    registerSuite({
+      name: "RedoRoute",
+      tests: [{ name: "t", run: async (ctx: TestContext) => { await ctx.redo(); } }],
+    });
+    const results = await runAllSuites();
+    expect(results[0].results[0].status).toBe("pass");
+    expect(CommandRegistry.execute).toHaveBeenCalledWith("core.edit.redo");
+  });
+
+  it("undo() fails LOUDLY when the command has no registered handler", async () => {
+    vi.mocked(CommandRegistry.has).mockReturnValue(false);
+    vi.mocked(CommandRegistry.execute).mockClear();
+    registerSuite({
+      name: "UndoNoHandler",
+      tests: [{ name: "t", run: async (ctx: TestContext) => { await ctx.undo(); } }],
+    });
+    const results = await runAllSuites();
+    expect(results[0].results[0].status).toBe("error");
+    expect(results[0].results[0].error).toContain("core.edit.undo");
+    // and it must NOT have fallen through to a silent execute()
+    expect(CommandRegistry.execute).not.toHaveBeenCalled();
+  });
+
+  it("redo() fails LOUDLY when the command has no registered handler", async () => {
+    vi.mocked(CommandRegistry.has).mockReturnValue(false);
+    vi.mocked(CommandRegistry.execute).mockClear();
+    registerSuite({
+      name: "RedoNoHandler",
+      tests: [{ name: "t", run: async (ctx: TestContext) => { await ctx.redo(); } }],
+    });
+    const results = await runAllSuites();
+    expect(results[0].results[0].status).toBe("error");
+    expect(results[0].results[0].error).toContain("core.edit.redo");
+    expect(CommandRegistry.execute).not.toHaveBeenCalled();
   });
 });
 

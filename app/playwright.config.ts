@@ -37,6 +37,14 @@ export default defineConfig({
   retries: 0,
   workers: 1,                    // one worker — single CDP connection
   reporter: [
+    // THE COLLECTION GUARD COMES FIRST and must stay in every reporter list.
+    // It fails any run whose collected test set disagrees with `--list` for
+    // the same filter (a 2026-08-13 journey pass collected 134 of 143 tests
+    // and reported a clean pass; see e2e/collectionGuard.ts). A CLI
+    // `--reporter=...` flag REPLACES this list, so global-setup refuses to
+    // start a run whose resolved reporters lost the guard — include it
+    // explicitly: `--reporter=./e2e/collectionGuard.ts,dot,json`.
+    ["./e2e/collectionGuard.ts"],
     ["list"],
     ["html", { open: "never" }],
     ["json", { outputFile: "./e2e/results/results.json" }],

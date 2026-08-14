@@ -272,6 +272,10 @@ test.describe("the walker's object actions have real effects", () => {
       count: (s: Awaited<ReturnType<typeof captureSnapshot>>) => number;
       /** Actions this family's create needs run first. */
       requires?: string[];
+      /** Params for actions whose execute reads them (fr.* resolve by index/
+       *  coordinates; the generic title/name object would be undefined x/y). */
+      createParams?: Record<string, unknown>;
+      delParams?: Record<string, unknown>;
     }> = [
       { create: "chart.create", del: "chart.delete", count: (s) => s.logical.charts.length },
       { create: "table.create", del: "table.delete", count: (s) => s.logical.tables.length },
@@ -286,6 +290,16 @@ test.describe("the walker's object actions have real effects", () => {
         del: "sparkline.delete",
         count: (s) => s.logical.sparklineGroups.length,
       },
+      {
+        // Floating ranges (2026-08-13): the newest object family, added the
+        // day its FIRST walk found the reset gap (BUG-0056) — this net is the
+        // standing answer to exactly that class.
+        create: "fr.create",
+        del: "fr.delete",
+        count: (s) => (s.logical.floatingRanges ?? []).length,
+        createParams: { x: 220, y: 90 },
+        delParams: { frIndex: 0 },
+      },
     ];
 
     for (const family of families) {
@@ -298,14 +312,18 @@ test.describe("the walker's object actions have real effects", () => {
       }
 
       const before = family.count(await captureSnapshot(appPage));
-      await act(family.create).execute(appPage, grid, { title: "Net_1", name: "Net_1" });
+      await act(family.create).execute(
+        appPage,
+        grid,
+        family.createParams ?? { title: "Net_1", name: "Net_1" }
+      );
       await appPage.waitForTimeout(500);
       const afterCreate = family.count(await captureSnapshot(appPage));
       expect(afterCreate, `${family.create} did not raise the count`).toBeGreaterThan(
         before
       );
 
-      await act(family.del).execute(appPage, grid, {});
+      await act(family.del).execute(appPage, grid, family.delParams ?? {});
       await appPage.waitForTimeout(600);
       const afterDelete = family.count(await captureSnapshot(appPage));
       expect(afterDelete, `${family.del} did not lower the count`).toBeLessThan(

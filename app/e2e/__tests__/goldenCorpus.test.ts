@@ -441,7 +441,11 @@ function beforeEachOf(source: string): string {
 }
 
 describe("the golden corpus and the build that produced it", () => {
-  it("shows an UNLIT Home tab on every golden taken on a brand-new workbook", () => {
+  it("shows the DEFAULT-STATE Home tab on every golden taken on a brand-new workbook", () => {
+    // Not "unlit": since BUG-0062 the fixed build lights exactly one toggle
+    // (Center Vertically, the document default) on an empty workbook, so each
+    // declared golden pins the reading its file must measure. Off the band in
+    // EITHER direction is a build this tree no longer produces.
     const message = describeStaleRibbonState(ribbonStates);
     expect(message, message ?? "").toBeNull();
   });
@@ -536,20 +540,22 @@ describe("the stale-product-state detector actually fires", () => {
       file: "visual/__screenshots__/v.spec.ts/fresh.png",
       spec: "visual/v.spec.ts",
       capture: "fresh",
+      expectedPressedAccent: 546,
     },
     {
       file: "visual/__screenshots__/v.spec.ts/known.png",
       spec: "visual/v.spec.ts",
       capture: "known",
+      expectedPressedAccent: 546,
     },
   ];
 
-  it("says nothing when every empty-document golden reads unlit", () => {
+  it("says nothing when every empty-document golden reads its pinned band", () => {
     expect(
       describeStaleRibbonState(
         [
-          { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 36 },
-          { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 23 },
+          { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 546 },
+          { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 533 },
         ],
         population,
         [],
@@ -557,20 +563,39 @@ describe("the stale-product-state detector actually fires", () => {
     ).toBeNull();
   });
 
+  it("fires in BOTH directions: the pre-BUG-0062 unlit face and a BUG-0028-style extra latch", () => {
+    // Below the band: the null-style build (everything dark, ~36 px of AA).
+    const unlit = describeStaleRibbonState(
+      [{ file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 36 }],
+      population,
+      [],
+    );
+    expect(unlit).toContain("fresh.png");
+    expect(unlit).toContain("BUG-0062");
+    // Above the band: a second lit box latched from the previous cell.
+    const latched = describeStaleRibbonState(
+      [{ file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 1092 }],
+      population,
+      [],
+    );
+    expect(latched).toContain("fresh.png");
+    expect(latched).toContain("BUG-0028");
+  });
+
   it("names the stray FILE, its count, and why the other two axes cannot see it", () => {
     const message = describeStaleRibbonState(
       [
-        { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 546 },
-        { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 23 },
+        { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 23 },
+        { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 546 },
       ],
       population,
       [],
     );
     expect(message).toContain("visual/__screenshots__/v.spec.ts/fresh.png");
-    expect(message).toContain("546");
+    expect(message).toContain("23");
     expect(message).toContain("which BUILD");
     expect(message).toContain("--update-snapshots=changed");
-    // The unlit sibling must NOT be named: a message that lists the whole
+    // The on-band sibling must NOT be named: a message that lists the whole
     // corpus is the blanket this program keeps refusing.
     expect(message).not.toContain("known.png");
   });
@@ -581,13 +606,13 @@ describe("the stale-product-state detector actually fires", () => {
         file: "visual/__screenshots__/v.spec.ts/known.png",
         ledgerId: "BUG-9999",
         reason: "x".repeat(90),
-        pressedAccentPixels: 546,
+        pressedAccentPixels: 36,
       },
     ];
     const message = describeStaleRibbonState(
       [
-        { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 546 },
-        { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 546 },
+        { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 36 },
+        { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 36 },
       ],
       population,
       quarantine,
@@ -638,30 +663,30 @@ describe("the pressed-accent reader", () => {
     expect(readPressedAccentFill(solid([16, 185, 129], 100))).toBe(0);
   });
 
-  it("reads the real pair: an EMPTY-workbook capture is unlit, a POPULATED one is lit", () => {
-    // THIS CASE USED TO READ THE BUG-0029 FILE AS ITS LIT EXAMPLE, and that was
-    // a mistake with a shelf life: `empty-grid-full-window.png` was re-recorded
-    // on 2026-08-12 and now measures 36, so the case failed the moment the bug
-    // it was built on was FIXED. A non-vacuity example must be something the
-    // corpus holds permanently, not the defect of the day.
+  it("reads the real pair: a COVERED-toggle capture is dark, a VISIBLE one is lit", () => {
+    // THIS CASE HAS BEEN RE-ANCHORED TWICE, both times because the state it
+    // leaned on was a defect's face and the defect got fixed. First it read
+    // the BUG-0029 file as its lit example (re-recorded 2026-08-12). Then it
+    // read `core-empty-grid` as its UNLIT example — and BUG-0062 fixed the
+    // ribbon to report the DOCUMENT DEFAULT style for empty cells, so an
+    // empty workbook now legitimately lights Center Vertically (the default
+    // is VerticalAlign::Middle) and there is no "unlit empty workbook" in
+    // the corpus at all any more.
     //
-    // `sheets-default-tabs` is the right lit example and it is lit LEGITIMATELY:
-    // its capture follows a `setCellValue`, so the cell exists and its effective
-    // format genuinely is middle-aligned. That is the distinction the whole axis
-    // rests on -- the rule is "no golden taken on an EMPTY workbook may show a
-    // latched toggle", not "no golden may" -- so pinning it here means the
-    // reader is proved able to see BOTH sides on files that will still be in the
-    // tree next year.
+    // The permanent pair is geometric, not behavioural: `menu-data-open`
+    // photographs the SAME empty workbook with the Data menu covering the
+    // alignment cluster (the lit box is simply not in frame), while
+    // `core-empty-grid` shows it plainly. Same window, same product state —
+    // the gap between the two readings IS the toggle, which is exactly what
+    // the reader must be able to see.
     const read = (p: string) =>
       readPressedAccentFill(decodePng(readFileSync(join(E2E_ROOT, ...p.split("/")))));
-    const empty = read("visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png");
-    const populated = read(
-      "visual/__screenshots__/core-visual.spec.ts/sheets-default-tabs.png",
-    );
-    expect(empty).toBeLessThan(PRESSED_ACCENT_FLOOR);
-    expect(populated).toBeGreaterThan(PRESSED_ACCENT_FLOOR);
+    const covered = read("visual/__screenshots__/core-visual.spec.ts/menu-data-open.png");
+    const visible = read("visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png");
+    expect(covered).toBeLessThan(PRESSED_ACCENT_FLOOR);
+    expect(visible).toBeGreaterThan(PRESSED_ACCENT_FLOOR);
     // Both are 1280x800 captures of the same window; the gap is the toggle.
-    expect(populated - empty).toBeGreaterThan(400);
+    expect(visible - covered).toBeGreaterThan(400);
   });
 });
 

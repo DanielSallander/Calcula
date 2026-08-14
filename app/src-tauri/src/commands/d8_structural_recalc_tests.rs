@@ -48,28 +48,32 @@ use engine::CellValue;
 
 fn insert_rows_at(wb: &Workbook, row: u32, count: u32) {
     insert_rows_impl(
-        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, row, count, None,
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer,
+        &wb.timeline, row, count, None,
     )
     .expect("insert_rows");
 }
 
 fn delete_rows_at(wb: &Workbook, row: u32, count: u32) {
     delete_rows_impl(
-        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, row, count, None,
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer,
+        &wb.timeline, row, count, None,
     )
     .expect("delete_rows");
 }
 
 fn insert_cols_at(wb: &Workbook, col: u32, count: u32) {
     insert_columns_impl(
-        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, col, count, None,
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer,
+        &wb.timeline, col, count, None,
     )
     .expect("insert_columns");
 }
 
 fn delete_cols_at(wb: &Workbook, col: u32, count: u32) {
     delete_columns_impl(
-        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, col, count, None,
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer,
+        &wb.timeline, col, count, None,
     )
     .expect("delete_columns");
 }
@@ -465,6 +469,8 @@ fn an_off_sheet_structural_edit_recalculates_the_sheet_it_edited() {
         &wb.files,
         &wb.pane,
         &wb.filters,
+        &wb.slicer,
+        &wb.timeline,
         1,
         calp::writeback::StructuralEdit::RowInsert { at: 2, count: 1 },
     )
@@ -961,4 +967,107 @@ fn a_delete_above_a_hidden_row_leaves_the_aggregate_agreeing_with_a_reload() {
     // The oracle is the point here, not the arithmetic: whatever the hidden set
     // shifted to, the stored value must be what a reload would produce.
     assert_settled(&wb, "a row delete above a hidden row");
+}
+
+// ---------------------------------------------------------------------------
+// 7. BUG-0055 — the EDGES a grown range needs, not just its rewritten text
+// ---------------------------------------------------------------------------
+
+/// The D8 family, one edge over. D8 shipped re-pointing + re-evaluating; the
+/// dependency-map maintenance for a range that GREW across the insert shifted
+/// only the edges that already existed. The inserted cells were never inside
+/// the old range, so no edge was shifted into place for them — and a write into
+/// the inserted row recalculated NOTHING. `assert_settled` cannot catch this
+/// class (it re-evaluates everything, edges or no edges); only an incremental
+/// write through the real edit path can.
+#[test]
+fn a_write_into_an_inserted_row_recalculates_the_grown_range() {
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "10");
+    wb.set(1, 0, "20");
+    wb.set(2, 0, "30");
+    wb.set(3, 0, "=SUM(A1:A3)");
+    assert_eq!(num(&wb, 0, 3, 0), 60.0, "precondition");
+
+    insert_rows_at(&wb, 1, 1);
+    // The formula moved to A5 and was re-pointed to =SUM(A1:A4).
+    assert_eq!(num(&wb, 0, 4, 0), 60.0, "after the insert, before any write");
+
+    // Write INTO the inserted row — the cell the old range never covered.
+    wb.set(1, 0, "15");
+    assert_eq!(
+        num(&wb, 0, 4, 0),
+        75.0,
+        "BUG-0055: the inserted cell had no dependency edge, so =SUM(A1:A4) kept 60"
+    );
+
+    // Control from the filed repro: a cell the range covered BEFORE the insert
+    // still cascades, and its result proves the value store had the 15 all
+    // along — only the edge was missing.
+    wb.set(2, 0, "25");
+    assert_eq!(num(&wb, 0, 4, 0), 80.0, "10+15+25+30");
+    assert_settled(&wb, "a write into an inserted row");
+}
+
+/// The column twin — same mechanism, same fix.
+#[test]
+fn a_write_into_an_inserted_column_recalculates_the_grown_range() {
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "10");
+    wb.set(0, 1, "20");
+    wb.set(0, 2, "30");
+    wb.set(0, 3, "=SUM(A1:C1)");
+    assert_eq!(num(&wb, 0, 0, 3), 60.0, "precondition");
+
+    insert_cols_at(&wb, 1, 1);
+    assert_eq!(num(&wb, 0, 0, 4), 60.0, "after the insert, before any write");
+
+    wb.set(0, 1, "15");
+    assert_eq!(
+        num(&wb, 0, 0, 4),
+        75.0,
+        "BUG-0055 (column twin): the inserted cell had no dependency edge"
+    );
+    assert_settled(&wb, "a write into an inserted column");
+}
+
+/// A defined name whose target range spans the insert: the fix rebuilds the
+/// edge maps by EXPANDING stored ASTs (`rebuild_all_dependencies`), so the
+/// name-using formula must keep its expanded cell edges — the regression the
+/// raw-parse alternative (the cut/paste relocation precedent) would have
+/// introduced.
+#[test]
+fn a_name_backed_formula_keeps_its_expanded_edges_across_an_insert() {
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "10");
+    wb.set(1, 0, "20");
+    {
+        let mut names = wb
+            .state
+            .named_ranges
+            .write(&crate::document_effect::test_seed_effect())
+            .unwrap();
+        names.insert(
+            "DATA".to_string(),
+            crate::named_ranges::NamedRange {
+                name: "DATA".to_string(),
+                sheet_index: None,
+                refers_to: "=Sheet1!$A$1:$A$2".to_string(),
+                comment: None,
+                folder: None,
+            },
+        );
+    }
+    wb.set(0, 2, "=SUM(DATA)");
+    assert_eq!(num(&wb, 0, 0, 2), 30.0, "precondition");
+
+    // Insert BELOW both name targets, so the name's definition is untouched
+    // and only the rebuild path decides whether the expanded edges survive.
+    insert_rows_at(&wb, 5, 1);
+    wb.set(1, 0, "25");
+    assert_eq!(
+        num(&wb, 0, 0, 2),
+        35.0,
+        "the expanded name edge (A2 -> the SUM) must survive the insert's rebuild"
+    );
 }

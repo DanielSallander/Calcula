@@ -161,3 +161,89 @@ export function getNumberFormatCategories(dec = ".", thou = ","): NumberFormatCa
 
 /** Default categories using US-English separators (backward compatibility). */
 export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = getNumberFormatCategories();
+
+// ============================================================================
+// Backend display-name mapping (BUG-0065)
+// ============================================================================
+// get_style returns DISPLAY NAMES ("Number (2 decimals, with separators)",
+// "Date (yyyy-mm-dd)"), not preset values -- so a dialog opened on a formatted
+// cell could never recognize the cell's own format: the category list stayed
+// on General and no preset highlighted. The Rust side of the same asymmetry
+// (parse_number_format not reading its serializer's names) corrupted the
+// format outright on an untouched OK.
+
+/** Backend display name -> preset value, for the shapes that HAVE a preset. */
+const DISPLAY_NAME_TO_PRESET: Record<string, string> = {
+  "General": "general",
+  "Number (2 decimals)": "number",
+  "Number (2 decimals, with separators)": "number_sep",
+  "Currency ($, 2 decimals)": "currency_usd",
+  "Currency (EUR, 2 decimals)": "currency_eur",
+  "Currency (kr, 2 decimals)": "currency_sek",
+  "Accounting ($, 2 decimals)": "accounting_usd",
+  "Accounting ($, 0 decimals)": "accounting_usd_0",
+  "Accounting (EUR, 2 decimals)": "accounting_eur",
+  "Accounting (kr, 2 decimals)": "accounting_sek",
+  "Percentage (2 decimals)": "percentage",
+  "Scientific (2 decimals)": "scientific",
+  "Fraction (up to 1 digits)": "fraction_1",
+  "Fraction (up to 2 digits)": "fraction_2",
+  "Fraction (up to 3 digits)": "fraction_3",
+  "Fraction (/2 fixed)": "fraction_halves",
+  "Fraction (/4 fixed)": "fraction_quarters",
+  "Fraction (/8 fixed)": "fraction_eighths",
+  "Fraction (/16 fixed)": "fraction_sixteenths",
+  "Fraction (/10 fixed)": "fraction_tenths",
+  "Fraction (/100 fixed)": "fraction_hundredths",
+  "Date (yyyy-mm-dd)": "date_iso",
+  "Date (mm/dd/yyyy)": "date_us",
+  "Date (dd/mm/yyyy)": "date_eu",
+  "Time (hh:mm:ss)": "time_24h",
+  "Time (hh:mm:ss AM/PM)": "time_12h",
+};
+
+/** Display-name prefix -> category id, for named shapes with no exact preset
+ *  (e.g. "Number (5 decimals)" after ribbon increase-decimal). */
+const DISPLAY_PREFIX_TO_CATEGORY: Array<[string, string]> = [
+  ["Number (", "number"],
+  ["Currency (", "currency"],
+  ["Accounting (", "accounting"],
+  ["Percentage (", "percentage"],
+  ["Scientific (", "scientific"],
+  ["Fraction (", "fraction"],
+  ["Date (", "date"],
+  ["Time (", "time"],
+];
+
+const PRESET_VALUE_TO_CATEGORY: Record<string, string> = Object.fromEntries(
+  NUMBER_FORMAT_CATEGORIES.flatMap((cat) =>
+    cat.id !== "custom" ? cat.formats.map((f) => [f.value, cat.id] as [string, string]) : []
+  )
+);
+
+/**
+ * Normalize a format string (preset value OR backend display name) to a preset
+ * value, or null if no preset is equivalent.
+ */
+export function normalizeToPresetValue(format: string): string | null {
+  if (!format) return null;
+  if (PRESET_VALUE_TO_CATEGORY[format]) return format;
+  const lower = format.toLowerCase();
+  if (PRESET_VALUE_TO_CATEGORY[lower]) return lower;
+  return DISPLAY_NAME_TO_PRESET[format] ?? null;
+}
+
+/**
+ * Which category a format string belongs to: preset values and backend
+ * display names land in their real category; anything else with format
+ * characters is custom; empty/general falls back to general.
+ */
+export function categoryForFormat(format: string): string {
+  const preset = normalizeToPresetValue(format);
+  if (preset) return PRESET_VALUE_TO_CATEGORY[preset] ?? "general";
+  if (!format || format.toLowerCase().includes("general")) return "general";
+  for (const [prefix, category] of DISPLAY_PREFIX_TO_CATEGORY) {
+    if (format.startsWith(prefix) && format.endsWith(")")) return category;
+  }
+  return "custom";
+}

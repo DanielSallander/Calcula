@@ -1726,6 +1726,23 @@ pub fn record_source_cascade_undo(state: &AppState, cascade: &SourceCascade) {
         return;
     }
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    record_source_cascade_undo_into(&mut undo_stack, cascade);
+}
+
+/// The same recording, over a guard the caller ALREADY HOLDS.
+///
+/// BUG-0054's structural delete paths hold the undo lock for their whole
+/// transaction (grid snapshot first, per-store restores after), so the
+/// state-locking wrapper above would self-deadlock there — std mutexes are not
+/// reentrant. Entries land in whatever transaction is open on the stack,
+/// exactly as the wrapper's doc promises.
+pub fn record_source_cascade_undo_into(
+    undo_stack: &mut engine::UndoStack,
+    cascade: &SourceCascade,
+) {
+    if cascade.is_empty() {
+        return;
+    }
     for slicer in &cascade.deleted_slicers {
         let data = serde_json::to_vec(&SlicerSnapshotOut {
             slicer_id: slicer.id,
