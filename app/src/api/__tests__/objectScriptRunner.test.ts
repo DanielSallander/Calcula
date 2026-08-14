@@ -64,6 +64,25 @@ describe("runObjectScriptOnce", () => {
     expect(String(spec.id)).toMatch(/^__calcula_run-once_/);
   });
 
+  it("carries the source's @capability pragmas as the R19 ceiling", async () => {
+    // A recorded model macro declares `// @capability bi.model`. Without this
+    // in the mount definition the run-once ceiling was EMPTY, so the JIT
+    // consent prompt was suppressed and the broker denied the gateway call —
+    // the macro could record model edits it could never replay.
+    await runObjectScriptOnce({
+      name: "Model macro",
+      source: "// @capability bi.model\nfunction setup(c){}",
+    });
+    const spec = hostMountScript.mock.calls[0][0] as { declaredCapabilities?: string[] };
+    expect(spec.declaredCapabilities).toEqual(["bi.model"]);
+  });
+
+  it("a pragma-free source declares nothing (empty ceiling, no prompts)", async () => {
+    await runObjectScriptOnce({ name: "Plain", source: "function setup(c){}" });
+    const spec = hostMountScript.mock.calls[0][0] as { declaredCapabilities?: string[] };
+    expect(spec.declaredCapabilities).toEqual([]);
+  });
+
   it("gives every run a distinct id", async () => {
     await runObjectScriptOnce({ name: "A", source: "" });
     await runObjectScriptOnce({ name: "A", source: "" });

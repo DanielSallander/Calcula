@@ -38,6 +38,7 @@ import {
   hostUnmountScript,
   workerRealmAvailable,
 } from "./scriptHost/host";
+import { parseDeclaredCapabilities } from "./scriptHost/capabilities";
 import { cancelUndoTransaction, getUndoState } from "./lib";
 import { SCRIPT_API_VERSION, type ScriptAccessLevel, type ScriptableObjectType } from "./scriptableObjects";
 
@@ -126,6 +127,15 @@ export async function runObjectScriptOnce(
       source,
       accessLevel,
       provenance: "local",
+      // The R19 ceiling from the source's own `// @capability` pragmas —
+      // exactly what a SAVED local script's definition carries. Declaring
+      // grants nothing: it only makes the JIT consent prompt possible
+      // (local provenance), and the Rust gates re-check the grant on every
+      // call. Without this a recorded macro that edits the BI model was
+      // denied WITHOUT a prompt: the run-once mount had an empty ceiling,
+      // so `maybeRequestCapabilityGrant` never asked and the broker refused
+      // `cap.biModel*` as undeclared. Found by the record→replay E2E.
+      declaredCapabilities: parseDeclaredCapabilities(source).caps,
       apiVersion: SCRIPT_API_VERSION,
     });
   } catch (err) {

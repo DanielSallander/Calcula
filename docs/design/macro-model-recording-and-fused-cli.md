@@ -24,22 +24,63 @@ messaging, read-only never batches).
 
 Deliberate deviations:
 
-1. **The main-window panel is Monaco-free.** `extensions/CommandLine/` hosts a
-   lightweight bottom strip (input + history + Tab completion chips + confirm
-   card + output log) driving the same engine. The Model Editor keeps its
-   Monaco panel untouched (zero regression risk). "One CLI" is delivered as one
-   grammar/kernel/engine with per-domain registries — panel-component
-   unification is a cosmetic follow-up, as is moving the model domain's
-   OPTION_KEYS triplication onto optionSchema (strict validation is ON for the
-   app domain from day one; the model domain stays completion-only until its
-   writers are audited against the mirror).
-2. **Per-window domains in v1.** Main window = app domain; model-editor window
-   = model domain. The kernel supports multi-domain engines (tested), and the
-   mixed-write refusal is live for when both mount in one window; wiring the
-   model domain into the main-window panel needs a connection picker and is
-   follow-up work.
-3. `help`/`clear` are engine-level; undo/redo route to the window's default
-   domain and must run alone (kernel-enforced, same rule as before).
+1. `help`/`clear` are engine-level; undo/redo route to the window's default
+   domain and must run alone (kernel-enforced, same rule as before). In the
+   main window that means MODEL undo/redo are not reachable from the CLI
+   (grid undo owns the verb there) — use the Model Editor for model undo.
+
+## Follow-ups — closed 2026-08-14
+
+- **Model-domain strict options (DONE).** `ModelEditor/cli/modelOptions.ts` is
+  the audited kind×verb option schema (78 entries, derived from writers.ts
+  code, pinned by a matrix test in `modelOptions.test.ts`); `strictOptions`
+  is ON for the model domain (unknown `key=` errors name the valid keys;
+  reads stay lenient — the audit proved ls/show/validate consume none). The
+  OPTION_KEYS completion mirror is DELETED — completion derives from the same
+  table via `modelOptionSpecsFor(verb, kind)`. Audit findings (reported, not
+  changed): `set writeback name=` / `set source name=` are undocumented
+  rename/display side-channels; the old mirror suggested `connstr` on
+  add/set source (only `connect` reads it) and name=/ops= on
+  `set relationship` (only add/rename read them).
+- **Panel unification (DONE).** `_shared/cli/components/CliPanel.tsx` is THE
+  panel (Monaco prompt/script modes, history, confirm card, saved scripts,
+  resize — generalized verbatim from the Model Editor's proven design behind
+  a `CliPanelDriver`), and `_shared/cli/language.ts` is THE Monaco language
+  machinery (register-once per language id, swappable completion context;
+  `engineCompletionContext(engine)` derives names + per-verb option keys
+  generically from kind specs). Both windows are thin wrappers now:
+  `ModelEditor/components/CommandPanel.tsx` (keeps `calcula.modelEditor.cli.*`
+  storage keys and the per-run-session semantics) and
+  `CommandLine/components/AppCliPanel.tsx` (`calcula.app.cli.*`).
+- **Model domain in the main window (DONE).** `_shared/cli/domainProviders.ts`
+  is the cross-extension seam: the ModelEditor registers a "model" provider at
+  activation (targets = BI connections; a binding = model domain + a live
+  session over `biModelGetOverview`); the main-window panel shows a "Model:"
+  picker when a provider exists, mounts the binding beside the app domain
+  (one engine, kind-driven dispatch, mixed-write refusal live), rebinds on
+  `bi:model-changed` for the bound connection so the overview never goes
+  stale, and model-object completion works through the kind specs'
+  `nameSuggestions` (shared `modelCompletion.ts`, one copy for both windows).
+- **Live E2E record→replay spec (DONE)** —
+  `app/e2e/journeys/macro-model-recording.spec.ts`: arm via the real Developer
+  menu → grid edit + `bi_model_upsert_measure` + a role edit → stop → assert
+  the stored source (one `caps.biModel.upsert`, the pragma, NOT REPLAYABLE for
+  the role with no role name, the unarmed edit absent) → delete the measure →
+  Run from the macro library → approve the bi.model JIT consent → the measure
+  is back. Writing this spec found a REAL replay gap before the first run:
+  `runObjectScriptOnce` mounted with an EMPTY declared-capability ceiling
+  (nothing parsed the source's pragmas on the run-once path), so
+  `maybeRequestCapabilityGrant` never prompted and the broker denied
+  `cap.biModel*` as undeclared — a recorded model macro could never replay.
+  Fixed in `objectScriptRunner.ts` (ceiling = `parseDeclaredCapabilities(source)
+  .caps`, local provenance, consent still required, Rust still re-checks);
+  pinned by two tests in `objectScriptRunner.test.ts`.
+
+Known limitation: the run-once mount's 10-second deadline keeps ticking while
+the JIT consent dialog is open, so a user who ponders the bi.model prompt for
+longer than that gets the "was still running after 10 seconds" error and must
+run the macro again (the grant flow itself is unharmed). Pausing the deadline
+during consent is future work in the mount machinery.
 
 ## Feature 1 — as built (deviations from the plan below)
 

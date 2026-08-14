@@ -175,7 +175,12 @@ export const KINDS: Kind[] = [
 // Parser (single-domain, typed)
 // ---------------------------------------------------------------------------
 
-const modelParser = createParser(mergeVocabulary([MODEL_VOCABULARY_CONTRIBUTION]));
+/** The model domain's full merged vocabulary (core verbs + this domain).
+ *  Shared with the Monaco language registration so highlighting/completion
+ *  can never disagree with the parser. */
+export const MODEL_CLI_VOCABULARY = mergeVocabulary([MODEL_VOCABULARY_CONTRIBUTION]);
+
+const modelParser = createParser(MODEL_CLI_VOCABULARY);
 
 /** Normalize a kind word: aliases, plural stripping, `hierarchies` special. */
 export function normalizeKind(word: string): Kind | null {

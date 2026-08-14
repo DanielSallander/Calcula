@@ -15,12 +15,17 @@ import {
   recalcWithCube,
   biGetConnections,
   biModelExportToFile,
+  biModelGetOverview,
   biModelImportFromFile,
   showToast,
 } from "@api";
+import { registerCliDomainProvider } from "../_shared/cli/domainProviders";
 import { openModelEditorWindow } from "./lib/openModelEditorWindow";
 import { onModelChanged } from "./lib/crossWindowEvents";
 import { ExportModelDialog } from "./components/ExportModelDialog";
+import { createModelDomain } from "./cli/modelDomain";
+import { createSession } from "./cli/execute";
+import { createLiveGateway } from "./cli/gateway";
 
 const EXPORT_MODEL_DIALOG_ID = "modelEditor:exportModelDialog";
 
@@ -97,6 +102,30 @@ function activate(context: ExtensionContext): void {
     order: 13,
     action: () => void exportModelFromMenu(context),
   });
+
+  // Offer the model domain to the main-window Command Line (Ctrl+Shift+P):
+  // the panel's picker lists BI connections and mounts a live binding. Goes
+  // through the _shared provider registry, never a cross-extension import.
+  cleanupFns.push(
+    registerCliDomainProvider({
+      id: "model",
+      label: "Model",
+      async listTargets() {
+        const conns = await biGetConnections();
+        return conns.map((c) => ({ id: c.id, label: c.name }));
+      },
+      async createBinding(targetId: string) {
+        const overview = await biModelGetOverview(targetId);
+        const session = createSession(
+          targetId,
+          overview,
+          !overview.editable,
+          createLiveGateway(),
+        );
+        return { domain: createModelDomain(), session };
+      },
+    }),
+  );
 
   // Bridge: edits made in the editor window must reach THIS window's
   // surfaces — CUBE cells re-evaluate and the model-aware panes refresh.
