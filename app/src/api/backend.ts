@@ -4684,6 +4684,34 @@ export async function biModelBatchCancel(connectionId: string): Promise<ModelOve
   return invoke<ModelOverview>("bi_model_batch_cancel", { connectionId });
 }
 
+// ============================================================================
+// Macro-recorder model-edit capture (bi/macro_capture.rs)
+// ============================================================================
+//
+// While a macro recording is armed, the Rust choke point below every model
+// mutation emits `macro:model-edit` / `macro:model-batch` Tauri events
+// TARGETED AT THE MAIN WINDOW. The payloads are gateway-ready
+// `caps.biModel` calls; they never ride the app-wide event bus.
+
+/** Raw Tauri event: one captured model mutation. */
+export const MACRO_MODEL_EDIT_EVENT = "macro:model-edit";
+/** Raw Tauri event: a trusted batch boundary (begin | end | cancel). */
+export const MACRO_MODEL_BATCH_EVENT = "macro:model-batch";
+/** Broadcast (boolean-only): the recorder armed/disarmed model capture. */
+export const MACRO_RECORDING_ARMED_EVENT = "macro:recording-armed-changed";
+
+/** Arm/disarm model-edit capture (main window only; the recorder session
+ *  calls this when recording starts/stops). */
+export async function setModelRecordingArmed(armed: boolean): Promise<void> {
+  return invoke<void>("macro_model_recording_set_armed", { armed });
+}
+
+/** Whether model-edit capture is currently armed (the Model Editor window's
+ *  recording pill asks on mount). */
+export async function isModelRecordingArmed(): Promise<boolean> {
+  return invoke<boolean>("macro_model_recording_armed");
+}
+
 export async function biModelSetMetadata(params: {
   connectionId: string;
   name?: string | null;

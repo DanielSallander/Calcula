@@ -1,8 +1,69 @@
 # Macro Recorder → Model Reach + Fused App CLI
 
-Status: PLANNED 2026-08-13 (not yet built). Decisions confirmed by the owner:
-model recording ships first; main-window CLI shortcut is Ctrl+Shift+P; runs mixing
-model writes and grid writes are refused at plan time.
+Status: Feature 1 BUILT 2026-08-13; Feature 2 BUILT 2026-08-13 (see the two
+"as built" sections). Decisions confirmed by the owner: model recording ships
+first; main-window CLI shortcut is Ctrl+Shift+P; runs mixing model writes and
+grid writes are refused at plan time.
+
+## Feature 2 — as built (deviations from the plan below)
+
+The kernel shipped as planned in `app/extensions/_shared/cli/` (lex + format
+moved verbatim; glob split out of resolve; parse parameterized by a
+`CliVocabulary`; `registry.ts` `CliDomain`/`CliBatchStrategy` contracts;
+`engine.ts` with kind-driven dispatch, the single-write-domain rule and
+per-domain batch strategies; `optionSchema.ts`). The model CLI migrated as a
+THIN WRAPPER: `ModelEditor/cli/execute.ts` keeps its public surface
+(createSession/planRun/executeRun) but runs the shared engine with
+`modelDomain.ts`; `parse.ts` keeps the typed Verb/Kind unions as a narrowing
+layer built from the SAME `MODEL_VOCABULARY_CONTRIBUTION` the domain hands the
+engine (no drift possible); lex/format/resolve became re-export shims.
+`cli.test.ts` (25) and `referenceDocs.test.ts` pass UNMODIFIED. Kernel tests:
+`_shared/cli/__tests__/kernel.test.ts` (16, two-domain fixture — dispatch,
+kind-uniqueness build error, mixed-write refusal, rollback vs commit-partial
+messaging, read-only never batches).
+
+Deliberate deviations:
+
+1. **The main-window panel is Monaco-free.** `extensions/CommandLine/` hosts a
+   lightweight bottom strip (input + history + Tab completion chips + confirm
+   card + output log) driving the same engine. The Model Editor keeps its
+   Monaco panel untouched (zero regression risk). "One CLI" is delivered as one
+   grammar/kernel/engine with per-domain registries — panel-component
+   unification is a cosmetic follow-up, as is moving the model domain's
+   OPTION_KEYS triplication onto optionSchema (strict validation is ON for the
+   app domain from day one; the model domain stays completion-only until its
+   writers are audited against the mirror).
+2. **Per-window domains in v1.** Main window = app domain; model-editor window
+   = model domain. The kernel supports multi-domain engines (tested), and the
+   mixed-write refusal is live for when both mount in one window; wiring the
+   model domain into the main-window panel needs a connection picker and is
+   follow-up work.
+3. `help`/`clear` are engine-level; undo/redo route to the window's default
+   domain and must run alone (kernel-enforced, same rule as before).
+
+## Feature 1 — as built (deviations from the plan below)
+
+Implemented per the plan, with two deliberate improvements:
+
+1. **The gateway payload is built in RUST, not mapped in TypeScript.** The capture
+   (`app/src-tauri/src/bi/macro_capture.rs`) constructs the exact JSON object the
+   `script_bi_model` dispatch arms consume, in the same crate as those
+   `gateway_field` reads — so there is NO per-kind TS mapping table to drift.
+   Codegen embeds the payload verbatim (`JSON.stringify`), and a Rust test pins
+   that every `GATEWAY_MUTABLE_KINDS` member has a builder arm.
+2. **Batch markers never enter the recorded-action vocabulary.** `macro:model-batch`
+   begin/end/cancel are session-internal: cancel DROPS the rolled-back edits from
+   the recording; codegen independently wraps ≥2 consecutive model edits per
+   connection in `batchBegin/End/Cancel` for atomic replay. There is no
+   `RecordedModelBatchEvent` in the `RecordedEvent` union.
+
+Also as built: role/source captures carry neither payload NOR name (role names are
+privileged per `sanitized_model_info`); multi-domain diffs accept only the two
+documented fan-outs (writebackColumn, calculatedTable) — stricter than the
+lifecycle event's priority list, because a partial replay would silently drop work;
+grid Ctrl+Z pops the last GRID action and Model Editor Undo the last MODEL action
+(type-filtered, index-preserving redo). The fills and remove-duplicates codegen
+fixes shipped with it (`api.fillRange` / `api.removeDuplicates` are emitted now).
 
 ## Context
 

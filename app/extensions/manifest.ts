@@ -45,6 +45,7 @@ import ReportsExtension from "./Reports";
 import SubtotalsExtension from "./Subtotals";
 import CsvImportExportExtension from "./CsvImportExport";
 import WatchWindowExtension from "./WatchWindow";
+import CommandLineExtension from "./CommandLine";
 import CalculationOptionsExtension from "./CalculationOptions";
 import EditingOptionsExtension from "./EditingOptions";
 import HyperlinksExtension from "./Hyperlinks";
@@ -166,6 +167,9 @@ export const builtInExtensions: ExtensionModule[] = [
   ModelMenuExtension,
   CsvImportExportExtension,
   WatchWindowExtension,
+  // The fused CLI's main-window panel (Ctrl+Shift+P; shares the _shared/cli
+  // kernel with the Model Editor's command line)
+  CommandLineExtension,
   CalculationOptionsExtension,
   EditingOptionsExtension,
   HyperlinksExtension,

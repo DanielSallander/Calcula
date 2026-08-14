@@ -23,8 +23,40 @@ export interface RecordedCommandEvent {
   args?: unknown;
 }
 
+/**
+ * One captured BI-model mutation (measure/relationship/context/... edit),
+ * observed via the armed-only Rust hook below every model install and
+ * delivered on the `macro:model-edit` Tauri event. Replayed through the
+ * consent-gated `caps.biModel` gateway; `payload` arrives GATEWAY-READY from
+ * Rust (built beside the gateway's own field reads), so codegen embeds it
+ * verbatim instead of maintaining a per-kind field mapping.
+ */
+export interface RecordedModelEditEvent {
+  kind: "modelEdit";
+  /** The BI connection the edit ran on (replay addresses it by this id). */
+  connectionId: string;
+  /** Display name resolved at capture time — comments only, never replay. */
+  connectionName?: string;
+  /** Gateway kind ("measure", "relationship", ...) for replayable edits; the
+   *  raw diff domain ("table", "role", "bulk", ...) otherwise. */
+  modelKind: string;
+  action: "upsert" | "delete";
+  /** The changed object's name (absent for privileged kinds — role names are
+   *  themselves privileged). */
+  name?: string;
+  /** The `caps.biModel.upsert/delete` payload, embedded verbatim. Present
+   *  only when `replayable`. */
+  payload?: Record<string, unknown>;
+  replayable: boolean;
+  /** Why the edit cannot replay (privileged kind, bulk change, oversized). */
+  reason?: string;
+}
+
 /** Everything the recorder can observe. */
-export type RecordedEvent = RecordedGridEvent | RecordedCommandEvent;
+export type RecordedEvent =
+  | RecordedGridEvent
+  | RecordedCommandEvent
+  | RecordedModelEditEvent;
 
 /** Narrow the bridge event union to one `kind` (keeps the codegen switch typed). */
 export type RecordedGridEventOf<K extends RecordedGridEvent["kind"]> = Extract<

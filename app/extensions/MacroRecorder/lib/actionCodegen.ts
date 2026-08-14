@@ -10,9 +10,11 @@
 //
 //   objectScript — the async UnlockedAPI (`context.api`) of an object script.
 //                  Values, formatting, structure, sheets, merge, freeze,
-//                  find/replace, executeCommand. Cannot fill.
+//                  find/replace, fills, remove-duplicates, executeCommand,
+//                  and BI-model edits via the consented `caps.biModel` gateway.
 //   notebook     — the synchronous QuickJS `Calcula.*` ops of a notebook cell.
-//                  Values, sheets, fillDown/fillRight. Nothing else.
+//                  Values, sheets, fillDown/fillRight. Nothing else — its
+//                  model surface is read-only, so model edits never replay.
 //
 // Anything a target cannot express is emitted as a clearly-marked comment AND
 // reported in `unsupported`, so the UI can say so out loud. Silently dropping an
@@ -25,6 +27,7 @@ import type {
   RecordedAction,
   RecordedEvent,
   RecordedGridEventOf,
+  RecordedModelEditEvent,
 } from "./types";
 
 // ============================================================================
@@ -297,6 +300,11 @@ interface EmitContext {
   temp: number;
   /** True once an invariant FORMULA has been seen (one warning, not N). */
   warnedInvariantFormula: boolean;
+  /** True once a `caps.biModel` call was emitted: widens the scaffold to
+   *  `(api, caps)` and adds the `// @capability bi.model` pragma. */
+  usesCaps: boolean;
+  /** Connections already introduced with a name comment. */
+  namedConnections: Set<string>;
 }
 
 function push(ctx: EmitContext, line: string): void {
@@ -472,12 +480,12 @@ function emitFillRange(
   ev: RecordedGridEventOf<"fillRange">,
 ): void {
   const label = `${a1Range(ev.sourceStartRow, ev.sourceStartCol, ev.sourceEndRow, ev.sourceEndCol)} -> ${a1Range(ev.targetStartRow, ev.targetStartCol, ev.targetEndRow, ev.targetEndCol)}`;
+  const sameCols =
+    ev.sourceStartCol === ev.targetStartCol && ev.sourceEndCol === ev.targetEndCol;
+  const sameRows =
+    ev.sourceStartRow === ev.targetStartRow && ev.sourceEndRow === ev.targetEndRow;
 
   if (ctx.o.target === "notebook") {
-    const sameCols =
-      ev.sourceStartCol === ev.targetStartCol && ev.sourceEndCol === ev.targetEndCol;
-    const sameRows =
-      ev.sourceStartRow === ev.targetStartRow && ev.sourceEndRow === ev.targetEndRow;
     if (sameCols && ev.targetStartRow === ev.sourceEndRow + 1) {
       push(
         ctx,
@@ -496,10 +504,48 @@ function emitFillRange(
     return;
   }
 
-  unsupported(
-    ctx,
-    `fill ${label} — the object-script API has no fill; record on the notebook target for fills`,
-  );
+  // objectScript: `api.fillRange` takes the COMBINED source+target rectangle,
+  // a direction, and the source-band size. Its default type "copy" (copy
+  // values, shift formulas) is exactly the backend `fill_range` this event
+  // recorded, so the replay is faithful — see commands/data.rs fill_range.
+  const emit = (
+    r0: number, c0: number, r1: number, c1: number,
+    direction: string, sourceSize: number,
+  ) => {
+    push(
+      ctx,
+      `await api.fillRange(${r0}, ${c0}, ${r1}, ${c1}, { direction: ${jsString(direction)}, sourceSize: ${sourceSize} }); // ${label}`,
+    );
+  };
+  if (sameCols && ev.targetStartRow === ev.sourceEndRow + 1) {
+    emit(
+      ev.sourceStartRow, ev.sourceStartCol, ev.targetEndRow, ev.targetEndCol,
+      "down", ev.sourceEndRow - ev.sourceStartRow + 1,
+    );
+    return;
+  }
+  if (sameCols && ev.targetEndRow === ev.sourceStartRow - 1) {
+    emit(
+      ev.targetStartRow, ev.sourceStartCol, ev.sourceEndRow, ev.targetEndCol,
+      "up", ev.sourceEndRow - ev.sourceStartRow + 1,
+    );
+    return;
+  }
+  if (sameRows && ev.targetStartCol === ev.sourceEndCol + 1) {
+    emit(
+      ev.sourceStartRow, ev.sourceStartCol, ev.targetEndRow, ev.targetEndCol,
+      "right", ev.sourceEndCol - ev.sourceStartCol + 1,
+    );
+    return;
+  }
+  if (sameRows && ev.targetEndCol === ev.sourceStartCol - 1) {
+    emit(
+      ev.sourceStartRow, ev.targetStartCol, ev.sourceEndRow, ev.sourceEndCol,
+      "left", ev.sourceEndCol - ev.sourceStartCol + 1,
+    );
+    return;
+  }
+  unsupported(ctx, `fill ${label} — the source and target bands are not adjacent`);
 }
 
 /**
@@ -580,6 +626,90 @@ function emitObjectScriptOnly(
   }
 }
 
+// ============================================================================
+// BI-model edits (caps.biModel — see bi/macro_capture.rs for the capture side)
+// ============================================================================
+
+/** First mention of a connection gets a comment naming it — the id alone is
+ *  opaque, and the name is the only place the reader learns which model the
+ *  macro edits. Replay always uses the id. */
+function emitConnectionComment(ctx: EmitContext, ev: RecordedModelEditEvent): void {
+  if (ctx.namedConnections.has(ev.connectionId)) return;
+  ctx.namedConnections.add(ev.connectionId);
+  const name = ev.connectionName ? ` "${ev.connectionName}"` : "";
+  push(
+    ctx,
+    `// BI connection${name} (id recorded from this workbook). Model edits land`,
+  );
+  push(ctx, `// on the MODEL undo stack (Model Editor Undo), not this grid batch.`);
+}
+
+function emitModelEdit(ctx: EmitContext, ev: RecordedModelEditEvent): void {
+  const label = `${ev.action} ${ev.modelKind}${ev.name ? ` ${jsString(ev.name)}` : ""}`;
+
+  if (ctx.o.target !== "objectScript") {
+    unsupported(
+      ctx,
+      `model ${label} — the notebook model surface is read-only; use the object-script target`,
+    );
+    return;
+  }
+  if (!ev.replayable || !ev.payload) {
+    unsupported(
+      ctx,
+      `model ${label} — ${ev.reason ?? "this edit cannot be replayed"}`,
+    );
+    return;
+  }
+
+  ctx.usesCaps = true;
+  emitConnectionComment(ctx, ev);
+  const conn = jsString(ev.connectionId);
+  const kind = jsString(ev.modelKind);
+  const method = ev.action === "delete" ? "delete" : "upsert";
+  // The payload arrives GATEWAY-READY from the Rust capture (built beside the
+  // gateway's own field reads) — embed it verbatim, never remap fields here.
+  const json = JSON.stringify(ev.payload, null, 2) ?? "{}";
+  const jsonLines = json.split("\n");
+  if (jsonLines.length === 1) {
+    push(ctx, `await caps.biModel.${method}(${conn}, ${kind}, ${json});`);
+    return;
+  }
+  push(ctx, `await caps.biModel.${method}(${conn}, ${kind}, ${jsonLines[0]}`);
+  for (let k = 1; k < jsonLines.length - 1; k++) push(ctx, jsonLines[k]);
+  push(ctx, `${jsonLines[jsonLines.length - 1]});`);
+}
+
+/**
+ * A run of consecutive model edits on ONE connection. Two or more replayable
+ * edits are wrapped in `batchBegin`/`batchEnd` so the replay is atomic and one
+ * model undo step — regardless of whether the original gestures were batched
+ * (a CLI batch that was CANCELLED never reaches codegen at all: the session
+ * drops its actions on the `macro:model-batch` cancel marker).
+ */
+function emitModelRun(ctx: EmitContext, events: RecordedModelEditEvent[]): void {
+  const replayable = events.filter((e) => e.replayable && e.payload);
+  if (ctx.o.target !== "objectScript" || replayable.length < 2) {
+    for (const e of events) emitModelEdit(ctx, e);
+    return;
+  }
+
+  emitConnectionComment(ctx, events[0]);
+  const conn = jsString(events[0].connectionId);
+  push(ctx, `await caps.biModel.batchBegin(${conn}); // one model undo step`);
+  push(ctx, `try {`);
+  const start = ctx.lines.length;
+  for (const e of events) emitModelEdit(ctx, e);
+  const inner = ctx.lines.splice(start).map((l) => (l.length > 0 ? "  " + l : l));
+  ctx.lines.push(...inner);
+  push(ctx, `  await caps.biModel.batchEnd(${conn});`);
+  push(ctx, `} catch (e) {`);
+  push(ctx, `  await caps.biModel.batchCancel(${conn});`);
+  push(ctx, `  throw e;`);
+  push(ctx, `}`);
+  ctx.usesCaps = true;
+}
+
 function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
   switch (event.kind) {
     // Sheet context is emitted by the sheet prologue below; the marker itself
@@ -617,14 +747,24 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
 
     case "removeDuplicates": {
       const label = a1Range(event.startRow, event.startCol, event.endRow, event.endCol);
-      const keys = event.keyColumns.map(colLetter).join(", ");
-      // No `api.removeDuplicates` exists on either runtime. Reporting it is the
-      // whole point: the rows it deleted are NOT coming back on replay, and a
-      // silent omission would leave the duplicates in place with no warning.
-      unsupported(
+      if (ctx.o.target !== "objectScript") {
+        const keys = event.keyColumns.map(colLetter).join(", ");
+        unsupported(
+          ctx,
+          `remove duplicates on ${label} (key column${event.keyColumns.length === 1 ? "" : "s"} ${keys || "none"})` +
+            " — the notebook runtime has no remove-duplicates op",
+        );
+        return;
+      }
+      // The event records ABSOLUTE key columns; `api.removeDuplicates` takes
+      // 0-based offsets FROM THE RANGE START (executeRemoveDuplicates maps
+      // them back). Omitted columns mean "every column of the range".
+      const offsets = event.keyColumns.map((c) => c - event.startCol);
+      const columnsPart =
+        offsets.length > 0 ? `columns: [${offsets.join(", ")}], ` : "";
+      push(
         ctx,
-        `remove duplicates on ${label} (key column${event.keyColumns.length === 1 ? "" : "s"} ${keys || "none"})` +
-          " — no script API for remove-duplicates",
+        `await api.removeDuplicates(${event.startRow}, ${event.startCol}, ${event.endRow}, ${event.endCol}, { ${columnsPart}hasHeaders: ${event.hasHeaders} }); // ${label}`,
       );
       return;
     }
@@ -749,6 +889,12 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
       return;
     }
 
+    case "modelEdit":
+      // Reached only for a run of one (emitBody groups consecutive model
+      // edits into emitModelRun); the case keeps the switch exhaustive.
+      emitModelEdit(ctx, event);
+      return;
+
     default: {
       // Exhaustiveness: a new RecordedGridEvent variant must not fall through
       // silently — that is precisely the "runs cleanly, does the wrong thing"
@@ -774,6 +920,7 @@ function emitSheetActivate(ctx: EmitContext, sheetIndex: number): void {
 function emitBody(actions: RecordedAction[], o: ResolvedOptions): {
   lines: string[];
   unsupported: string[];
+  usesCaps: boolean;
 } {
   const ctx: EmitContext = {
     o,
@@ -781,11 +928,13 @@ function emitBody(actions: RecordedAction[], o: ResolvedOptions): {
     unsupported: [],
     temp: 0,
     warnedInvariantFormula: false,
+    usesCaps: false,
+    namedConnections: new Set(),
   };
 
   if (actions.length === 0) {
     push(ctx, "// Nothing was recorded.");
-    return { lines: ctx.lines, unsupported: ctx.unsupported };
+    return { lines: ctx.lines, unsupported: ctx.unsupported, usesCaps: false };
   }
 
   // `null` = "we have not told the runtime which sheet we are on yet".
@@ -795,6 +944,24 @@ function emitBody(actions: RecordedAction[], o: ResolvedOptions): {
   let i = 0;
   while (i < actions.length) {
     const action = actions[i];
+
+    // Model edits are sheet-independent (they run against a BI connection),
+    // so they neither need nor trigger the sheet prologue. A run of them on
+    // one connection is emitted together so replay can batch atomically.
+    if (action.event.kind === "modelEdit") {
+      const connectionId = action.event.connectionId;
+      const run: RecordedModelEditEvent[] = [action.event];
+      let j = i + 1;
+      while (j < actions.length) {
+        const e = actions[j].event;
+        if (e.kind !== "modelEdit" || e.connectionId !== connectionId) break;
+        run.push(e);
+        j += 1;
+      }
+      emitModelRun(ctx, run);
+      i = j;
+      continue;
+    }
 
     if (action.sheetIndex !== emittedSheet) {
       if (first && !o.emitInitialSheetActivate) {
@@ -830,7 +997,7 @@ function emitBody(actions: RecordedAction[], o: ResolvedOptions): {
     i += 1;
   }
 
-  return { lines: ctx.lines, unsupported: ctx.unsupported };
+  return { lines: ctx.lines, unsupported: ctx.unsupported, usesCaps: ctx.usesCaps };
 }
 
 // ============================================================================
@@ -853,6 +1020,7 @@ function buildHeader(
   o: ResolvedOptions,
   actionCount: number,
   unsupportedList: string[],
+  usesCaps: boolean,
 ): string[] {
   const lines = [
     `// Macro: ${o.name}`,
@@ -864,6 +1032,16 @@ function buildHeader(
       "// Requires an UNLOCKED script: `context.api` is null in the restricted tier.",
     );
   }
+  if (usesCaps) {
+    // The pragma is what Script Security reads (parseDeclaredCapabilities):
+    // first run prompts for bi.model consent; the Rust gateway re-checks the
+    // grant authoritatively on every call.
+    lines.push(`// @capability bi.model`);
+    lines.push(
+      "// Edits the BI model through the consented bi.model gateway; those edits",
+      "// land on the MODEL undo stack (Model Editor Undo), not the grid's Ctrl+Z.",
+    );
+  }
   if (unsupportedList.length > 0) {
     lines.push(`// ${unsupportedList.length} action(s) could not be expressed on this target:`);
     for (const u of unsupportedList) lines.push(`//   - ${u}`);
@@ -871,7 +1049,11 @@ function buildHeader(
   return lines;
 }
 
-function wrapObjectScript(body: string[], o: ResolvedOptions): string[] {
+function wrapObjectScript(
+  body: string[],
+  o: ResolvedOptions,
+  usesCaps: boolean,
+): string[] {
   const inner: string[] = [];
   if (o.undoBatch) {
     inner.push(`await api.beginBatch(${jsString(o.name)});`);
@@ -886,8 +1068,13 @@ function wrapObjectScript(body: string[], o: ResolvedOptions): string[] {
     inner.push(...body);
   }
 
+  // Model-free macros keep the historical `(api)` shape byte-for-byte; only a
+  // macro that actually edits the model widens to `(api, caps)`.
+  const params = usesCaps ? "api, caps" : "api";
+  const callArgs = usesCaps ? "context.api, context.caps" : "context.api";
+
   const fn = [
-    `async function ${o.fnName}(api) {`,
+    `async function ${o.fnName}(${params}) {`,
     ...indent(inner, 2),
     `}`,
   ];
@@ -911,7 +1098,7 @@ function wrapObjectScript(body: string[], o: ResolvedOptions): string[] {
     `  if (typeof context.onClick === "function") {`,
     `    context.onClick(async () => {`,
     `      try {`,
-    `        await ${o.fnName}(context.api);`,
+    `        await ${o.fnName}(${callArgs});`,
     `      } catch (e) {`,
     `        context.notify(String(e && e.message ? e.message : e), "error");`,
     `      }`,
@@ -920,7 +1107,7 @@ function wrapObjectScript(body: string[], o: ResolvedOptions): string[] {
     `  }`,
     `  // Returned, not fired-and-forgotten: the mount resolves only after this`,
     `  // promise settles, so "the macro finished" is something the caller knows.`,
-    `  return ${o.fnName}(context.api);`,
+    `  return ${o.fnName}(${callArgs});`,
     `}`,
   ];
 }
@@ -973,14 +1160,14 @@ export function generateMacroSource(
   options: MacroCodegenOptions,
 ): MacroCodegenResult {
   const o = resolveOptions(options);
-  const { lines: body, unsupported: notSupported } = emitBody(actions, o);
+  const { lines: body, unsupported: notSupported, usesCaps } = emitBody(actions, o);
 
   const wrapped =
-    o.target === "objectScript" ? wrapObjectScript(body, o) : body;
+    o.target === "objectScript" ? wrapObjectScript(body, o, usesCaps) : body;
 
   const out: string[] = [];
   if (o.header) {
-    out.push(...buildHeader(o, actions.length, notSupported));
+    out.push(...buildHeader(o, actions.length, notSupported, usesCaps));
     out.push("");
   }
   out.push(...wrapped);

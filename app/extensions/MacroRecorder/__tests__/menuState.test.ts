@@ -29,6 +29,9 @@ vi.mock("@api", () => ({
     BEFORE_CLOSE: "app:before-close",
     SHEET_CHANGED: "app:sheet-changed",
   },
+  MACRO_MODEL_EDIT_EVENT: "macro:model-edit",
+  MACRO_MODEL_BATCH_EVENT: "macro:model-batch",
+  listenTauriEvent: () => Promise.resolve(() => {}),
   listWorkbookScripts: async () => [],
   getWorkbookScript: async () => {
     throw new Error("not found");

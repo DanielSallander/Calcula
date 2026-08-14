@@ -5119,6 +5119,8 @@ pub fn run() {
             bi::model_editor::bi_model_set_table_refresh,
             bi::model_editor::bi_model_refresh_table,
             bi::model_editor::bi_model_extension_data,
+            bi::macro_capture::macro_model_recording_set_armed,
+            bi::macro_capture::macro_model_recording_armed,
             bi::model_editor::script_bi_model,
             bi::script_source::bi_script_source,
             bi::script_source::connector_secrets,

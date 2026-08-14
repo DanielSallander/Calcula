@@ -42,12 +42,18 @@ vi.mock("@api", () => ({
       hooks.appEvent = null;
     };
   },
+  MACRO_MODEL_EDIT_EVENT: "macro:model-edit",
+  MACRO_MODEL_BATCH_EVENT: "macro:model-batch",
+  // The Tauri event plumbing cannot run under vitest; the model tests drive
+  // the handlers through the modelCaptureForTests seam instead.
+  listenTauriEvent: () => Promise.resolve(() => {}),
 }));
 
 import {
   cancelRecording,
   getRecordedActions,
   getRecorderSnapshot,
+  modelCaptureForTests,
   pauseRecording,
   resetRecorderForTests,
   resumeRecording,
@@ -55,7 +61,17 @@ import {
   stopRecording,
   subscribeToRecorder,
 } from "../lib/actionRecorder";
+import { macroRecorderBackend } from "../lib/macroRecorderBackend";
 import type { RecordedGridEvent } from "@api/lib";
+
+// The recorder arms/disarms model capture and prefetches connection names via
+// its backend channel; bind it to a benign stub so install/uninstall resolve.
+macroRecorderBackend.set(async <T,>(command: string): Promise<T> => {
+  if (command === "bi_get_connections") {
+    return [{ id: "conn-1", name: "Sales" }] as unknown as T;
+  }
+  return undefined as unknown as T;
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -332,5 +348,112 @@ describe("undo edits the recording", () => {
     await startRecording("A");
     emitCommand("core.edit.undo", "after");
     expect(getRecordedActions()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model-edit capture (macro:model-edit / macro:model-batch)
+// ---------------------------------------------------------------------------
+
+function modelEdit(overrides: Record<string, unknown> = {}) {
+  return {
+    connectionId: "conn-1",
+    kind: "measure",
+    action: "upsert" as const,
+    name: "Revenue",
+    payload: { originalName: null, name: "Revenue" },
+    replayable: true,
+    ...overrides,
+  };
+}
+
+describe("model-edit capture", () => {
+  it("records a captured model edit with the cached connection name", async () => {
+    await startRecording("A");
+    modelCaptureForTests.setConnectionNames(new Map([["conn-1", "Sales"]]));
+    modelCaptureForTests.onModelEdit(modelEdit());
+    const actions = getRecordedActions();
+    expect(actions).toHaveLength(1);
+    expect(actions[0].event).toMatchObject({
+      kind: "modelEdit",
+      connectionId: "conn-1",
+      connectionName: "Sales",
+      modelKind: "measure",
+      action: "upsert",
+      replayable: true,
+    });
+  });
+
+  it("drops model edits while paused and while a command owns the timeline", async () => {
+    await startRecording("A");
+    pauseRecording();
+    modelCaptureForTests.onModelEdit(modelEdit());
+    expect(getRecordedActions()).toHaveLength(0);
+    resumeRecording();
+    emitCommand("someExtension.command", "before");
+    modelCaptureForTests.onModelEdit(modelEdit());
+    emitCommand("someExtension.command", "after");
+    // Only the command itself was recorded — not its internal model edit.
+    const kinds = getRecordedActions().map((a) => a.event.kind);
+    expect(kinds).toEqual(["command"]);
+  });
+
+  it("a model undo marker pops the last MODEL action, never a grid action", async () => {
+    await startRecording("A");
+    emitGrid(WRITE_A1);
+    modelCaptureForTests.onModelEdit(modelEdit());
+    emitGrid(WRITE_A2);
+    modelCaptureForTests.onModelEdit(modelEdit({ action: "undo", payload: undefined }));
+    const kinds = getRecordedActions().map((a) => a.event.kind);
+    expect(kinds).toEqual(["cellWrites", "cellWrites"]);
+  });
+
+  it("grid Ctrl+Z pops the last GRID action even when a model edit came later", async () => {
+    await startRecording("A");
+    emitGrid(WRITE_A1);
+    emitGrid(WRITE_A2);
+    modelCaptureForTests.onModelEdit(modelEdit());
+    emitCommand("core.edit.undo", "after");
+    const kinds = getRecordedActions().map((a) => a.event.kind);
+    expect(kinds).toEqual(["cellWrites", "modelEdit"]);
+    expect(
+      getRecordedActions().filter((a) => a.event.kind === "cellWrites"),
+    ).toHaveLength(1);
+  });
+
+  it("a model redo marker restores the popped model action in place", async () => {
+    await startRecording("A");
+    modelCaptureForTests.onModelEdit(modelEdit());
+    emitGrid(WRITE_A1);
+    modelCaptureForTests.onModelEdit(modelEdit({ action: "undo", payload: undefined }));
+    modelCaptureForTests.onModelEdit(modelEdit({ action: "redo", payload: undefined }));
+    const kinds = getRecordedActions().map((a) => a.event.kind);
+    expect(kinds).toEqual(["modelEdit", "cellWrites"]);
+  });
+
+  it("a cancelled batch drops its model edits but keeps interleaved grid work", async () => {
+    await startRecording("A");
+    modelCaptureForTests.onModelBatch({ connectionId: "conn-1", action: "begin" });
+    modelCaptureForTests.onModelEdit(modelEdit());
+    emitGrid(WRITE_A1);
+    modelCaptureForTests.onModelEdit(modelEdit({ name: "Two" }));
+    modelCaptureForTests.onModelBatch({ connectionId: "conn-1", action: "cancel" });
+    const kinds = getRecordedActions().map((a) => a.event.kind);
+    expect(kinds).toEqual(["cellWrites"]);
+  });
+
+  it("an ended batch keeps its model edits", async () => {
+    await startRecording("A");
+    modelCaptureForTests.onModelBatch({ connectionId: "conn-1", action: "begin" });
+    modelCaptureForTests.onModelEdit(modelEdit());
+    modelCaptureForTests.onModelBatch({ connectionId: "conn-1", action: "end" });
+    expect(getRecordedActions()).toHaveLength(1);
+  });
+
+  it("a cancel with no recorded begin is harmless", async () => {
+    await startRecording("A");
+    modelCaptureForTests.onModelEdit(modelEdit());
+    modelCaptureForTests.onModelBatch({ connectionId: "conn-1", action: "cancel" });
+    expect(getRecordedActions()).toHaveLength(1);
   });
 });

@@ -16,6 +16,9 @@ import {
   biModelRedo,
   biModelUndo,
   biModelUndoState,
+  isModelRecordingArmed,
+  listenTauriEvent,
+  MACRO_RECORDING_ARMED_EVENT,
 } from "@api";
 import type {
   ConnectionInfo,
@@ -210,6 +213,27 @@ export function ModelEditorApp(): React.ReactElement {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleCli]);
+
+  // Macro-recording pill: edits made HERE are captured by the recorder in the
+  // MAIN window while it is armed — without this, recording in the Model
+  // Editor would be invisible in the Model Editor.
+  const [macroRecording, setMacroRecording] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    void isModelRecordingArmed()
+      .then((armed) => {
+        if (!disposed) setMacroRecording(armed);
+      })
+      .catch(() => {});
+    const unlisten = listenTauriEvent<{ armed: boolean }>(
+      MACRO_RECORDING_ARMED_EVENT,
+      (p) => setMacroRecording(Boolean(p?.armed)),
+    );
+    return () => {
+      disposed = true;
+      void unlisten.then((un) => un());
+    };
+  }, []);
 
   const connectionIdRef = useRef(connectionId);
   connectionIdRef.current = connectionId;
@@ -559,6 +583,22 @@ export function ModelEditorApp(): React.ReactElement {
           Command Line
         </button>
         <div style={{ flex: 1 }} />
+        {macroRecording && (
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: "#fff",
+              background: "#c0392b",
+              borderRadius: 10,
+              padding: "2px 10px",
+              whiteSpace: "nowrap",
+            }}
+            title="A macro is being recorded in the main window. Model edits made here are captured into the macro (privileged areas like roles and sources record as not-replayable notes)."
+          >
+            ● Recording macro
+          </span>
+        )}
         {loading && <span style={{ ...styles.muted, fontSize: 12 }}>Loading&hellip;</span>}
         {/* Models have no separate file: edits live in this workbook and are
             written to disk when the workbook is saved. Surfaced so users don't

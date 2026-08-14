@@ -848,11 +848,32 @@ this table are both wrong until someone re-derives from code.
    > green tests on a pure function were evidence about the pure function and about nothing else.
    - **Capture moved to the IPC bridge, not the command layer.** The old `setCellRecorderHook`
      is replaced by `setGridRecorderHook` / `RecordedGridEvent` in `core/lib/tauri-api.ts`
-     (re-exported from `@api/lib`): 20 structural event kinds — cell writes (with the batch
-     path's `invariant` flag), `applyFormatting`, border presets, clears, fills, row/column
-     insert+delete, merge/unmerge, row height / column width, freeze panes, `replaceAll`, and
-     sheet activate/add/delete/rename. The UI commands act on the ambient selection; these
-     arrive with explicit coordinates, which is what a replayable macro needs.
+     (re-exported from `@api/lib`): the structural event kinds are the members of the
+     `RecordedGridEvent` union in that file (a literal count here went stale twice — the union
+     is the authority; 24 as of 2026-08-13) — cell writes (with the batch path's `invariant`
+     flag), `applyFormatting`, border presets, clears, fills, row/column insert+delete,
+     merge/unmerge, row height / column width, freeze panes, `replaceAll`, sort,
+     remove-duplicates, and sheet activate/add/delete/rename. The UI commands act on the
+     ambient selection; these arrive with explicit coordinates, which is what a replayable
+     macro needs.
+   - **BI-model edits record too (2026-08-13).** A third capture source, below the other two:
+     an armed-only Rust hook in `emit_model_changed` (`bi/macro_capture.rs`) — the single
+     funnel under every model mutation (both windows, the Model Editor CLI, imports,
+     undo/redo) — emits `macro:model-edit` to the MAIN window with a GATEWAY-READY
+     `caps.biModel` payload built beside the gateway's own `gateway_field` reads (one crate,
+     no TS field mapping to drift). Codegen embeds the payload verbatim, batches ≥2
+     consecutive edits per connection via `batchBegin/End/Cancel`, threads `(api, caps)` and
+     declares `// @capability bi.model`, so replay goes through normal JIT consent + the
+     authoritative Rust grant re-check + audit. Privileged kinds (roles, sources, table
+     structure, storage/refresh) degrade to `// NOT REPLAYABLE` — role/source captures carry
+     no payload and no NAME (role names are themselves privileged). Script-attributed
+     mutations are never captured (no double-record). Entry points, each proven by test:
+     (1) Model Editor visual UI / (2) Model Editor CLI / (3) main-window model surfaces — all
+     three converge on `emit_model_changed` below the Tauri command layer (Rust unit tests on
+     `compute_capture`); (4) script gateway → must NOT record (attribution-scope test);
+     (5) undo/redo markers; (6) imports → not replayable (bulk); (7) trusted batch
+     begin/end/cancel markers (a CANCELLED batch's edits are dropped from the recording);
+     (8) replay through `runObjectScriptOnce` (codegen tests + the real broker validator).
    - **Slice 2 done.** `CommandRegistry.execute` reports `before/after/failed/unhandled` through
      `setCommandRecorderHook` (`@api/commands`). Commands whose effects reach the bridge (every
      `core.*`) are not recorded — the bridge event is strictly better — and any OTHER command is

@@ -1,24 +1,21 @@
 // FILENAME: app/extensions/ModelEditor/cli/execute.ts
-// PURPOSE: Command-run orchestration for the Model Editor CLI. Parses a run
-//          (one prompt line or a whole script), previews its writes for the
-//          confirmation step, then executes sequentially. Multi-write runs are
-//          wrapped in a backend edit batch: ONE undo step, all-or-nothing
-//          (any error rolls the whole run back via bi_model_batch_cancel).
+// PURPOSE: Command-run orchestration for the Model Editor CLI, now a typed
+//          wrapper over the shared CLI engine (_shared/cli/engine.ts) running
+//          the single MODEL domain. The public surface (CliSession,
+//          createSession, planRun, executeRun, RunPlan, RunOutcome) is
+//          unchanged — the panel and the tests drive it exactly as before;
+//          the engine underneath is the same one the main-window CLI uses.
 
 import type { ModelMeasureInfo, ModelOverview } from "@api";
 import { CliError } from "./lex";
-import { parseScript } from "./parse";
 import type { Command } from "./parse";
 import type { CliGateway } from "./gateway";
-import { runRead } from "./readers";
-import { previewWriteCommand, runWrite } from "./writers";
-import { helpText } from "./help";
+import { createCliEngine } from "../../_shared/cli/engine";
+import type { CliEngine } from "../../_shared/cli/engine";
+import type { CliIo } from "../../_shared/cli/registry";
+import { createModelDomain } from "./modelDomain";
 
-export interface CliIo {
-  /** Append a block of output. cls: "out" (default) | "err" | "info". */
-  print(text: string, cls?: "out" | "err" | "info"): void;
-  clear(): void;
-}
+export type { CliIo };
 
 /** Mutable state threaded through one run. `overview` is kept fresh from
  *  every mutation result so later commands (and wildcard re-expansion)
@@ -32,6 +29,9 @@ export interface CliSession {
   hadEdits: boolean;
   /** True once the on-screen overview may differ from `overview` at entry. */
   overviewDirty: boolean;
+  /** True when a failed batch run was rolled back (the restored overview is
+   *  already installed on the session). */
+  rolledBack: boolean;
 }
 
 export function createSession(
@@ -40,7 +40,20 @@ export function createSession(
   readOnly: boolean,
   gateway: CliGateway,
 ): CliSession {
-  return { connectionId, overview, readOnly, gateway, hadEdits: false, overviewDirty: false };
+  return {
+    connectionId,
+    overview,
+    readOnly,
+    gateway,
+    hadEdits: false,
+    overviewDirty: false,
+    rolledBack: false,
+  };
+}
+
+/** The fused engine with this session's model domain bound. */
+export function createModelEngine(s: CliSession): CliEngine {
+  return createCliEngine([{ domain: createModelDomain(), session: s }], "model");
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +88,7 @@ export async function mutMeasures(
 }
 
 // ---------------------------------------------------------------------------
-// Run planning
+// Run planning / execution (typed wrappers over the shared engine)
 // ---------------------------------------------------------------------------
 
 export interface RunPlan {
@@ -87,41 +100,24 @@ export interface RunPlan {
   hasWildcard: boolean;
   /** Confirmation required before executing (multi-write or wildcard). */
   needsConfirm: boolean;
+  /** The engine plan executeRun replays (carried opaquely). */
+  engine: CliEngine;
+  enginePlan: import("../../_shared/cli/engine").RunPlan;
 }
 
 /** Parse + statically preview a run. Throws CliError on parse/lookup errors. */
 export function planRun(text: string, s: CliSession): RunPlan {
-  const commands = parseScript(text);
-  if (commands.length === 0) throw new CliError("Nothing to run");
-
-  const undoRedo = commands.filter((c) => c.verb === "undo" || c.verb === "redo");
-  if (undoRedo.length > 0 && commands.length > 1) {
-    throw new CliError(
-      "undo/redo must be run on their own (a batched script would swallow the step they restore)",
-      undoRedo[0].line,
-    );
-  }
-
-  const writeLabels: string[] = [];
-  let hasWildcard = false;
-  for (const cmd of commands) {
-    const w = previewWriteCommand(cmd, s);
-    if (w !== null) {
-      writeLabels.push(...w.labels);
-      hasWildcard = hasWildcard || w.wildcard;
-    }
-  }
+  const engine = createModelEngine(s);
+  const plan = engine.planRun(text);
   return {
-    commands,
-    writeLabels,
-    hasWildcard,
-    needsConfirm: writeLabels.length > 1 || hasWildcard,
+    commands: plan.items.map((i) => i.cmd as Command),
+    writeLabels: plan.writeLabels,
+    hasWildcard: plan.hasWildcard,
+    needsConfirm: plan.needsConfirm,
+    engine,
+    enginePlan: plan,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Run execution
-// ---------------------------------------------------------------------------
 
 export interface RunOutcome {
   ok: boolean;
@@ -136,46 +132,16 @@ export async function executeRun(
   s: CliSession,
   io: CliIo,
 ): Promise<RunOutcome> {
-  const g = s.gateway;
-  const useBatch = plan.writeLabels.length > 1 && !s.readOnly;
-  let batchOpen = false;
-
-  if (useBatch) {
-    await g.batchBegin(s.connectionId);
-    batchOpen = true;
+  const { ok } = await plan.engine.executeRun(plan.enginePlan, io);
+  if (!ok && s.rolledBack) {
+    // The batch strategy already installed the restored overview.
+    s.rolledBack = false;
+    return { ok, overview: s.overview };
   }
-  try {
-    for (const cmd of plan.commands) {
-      await execCommand(cmd, s, io);
-    }
-    if (batchOpen) {
-      batchOpen = false;
-      await g.batchEnd(s.connectionId, s.hadEdits);
-    }
-  } catch (e) {
-    const msg = e instanceof CliError && e.line !== null ? `line ${e.line}: ${errText(e)}` : errText(e);
-    if (batchOpen) {
-      batchOpen = false;
-      try {
-        const restored = await g.batchCancel(s.connectionId);
-        s.overview = restored;
-        io.print(`Error — ${msg}`, "err");
-        io.print("All changes from this run were rolled back.", "info");
-        return { ok: false, overview: restored };
-      } catch (cancelErr) {
-        io.print(`Error — ${msg}`, "err");
-        io.print(`Rollback also failed: ${errText(cancelErr)}`, "err");
-        return { ok: false, overview: await refreshOverview(s) };
-      }
-    }
-    io.print(`Error — ${msg}`, "err");
-    // No batch: a partial single-write run may still have changed the model.
-    return { ok: false, overview: s.overviewDirty ? await refreshOverview(s) : null };
-  }
-
-  // Success: hand the host ONE fresh overview for the whole run (measure
-  // renames can ripple into KPIs etc., so re-read rather than trust patches).
-  return { ok: true, overview: s.overviewDirty ? await refreshOverview(s) : null };
+  // Success (or an unbatched failure): hand the host ONE fresh overview for
+  // the whole run (measure renames can ripple into KPIs etc., so re-read
+  // rather than trust patches).
+  return { ok, overview: s.overviewDirty ? await refreshOverview(s) : null };
 }
 
 async function refreshOverview(s: CliSession): Promise<ModelOverview> {
@@ -185,43 +151,4 @@ async function refreshOverview(s: CliSession): Promise<ModelOverview> {
     // Keep the locally patched overview when the re-read fails.
   }
   return s.overview;
-}
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
-
-async function execCommand(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
-  switch (cmd.verb) {
-    case "help":
-      io.print(helpText(cmd.pos.map((t) => t.text)));
-      return;
-    case "clear":
-      io.clear();
-      return;
-    case "undo": {
-      s.overview = await s.gateway.undo(s.connectionId);
-      s.overviewDirty = true;
-      io.print("Undone.", "info");
-      return;
-    }
-    case "redo": {
-      s.overview = await s.gateway.redo(s.connectionId);
-      s.overviewDirty = true;
-      io.print("Redone.", "info");
-      return;
-    }
-    case "ls":
-    case "show":
-    case "validate":
-      await runRead(cmd, s, io);
-      return;
-    default:
-      await runWrite(cmd, s, io);
-      return;
-  }
 }

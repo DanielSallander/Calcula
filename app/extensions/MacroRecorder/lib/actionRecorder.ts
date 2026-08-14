@@ -19,12 +19,46 @@
 
 import { getActiveSheet, setGridRecorderHook } from "@api/lib";
 import { setCommandRecorderHook, type CommandRecordPhase } from "@api/commands";
-import { AppEvents, onAppEvent } from "@api";
+import {
+  AppEvents,
+  onAppEvent,
+  listenTauriEvent,
+  MACRO_MODEL_EDIT_EVENT,
+  MACRO_MODEL_BATCH_EVENT,
+} from "@api";
+import { macroRecorderBackend } from "./macroRecorderBackend";
 import type {
   RecordedAction,
   RecordedEvent,
+  RecordedModelEditEvent,
   RecordingStatus,
 } from "./types";
+
+// ============================================================================
+// Model-edit capture (raw Tauri events from bi/macro_capture.rs)
+// ============================================================================
+
+/** `macro:model-edit` payload — a captured model mutation, or an undo/redo
+ *  session-editing marker. Mirrors Rust `RecordedModelEditPayload`. */
+interface ModelEditCapture {
+  connectionId: string;
+  kind: string;
+  action: "upsert" | "delete" | "undo" | "redo";
+  name?: string;
+  payload?: Record<string, unknown>;
+  replayable: boolean;
+  reason?: string;
+}
+
+/** `macro:model-batch` payload — a trusted batch boundary (the CLI's atomic
+ *  runs). Mirrors Rust `RecordedModelBatchPayload`. */
+interface ModelBatchCapture {
+  connectionId: string;
+  action: "begin" | "end" | "cancel";
+}
+
+const isModelEvent = (e: RecordedEvent): boolean => e.kind === "modelEdit";
+const isGridOrCommandEvent = (e: RecordedEvent): boolean => e.kind !== "modelEdit";
 
 // ============================================================================
 // Command classification
@@ -103,13 +137,20 @@ export function getRecorderSnapshot(): RecorderSnapshot {
 // ============================================================================
 
 let actions: RecordedAction[] = [];
-/** Actions removed by an undo, waiting for a redo to put them back. */
-let undone: RecordedAction[] = [];
+/** Actions removed by an undo, waiting for a redo to put them back. The index
+ *  remembers where the action sat so a redo can reinsert it in place (grid
+ *  undo skips model events and vice versa, so pops are not always the tail). */
+let undone: Array<{ action: RecordedAction; index: number }> = [];
 let seq = 0;
 let activeSheet = 0;
 /** >0 while a recorded command owns the timeline (bridge events suppressed). */
 let commandDepth = 0;
 let cleanups: Array<() => void> = [];
+/** Where each connection's open trusted model batch began (action index), so
+ *  a batch CANCEL can drop the rolled-back model edits from the recording. */
+let modelBatchStart = new Map<string, number>();
+/** Connection id -> display name, prefetched at install for codegen comments. */
+let connectionNames = new Map<string, string>();
 
 function publish(): void {
   setSnapshot({ ...snapshot, actionCount: actions.length });
@@ -185,6 +226,66 @@ function serializableArgs(args: unknown): unknown {
   }
 }
 
+function onModelEdit(e: ModelEditCapture): void {
+  if (snapshot.status !== "recording") return;
+
+  // The Model Editor's Undo/Redo edit the recording, mirroring grid Ctrl+Z —
+  // but each one touches only its own kind of action (see popLastMatching).
+  if (e.action === "undo") {
+    popLastMatching(isModelEvent);
+    return;
+  }
+  if (e.action === "redo") {
+    unpopLastMatching(isModelEvent);
+    return;
+  }
+
+  // A recorded command owns the timeline: its handler's model edits would
+  // otherwise double up on top of the replayed command.
+  if (commandDepth > 0) return;
+
+  const event: RecordedModelEditEvent = {
+    kind: "modelEdit",
+    connectionId: e.connectionId,
+    connectionName: connectionNames.get(e.connectionId),
+    modelKind: e.kind,
+    action: e.action,
+    name: e.name,
+    payload: e.payload,
+    replayable: e.replayable,
+    reason: e.reason,
+  };
+  pushAction(event);
+}
+
+function onModelBatch(e: ModelBatchCapture): void {
+  if (snapshot.status !== "recording") return;
+  switch (e.action) {
+    case "begin":
+      modelBatchStart.set(e.connectionId, actions.length);
+      return;
+    case "end":
+      modelBatchStart.delete(e.connectionId);
+      return;
+    case "cancel": {
+      // The batch rolled back: its model edits never happened, so they must
+      // not replay. Grid actions interleaved into the window (other-window
+      // edits) are kept — only this connection's model edits go.
+      const start = modelBatchStart.get(e.connectionId);
+      modelBatchStart.delete(e.connectionId);
+      if (start === undefined) return;
+      actions = actions.filter(
+        (a, i) =>
+          i < start ||
+          a.event.kind !== "modelEdit" ||
+          a.event.connectionId !== e.connectionId,
+      );
+      publish();
+      return;
+    }
+  }
+}
+
 // ============================================================================
 // Undo / redo of the RECORDING
 // ============================================================================
@@ -193,26 +294,48 @@ function serializableArgs(args: unknown): unknown {
  * A user who mistypes mid-recording presses Ctrl+Z. Recording the undo and
  * replaying it would be absurd, and leaving the mistake in is worse — so the
  * undo removes the last recorded action instead, and a redo puts it back.
+ *
+ * TWO UNDO SYSTEMS, TWO FILTERS. Grid Ctrl+Z never touches the model undo
+ * stack and the Model Editor's Undo never touches the grid's, so each pop
+ * removes the last action OF ITS OWN KIND — otherwise a grid undo performed
+ * after a model edit would silently delete the model action from the
+ * recording while leaving the actually-undone grid action in. (Which recorded
+ * action a model undo restores is still a heuristic when the user undoes a
+ * multi-edit batch — documented limitation, same class as the grid one.)
  */
-function popAction(): void {
-  const last = actions.pop();
-  if (!last) return;
-  undone.push(last);
-  // Sheet markers move the tracker, so undoing one must move it back.
-  if (last.event.kind === "activateSheet") {
-    activeSheet = lastKnownSheet();
+function popLastMatching(matches: (e: RecordedEvent) => boolean): void {
+  for (let i = actions.length - 1; i >= 0; i--) {
+    if (!matches(actions[i].event)) continue;
+    const [removed] = actions.splice(i, 1);
+    undone.push({ action: removed, index: i });
+    // Sheet markers move the tracker, so undoing one must move it back.
+    if (removed.event.kind === "activateSheet") {
+      activeSheet = lastKnownSheet();
+    }
+    publish();
+    return;
   }
-  publish();
+}
+
+function unpopLastMatching(matches: (e: RecordedEvent) => boolean): void {
+  for (let i = undone.length - 1; i >= 0; i--) {
+    if (!matches(undone[i].action.event)) continue;
+    const [{ action, index }] = undone.splice(i, 1);
+    actions.splice(Math.min(index, actions.length), 0, action);
+    if (action.event.kind === "activateSheet") {
+      activeSheet = action.event.index;
+    }
+    publish();
+    return;
+  }
+}
+
+function popAction(): void {
+  popLastMatching(isGridOrCommandEvent);
 }
 
 function unpopAction(): void {
-  const restored = undone.pop();
-  if (!restored) return;
-  actions.push(restored);
-  if (restored.event.kind === "activateSheet") {
-    activeSheet = restored.event.index;
-  }
-  publish();
+  unpopLastMatching(isGridOrCommandEvent);
 }
 
 /** The sheet the timeline is on after the most recent surviving action. */
@@ -243,11 +366,40 @@ function installHooks(): void {
     },
   );
   cleanups.push(off);
+
+  // Model-edit capture: arm the Rust hook (best-effort — a failed arm means
+  // model edits silently don't record, so surface it in the console) and
+  // subscribe to the main-window-targeted capture events.
+  void macroRecorderBackend
+    .invoke("macro_model_recording_set_armed", { armed: true })
+    .catch((e) => console.error("[MacroRecorder] failed to arm model capture", e));
+  const unlistenEdit = listenTauriEvent<ModelEditCapture>(
+    MACRO_MODEL_EDIT_EVENT,
+    onModelEdit,
+  );
+  const unlistenBatch = listenTauriEvent<ModelBatchCapture>(
+    MACRO_MODEL_BATCH_EVENT,
+    onModelBatch,
+  );
+  cleanups.push(() => void unlistenEdit.then((un) => un()));
+  cleanups.push(() => void unlistenBatch.then((un) => un()));
+
+  // Connection display names, for codegen comments only (replay uses ids).
+  // Best-effort: a name that cannot be resolved simply stays out of comments.
+  void macroRecorderBackend
+    .invoke<Array<{ id: string; name: string }>>("bi_get_connections", {})
+    .then((list) => {
+      connectionNames = new Map(list.map((c) => [c.id, c.name]));
+    })
+    .catch(() => {});
 }
 
 function uninstallHooks(): void {
   setGridRecorderHook(null);
   setCommandRecorderHook(null);
+  void macroRecorderBackend
+    .invoke("macro_model_recording_set_armed", { armed: false })
+    .catch(() => {});
   for (const fn of cleanups) {
     try {
       fn();
@@ -257,6 +409,7 @@ function uninstallHooks(): void {
   }
   cleanups = [];
   commandDepth = 0;
+  modelBatchStart = new Map();
 }
 
 /** Begin a recording. Resolves once the starting sheet is known. */
@@ -330,5 +483,17 @@ export function resetRecorderForTests(): void {
   undone = [];
   seq = 0;
   activeSheet = 0;
+  modelBatchStart = new Map();
+  connectionNames = new Map();
   setSnapshot(IDLE);
 }
+
+/** Test seams for the model-capture handlers (the Tauri event plumbing cannot
+ *  run under vitest; tests drive the handlers directly). */
+export const modelCaptureForTests = {
+  onModelEdit,
+  onModelBatch,
+  setConnectionNames(names: Map<string, string>): void {
+    connectionNames = names;
+  },
+};

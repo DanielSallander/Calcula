@@ -5,6 +5,7 @@
 pub mod types;
 pub mod commands;
 pub mod cube;
+pub mod macro_capture;
 pub mod measures;
 pub mod model_editor;
 pub mod engine_registry;

@@ -16,9 +16,9 @@ import {
   toIdentifier,
 } from "../lib/actionCodegen";
 import type { RecordedAction, RecordedEvent } from "../lib/types";
-// The REAL broker validator, so "the generated sort call is accepted by the
+// The REAL broker validators, so "the generated call is accepted by the
 // script API" is a fact this suite checks rather than a claim it makes.
-import { vSortRange } from "@api/scriptHost/validators";
+import { vSortRange, vBiModelMutation } from "@api/scriptHost/validators";
 
 // ============================================================================
 // Fixtures
@@ -476,9 +476,64 @@ describe("fill range", () => {
     expect(result.unsupported).toHaveLength(1);
   });
 
-  it("reports that the object-script API cannot fill at all", () => {
-    const result = gen([act(down)]);
-    expect(result.unsupported[0]).toContain("has no fill");
+  it("maps a downward fill onto api.fillRange with the combined rect (objectScript)", () => {
+    const { source, unsupported } = gen([act(down)]);
+    expect(unsupported).toHaveLength(0);
+    expect(source).toContain(
+      'await api.fillRange(0, 0, 9, 1, { direction: "down", sourceSize: 1 });',
+    );
+  });
+
+  it("maps an upward fill onto api.fillRange (objectScript)", () => {
+    const up: RecordedEvent = {
+      kind: "fillRange",
+      sourceStartRow: 9,
+      sourceStartCol: 0,
+      sourceEndRow: 9,
+      sourceEndCol: 0,
+      targetStartRow: 0,
+      targetStartCol: 0,
+      targetEndRow: 8,
+      targetEndCol: 0,
+    };
+    const { source } = gen([act(up)]);
+    expect(source).toContain(
+      'await api.fillRange(0, 0, 9, 0, { direction: "up", sourceSize: 1 });',
+    );
+  });
+
+  it("maps a leftward fill with a multi-column source band (objectScript)", () => {
+    const left: RecordedEvent = {
+      kind: "fillRange",
+      sourceStartRow: 0,
+      sourceStartCol: 4,
+      sourceEndRow: 2,
+      sourceEndCol: 5,
+      targetStartRow: 0,
+      targetStartCol: 0,
+      targetEndRow: 2,
+      targetEndCol: 3,
+    };
+    const { source } = gen([act(left)]);
+    expect(source).toContain(
+      'await api.fillRange(0, 0, 2, 5, { direction: "left", sourceSize: 2 });',
+    );
+  });
+
+  it("reports a non-adjacent fill instead of guessing a direction", () => {
+    const gap: RecordedEvent = {
+      kind: "fillRange",
+      sourceStartRow: 0,
+      sourceStartCol: 0,
+      sourceEndRow: 0,
+      sourceEndCol: 0,
+      targetStartRow: 5,
+      targetStartCol: 0,
+      targetEndRow: 9,
+      targetEndCol: 0,
+    };
+    const result = gen([act(gap)]);
+    expect(result.unsupported[0]).toContain("not adjacent");
   });
 });
 
@@ -750,22 +805,26 @@ describe("remove duplicates", () => {
     hasHeaders: true,
   };
 
-  it("is reported on both runtimes rather than silently dropped", () => {
-    for (const opts of [{}, NB]) {
-      const { unsupported, source } = gen([act(event)], opts);
-      expect(unsupported).toHaveLength(1);
-      expect(source).toContain("NOT REPLAYABLE");
-    }
+  it("emits api.removeDuplicates with RANGE-RELATIVE column offsets (objectScript)", () => {
+    const shifted = { ...event, startCol: 2, endCol: 6, keyColumns: [2, 4] };
+    const { source, unsupported } = gen([act(shifted)]);
+    expect(unsupported).toHaveLength(0);
+    // Absolute key columns 2 and 4 in a range starting at column 2 -> [0, 2].
+    expect(source).toContain(
+      "await api.removeDuplicates(0, 2, 99, 6, { columns: [0, 2], hasHeaders: true });",
+    );
   });
 
-  it("names the range and the key columns so the user can redo it", () => {
-    const { unsupported } = gen([act(event)]);
+  it("is still reported on the notebook runtime rather than silently dropped", () => {
+    const { unsupported, source } = gen([act(event)], NB);
+    expect(unsupported).toHaveLength(1);
+    expect(source).toContain("NOT REPLAYABLE");
     expect(unsupported[0]).toContain("A1:E100");
     expect(unsupported[0]).toContain("key columns A, C");
   });
 
-  it("uses the singular for a single key column", () => {
-    const { unsupported } = gen([act({ ...event, keyColumns: [3] })]);
+  it("uses the singular for a single key column (notebook report)", () => {
+    const { unsupported } = gen([act({ ...event, keyColumns: [3] })], NB);
     expect(unsupported[0]).toContain("key column D");
   });
 });
@@ -971,5 +1030,148 @@ describe("edge cases", () => {
       // eslint-disable-next-line no-new-func
       expect(() => new Function(source)).not.toThrow();
     }
+  });
+});
+
+// ============================================================================
+// BI-model edits (caps.biModel)
+// ============================================================================
+
+describe("model edits", () => {
+  // A payload exactly as the Rust capture builds it (gateway-ready; the
+  // codegen must embed it VERBATIM — field mapping happens nowhere in TS).
+  const measurePayload = {
+    originalName: null,
+    name: "Margin %",
+    formula: "DIVIDE([Profit], [Revenue])",
+    description: null,
+    formatString: "0.0%",
+    formatStringExpression: null,
+    detailRows: null,
+    group: "Ratios",
+    hidden: false,
+  };
+
+  function modelEdit(overrides: Record<string, unknown> = {}): RecordedEvent {
+    return {
+      kind: "modelEdit",
+      connectionId: "conn-8f2a",
+      connectionName: "Sales",
+      modelKind: "measure",
+      action: "upsert",
+      name: "Margin %",
+      payload: measurePayload,
+      replayable: true,
+      ...overrides,
+    } as RecordedEvent;
+  }
+
+  it("emits caps.biModel.upsert with the captured payload embedded verbatim", () => {
+    const { source, unsupported } = gen([act(modelEdit())]);
+    expect(unsupported).toHaveLength(0);
+    expect(source).toContain('await caps.biModel.upsert("conn-8f2a", "measure", {');
+    // The emitted JSON parses back to the exact captured payload.
+    const m = source.match(
+      /caps\.biModel\.upsert\("conn-8f2a", "measure", ({[\s\S]*?})\);/,
+    );
+    expect(m).not.toBeNull();
+    expect(JSON.parse(m![1])).toEqual(measurePayload);
+  });
+
+  it("the emitted call passes the REAL broker mutation validator", () => {
+    const { source } = gen([act(modelEdit())]);
+    const m = source.match(
+      /caps\.biModel\.upsert\("conn-8f2a", "measure", ({[\s\S]*?})\);/,
+    );
+    expect(
+      vBiModelMutation(["conn-8f2a", "measure", JSON.parse(m![1])]),
+    ).toBe(true);
+  });
+
+  it("emits caps.biModel.delete for a delete action", () => {
+    const { source } = gen([
+      act(modelEdit({ action: "delete", payload: { name: "Margin %" } })),
+    ]);
+    expect(source).toContain(
+      'await caps.biModel.delete("conn-8f2a", "measure", {',
+    );
+  });
+
+  it("names the connection once, in a comment, and never in replay logic", () => {
+    const { source } = gen([act(modelEdit()), act(modelEdit())]);
+    const nameMentions = source.match(/BI connection "Sales"/g) ?? [];
+    expect(nameMentions).toHaveLength(1);
+  });
+
+  it("wraps two or more replayable edits in batchBegin/batchEnd with rollback", () => {
+    const { source } = gen([
+      act(modelEdit()),
+      act(modelEdit({ name: "Margin 2", payload: { ...measurePayload, name: "Margin 2" } })),
+    ]);
+    expect(source).toContain('await caps.biModel.batchBegin("conn-8f2a");');
+    expect(source).toContain('await caps.biModel.batchEnd("conn-8f2a");');
+    expect(source).toContain('await caps.biModel.batchCancel("conn-8f2a");');
+    // Order: begin before the first upsert, end after the last.
+    expect(source.indexOf("batchBegin")).toBeLessThan(source.indexOf("upsert"));
+  });
+
+  it("a single model edit is not batch-wrapped", () => {
+    const { source } = gen([act(modelEdit())]);
+    expect(source).not.toContain("batchBegin");
+  });
+
+  it("privileged and bulk captures become NOT REPLAYABLE, payload-free", () => {
+    const role = modelEdit({
+      modelKind: "role",
+      name: undefined,
+      payload: undefined,
+      replayable: false,
+      reason: "security roles are not scriptable — re-create this edit in the Model Editor",
+    });
+    const { source, unsupported } = gen([act(role)]);
+    expect(unsupported).toHaveLength(1);
+    expect(source).toContain("NOT REPLAYABLE");
+    expect(source).toContain("security roles are not scriptable");
+    expect(source).not.toContain("caps.biModel");
+  });
+
+  it("every model action is NOT REPLAYABLE on the notebook target", () => {
+    const { source, unsupported } = gen([act(modelEdit())], NB);
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]).toContain("read-only");
+    expect(source).not.toContain("caps.biModel");
+  });
+
+  it("threads caps through the scaffold and declares the bi.model pragma", () => {
+    const { source } = generateMacroSource([act(modelEdit())], {
+      target: "objectScript",
+      name: "Add margin",
+      recordedAt: "T",
+    });
+    expect(source).toContain("// @capability bi.model");
+    expect(source).toContain("async function addMargin(api, caps) {");
+    expect(source).toContain("addMargin(context.api, context.caps)");
+    // eslint-disable-next-line no-new-func
+    expect(() => new Function(source)).not.toThrow();
+  });
+
+  it("model-free macros keep the historical (api) scaffold and no pragma", () => {
+    const { source } = generateMacroSource([act(writes([[0, 0, "x"]]))], {
+      target: "objectScript",
+      name: "Plain",
+      recordedAt: "T",
+    });
+    expect(source).not.toContain("@capability");
+    expect(source).toContain("async function plain(api) {");
+    expect(source).toContain("plain(context.api)");
+    expect(source).not.toContain("caps");
+  });
+
+  it("model edits do not trigger the sheet prologue", () => {
+    const { source } = gen(
+      [act(modelEdit(), 3)],
+      { emitInitialSheetActivate: true },
+    );
+    expect(source).not.toContain("setActiveSheet");
   });
 });

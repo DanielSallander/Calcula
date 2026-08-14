@@ -467,17 +467,43 @@ struct RefreshCompletedPayload {
     duration_ms: u64,
 }
 
-/// Diff two base models into the single changed DOMAIN, with the changed
-/// object's name when it is cheaply determinable (single add/remove/rename/
-/// in-place edit). Deriving the domain from the models — instead of threading
-/// it through every command — keeps emission exactly-once at the choke points
-/// with no per-call-site bookkeeping to forget.
-fn changed_domain(
+/// How one entity list changed between two base models, in enough detail for
+/// both the lifecycle event (domain + name) and the macro recorder's capture
+/// (action + rename tracking). See `diff_entity_lists`.
+pub(super) struct EntityChange {
+    pub domain: &'static str,
+    /// The single changed object's name (the NEW name for a rename), or None
+    /// when not cheaply determinable.
+    pub name: Option<String>,
+    /// For a rename: the removed (old) name.
+    pub original_name: Option<String>,
+    pub change: EntityChangeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EntityChangeKind {
+    Added,
+    Removed,
+    Renamed,
+    /// In-place edit of one object (same name before and after).
+    Edited,
+    /// More than one object changed within the list, or the shape was
+    /// ambiguous (e.g. two adds).
+    Unknown,
+}
+
+/// Diff two base models into the changed entity LISTS, one `EntityChange` per
+/// changed domain. Shared by `changed_domain` (lifecycle events) and the
+/// macro recorder's capture (bi/macro_capture.rs) so the two can never
+/// disagree about what changed. Deriving the change from the models — instead
+/// of threading it through every command — keeps emission exactly-once at the
+/// choke points with no per-call-site bookkeeping to forget.
+pub(super) fn diff_entity_lists(
     before: &bi_engine::DataModel,
     after: &bi_engine::DataModel,
-) -> (String, Option<String>) {
+) -> Vec<EntityChange> {
     fn list_diff<T: serde::Serialize>(
-        changes: &mut Vec<(&'static str, Option<String>)>,
+        changes: &mut Vec<EntityChange>,
         domain: &'static str,
         before: &[T],
         after: &[T],
@@ -490,8 +516,8 @@ fn changed_domain(
         }
         let bn: HashSet<String> = before.iter().map(&name_of).collect();
         let an: HashSet<String> = after.iter().map(&name_of).collect();
-        let mut sym: Vec<String> = bn.symmetric_difference(&an).cloned().collect();
-        let name = match sym.len() {
+        let sym: Vec<String> = bn.symmetric_difference(&an).cloned().collect();
+        let change = match sym.len() {
             0 => {
                 // In-place edit: the single entry whose serialization differs.
                 let mut changed: Vec<String> = after
@@ -507,20 +533,47 @@ fn changed_domain(
                     })
                     .map(&name_of)
                     .collect();
-                if changed.len() == 1 { changed.pop() } else { None }
+                if changed.len() == 1 {
+                    EntityChange {
+                        domain,
+                        name: changed.pop(),
+                        original_name: None,
+                        change: EntityChangeKind::Edited,
+                    }
+                } else {
+                    EntityChange { domain, name: None, original_name: None, change: EntityChangeKind::Unknown }
+                }
             }
-            1 => sym.pop(),
+            1 => {
+                let n = sym.into_iter().next();
+                let kind = if n.as_deref().map(|s| an.contains(s)).unwrap_or(false) {
+                    EntityChangeKind::Added
+                } else {
+                    EntityChangeKind::Removed
+                };
+                EntityChange { domain, name: n, original_name: None, change: kind }
+            }
             2 => {
                 // Likely a rename: report the NEW name when exactly one is new.
                 let mut added: Vec<String> = an.difference(&bn).cloned().collect();
-                if added.len() == 1 { added.pop() } else { None }
+                let mut removed: Vec<String> = bn.difference(&an).cloned().collect();
+                if added.len() == 1 && removed.len() == 1 {
+                    EntityChange {
+                        domain,
+                        name: added.pop(),
+                        original_name: removed.pop(),
+                        change: EntityChangeKind::Renamed,
+                    }
+                } else {
+                    EntityChange { domain, name: None, original_name: None, change: EntityChangeKind::Unknown }
+                }
             }
-            _ => None,
+            _ => EntityChange { domain, name: None, original_name: None, change: EntityChangeKind::Unknown },
         };
-        changes.push((domain, name));
+        changes.push(change);
     }
 
-    let mut c: Vec<(&'static str, Option<String>)> = Vec::new();
+    let mut c: Vec<EntityChange> = Vec::new();
     list_diff(&mut c, "measure", before.measures(), after.measures(), |m| m.name().to_string());
     list_diff(&mut c, "calcColumn", before.calculated_columns(), after.calculated_columns(), |x| x.name().to_string());
     list_diff(&mut c, "relationship", before.relationships(), after.relationships(), |r| r.name().to_string());
@@ -543,8 +596,14 @@ fn changed_domain(
         let bk: HashSet<&String> = before.extension_data().keys().collect();
         let ak: HashSet<&String> = after.extension_data().keys().collect();
         let mut sym: Vec<String> = bk.symmetric_difference(&ak).map(|k| (*k).clone()).collect();
-        let name = if sym.len() == 1 {
-            sym.pop()
+        let change = if sym.len() == 1 {
+            let key = sym.pop();
+            let kind = if key.as_deref().map(|k| after.extension_data().contains_key(k)).unwrap_or(false) {
+                EntityChangeKind::Added
+            } else {
+                EntityChangeKind::Removed
+            };
+            EntityChange { domain: "extensionData", name: key, original_name: None, change: kind }
         } else if sym.is_empty() {
             let mut changed: Vec<String> = after
                 .extension_data()
@@ -552,29 +611,50 @@ fn changed_domain(
                 .filter(|(k, v)| before.extension_data().get(*k) != Some(v))
                 .map(|(k, _)| k.clone())
                 .collect();
-            if changed.len() == 1 { changed.pop() } else { None }
+            if changed.len() == 1 {
+                EntityChange {
+                    domain: "extensionData",
+                    name: changed.pop(),
+                    original_name: None,
+                    change: EntityChangeKind::Edited,
+                }
+            } else {
+                EntityChange { domain: "extensionData", name: None, original_name: None, change: EntityChangeKind::Unknown }
+            }
         } else {
-            None
+            EntityChange { domain: "extensionData", name: None, original_name: None, change: EntityChangeKind::Unknown }
         };
-        c.push(("extensionData", name));
+        c.push(change);
     }
 
+    c
+}
+
+/// The AUTHORED domains preferred when a single edit fans out into synthesized
+/// side effects (writeback column -> store tables + generated column;
+/// materialized calculated table -> derived table; measure/calcColumn
+/// derivatives). Shared with the lifecycle-event fold below.
+const FANOUT_PRIORITY: &[&str] = &["writebackColumn", "calculatedTable", "measure", "calcColumn"];
+
+/// Diff two base models into the single changed DOMAIN, with the changed
+/// object's name when it is cheaply determinable (single add/remove/rename/
+/// in-place edit). Thin fold over `diff_entity_lists` for the lifecycle event.
+fn changed_domain(
+    before: &bi_engine::DataModel,
+    after: &bi_engine::DataModel,
+) -> (String, Option<String>) {
+    let c = diff_entity_lists(before, after);
     match c.len() {
         0 => {
             // No entity list changed: a scalar/metadata edit (date table,
             // fiscal year, default lookup resolution, descriptive metadata).
             ("metadata".to_string(), None)
         }
-        1 => (c[0].0.to_string(), c[0].1.clone()),
+        1 => (c[0].domain.to_string(), c[0].name.clone()),
         _ => {
-            // Prefer the AUTHORED domain when a single edit fans out into
-            // synthesized side effects (writeback column -> store tables +
-            // generated column; materialized calculated table -> derived
-            // table). Otherwise it is a genuine bulk change.
-            const PRIORITY: &[&str] = &["writebackColumn", "calculatedTable", "measure", "calcColumn"];
-            for p in PRIORITY {
-                if let Some(e) = c.iter().find(|e| e.0 == *p) {
-                    return (p.to_string(), e.1.clone());
+            for p in FANOUT_PRIORITY {
+                if let Some(e) = c.iter().find(|e| e.domain == *p) {
+                    return (p.to_string(), e.name.clone());
                 }
             }
             ("bulk".to_string(), None)
@@ -585,9 +665,15 @@ fn changed_domain(
 /// Emit `bi:model-changed` app-wide for every connection sharing `model_key`.
 /// Fire-and-forget (event loss must never fail an edit); the frontend bridge
 /// re-emits on the `@api` event bus.
+///
+/// `edited_connection` is the connection the mutation came in on — the macro
+/// recorder's capture (armed-only, main-window-targeted; see
+/// bi/macro_capture.rs) records against that identity, while the app-wide
+/// lifecycle event still fans out to every model-sharing sibling.
 fn emit_model_changed(
     bi_state: &BiState,
     model_key: &Option<ModelKey>,
+    edited_connection: ConnectionId,
     before: &bi_engine::DataModel,
     after: &bi_engine::DataModel,
     source: &str,
@@ -620,6 +706,14 @@ fn emit_model_changed(
             },
         );
     }
+    super::macro_capture::capture_and_emit(
+        &app,
+        edited_connection,
+        before,
+        after,
+        source,
+        script_id.as_deref(),
+    );
 }
 
 /// Emit `bi:refresh-completed` (per-table outcomes + duration) app-wide.
@@ -737,7 +831,7 @@ where
     // source is "script" when the Phase-2 gateway's attribution scope is set).
     let script_id = current_script_attribution();
     let source = if script_id.is_some() { "script" } else { "user" };
-    emit_model_changed(bi_state, &model_key, &base, &new_base, source, script_id);
+    emit_model_changed(bi_state, &model_key, connection_id, &base, &new_base, source, script_id);
     // Record the pre-edit state for undo (after a successful install).
     record_model_undo(&model_key, base);
     Ok(new_base)
@@ -2025,7 +2119,7 @@ fn data_type_from_str(s: &str) -> Result<bi_engine::DataType, String> {
 // Overview assembly
 // ---------------------------------------------------------------------------
 
-fn build_overview(
+pub(super) fn build_overview(
     base: &bi_engine::DataModel,
     bindings: &[super::types::BiBindRequest],
     editable: bool,
@@ -4835,7 +4929,7 @@ pub async fn bi_model_undo(
         prev
     };
     install_base_model(&bi_state, &connection_id, &prev).await?;
-    emit_model_changed(&bi_state, &model_key, &current_base, &prev, "undo", None);
+    emit_model_changed(&bi_state, &model_key, connection_id, &current_base, &prev, "undo", None);
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(build_overview(&prev, &bindings, true, None))
 }
@@ -4873,7 +4967,7 @@ pub async fn bi_model_redo(
         next
     };
     install_base_model(&bi_state, &connection_id, &next).await?;
-    emit_model_changed(&bi_state, &model_key, &current_base, &next, "redo", None);
+    emit_model_changed(&bi_state, &model_key, connection_id, &current_base, &next, "redo", None);
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     Ok(build_overview(&next, &bindings, true, None))
 }
@@ -4986,7 +5080,7 @@ async fn rollback_model_batch(
             .ok_or("Batch snapshot missing from the undo stack")?
     };
     install_base_model(bi_state, connection_id, &prev).await?;
-    emit_model_changed(bi_state, &model_key, &current_base, &prev, "undo", script_id);
+    emit_model_changed(bi_state, &model_key, *connection_id, &current_base, &prev, "undo", script_id);
     Ok(prev)
 }
 
@@ -5104,7 +5198,9 @@ pub async fn bi_model_batch_begin(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     // A crashed script must not be able to lock the user out of batching.
     reclaim_expired_script_batches(&bi_state).await;
-    begin_model_batch(&bi_state, connection_id)
+    begin_model_batch(&bi_state, connection_id)?;
+    super::macro_capture::emit_batch_marker(connection_id, "begin");
+    Ok(())
 }
 
 /// Close the open batch, keeping its edits as one undo step. When no edit
@@ -5120,7 +5216,9 @@ pub async fn bi_model_batch_end(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     reclaim_expired_script_batches(&bi_state).await;
     guard_no_live_script_batch(&bi_state, connection_id)?;
-    end_model_batch(&bi_state, connection_id, had_edits)
+    end_model_batch(&bi_state, connection_id, had_edits)?;
+    super::macro_capture::emit_batch_marker(connection_id, "end");
+    Ok(())
 }
 
 /// Abort the open batch: reinstall the pre-batch snapshot (rolling back every
@@ -5136,6 +5234,7 @@ pub async fn bi_model_batch_cancel(
     reclaim_expired_script_batches(&bi_state).await;
     guard_no_live_script_batch(&bi_state, connection_id)?;
     let prev = rollback_model_batch(&bi_state, &connection_id, None).await?;
+    super::macro_capture::emit_batch_marker(connection_id, "cancel");
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     let bindings = {
         let conns = bi_state.connections.lock().unwrap();
@@ -5442,7 +5541,7 @@ const GATEWAY_READ_ACTIONS: &[&str] = &[
 /// per-table storage mode, and refresh policies. Those are the "who may see
 /// what" and "where the data comes from" boundaries; a consented script may
 /// author analysis and data-collection definitions, never move either boundary.
-const GATEWAY_MUTABLE_KINDS: &[&str] = &[
+pub(super) const GATEWAY_MUTABLE_KINDS: &[&str] = &[
     "measure",
     "calcColumn",
     "relationship",
@@ -6728,7 +6827,7 @@ pub async fn bi_model_import_tables(
             .unwrap_or_default()
     };
     drop(guard);
-    emit_model_changed(&bi_state, &model_key, &base, &new_base, "user", None);
+    emit_model_changed(&bi_state, &model_key, connection_id, &base, &new_base, "user", None);
 
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!(
@@ -6890,7 +6989,7 @@ pub async fn bi_model_import_sql_source(
             .unwrap_or_default()
     };
     drop(guard);
-    emit_model_changed(&bi_state, &model_key, &base, &new_base, "user", None);
+    emit_model_changed(&bi_state, &model_key, connection_id, &base, &new_base, "user", None);
 
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     crate::log_info!(

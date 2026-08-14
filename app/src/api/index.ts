@@ -450,6 +450,15 @@ export type {
 export { emitTauriEvent, listenTauriEvent } from "./backend";
 export type { UnlistenFn } from "./backend";
 
+// Macro-recorder model-edit capture (armed-only raw Tauri events; the
+// payloads are gateway-ready caps.biModel calls — see bi/macro_capture.rs).
+export {
+  MACRO_MODEL_EDIT_EVENT,
+  MACRO_MODEL_BATCH_EVENT,
+  MACRO_RECORDING_ARMED_EVENT,
+  isModelRecordingArmed,
+} from "./backend";
+
 // Calculation cancellation + staleness (the Ctrl+Break analogue). See
 // app/src-tauri/src/eval_budget.rs for why a running recalculation is
 // reachable at all.
