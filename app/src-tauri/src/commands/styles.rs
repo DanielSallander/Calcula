@@ -2,6 +2,7 @@
 // PURPOSE: Styling operations, formatting, and style definitions.
 
 use crate::api_types::{CellData, FillParam, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
+use serde::{Deserialize, Serialize};
 use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
@@ -106,7 +107,7 @@ pub fn set_cell_style(
         Some(CellData {
             row,
             col,
-            display: result.text,
+            display: result.text, overflow: result.overflow,
             display_color: result.color,
             formula: updated_cell.formula_string().map(|f| format!("={}", f)),
             style_index: effective_style_index,
@@ -144,6 +145,8 @@ pub fn set_cell_style(
             row,
             col,
             display: String::new(),
+            // Empty: nothing to overflow, and text never marks.
+            overflow: crate::api_types::OverflowClass::Text,
             display_color: None,
             formula: None,
             style_index: effective_style_index,
@@ -167,7 +170,7 @@ pub fn apply_formatting(
     // stores; taking it after `grid`/`style_registry` would fix a lock order
     // that other gate call sites do not share).
     //
-    // Formatting a locked cell on a protected sheet is an edit like any other —
+    // Formatting a locked cell on a protected sheet is an edit like any other --
     // Excel refuses it, and `clear_range_with_options` already refuses format
     // clears here. This gate also becomes load-bearing once `CellStyle.locked`
     // is the source of truth: without it, `applyFormatting({locked: false})`
@@ -203,7 +206,7 @@ pub fn apply_formatting(
     let mut updated_styles = Vec::new();
     let mut used_style_indices = std::collections::HashSet::new();
 
-    // Begin undo transaction for batch formatting — unless the frontend
+    // Begin undo transaction for batch formatting -- unless the frontend
     // already opened one (e.g. a script's withScriptUndoBatch wrapping a
     // multi-key setRangeFormat decomposition into ONE undo step).
     let cell_count = params.rows.len() * params.cols.len();
@@ -241,12 +244,12 @@ pub fn apply_formatting(
 
             // Base the delta on the EFFECTIVE style: a style-0 cell under a
             // row/column tier is showing the tier's format (and lock state),
-            // and basing on index 0 would discard the tier — turning "bold this
+            // and basing on index 0 would discard the tier -- turning "bold this
             // cell" into "bold + strip the column's fill", or silently
             // re-locking a cell inside a tier-unlocked column.
             let old_style_index = grid.effective_style_index(row, col);
             // Under a tier, the computed style must land on a NON-ZERO index
-            // even when it equals the default — index 0 would mean "inherit"
+            // even when it equals the default -- index 0 would mean "inherit"
             // and resolve straight back to the tier.
             let needs_explicit = cell.style_index == 0 && old_style_index != 0;
 
@@ -276,7 +279,7 @@ pub fn apply_formatting(
                 updated_cells.push(CellData {
                     row,
                     col,
-                    display: fmt_result.text,
+                    display: fmt_result.text, overflow: fmt_result.overflow,
                     display_color: fmt_result.color,
                     formula: updated_cell.formula_string().map(|f| format!("={}", f)),
                     style_index: cached_new_index,
@@ -346,7 +349,10 @@ pub fn apply_formatting(
                     "top" => VerticalAlign::Top,
                     "middle" => VerticalAlign::Middle,
                     "bottom" => VerticalAlign::Bottom,
-                    _ => VerticalAlign::Middle,
+                    // Excel's default vertical alignment is BOTTOM, so an
+                    // unrecognised spelling resolves to the document default
+                    // rather than to a third state.
+                    _ => VerticalAlign::Bottom,
                 };
             }
             if let Some(wrap) = params.wrap_text {
@@ -356,7 +362,10 @@ pub fn apply_formatting(
                 new_style.text_rotation = parse_text_rotation(rotation);
             }
             if let Some(ref format) = params.number_format {
-                new_style.number_format = parse_number_format(format);
+                // Locale-aware: the ribbon's Currency / Accounting / Short Date
+                // / Long Date / Time entries are REGIONAL presets, and the
+                // invariant parse would resolve them to US shapes.
+                new_style.number_format = parse_number_format_with_locale(format, &locale);
             }
 
             if let Some(checkbox) = params.checkbox {
@@ -405,7 +414,7 @@ pub fn apply_formatting(
                 new_style.formula_hidden = formula_hidden;
             }
 
-            // Get or create style index (explicit under a tier — see above)
+            // Get or create style index (explicit under a tier -- see above)
             let new_style_index = if needs_explicit {
                 styles.get_or_create_explicit(new_style.clone())
             } else {
@@ -444,7 +453,7 @@ pub fn apply_formatting(
             updated_cells.push(CellData {
                 row,
                 col,
-                display: fmt_result.text,
+                display: fmt_result.text, overflow: fmt_result.overflow,
                 display_color: fmt_result.color,
                 formula: updated_cell.formula_string().map(|f| format!("={}", f)),
                 style_index: new_style_index,
@@ -457,7 +466,7 @@ pub fn apply_formatting(
         }
     }
 
-    // Commit undo transaction (only the one this command opened — an outer
+    // Commit undo transaction (only the one this command opened -- an outer
     // frontend transaction is committed by its owner).
     if opened_transaction {
         undo_stack.commit_transaction();
@@ -519,6 +528,9 @@ pub fn apply_formatting_to_sheets(
     let active_sheet = *state.active_sheet.read().unwrap();
     let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    // Taken LAST, matching apply_formatting's order (grid(s) -> styles ->
+    // undo -> locale), so the two commands cannot deadlock against each other.
+    let locale = state.locale.lock().unwrap();
 
     let cell_count = params.rows.len() * params.cols.len();
 
@@ -556,7 +568,7 @@ pub fn apply_formatting_to_sheets(
                 // Base the delta on the EFFECTIVE style, not the cell's own
                 // index: a cell with style_index 0 under a row/column tier is
                 // showing the tier's format (including its lock state), and
-                // basing on index 0 would silently discard the tier — e.g.
+                // basing on index 0 would silently discard the tier -- e.g.
                 // re-locking a cell the tier had unlocked.
                 let effective_index = grid.effective_style_index(row, col);
                 let mut new_style = styles.get(effective_index).clone();
@@ -599,7 +611,9 @@ pub fn apply_formatting_to_sheets(
                         "top" => VerticalAlign::Top,
                         "middle" => VerticalAlign::Middle,
                         "bottom" => VerticalAlign::Bottom,
-                        _ => VerticalAlign::Middle,
+                        // Excel's default vertical alignment is BOTTOM (see the
+                        // sibling arm in apply_formatting).
+                        _ => VerticalAlign::Bottom,
                     };
                 }
                 if let Some(wrap) = params.wrap_text { new_style.wrap_text = wrap; }
@@ -607,7 +621,10 @@ pub fn apply_formatting_to_sheets(
                     new_style.text_rotation = parse_text_rotation(rotation);
                 }
                 if let Some(ref format) = params.number_format {
-                    new_style.number_format = parse_number_format(format);
+                    // Same regional presets as apply_formatting -- a group
+                    // format must not resolve dates differently from a single
+                    // sheet's.
+                    new_style.number_format = parse_number_format_with_locale(format, &locale);
                 }
                 if let Some(checkbox) = params.checkbox { new_style.checkbox = checkbox; }
                 if let Some(button) = params.button { new_style.button = button; }
@@ -630,7 +647,7 @@ pub fn apply_formatting_to_sheets(
                 if let Some(formula_hidden) = params.formula_hidden { new_style.formula_hidden = formula_hidden; }
 
                 // Under a tier, a result equal to the default must still land
-                // on a NON-ZERO index — 0 would mean "inherit" and resolve
+                // on a NON-ZERO index -- 0 would mean "inherit" and resolve
                 // straight back to the tier the user just formatted away from.
                 let new_style_index = if effective_index != cell.style_index {
                     styles.get_or_create_explicit(new_style)
@@ -671,12 +688,140 @@ pub fn preview_number_format(state: State<AppState>, format_string: String, samp
     }
 }
 
+// ============================================================================
+// Home > Number dropdown (Excel's ribbon Number-format gallery)
+// ============================================================================
+
+/// Excel's Home > Number dropdown, in Excel's order.
+///
+/// These are the ONLY vocabulary the ribbon sends. They are preset KEYWORDS,
+/// not format codes, because the six regional ones cannot be written down
+/// without knowing the region -- Excel's Short Date / Long Date / Time entries
+/// are `[$-x-sysdate]` / `[$-x-systime]` handles and its Currency / Accounting
+/// entries read the OS currency pattern. Shipping `m/d/yyyy` or `$` from the
+/// frontend would be BUG-0064 again (the Format Cells dialog advertising
+/// "1,234.00" on a document that renders "1 234,00").
+///
+/// `Special` and `Custom` are deliberately absent: they are Format Cells
+/// categories, not dropdown entries. The dropdown's twelfth row is
+/// "More Number Formats...", which opens that dialog and is UI, not a format.
+pub(crate) const RIBBON_NUMBER_FORMAT_PRESETS: [&str; 11] = [
+    "general",
+    "number",
+    "currency",
+    "accounting",
+    "date_short",
+    "date_long",
+    "time",
+    "percentage",
+    "fraction_1",
+    "scientific",
+    "text",
+];
+
+/// One row of the ribbon Number dropdown, resolved for the current locale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RibbonNumberFormatPreset {
+    /// The preset keyword the ribbon sends back through `apply_formatting`.
+    pub preset: String,
+    /// What `get_style` will report for a cell carrying this preset, i.e. the
+    /// output of `format_number_format_name`. The ribbon needs this to answer
+    /// "which entry is the selected cell already on?" -- get_style speaks
+    /// display names, the dropdown speaks presets, and inverting the mapping
+    /// in TypeScript would be a second source of truth that drifts the first
+    /// time a name changes here (exactly how BUG-0065 happened).
+    pub display_name: String,
+    /// The preset applied to `sample_value`, so the dropdown can show Excel's
+    /// live sample without re-deriving any format string.
+    pub sample: String,
+}
+
+/// Resolve Excel's Home > Number dropdown for the CURRENT locale.
+///
+/// Returns one row per entry, in Excel's order, carrying the keyword to send,
+/// the display name `get_style` will report back, and a formatted sample of
+/// `sample_value` (the active cell's value, the way Excel previews each row).
+#[tauri::command]
+pub fn get_ribbon_number_formats(
+    state: State<AppState>,
+    sample_value: Option<f64>,
+) -> Vec<RibbonNumberFormatPreset> {
+    let locale = state.locale.lock().unwrap();
+    let sample = sample_value.unwrap_or(1234.5678);
+    RIBBON_NUMBER_FORMAT_PRESETS
+        .iter()
+        .map(|preset| {
+            let nf = parse_number_format_with_locale(preset, &locale);
+            let style = CellStyle::new().with_number_format(nf.clone());
+            RibbonNumberFormatPreset {
+                preset: (*preset).to_string(),
+                display_name: crate::api_types::format_number_format_name(&nf),
+                sample: format_cell_value_with_color(&CellValue::Number(sample), &style, &locale)
+                    .text,
+            }
+        })
+        .collect()
+}
+
+/// Parse a number format string into a NumberFormat enum, using the INVARIANT
+/// (en-US) locale for the presets whose meaning is regional.
+///
+/// Prefer `parse_number_format_with_locale` on any path that carries a locale.
+/// The six regional presets -- `currency`, `accounting`, `date_short`,
+/// `date_long`, `time`, and the legacy `date_iso`/`time_24h` family's
+/// locale-free siblings -- resolve to US shapes here, which is right for the
+/// pivot/format-code call sites (they already format against
+/// `LocaleSettings::invariant()`) and wrong for anything a user picked.
+pub(crate) fn parse_number_format(format: &str) -> NumberFormat {
+    parse_number_format_with_locale(format, &engine::LocaleSettings::invariant())
+}
+
 /// Parse a number format string into a NumberFormat enum.
 /// Recognizes known preset names (e.g., "general", "currency_usd") and treats
 /// anything else containing format characters as a custom format string.
-pub(crate) fn parse_number_format(format: &str) -> NumberFormat {
+///
+/// The RIBBON presets (`RIBBON_NUMBER_FORMAT_PRESETS`) are resolved against
+/// `locale`, because that is what Excel does: its Short Date / Long Date / Time
+/// entries write `[$-x-sysdate]` / `[$-x-systime]` -- handles meaning "ask the
+/// OS" -- and its Currency / Accounting entries take the symbol AND its side
+/// from the regional currency pattern, not from the language. Sending a
+/// hard-coded `m/d/yyyy` or `$` would render a Swedish workbook in US shapes.
+pub(crate) fn parse_number_format_with_locale(
+    format: &str,
+    locale: &engine::LocaleSettings,
+) -> NumberFormat {
+    let locale_currency_position = match locale.currency_position {
+        engine::LocaleCurrencyPosition::Before => CurrencyPosition::Before,
+        engine::LocaleCurrencyPosition::After => CurrencyPosition::After,
+    };
     match format.to_lowercase().as_str() {
         "general" => NumberFormat::General,
+        // ---- Excel's Home > Number dropdown, the regional half ----
+        "currency" => NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: locale.currency_symbol.clone(),
+            symbol_position: locale_currency_position,
+        },
+        "accounting" => NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: locale.currency_symbol.trim().to_string(),
+            symbol_position: locale_currency_position,
+        },
+        "date_short" => NumberFormat::Date {
+            format: locale.date_format.clone(),
+        },
+        "date_long" => NumberFormat::Date {
+            format: locale.long_date_format.clone(),
+        },
+        "time" => NumberFormat::Time {
+            format: locale.time_format.clone(),
+        },
+        // Excel's Text entry is the one-section format `@`: the value is shown
+        // exactly as typed and is not evaluated as a number.
+        "text" => NumberFormat::Custom {
+            format: "@".to_string(),
+        },
         "number" => NumberFormat::Number {
             decimal_places: 2,
             use_thousands_separator: false,
@@ -973,7 +1118,7 @@ fn is_custom_format_string(s: &str) -> bool {
 /// The FULL vocabulary the app itself emits round-trips here:
 /// - `StyleData::from_cell_style` (api_types.rs) emits "none" | "rotate90" |
 ///   "rotate270" | "custom:N", and the FormatCells dialog + script surface
-///   send those same strings back — "rotate90"/"rotate270"/"custom:N" used to
+///   send those same strings back -- "rotate90"/"rotate270"/"custom:N" used to
 ///   fall through to the integer parser, fail, and silently apply None.
 /// - Bare integer degrees ("45", "-30") and the legacy aliases
 ///   ("0"/"90"/"270"/"-90"/"up"/"down") are accepted too; angles clamp to
@@ -1191,7 +1336,7 @@ pub fn set_cell_rich_text(
     Ok(Some(CellData {
         row,
         col,
-        display: result.text,
+        display: result.text, overflow: result.overflow,
         display_color: result.color,
         formula: cell.formula_string().map(|f| format!("={}", f)),
         style_index: effective_style_index,
@@ -1399,7 +1544,7 @@ pub fn apply_border_preset(
             updated_cells.push(CellData {
                 row,
                 col,
-                display: fmt_result.text,
+                display: fmt_result.text, overflow: fmt_result.overflow,
                 display_color: fmt_result.color,
                 formula: updated_cell.formula_string().map(|f| format!("={}", f)),
                 style_index: new_style_index,
@@ -1453,7 +1598,7 @@ mod tests {
 
     /// THE round-trip: StyleData -> FormattingParams.text_rotation ->
     /// parse_text_rotation -> StyleData again. Every rotation the app can
-    /// hold must survive the loop unchanged — "rotate90"/"rotate270"/
+    /// hold must survive the loop unchanged -- "rotate90"/"rotate270"/
     /// "custom:N" used to fall through to the integer parser and silently
     /// apply None.
     #[test]
@@ -1628,6 +1773,209 @@ mod tests {
         assert_eq!(
             parse_number_format("#,##0.00;[Red]-#,##0.00"),
             NumberFormat::Custom { format: "#,##0.00;[Red]-#,##0.00".to_string() }
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Home > Number dropdown (Excel parity, 2026-08-15)
+    //
+    // The ribbon used to send FORMAT CODES ("0.00", "#,##0.00", "@") from a
+    // six-entry list whose third label was "Thousands" -- not an Excel entry
+    // name -- with no Currency, no Accounting, no date, no time and no
+    // fraction. Codes and preset keywords are disjoint vocabularies, so a code
+    // survived only through the `_ =>` guessing arm; a date code would have
+    // landed in Custom rather than Date.
+    // ------------------------------------------------------------------
+    use super::{parse_number_format_with_locale, RIBBON_NUMBER_FORMAT_PRESETS};
+    use engine::LocaleSettings;
+
+    fn se() -> LocaleSettings {
+        LocaleSettings::from_locale_id("sv-SE")
+    }
+
+    /// Every dropdown entry must resolve to a REAL typed format. A keyword
+    /// that fell through to the guessing arm would land in General (no format
+    /// characters) and the entry would silently do nothing.
+    #[test]
+    fn every_ribbon_preset_resolves_to_a_typed_format() {
+        for locale_id in ["en-US", "sv-SE", "de-DE", "ja-JP"] {
+            let locale = LocaleSettings::from_locale_id(locale_id);
+            for preset in RIBBON_NUMBER_FORMAT_PRESETS {
+                let parsed = parse_number_format_with_locale(preset, &locale);
+                if preset == "general" {
+                    assert_eq!(parsed, NumberFormat::General);
+                } else {
+                    assert_ne!(
+                        parsed,
+                        NumberFormat::General,
+                        "{} / {} fell through to General",
+                        locale_id,
+                        preset
+                    );
+                }
+            }
+        }
+    }
+
+    /// The dropdown's own vocabulary must round-trip through get_style the
+    /// same way BUG-0065's did: the ribbon reads back a DISPLAY NAME and has
+    /// to recognise which entry the cell is on.
+    #[test]
+    fn every_ribbon_preset_round_trips_through_the_display_name() {
+        for locale_id in ["en-US", "sv-SE"] {
+            let locale = LocaleSettings::from_locale_id(locale_id);
+            for preset in RIBBON_NUMBER_FORMAT_PRESETS {
+                let applied = parse_number_format_with_locale(preset, &locale);
+                let name = format_number_format_name(&applied);
+                assert_eq!(
+                    parse_number_format_with_locale(&name, &locale),
+                    applied,
+                    "{} / {} did not survive the name round-trip ({})",
+                    locale_id,
+                    preset,
+                    name
+                );
+            }
+        }
+    }
+
+    /// The regional half. A hard-coded US date or `$` here is the defect
+    /// BUG-0064 was: the surface advertising one region while the document
+    /// renders another.
+    #[test]
+    fn regional_presets_follow_the_locale() {
+        let se = se();
+        assert_eq!(
+            parse_number_format_with_locale("date_short", &se),
+            NumberFormat::Date { format: "YYYY-MM-DD".to_string() }
+        );
+        assert_eq!(
+            parse_number_format_with_locale("date_long", &se),
+            NumberFormat::Date { format: "\"den \"d mmmm yyyy".to_string() }
+        );
+        assert_eq!(
+            parse_number_format_with_locale("time", &se),
+            NumberFormat::Time { format: "hh:mm:ss".to_string() }
+        );
+        assert_eq!(
+            parse_number_format_with_locale("currency", &se),
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: " kr".to_string(),
+                symbol_position: CurrencyPosition::After,
+            }
+        );
+        // Accounting draws the symbol as its own column, so it takes the bare
+        // symbol -- the currency preset's leading space would double up.
+        assert_eq!(
+            parse_number_format_with_locale("accounting", &se),
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "kr".to_string(),
+                symbol_position: CurrencyPosition::After,
+            }
+        );
+
+        let us = LocaleSettings::invariant();
+        assert_eq!(
+            parse_number_format_with_locale("date_short", &us),
+            NumberFormat::Date { format: "MM/DD/YYYY".to_string() }
+        );
+        assert_eq!(
+            parse_number_format_with_locale("currency", &us),
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+            }
+        );
+        assert_eq!(
+            parse_number_format_with_locale("time", &us),
+            NumberFormat::Time { format: "h:mm:ss AM/PM".to_string() }
+        );
+    }
+
+    /// The non-regional half is identical in every locale (only the SEPARATORS
+    /// move, and those live in the formatter, not the format).
+    #[test]
+    fn non_regional_presets_are_locale_invariant() {
+        for preset in ["general", "number", "percentage", "fraction_1", "scientific", "text"] {
+            assert_eq!(
+                parse_number_format_with_locale(preset, &se()),
+                parse_number_format_with_locale(preset, &LocaleSettings::invariant()),
+                "{} must not depend on the locale",
+                preset
+            );
+        }
+        // Excel's Number entry is `0.00` -- fixed 2 decimals, NO separator.
+        assert_eq!(
+            parse_number_format_with_locale("number", &se()),
+            NumberFormat::Number { decimal_places: 2, use_thousands_separator: false }
+        );
+        // Excel's Text entry is the one-section `@` format.
+        assert_eq!(
+            parse_number_format_with_locale("text", &se()),
+            NumberFormat::Custom { format: "@".to_string() }
+        );
+    }
+
+    /// What each entry actually RENDERS on the app's own sv-SE test locale.
+    /// These are the strings measured live in the app; if the formatter or the
+    /// locale table moves, this is the pin that says so.
+    #[test]
+    fn swedish_ribbon_presets_render_excel_shapes() {
+        let se = se();
+        let render = |preset: &str, value: f64| {
+            engine::format_number(value, &parse_number_format_with_locale(preset, &se), &se)
+        };
+        let nbsp = '\u{00A0}';
+        assert_eq!(render("general", 1234.5678), "1234,5678");
+        assert_eq!(render("number", 1234.5678), "1234,57");
+        assert_eq!(render("currency", 1234.5678), format!("1{}234,57 kr", nbsp));
+        assert_eq!(render("accounting", 1234.5678), format!("1{}234,57  kr", nbsp));
+        assert_eq!(render("date_short", 45306.0), "2024-01-15");
+        assert_eq!(render("date_long", 45306.0), "den 15 januari 2024");
+        assert_eq!(render("time", 45306.5625), "13:30:00");
+        assert_eq!(render("percentage", 1234.5678), "123456,78%");
+        assert_eq!(render("fraction_1", 1234.5678), "1234 4/7");
+        assert_eq!(render("scientific", 1234.5678), "1,23E+03");
+        assert_eq!(render("text", 1234.5678), "1234,5678");
+    }
+
+    /// The same eleven entries on en-US, so a regression that hard-codes ONE
+    /// region is visible from either side.
+    #[test]
+    fn us_ribbon_presets_render_excel_shapes() {
+        let us = LocaleSettings::invariant();
+        let render = |preset: &str, value: f64| {
+            engine::format_number(value, &parse_number_format_with_locale(preset, &us), &us)
+        };
+        assert_eq!(render("number", 1234.5678), "1234.57");
+        assert_eq!(render("currency", 1234.5678), "$1,234.57");
+        assert_eq!(render("date_short", 45306.0), "01/15/2024");
+        assert_eq!(render("date_long", 45306.0), "Monday, January 15, 2024");
+        assert_eq!(render("time", 45306.5625), "1:30:00 PM");
+    }
+
+    /// The list itself: Excel's entries, in Excel's order, with Special and
+    /// Custom (Format Cells categories, not dropdown rows) absent.
+    #[test]
+    fn the_dropdown_is_excels_list_in_excels_order() {
+        assert_eq!(
+            RIBBON_NUMBER_FORMAT_PRESETS,
+            [
+                "general",
+                "number",
+                "currency",
+                "accounting",
+                "date_short",
+                "date_long",
+                "time",
+                "percentage",
+                "fraction_1",
+                "scientific",
+                "text",
+            ]
         );
     }
 }

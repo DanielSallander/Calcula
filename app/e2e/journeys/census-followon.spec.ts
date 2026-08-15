@@ -924,22 +924,35 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
     return rows;
   }
 
-  test("5. a truncated cell's underline is as wide as the ELLIPSISED text, not as wide as the cell", async ({
+  // RE-AIMED WHEN CALCULA ADOPTED EXCEL'S OVERFLOW RULE (§21c item 3).
+  //
+  // The original fixture was an over-long TEXT value, and its teeth came from
+  // the gap between where the ELLIPSISED string ended and where the old code's
+  // "measure the full string, clamp to the cell" answer would have drawn. Excel
+  // does not ellipsise — it CLIPS at the cell edge — so for an over-long value
+  // the glyphs and the clamp now legitimately coincide, and that fixture can no
+  // longer tell a correct renderer from the broken one. Left alone it would have
+  // gone on "passing" while measuring nothing, which is worse than failing.
+  //
+  // The invariant is unchanged: A RULE MUST SPAN THE GLYPHS THAT WERE PAINTED,
+  // NOT THE STRING THE CELL HOLDS. What changed is where that still bites, and
+  // the fixture below moved to it: a value that FITS, whose glyphs stop a long
+  // way short of the cell's inner edge. That gap is the discrimination, and it
+  // is far larger than the old one — the old-code answer (clamp to the cell)
+  // misses by tens of pixels rather than by a few.
+  test("5. an underline is as wide as the GLYPHS PAINTED, not as wide as the cell", async ({
     appPage: page,
     grid,
   }) => {
     try {
       await newFile(page);
 
-      // A string of uniformly WIDE glyphs. The point of the fixture is that the
-      // character which does NOT fit is wide, so the ellipsised string ends a
-      // long way short of the cell's inner edge — which is where the old code
-      // (measure the FULL string, clamp to the cell) would have drawn to. With
-      // narrow glyphs the two answers can differ by a single pixel and the
-      // assertion would have no teeth.
-      const WIDE = "WMWMWMWMWMWMWMWMWMWM";
+      // Uniformly WIDE glyphs, short enough to fit the column with room to
+      // spare. The width of the glyphs is what makes the "rule spans the text"
+      // and "rule spans the cell" answers differ by a large, unambiguous margin.
+      const WIDE = "WMWM";
       await invoke(page, "update_cell", { row: 19, col: 31, value: WIDE }); // AF20
-      await invoke(page, "update_cell", { row: 19, col: 32, value: "X" }); // AG20 — the wall that forces truncation
+      await invoke(page, "update_cell", { row: 19, col: 32, value: "X" }); // AG20 — blocks any spill
       await page.evaluate(() => window.dispatchEvent(new Event("grid:refresh")));
       await page.waitForTimeout(400);
 
@@ -995,7 +1008,7 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
       const glyphRight = textRight / px.scale;
       expect(glyphRight, "the cell must actually have painted glyphs").toBeGreaterThan(0);
 
-      // THE CLAIM: the rule stops where the ellipsised text stops.
+      // THE CLAIM: the rule stops where the painted glyphs stop.
       expect(
         underlineRight,
         `the underline must not run past the visible text (underline ends ${underlineRight.toFixed(1)}, glyphs end ${glyphRight.toFixed(1)}, CSS px into the cell)`,

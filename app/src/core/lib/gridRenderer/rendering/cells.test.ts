@@ -205,7 +205,7 @@ describe("drawRichTextRuns", () => {
     expect(totalWidth).toBe(80);
   });
 
-  it("truncates with ellipsis when exceeding maxWidth", () => {
+  it("clips rather than ellipsising when exceeding maxWidth", () => {
     // Make measureText return large widths so truncation kicks in
     (ctx.measureText as ReturnType<typeof vi.fn>).mockReturnValue({ width: 150 });
 
@@ -220,10 +220,14 @@ describe("drawRichTextRuns", () => {
       false, false, false, false,
     );
 
-    // When truncating, the function draws an ellipsis
+    // Excel clips over-long text at the cell edge: the run is drawn whole and
+    // the caller's clip rectangle cuts it. No ellipsis, and no '####' either —
+    // that marker is for numbers and dates, never for text.
     const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
     const allDrawnText = calls.map((c: unknown[]) => c[0]).join("");
-    expect(allDrawnText).toContain("...");
+    expect(allDrawnText).not.toContain("...");
+    expect(allDrawnText).not.toContain("#");
+    expect(allDrawnText).toContain("Very long text");
   });
 
   it("does nothing for empty runs array", () => {

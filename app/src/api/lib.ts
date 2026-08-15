@@ -229,6 +229,7 @@ export {
 
   // Number format preview
   previewNumberFormat,
+  getRibbonNumberFormats,
 
   // Status bar aggregation
   getSelectionAggregations,
@@ -273,6 +274,7 @@ export type {
   ColumnGroup,
   SheetOutline,
   PreviewResult,
+  RibbonNumberFormat,
   SelectionAggregationResult,
   IterationSettings,
   AutoRecoverSettings,

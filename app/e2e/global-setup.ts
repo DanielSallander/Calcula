@@ -151,6 +151,16 @@ export default async function globalSetup(config: FullConfig) {
       // this file and the manual launcher had drifted apart, and the drift cost
       // the whole golden corpus its meaning twice over.
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: webview2BrowserArguments(CDP_PORT),
+      // THE APP UNDER TEST IS NOT HOT-RELOADABLE. Vite pushes to whatever is
+      // connected, and a source save mid-run fast-refreshes the provider tree:
+      // GridProvider's `useReducer` restarts from `getInitialState()`, so the
+      // selection snaps to A1 and the scroll to 0 with NO navigation --
+      // `performance.timeOrigin` unchanged, window markers intact, nothing in
+      // the page able to tell. Measured 2026-08-15: ~170 modules updated and
+      // the parked selection reset 2.5 s after the harness parked it. A capture
+      // taken across that window photographs the editor. See vite.config.ts and
+      // e2e/__tests__/hmrDisabledForE2E.test.ts.
+      CALCULA_E2E: "1",
     },
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],

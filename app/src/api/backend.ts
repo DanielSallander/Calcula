@@ -13,7 +13,7 @@ import type { CellData, DimensionData, FormattingResult } from "../core/types";
 // from HERE rather than from core/lib/tauri-api.ts. Reporting to the same single
 // hook is what keeps a recording complete: an omitted sort produces a macro that
 // runs cleanly and leaves the data in the wrong order.
-import { recordGridEvent } from "../core/lib/tauri-api";
+import { recordGridEvent, announceStyleEntries } from "../core/lib/tauri-api";
 // Refresh announcements are emitted from the WRAPPERS in this file, never from
 // their call sites, so every route (ribbon, dialog, context menu, outline bar,
 // script broker) announces the change. See the block comment on OUTLINE_CHANGED
@@ -6162,18 +6162,31 @@ export async function deleteNamedStyle(name: string): Promise<void> {
   return invoke<void>("delete_named_style", { name });
 }
 
-/** Apply a named style to specified cells. Returns updated cells and styles. */
+/**
+ * Apply a named style to specified cells. Returns updated cells and styles.
+ *
+ * ANNOUNCES ITS STYLE ENTRIES (BUG-0080). Applying a named style MINTS a style
+ * registry index, and the renderer's `getStyleFromCache` falls back to index 0
+ * -- the document default -- for an index the frontend cache does not hold. This
+ * wrapper is a door to that mint just as `applyFormatting` is, it is exported
+ * through `@api`, and it used to discard `result.styles` entirely.
+ */
 export async function applyNamedStyle(
   name: string,
   rows: number[],
   cols: number[],
 ): Promise<FormattingResult> {
-  return invoke<FormattingResult>("apply_named_style", { name, rows, cols });
+  const result = await invoke<FormattingResult>("apply_named_style", { name, rows, cols });
+  announceStyleEntries(result);
+  return result;
 }
 
 /**
  * Apply a named style to a rectangular range (inclusive bounds) as ONE undo
  * transaction. Bounds may arrive swapped; the backend normalizes them.
+ *
+ * Announces its style entries for the same reason as `applyNamedStyle` above
+ * (BUG-0080).
  */
 export async function applyNamedStyleRange(
   name: string,
@@ -6182,13 +6195,15 @@ export async function applyNamedStyleRange(
   endRow: number,
   endCol: number,
 ): Promise<FormattingResult> {
-  return invoke<FormattingResult>("apply_named_style_range", {
+  const result = await invoke<FormattingResult>("apply_named_style_range", {
     name,
     startRow,
     startCol,
     endRow,
     endCol,
   });
+  announceStyleEntries(result);
+  return result;
 }
 
 // ============================================================================

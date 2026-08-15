@@ -22,7 +22,7 @@ use crate::api_types::{
 };
 use crate::document_effect::{DocumentEffect, TransientScope};
 use crate::{
-    evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
+    evaluate_formula_multi_sheet, get_column_row_dependents,
     get_recalculation_order, AppState,
 };
 use engine::{Cell, CellValue, Grid, StyleRegistry};
@@ -45,7 +45,7 @@ fn build_cell_data(
     // Row/column style tiers: resolve against the same grid the cell came from.
     let effective_style_index = grid.effective_style_index(r, c);
     let style = styles.get(effective_style_index);
-    let display = format_cell_value(&cell.value, style, locale);
+    let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, locale);
 
     let merge = merged_regions
         .iter()
@@ -59,6 +59,7 @@ fn build_cell_data(
         row: r,
         col: c,
         display,
+        overflow,
         display_color: None,
         formula: cell.formula_string().map(|f| format!("={}", f)),
         style_index: effective_style_index,
@@ -197,6 +198,8 @@ fn apply_set_ops_and_recalc(
                 row: r,
                 col: c,
                 display: String::new(),
+                // Empty: nothing to overflow, and text never marks.
+                overflow: crate::api_types::OverflowClass::Text,
                 display_color: None,
                 formula: None,
                 // Now-empty cell: a row/column style still applies to it.

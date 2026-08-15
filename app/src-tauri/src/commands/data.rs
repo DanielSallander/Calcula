@@ -496,6 +496,8 @@ fn erase_released_spill_cells(
             row: r,
             col: c,
             display: String::new(),
+            // Empty: nothing to overflow, and text never marks.
+            overflow: crate::api_types::OverflowClass::Text,
             display_color: None,
             formula: None,
             style_index: 0,
@@ -687,11 +689,12 @@ pub(crate) fn apply_spill_decision(
             } else {
                 0
             };
-            let display = format_cell_value(cv, styles.get(effective), locale);
+            let (display, overflow) = crate::format_cell_value_and_class(cv, styles.get(effective), locale);
             updated_cells.push(CellData {
                 row: target_r,
                 col: target_c,
                 display,
+                overflow,
                 display_color: None,
                 formula: None,
                 style_index: 0,
@@ -910,7 +913,7 @@ pub fn get_viewport_cells(
                 continue;
             }
 
-            let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
+            let (display, display_color, formula, style_index, rich_text, accounting_layout, overflow) = if let Some(c) = cell {
                 let style = styles.get(effective_style_index);
                 let result = crate::format_cell_value_with_color(&c.value, style, &locale);
                 let rt = c.rich_text.as_ref().map(|runs| {
@@ -930,15 +933,16 @@ pub fn get_viewport_cells(
                 } else {
                     formula_display(&c, &locale)
                 };
-                (result.text, result.color, formula, effective_style_index, rt, acct)
+                (result.text, result.color, formula, effective_style_index, rt, acct, result.overflow)
             } else {
-                (String::new(), None, None, effective_style_index, None, None)
+                (String::new(), None, None, effective_style_index, None, None, crate::api_types::OverflowClass::Text)
             };
 
             cells.push(CellData {
                 row,
                 col,
                 display,
+                overflow,
                 display_color,
                 formula,
                 style_index,
@@ -1136,7 +1140,7 @@ pub fn get_watch_cells(
             CellData {
                 row,
                 col,
-                display: r.text,
+                display: r.text, overflow: r.overflow,
                 display_color: r.color,
                 formula: formula_display(&c, locale),
                 style_index: grid.effective_style_index(row, col),
@@ -1351,12 +1355,13 @@ pub fn get_collection_texts(
 fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, locale: &engine::LocaleSettings) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(grid.effective_style_index(row, col));
-    let display = format_cell_value(&cell.value, style, locale);
+    let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, locale);
 
     Some(CellData {
         row,
         col,
         display,
+        overflow,
         display_color: None,
         formula: formula_display(&cell, locale),
         style_index: grid.effective_style_index(row, col),
@@ -1734,6 +1739,8 @@ fn update_cell_impl(
             row,
             col,
             display: String::new(),
+            // Empty: nothing to overflow, and text never marks.
+            overflow: crate::api_types::OverflowClass::Text,
             display_color: None,
             formula: None,
             style_index: 0,
@@ -1944,7 +1951,7 @@ fn update_cell_impl(
 
         // Get the display value
         let style = styles.get(grid.effective_style_index(row, col));
-        let display = format_cell_value(&cell.value, style, &locale);
+        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
         perf_t3_stored = Instant::now();
 
         // Get merge span info
@@ -1964,6 +1971,7 @@ fn update_cell_impl(
             row,
             col,
             display,
+            overflow,
             display_color: None,
             formula: formula_display(&cell, &locale),
             style_index: grid.effective_style_index(row, col),
@@ -2430,7 +2438,7 @@ pub(crate) fn reevaluate_formula_cell(
     }
 
     let dep_style = styles.get(grid.effective_style_index(dep_row, dep_col));
-    let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
+    let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_dep.value, dep_style, locale);
 
     let (dep_row_span, dep_col_span) =
         if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
@@ -2445,7 +2453,7 @@ pub(crate) fn reevaluate_formula_cell(
     updated_cells.push(CellData {
         row: dep_row,
         col: dep_col,
-        display: dep_display,
+        display: dep_display, overflow: dep_overflow,
         display_color: None,
         formula: if include_formula {
             formula_display(&updated_dep, locale)
@@ -2654,7 +2662,7 @@ fn recalc_walked_cell(
 
     // Resolve the style tiers on the dependent's OWN sheet.
     let dep_style = styles.get(grids[dep_sheet_idx].effective_style_index(dep_row, dep_col));
-    let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
+    let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_dep.value, dep_style, locale);
 
     // Same-sheet deps: merge span info and sheet_index=None so the frontend
     // emits cell events for re-rendering. Cross-sheet deps: default span (1,1)
@@ -2676,7 +2684,7 @@ fn recalc_walked_cell(
     updated_cells.push(CellData {
         row: dep_row,
         col: dep_col,
-        display: dep_display,
+        display: dep_display, overflow: dep_overflow,
         display_color: None,
         formula: if include_formulas {
             formula_display(&updated_dep, locale)
@@ -3245,6 +3253,8 @@ pub(crate) fn update_cells_batch_core(
                 row,
                 col,
                 display: String::new(),
+                // Empty: nothing to overflow, and text never marks.
+                overflow: crate::api_types::OverflowClass::Text,
                 display_color: None,
                 formula: None,
                 style_index: 0,
@@ -3426,7 +3436,7 @@ pub(crate) fn update_cells_batch_core(
 
         // Get the display value
         let style = styles.get(grid.effective_style_index(row, col));
-        let display = format_cell_value(&cell.value, style, &locale);
+        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
 
         let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(row, col)) {
             (
@@ -3441,6 +3451,7 @@ pub(crate) fn update_cells_batch_core(
             row,
             col,
             display,
+            overflow,
             display_color: None,
             formula: formula_display(&cell, &locale),
             style_index: grid.effective_style_index(row, col),
@@ -3592,7 +3603,7 @@ pub(crate) fn update_cells_batch_core(
                             }
 
                             let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
+                            let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_with_ast.value, dep_style, &locale);
 
                             let (dep_row_span, dep_col_span) =
                                 if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
@@ -3607,7 +3618,7 @@ pub(crate) fn update_cells_batch_core(
                             updated_cells.push(CellData {
                                 row: *dep_row,
                                 col: *dep_col,
-                                display: dep_display,
+                                display: dep_display, overflow: dep_overflow,
                                 display_color: None,
                                 formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
                                 style_index: grid.effective_style_index(*dep_row, *dep_col),
@@ -3631,7 +3642,7 @@ pub(crate) fn update_cells_batch_core(
                     }
 
                     let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                    let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
+                    let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_dep.value, dep_style, &locale);
 
                     let (dep_row_span, dep_col_span) =
                         if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
@@ -3646,7 +3657,7 @@ pub(crate) fn update_cells_batch_core(
                     updated_cells.push(CellData {
                         row: *dep_row,
                         col: *dep_col,
-                        display: dep_display,
+                        display: dep_display, overflow: dep_overflow,
                         display_color: None,
                         formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
                         style_index: grid.effective_style_index(*dep_row, *dep_col),
@@ -4489,6 +4500,8 @@ pub fn clear_range_with_options(
                     row,
                     col,
                     display: String::new(),
+                    // Empty: nothing to overflow, and text never marks.
+                    overflow: crate::api_types::OverflowClass::Text,
                     display_color: None,
                     formula: None,
                     style_index: 0,
@@ -4558,6 +4571,8 @@ pub fn clear_range_with_options(
                         row,
                         col,
                         display: String::new(),
+                        // Empty: nothing to overflow, and text never marks.
+                        overflow: crate::api_types::OverflowClass::Text,
                         display_color: None,
                         formula: None,
                         style_index,
@@ -4590,7 +4605,7 @@ pub fn clear_range_with_options(
                     // The cell's own style is cleared, but a row/column style
                     // still applies to it.
                     let default_style = style_registry.get(grid.effective_style_index(row, col));
-                    let display = format_cell_value(&cell.value, default_style, &locale);
+                    let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
 
                     // Get merge span info
                     let merge_info = merged_regions
@@ -4609,6 +4624,7 @@ pub fn clear_range_with_options(
                         row,
                         col,
                         display,
+                        overflow,
                         display_color: None,
                         formula: formula_display(&cell, &locale),
                         style_index: 0,
@@ -4639,7 +4655,7 @@ pub fn clear_range_with_options(
                         // The cell's own style is cleared, but a row/column
                         // style still applies to it.
                         let default_style = style_registry.get(grid.effective_style_index(row, col));
-                        let display = format_cell_value(&cell.value, default_style, &locale);
+                        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
 
                         // Get merge span info
                         let merge_info = merged_regions
@@ -4658,6 +4674,7 @@ pub fn clear_range_with_options(
                             row,
                             col,
                             display,
+                            overflow,
                             display_color: None,
                             formula: formula_display(&cell, &locale),
                             style_index: 0,
@@ -5256,12 +5273,13 @@ pub fn sort_range(
                         }
 
                         let style = styles.get(grid.effective_style_index(target_row, target_col));
-                        let display = format_cell_value(&cell.value, style, &locale);
+                        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
 
                         updated_cells.push(CellData {
                             row: target_row,
                             col: target_col,
                             display,
+                            overflow,
                             display_color: None,
                             formula: formula_display(&cell, &locale),
                             style_index: grid.effective_style_index(target_row, target_col),
@@ -5281,6 +5299,8 @@ pub fn sort_range(
                             row: target_row,
                             col: target_col,
                             display: String::new(),
+                            // Empty: nothing to overflow, and text never marks.
+                            overflow: crate::api_types::OverflowClass::Text,
                             display_color: None,
                             formula: None,
                             style_index: 0,
@@ -5410,12 +5430,13 @@ pub fn sort_range(
                         }
 
                         let style = styles.get(grid.effective_style_index(target_row, target_col));
-                        let display = format_cell_value(&cell.value, style, &locale);
+                        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
 
                         updated_cells.push(CellData {
                             row: target_row,
                             col: target_col,
                             display,
+                            overflow,
                             display_color: None,
                             formula: formula_display(&cell, &locale),
                             style_index: grid.effective_style_index(target_row, target_col),
@@ -5435,6 +5456,8 @@ pub fn sort_range(
                             row: target_row,
                             col: target_col,
                             display: String::new(),
+                            // Empty: nothing to overflow, and text never marks.
+                            overflow: crate::api_types::OverflowClass::Text,
                             display_color: None,
                             formula: None,
                             style_index: 0,
@@ -6157,12 +6180,13 @@ pub fn remove_duplicates(
                 }
 
                 let style = styles.get(grid.effective_style_index(target_row, target_col));
-                let display = format_cell_value(&cell.value, style, &locale);
+                let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
 
                 updated_cells.push(CellData {
                     row: target_row,
                     col: target_col,
                     display,
+                    overflow,
                     display_color: None,
                     formula: formula_display(&cell, &locale),
                     style_index: grid.effective_style_index(target_row, target_col),
@@ -6182,6 +6206,8 @@ pub fn remove_duplicates(
                     row: target_row,
                     col: target_col,
                     display: String::new(),
+                    // Empty: nothing to overflow, and text never marks.
+                    overflow: crate::api_types::OverflowClass::Text,
                     display_color: None,
                     formula: None,
                     style_index: 0,
@@ -6212,6 +6238,8 @@ pub fn remove_duplicates(
                 row,
                 col,
                 display: String::new(),
+                // Empty: nothing to overflow, and text never marks.
+                overflow: crate::api_types::OverflowClass::Text,
                 display_color: None,
                 formula: None,
                 style_index: 0,
@@ -7557,7 +7585,7 @@ pub fn fill_range(
 
                 // Build CellData for the response
                 let style = styles.get(grid.effective_style_index(tr, tc));
-                let display = format_cell_value(&new_cell.value, style, &locale);
+                let (display, overflow) = crate::format_cell_value_and_class(&new_cell.value, style, &locale);
 
                 let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(tr, tc)) {
                     (
@@ -7572,6 +7600,7 @@ pub fn fill_range(
                     row: tr,
                     col: tc,
                     display,
+                    overflow,
                     display_color: None,
                     formula: formula_display(&new_cell, &locale),
                     style_index: grid.effective_style_index(tr, tc),
@@ -7627,6 +7656,8 @@ pub fn fill_range(
                     row: tr,
                     col: tc,
                     display: String::new(),
+                    // Empty: nothing to overflow, and text never marks.
+                    overflow: crate::api_types::OverflowClass::Text,
                     display_color: None,
                     formula: None,
                     style_index: 0,
@@ -7749,14 +7780,14 @@ pub fn fill_range(
                                 grids[active_sheet].set_cell(*dep_row, *dep_col, updated_with_ast.clone());
                             }
                             let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
+                            let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_with_ast.value, dep_style, &locale);
                             let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
                                 (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
                             } else {
                                 (1, 1)
                             };
                             updated_cells.push(CellData {
-                                row: *dep_row, col: *dep_col, display: dep_display,
+                                row: *dep_row, col: *dep_col, display: dep_display, overflow: dep_overflow,
                                 display_color: None,
                                 formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
                                 style_index: grid.effective_style_index(*dep_row, *dep_col),
@@ -7775,14 +7806,14 @@ pub fn fill_range(
                         grids[active_sheet].set_cell(*dep_row, *dep_col, updated_dep.clone());
                     }
                     let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                    let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
+                    let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_dep.value, dep_style, &locale);
                     let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
                         (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
                     } else {
                         (1, 1)
                     };
                     updated_cells.push(CellData {
-                        row: *dep_row, col: *dep_col, display: dep_display,
+                        row: *dep_row, col: *dep_col, display: dep_display, overflow: dep_overflow,
                         display_color: None,
                         formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
                         style_index: grid.effective_style_index(*dep_row, *dep_col),

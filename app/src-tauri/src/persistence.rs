@@ -3708,6 +3708,7 @@ pub fn open_file(
                 col: *col,
                 formula: cell.formula_string().map(|f| format!("={}", f)),
                 display: format_cell_value(&cell.value, style, &locale),
+                overflow: crate::api_types::overflow_class_for(&cell.value, style),
                 display_color: None,
                 style_index: effective_style_index,
                 row_span,

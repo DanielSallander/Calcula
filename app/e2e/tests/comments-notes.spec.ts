@@ -23,15 +23,19 @@ import type { Page } from "@playwright/test";
  * committed goldens DO contain theirs — the notes golden holds 10 px of the
  * note triangle and 15 px of a neighbouring comment triangle.
  *
- * DO NOT verify that by counting #FF0000 / #7B68EE pixels. Those are the source
- * constants in `Review/rendering/triangleRenderer.ts`, but the renderer paints
- * through the skin/theme, so the literal constant never lands in a frame: the
- * triangles decode as `226,57,34` and `124,111,229`. An exact-constant count
- * reports "no indicator" on a frame that plainly has one, which is exactly the
- * wrong conclusion this comment used to record. Count near-matches, or diff the
- * frame against the same frame with the decoration unregistered — the technique
- * `gridRenderer/cellDecorationZOrder.test.ts` and the live journey assertion in
- * `journeys/correctness-cluster.spec.ts` (test 10) both use.
+ * THE CONSTANTS DO LAND EXACTLY, and this comment used to say the opposite.
+ * `Review/rendering/triangleRenderer.ts` paints NOTE_COLOR `#FF0000` and
+ * COMMENT_COLOR `#7B68EE` (note red, comment purple — that way round). Measured
+ * 2026-08-15 by decoding both the committed goldens and a fresh capture: the
+ * triangles read `255,0,0` and `123,104,238`, i.e. the source constants to the
+ * bit, with `255,127,127` / `170,165,240` on their antialiased edges.
+ *
+ * The `226,57,34` / `124,111,229` this comment used to warn about are those same
+ * two colours rasterized through a WIDE-GAMUT DISPLAY PROFILE — captures taken
+ * before `--force-color-profile=sRGB` was pinned (see e2e/webview2Args.mjs,
+ * which measures the same shift on StatusBar's `#217346`). With the pin in force
+ * an exact-constant count is correct and is the sharpest available check; it was
+ * the environment that had drifted, not the renderer.
  */
 async function announceAnnotationsChanged(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -43,6 +47,114 @@ async function announceAnnotationsChanged(page: Page): Promise<void> {
   // only lands after it resolves.
   await page.waitForTimeout(700);
 }
+
+/**
+ * Reclaim this file's own ground before anything is photographed.
+ *
+ * WHY (BUG-0074). The three goldens here photograph W1, X1 and W6, and for a
+ * while they photographed something no test in this file creates: an Excel
+ * TableStyleMedium2 header (`#4472C4` fill, white bold text) on W1 and a banded
+ * row (`#D9E2F3`) on W2 and W6. `tables.spec.ts` built a table over V1:W2 —
+ * inside the W-X ground this file's header declares — and never deleted it.
+ *
+ * A table is not cell state. Its colours come from the Table extension's STYLE
+ * INTERCEPTOR, applied per frame from the table DEFINITION, so `resetGrid`,
+ * `clear_range_with_options` and `new_file`-less resets all leave it painting.
+ * And because `tables` sorts after `comments-notes`, it could only ever reach
+ * this file on the SECOND run against one app process — which is why one build
+ * gave three answers: cold 3 fail, warm 6 pass / 1 fail, and an
+ * `--update-snapshots` pass on a warm app wrote the contamination as truth.
+ *
+ * The cause is fixed where it was caused (tables.spec.ts now stays in R-T and
+ * tears its tables down, and zz-workbook-residue.spec.ts fails the run if any
+ * table survives). This is the second line of defence: the golden should be a
+ * function of THIS test, not of who ran before it. It deletes any table
+ * overlapping W1:X10 and clears formatting there — both cheap, both idempotent,
+ * and neither touches comments or notes, which are separate state.
+ */
+async function reclaimTerritory(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const tauri = (window as any).__TAURI__;
+    if (!tauri?.core?.invoke) return;
+    const tables: Array<{
+      id: string; startRow: number; startCol: number; endRow: number; endCol: number;
+    }> = await tauri.core.invoke("get_all_tables", {}).catch(() => []);
+    // W1:X10 = rows 0..9, cols 22..23.
+    for (const t of tables) {
+      const overlaps =
+        t.startRow <= 9 && t.endRow >= 0 && t.startCol <= 23 && t.endCol >= 22;
+      if (overlaps) {
+        await tauri.core.invoke("delete_table", { tableId: t.id }).catch(() => {});
+      }
+    }
+    // `applyTo` is lower case — see e2e/__tests__/clearApplyToVocabulary.test.ts.
+    await tauri.core
+      .invoke("clear_range_with_options", {
+        params: { startRow: 0, startCol: 22, endRow: 9, endCol: 23, applyTo: "formats" },
+      })
+      .catch(() => {});
+    window.dispatchEvent(new Event("app:table-definitions-updated"));
+    window.dispatchEvent(new Event("grid:refresh"));
+  });
+  await page.waitForTimeout(300);
+}
+
+test.beforeEach(async ({ grid }) => {
+  await reclaimTerritory(grid.page);
+});
+
+/**
+ * THIS FILE'S OWN RESIDUE — the annotations it creates.
+ *
+ * Measured 2026-08-15: running this file twice against one app process failed
+ * FOUR tests the second time, and none of them on a screenshot. `add_comment`
+ * and `add_note` refuse a cell that already carries one, so
+ * `expect(result.success).toBe(true)` failed at W1, W2, W3 and X1 — the comments
+ * and notes the FIRST run left behind. Nothing in the suite removes an
+ * annotation: it is neither cell state (`clear_range_with_options` does not
+ * touch it) nor a floating object (the residue guard cannot see it).
+ *
+ * NOT done in `beforeEach`, deliberately. The `notes-cell-with-indicator` golden
+ * clips X1 with 4 px of padding, and those 4 px contain the right edge of W1 —
+ * including 15 px of the COMMENT triangle test 1 put there. That cross-test
+ * dependency is real and is documented at the top of this file; wiping
+ * annotations between tests would quietly delete it from the golden. The file's
+ * tests may depend on each other; the RUN may not depend on the previous run.
+ */
+test.afterAll(async ({ sharedPage }) => {
+  await sharedPage.evaluate(async () => {
+    const tauri = (window as any).__TAURI__;
+    if (!tauri?.core?.invoke) return;
+    // W1:X10 — rows 0..9, cols 22..23, the ground this file's header claims.
+    for (let row = 0; row <= 9; row++) {
+      for (const col of [22, 23]) {
+        const comment: { id?: string } | null = await tauri.core
+          .invoke("get_comment", { row, col })
+          .catch(() => null);
+        if (comment?.id) {
+          await tauri.core.invoke("delete_comment", { commentId: comment.id }).catch(() => {});
+        }
+        const note: { id?: string } | null = await tauri.core
+          .invoke("get_note", { row, col })
+          .catch(() => null);
+        if (note?.id) {
+          await tauri.core.invoke("delete_note", { noteId: note.id }).catch(() => {});
+        }
+      }
+    }
+    // `applyTo` is lower case — see e2e/__tests__/clearApplyToVocabulary.test.ts.
+    await tauri.core
+      .invoke("clear_range_with_options", {
+        params: { startRow: 0, startCol: 22, endRow: 9, endCol: 23, applyTo: "all" },
+      })
+      .catch(() => {});
+    // The backend forgot them; Review keeps its own indicator cache and only
+    // re-reads it on this event, so without it the triangles keep painting.
+    window.dispatchEvent(new CustomEvent("app:annotations-changed", { detail: {} }));
+    window.dispatchEvent(new Event("grid:refresh"));
+  });
+  await sharedPage.waitForTimeout(400);
+});
 
 test.describe("Comments", () => {
   test("add a comment to a cell", async ({ appPage, grid }) => {

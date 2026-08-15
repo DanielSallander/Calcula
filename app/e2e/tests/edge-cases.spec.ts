@@ -23,7 +23,7 @@ test.describe("Large data handling", () => {
       if (!tauri?.core?.invoke) return;
       await tauri.core
         .invoke("clear_range_with_options", {
-          params: { startRow: 0, startCol: 30, endRow: 199, endCol: 33, applyTo: "All" },
+          params: { startRow: 0, startCol: 30, endRow: 199, endCol: 33, applyTo: "all" },
         })
         .catch(() => {});
       window.dispatchEvent(new Event("grid:refresh"));

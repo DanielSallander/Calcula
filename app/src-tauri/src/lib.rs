@@ -844,6 +844,12 @@ pub struct CellDisplayResult {
     pub color: Option<String>,
     /// When set, the cell uses accounting layout with split rendering.
     pub accounting: Option<AccountingLayoutData>,
+    /// Which of Excel's overflow rules the VALUE behind `text` is entitled to.
+    ///
+    /// Carried here because this is the one place that holds both the
+    /// `CellValue` and the `CellStyle`; `text` alone has already discarded the
+    /// type and the sign that the decision needs (BUG-0066).
+    pub overflow: crate::api_types::OverflowClass,
 }
 
 /// Accounting layout data for split rendering (symbol left, value right).
@@ -856,6 +862,22 @@ pub struct AccountingLayoutData {
 
 pub fn format_cell_value(value: &CellValue, style: &CellStyle, locale: &engine::LocaleSettings) -> String {
     format_cell_value_with_color(value, style, locale).text
+}
+
+/// The display text AND the overflow class the value is entitled to.
+///
+/// Exists so that a `CellData` construction site cannot bind the two to
+/// DIFFERENT cells. The alternative -- `format_cell_value(&a.value, ..)` beside
+/// `overflow_class_for(&b.value, ..)` -- type-checks perfectly while describing
+/// two different values, and the mistake would show up only as a missing or
+/// spurious '####' in one workbook.
+pub fn format_cell_value_and_class(
+    value: &CellValue,
+    style: &CellStyle,
+    locale: &engine::LocaleSettings,
+) -> (String, crate::api_types::OverflowClass) {
+    let r = format_cell_value_with_color(value, style, locale);
+    (r.text, r.overflow)
 }
 
 /// Render a `CellError` the way the GRID renders it.
@@ -910,9 +932,19 @@ pub fn cell_error_display(e: &CellError) -> String {
 
 /// Format a cell value and return both display text and optional color override.
 /// The color is only populated for Custom formats that include [Color] tokens.
+/// THE overflow class is stamped here, in ONE place, rather than in each arm
+/// below: this function is the only one in the app that holds a `CellValue` and
+/// its `CellStyle` together, and an arm that forgot to stamp it would silently
+/// fall back to `Text` (no marker) for a value Excel refuses outright.
 pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle, locale: &engine::LocaleSettings) -> CellDisplayResult {
+    let mut result = format_cell_value_parts(value, style, locale);
+    result.overflow = crate::api_types::overflow_class_for(value, style);
+    result
+}
+
+fn format_cell_value_parts(value: &CellValue, style: &CellStyle, locale: &engine::LocaleSettings) -> CellDisplayResult {
     match value {
-        CellValue::Empty => CellDisplayResult { text: String::new(), color: None, accounting: None },
+        CellValue::Empty => CellDisplayResult { text: String::new(), color: None, accounting: None, overflow: Default::default() },
         CellValue::Number(n) => {
             let result = format_number_with_color(*n, &style.number_format, locale);
             if !matches!(style.number_format, NumberFormat::General) {
@@ -926,7 +958,7 @@ pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle, locale
             CellDisplayResult {
                 text: result.text,
                 color: result.color.map(|c| format_color_to_css(&c).to_string()),
-                accounting,
+                accounting, overflow: Default::default(),
             }
         },
         CellValue::Text(s) => {
@@ -934,28 +966,28 @@ pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle, locale
             CellDisplayResult {
                 text: result.text,
                 color: result.color.map(|c| format_color_to_css(&c).to_string()),
-                accounting: None,
+                accounting: None, overflow: Default::default(),
             }
         },
         CellValue::Boolean(b) => CellDisplayResult {
             text: if *b { "TRUE" } else { "FALSE" }.to_string(),
             color: None,
-            accounting: None,
+            accounting: None, overflow: Default::default(),
         },
         CellValue::Error(e) => CellDisplayResult {
             text: cell_error_display(e),
             color: None,
-            accounting: None,
+            accounting: None, overflow: Default::default(),
         },
         CellValue::List(items) => CellDisplayResult {
             text: format!("[List({})]", items.len()),
             color: None,
-            accounting: None,
+            accounting: None, overflow: Default::default(),
         },
         CellValue::Dict(entries) => CellDisplayResult {
             text: format!("[Dict({})]", entries.len()),
             color: None,
-            accounting: None,
+            accounting: None, overflow: Default::default(),
         },
     }
 }
@@ -4833,6 +4865,7 @@ pub fn run() {
             commands::apply_formatting_to_sheets,
             commands::apply_border_preset,
             commands::preview_number_format,
+            commands::get_ribbon_number_formats,
             commands::get_style_count,
             commands::insert_rows,
             commands::insert_columns,

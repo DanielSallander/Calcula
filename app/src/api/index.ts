@@ -1889,10 +1889,12 @@ export type {
 
 export {
   previewNumberFormat,
+  getRibbonNumberFormats,
 } from "./lib";
 
 export type {
   PreviewResult,
+  RibbonNumberFormat,
 } from "./lib";
 
 // ============================================================================

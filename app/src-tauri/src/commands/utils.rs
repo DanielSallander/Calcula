@@ -61,7 +61,7 @@ pub(crate) fn get_cell_internal_with_merge_hiding(
         return None;
     }
 
-    let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
+    let (display, display_color, formula, style_index, rich_text, accounting_layout, overflow) = if let Some(c) = cell {
         let style = styles.get(effective_style_index);
         let result = format_cell_value_with_color(&c.value, style, locale);
         let rt = c
@@ -78,16 +78,17 @@ pub(crate) fn get_cell_internal_with_merge_hiding(
         } else {
             c.formula_string().map(|f| format!("={}", localize_formula(&f, locale)))
         };
-        (result.text, result.color, localized_formula, effective_style_index, rt, acct)
+        (result.text, result.color, localized_formula, effective_style_index, rt, acct, result.overflow)
     } else {
         // Empty merge master, or an empty cell that a row/column style reaches
-        (String::new(), None, None, effective_style_index, None, None)
+        (String::new(), None, None, effective_style_index, None, None, crate::api_types::OverflowClass::Text)
     };
 
     Some(CellData {
         row,
         col,
         display,
+        overflow,
         display_color,
         formula,
         style_index,

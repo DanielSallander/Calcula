@@ -23,8 +23,12 @@ pub enum TextAlign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VerticalAlign {
     Top,
-    #[default]
     Middle,
+    /// Excel's default. A cell with no explicit vertical alignment sits on the
+    /// bottom edge of its row -- `Range.VerticalAlignment` returns `xlBottom`
+    /// for a fresh cell, and OOXML omits the `vertical` attribute entirely,
+    /// which readers resolve to bottom (see `xlsx_style_reader`).
+    #[default]
     Bottom,
 }
 
@@ -355,7 +359,7 @@ impl CellStyle {
             font: FontStyle::default(),
             fill: Fill::None,
             text_align: TextAlign::General,
-            vertical_align: VerticalAlign::Middle,
+            vertical_align: VerticalAlign::Bottom,
             number_format: NumberFormat::General,
             borders: Borders::default(),
             wrap_text: false,
@@ -696,6 +700,104 @@ mod tests {
         let default = registry.get(0);
         assert!(!default.font.bold);
         assert!(!default.font.italic);
+    }
+
+    /// EXCEL PARITY: the document default vertical alignment is BOTTOM.
+    ///
+    /// Excel's default cell is `Horizontal: General, Vertical: Bottom`, and it
+    /// is not configurable. The schema declares no default for
+    /// `CT_CellAlignment/@vertical`; Excel's behaviour for an ABSENT attribute
+    /// is bottom, which is why `xlsx_style_reader` already resolved a missing
+    /// `vertical` to `Bottom` while THIS constructor said `Middle`. Calcula
+    /// therefore rendered every unstyled cell half a row higher than Excel, and
+    /// an imported .xlsx disagreed with a native workbook about the same
+    /// "unset" cell.
+    ///
+    /// FOUR authorities have to agree or a cell renders one way and reports
+    /// another, so all four are pinned in one place:
+    ///   - `CellStyle::new()`         -- what a fresh style is
+    ///   - `CellStyle::default()`     -- the Default impl that delegates to it
+    ///   - `VerticalAlign::default()` -- the derived enum default, which is
+    ///     where any `#[serde(default)]` or `..Default::default()` lands
+    ///   - `StyleRegistry::new().get(0)` -- style index 0, the entry every
+    ///     unstyled cell in every sheet points at.
+    #[test]
+    fn the_document_default_vertical_alignment_is_bottom_like_excel() {
+        assert_eq!(
+            CellStyle::new().vertical_align,
+            VerticalAlign::Bottom,
+            "CellStyle::new() is the authority for the document default"
+        );
+        assert_eq!(
+            CellStyle::default().vertical_align,
+            VerticalAlign::Bottom,
+            "the Default impl must not drift from CellStyle::new()"
+        );
+        assert_eq!(
+            VerticalAlign::default(),
+            VerticalAlign::Bottom,
+            "the derived enum default is where a serde-defaulted field lands"
+        );
+        assert_eq!(
+            StyleRegistry::new().get(0).vertical_align,
+            VerticalAlign::Bottom,
+            "style index 0 is what every unstyled cell references"
+        );
+    }
+
+    /// ONLY THE DEFAULT MOVED: an EXPLICIT `Middle` is still a real, distinct,
+    /// renderable state.
+    ///
+    /// The failure this forbids is the cheap way to "implement" the parity
+    /// change -- folding Middle into the default so a user who deliberately
+    /// centred a cell silently loses it. An explicitly-middle style must NOT
+    /// dedupe onto index 0, must survive a registry round-trip, and must keep
+    /// reporting `Middle`.
+    #[test]
+    fn an_explicit_middle_alignment_is_distinct_from_the_default_and_survives() {
+        let explicit_middle = CellStyle::new().with_vertical_align(VerticalAlign::Middle);
+        assert_ne!(
+            explicit_middle,
+            CellStyle::new(),
+            "an explicitly-middle cell is not the default cell"
+        );
+
+        let mut registry = StyleRegistry::new();
+        let idx = registry.get_or_create(explicit_middle);
+        assert_ne!(idx, 0, "explicit Middle must not collapse onto the default index");
+        assert_eq!(registry.get(idx).vertical_align, VerticalAlign::Middle);
+        assert_eq!(
+            registry.get(0).vertical_align,
+            VerticalAlign::Bottom,
+            "adding an explicit Middle must not disturb the default"
+        );
+
+        // Through the exact serialization the .cala style registry uses.
+        let json = serde_json::to_string(registry.all_styles()).unwrap();
+        let restored: Vec<CellStyle> = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored[0].vertical_align, VerticalAlign::Bottom);
+        assert_eq!(restored[idx].vertical_align, VerticalAlign::Middle);
+    }
+
+    /// The style a default cell SAVES must be bottom, not a stamped Middle.
+    ///
+    /// The concrete risk the parity change carries: some producer keeps writing
+    /// `Middle` on the way out, so every NEW document freezes the old default
+    /// into its style registry and reopens looking like the pre-change build
+    /// even though the constructor moved. `styles/registry.json` is a plain
+    /// serde dump of `all_styles()`, so the bytes are checked directly.
+    #[test]
+    fn a_freshly_saved_default_style_carries_bottom_in_its_serialized_bytes() {
+        let registry = StyleRegistry::new();
+        let json = serde_json::to_string(registry.all_styles()).unwrap();
+        assert!(
+            json.contains("\"vertical_align\":\"Bottom\""),
+            "the saved default style must say Bottom; got {json}"
+        );
+        assert!(
+            !json.contains("\"vertical_align\":\"Middle\""),
+            "a brand-new registry must not stamp Middle anywhere; got {json}"
+        );
     }
 
     // REGRESSION: get_or_create_explicit's duplicate default collapsed when the

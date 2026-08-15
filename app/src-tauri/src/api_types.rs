@@ -98,6 +98,74 @@ pub struct AccountingLayout {
     pub value: String,
 }
 
+/// Which of Excel's overflow rules a cell's VALUE is entitled to.
+///
+/// `CellData` carries only a formatted `display` string, and that string has
+/// already thrown away the two things Excel's overflow rules ask about: the
+/// value's TYPE and, for a date, its SIGN. The renderer can infer the type from
+/// the format plus the text and is exact for almost every cell, but two cases
+/// are not recoverable downstream at all:
+///
+///   - a NEGATIVE serial under a Date or Time format. Excel refuses it with
+///     '####' at EVERY width, because a serial below zero has no representation
+///     in the 1900 date system, and Microsoft's remedy is "verify that dates and
+///     times are positive values" rather than "widen the column". The engine
+///     instead renders `-1.0` as "1900-01-01" and `-0.5` as "12:00:00" -- values
+///     a user cannot tell from real ones. By the time the renderer sees
+///     "1900-01-01" the negativity is gone (BUG-0066).
+///   - TEXT stored in a cell carrying an explicitly numeric format. The
+///     inference reads it as numeric if it contains a digit, and would mark a
+///     pasted header in a Date column.
+///
+/// `Text` is the default and the FAIL-SAFE direction: text never shows the
+/// marker, so a construction site that gets this wrong degrades to the
+/// pre-BUG-0066 behaviour rather than to a wrong '####'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum OverflowClass {
+    /// Spills into absolutely-empty neighbours; clipped mid-glyph otherwise.
+    #[default]
+    Text,
+    /// Cannot spill. Shows '####' when the formatted value does not fit.
+    Numeric,
+    /// Cannot spill and cannot be shown AT ALL: '####' at every width.
+    Unrepresentable,
+}
+
+/// The overflow class of a value under a style, decided where BOTH are in hand.
+///
+/// This is the ONE place the decision is made. It is deliberately not a method
+/// on `CellValue` (which has no style) nor on `CellStyle` (which has no value).
+pub fn overflow_class_for(
+    value: &engine::CellValue,
+    style: &engine::CellStyle,
+) -> OverflowClass {
+    use engine::{CellValue, NumberFormat};
+    let is_date_or_time = matches!(
+        style.number_format,
+        NumberFormat::Date { .. } | NumberFormat::Time { .. }
+    );
+    match value {
+        // Excel's Text format shows the value exactly as typed and does not
+        // evaluate it as a number, so digits under `@` still spill like prose.
+        CellValue::Number(n) => {
+            if is_date_or_time && *n < 0.0 {
+                OverflowClass::Unrepresentable
+            } else if matches!(&style.number_format, NumberFormat::Custom { format } if format == "@")
+            {
+                OverflowClass::Text
+            } else {
+                OverflowClass::Numeric
+            }
+        }
+        // An error literal cannot spill either: Excel marks a too-narrow one
+        // exactly as it marks a number.
+        CellValue::Error(_) => OverflowClass::Numeric,
+        CellValue::Boolean(_) => OverflowClass::Numeric,
+        _ => OverflowClass::Text,
+    }
+}
+
 /// Cell data returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +173,11 @@ pub struct CellData {
     pub row: u32,
     pub col: u32,
     pub display: String,
+    /// Which of Excel's overflow rules this cell's VALUE is entitled to.
+    /// Defaulted to `Text` (the fail-safe direction) and omitted from the wire
+    /// when it is the default, so text cells cost nothing extra.
+    #[serde(default, skip_serializing_if = "OverflowClass::is_default")]
+    pub overflow: OverflowClass,
     /// Optional color override from number format (e.g., [Red] in custom format).
     /// CSS hex color string like "#ff0000". None when no format color applies.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +202,13 @@ pub struct CellData {
     /// When present, the renderer draws symbol at left edge and value at right edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_layout: Option<AccountingLayout>,
+}
+
+impl OverflowClass {
+    /// `skip_serializing_if` hook: the default costs no bytes on the wire.
+    pub fn is_default(&self) -> bool {
+        matches!(self, OverflowClass::Text)
+    }
 }
 
 fn default_span() -> u32 {
@@ -2177,6 +2257,12 @@ pub struct LocaleSettingsData {
     pub thousands_separator: String,
     pub list_separator: String,
     pub date_format: String,
+    /// OS long-date pattern. Excel's Long Date entry is `[$-x-sysdate]`, i.e.
+    /// "whatever the region says"; this is that pattern for this locale.
+    pub long_date_format: String,
+    /// OS long-time pattern (with seconds). Excel's Time entry is
+    /// `[$-x-systime]`.
+    pub time_format: String,
     pub currency_symbol: String,
     pub currency_position: String,
 }
@@ -2190,6 +2276,8 @@ impl From<&engine::LocaleSettings> for LocaleSettingsData {
             thousands_separator: locale.thousands_separator.to_string(),
             list_separator: locale.list_separator.to_string(),
             date_format: locale.date_format.clone(),
+            long_date_format: locale.long_date_format.clone(),
+            time_format: locale.time_format.clone(),
             currency_symbol: locale.currency_symbol.clone(),
             currency_position: match locale.currency_position {
                 engine::LocaleCurrencyPosition::Before => "before".to_string(),
@@ -2446,4 +2534,160 @@ pub struct SheetDisplayFlagsPatch {
     pub show_formulas: Option<bool>,
     pub view_mode: Option<String>,
     pub display_headings: Option<bool>,
+}
+
+#[cfg(test)]
+mod overflow_class_tests {
+    use super::*;
+    use engine::{CellError, CellStyle, CellValue, NumberFormat};
+
+    fn dated(pattern: &str) -> CellStyle {
+        CellStyle::new().with_number_format(NumberFormat::Date { format: pattern.to_string() })
+    }
+    fn timed(pattern: &str) -> CellStyle {
+        CellStyle::new().with_number_format(NumberFormat::Time { format: pattern.to_string() })
+    }
+
+    /// BUG-0066. The rung that no renderer-side rule can reach: Excel refuses a
+    /// negative serial under a Date or Time format at EVERY width, because a
+    /// serial below zero has no representation in the 1900 date system.
+    ///
+    /// The engine renders -1.0 as "1900-01-01" and -0.5 as "12:00:00" -- values
+    /// a user cannot tell from real ones -- so by the time the renderer holds
+    /// the display string the negativity is gone. It has to be decided HERE.
+    #[test]
+    fn a_negative_serial_under_a_date_or_time_format_is_unrepresentable() {
+        for pattern in ["YYYY-MM-DD", "yyyy-mm-dd", "mm/dd/yyyy"] {
+            assert_eq!(
+                overflow_class_for(&CellValue::Number(-1.0), &dated(pattern)),
+                OverflowClass::Unrepresentable,
+                "negative date serial under {pattern}"
+            );
+        }
+        assert_eq!(
+            overflow_class_for(&CellValue::Number(-0.5), &timed("hh:mm:ss")),
+            OverflowClass::Unrepresentable,
+        );
+    }
+
+    /// The refusal is SCOPED to date/time formats. Excel shows a negative
+    /// number under General or Number perfectly normally -- it is the date
+    /// interpretation that has no answer, not the sign.
+    #[test]
+    fn a_negative_number_under_a_non_date_format_is_an_ordinary_numeric() {
+        assert_eq!(
+            overflow_class_for(&CellValue::Number(-1.0), &CellStyle::new()),
+            OverflowClass::Numeric,
+        );
+        let two_dp = CellStyle::new().with_number_format(NumberFormat::Number {
+            decimal_places: 2,
+            use_thousands_separator: false,
+        });
+        assert_eq!(
+            overflow_class_for(&CellValue::Number(-1.0), &two_dp),
+            OverflowClass::Numeric,
+        );
+    }
+
+    /// Zero is a real date (the 1900 system's day 0) and every positive serial
+    /// is representable, so neither may be refused.
+    #[test]
+    fn zero_and_positive_serials_under_a_date_format_are_ordinary_numerics() {
+        assert_eq!(
+            overflow_class_for(&CellValue::Number(0.0), &dated("YYYY-MM-DD")),
+            OverflowClass::Numeric,
+        );
+        assert_eq!(
+            overflow_class_for(&CellValue::Number(45306.0), &dated("YYYY-MM-DD")),
+            OverflowClass::Numeric,
+        );
+    }
+
+    /// Excel's Text format shows the value exactly as typed and does not
+    /// evaluate it as a number, so its digits still spill like prose and must
+    /// never be marked. This is the second half BUG-0066 closes: the renderer's
+    /// inference reads "1234567890" under `@` by its digits alone.
+    #[test]
+    fn digits_under_the_text_format_stay_text() {
+        let text_fmt = CellStyle::new()
+            .with_number_format(NumberFormat::Custom { format: "@".to_string() });
+        assert_eq!(
+            overflow_class_for(&CellValue::Number(1234567890.0), &text_fmt),
+            OverflowClass::Text,
+        );
+        assert_eq!(
+            overflow_class_for(&CellValue::Text("hello".into()), &text_fmt),
+            OverflowClass::Text,
+        );
+    }
+
+    /// Text stored in a cell carrying an explicitly numeric format is the case
+    /// the renderer's inference gets WRONG (it reads a digit and says numeric),
+    /// and it is exactly what the transported class fixes: a pasted header in a
+    /// Date column is text and must not be marked.
+    #[test]
+    fn text_under_a_numeric_format_is_text_not_a_marked_number() {
+        assert_eq!(
+            overflow_class_for(&CellValue::Text("Q1 2024".into()), &dated("YYYY-MM-DD")),
+            OverflowClass::Text,
+        );
+    }
+
+    /// Errors and booleans cannot spill: Excel marks a too-narrow one exactly
+    /// as it marks a number.
+    #[test]
+    fn errors_and_booleans_cannot_spill() {
+        assert_eq!(
+            overflow_class_for(&CellValue::Error(CellError::Div0), &CellStyle::new()),
+            OverflowClass::Numeric,
+        );
+        assert_eq!(
+            overflow_class_for(&CellValue::Boolean(true), &CellStyle::new()),
+            OverflowClass::Numeric,
+        );
+    }
+
+    /// An empty cell has nothing to overflow, and Text is the fail-safe class.
+    #[test]
+    fn empty_is_text_and_text_is_the_serde_default() {
+        assert_eq!(
+            overflow_class_for(&CellValue::Empty, &dated("YYYY-MM-DD")),
+            OverflowClass::Text,
+        );
+        assert_eq!(OverflowClass::default(), OverflowClass::Text);
+        assert!(OverflowClass::Text.is_default());
+        assert!(!OverflowClass::Numeric.is_default());
+        assert!(!OverflowClass::Unrepresentable.is_default());
+    }
+
+    /// The wire spelling is camelCase and the default costs no bytes -- the
+    /// same struct-level `rename_all` discipline every other API type follows.
+    #[test]
+    fn the_wire_shape_is_camel_case_and_the_default_is_omitted() {
+        let numeric = serde_json::to_string(&OverflowClass::Numeric).unwrap();
+        assert_eq!(numeric, "\"numeric\"");
+        let unrep = serde_json::to_string(&OverflowClass::Unrepresentable).unwrap();
+        assert_eq!(unrep, "\"unrepresentable\"");
+
+        let text_cell = CellData {
+            row: 0,
+            col: 0,
+            display: "hi".into(),
+            overflow: OverflowClass::Text,
+            display_color: None,
+            formula: None,
+            style_index: 0,
+            row_span: 1,
+            col_span: 1,
+            sheet_index: None,
+            rich_text: None,
+            accounting_layout: None,
+        };
+        let json = serde_json::to_string(&text_cell).unwrap();
+        assert!(!json.contains("overflow"), "default must not reach the wire: {json}");
+
+        let marked = CellData { overflow: OverflowClass::Unrepresentable, ..text_cell };
+        let json = serde_json::to_string(&marked).unwrap();
+        assert!(json.contains("\"overflow\":\"unrepresentable\""), "{json}");
+    }
 }

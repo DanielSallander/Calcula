@@ -34,6 +34,10 @@ import {
   EMPTY_DOCUMENT_GOLDENS,
   STALE_PRODUCT_STATE_GOLDENS,
   PRESSED_ACCENT_FLOOR,
+  PRESSED_ACCENT_MEDIAN_BAND,
+  DOCUMENT_DEFAULT_VERTICAL_ALIGN,
+  DEFAULT_LIT_ALIGNMENT_TOGGLE,
+  readPressedAccentGeometry,
   type GoldenReading,
   type MisRecordedCorpus,
   type RibbonStateReading,
@@ -74,10 +78,17 @@ const readings: GoldenReading[] = walkPngs(E2E_ROOT)
  * contain a Home ribbon can hold a latched toggle -- and a different remedy.
  */
 const ribbonStates: RibbonStateReading[] = walkPngs(E2E_ROOT)
-  .map((full) => ({
-    file: relative(E2E_ROOT, full).split(sep).join("/"),
-    pressedAccentPixels: readPressedAccentFill(decodePng(readFileSync(full))),
-  }))
+  .map((full) => {
+    // BOTH axes off the same decode: how much fill, and WHERE it is. The
+    // second one is what tells Bottom Align from Center Vertically -- the
+    // count cannot, because they are the same box in the same row.
+    const g = readPressedAccentGeometry(decodePng(readFileSync(full)));
+    return {
+      file: relative(E2E_ROOT, full).split(sep).join("/"),
+      pressedAccentPixels: g.pixels,
+      pressedAccentMedianX: g.medianX,
+    };
+  })
   .sort((a, b) => a.file.localeCompare(b.file));
 
 describe("the committed golden corpus", () => {
@@ -442,12 +453,77 @@ function beforeEachOf(source: string): string {
 
 describe("the golden corpus and the build that produced it", () => {
   it("shows the DEFAULT-STATE Home tab on every golden taken on a brand-new workbook", () => {
-    // Not "unlit": since BUG-0062 the fixed build lights exactly one toggle
-    // (Center Vertically, the document default) on an empty workbook, so each
-    // declared golden pins the reading its file must measure. Off the band in
-    // EITHER direction is a build this tree no longer produces.
+    // Not "unlit": since BUG-0062 the fixed build lights exactly one toggle on
+    // an empty workbook -- BOTTOM ALIGN since the 2026-08-15 Excel-parity
+    // change (§21c item 2) moved the document default from
+    // `VerticalAlign::Middle` to `Bottom`. Each declared golden pins BOTH the
+    // amount of pressed-accent fill and WHERE it sits, because the two toggles
+    // are the same box in the same row and differ only by 33 px of x.
+    //
+    // Off the band in EITHER direction, or at the wrong x, is a build this tree
+    // no longer produces. EXPECTED RED until the empty-document goldens are
+    // re-captured against the parity build: they still photograph Center
+    // Vertically at x=427. That is the axis working -- it names the five files
+    // and the mechanism instead of leaving five mystery diffs for the
+    // comparator to report as "some pixels moved".
     const message = describeStaleRibbonState(ribbonStates);
     expect(message, message ?? "").toBeNull();
+  });
+
+  it("pins the SAME default the product actually ships, read out of the product's own sources", () => {
+    // THE GUARD THE PREVIOUS RE-AIM DID NOT HAVE, and the reason it went stale
+    // in the most expensive way available: its comment said the fixed build
+    // lights Center Vertically "the same way Excel shows Bottom Align pressed
+    // on a fresh sheet" -- documenting a coincidence of ARITY (one lit toggle
+    // on each side) as if it were a match of IDENTITY. When the document
+    // default moved to Excel's Bottom on 2026-08-15, that sentence became
+    // false and nothing in the tree said so.
+    //
+    // So the corpus's claim about the product is now CHECKED against the
+    // product. Four authorities, one number: whichever one a future pass
+    // changes, this fails and names the others.
+    const repoRoot = join(process.cwd(), "..");
+    const read = (p: string) => readFileSync(join(repoRoot, ...p.split("/")), "utf8");
+
+    // 1. The Rust authority: CellStyle::new().
+    const styleRs = read("core/engine/src/style.rs");
+    const rustDefault = /vertical_align:\s*VerticalAlign::(\w+),/.exec(styleRs)?.[1];
+    expect(
+      rustDefault?.toLowerCase(),
+      "core/engine/src/style.rs CellStyle::new() is the authority for the " +
+        "document default; goldenCorpus.ts describes a different one",
+    ).toBe(DOCUMENT_DEFAULT_VERTICAL_ALIGN);
+
+    // 2. The derived enum default, which is where a serde-defaulted field lands.
+    expect(
+      /#\[default\]\s*\r?\n\s*(\w+),/.exec(
+        styleRs.slice(styleRs.indexOf("pub enum VerticalAlign")),
+      )?.[1]?.toLowerCase(),
+      "VerticalAlign's #[default] variant must agree with CellStyle::new()",
+    ).toBe(DOCUMENT_DEFAULT_VERTICAL_ALIGN);
+
+    // 3. The TypeScript mirror the frontend renders from.
+    expect(
+      /verticalAlign:\s*"(\w+)"/.exec(read("app/src/core/types/types.ts"))?.[1],
+      "app/src/core/types/types.ts DEFAULT_STYLE mirrors the Rust default; a " +
+        "disagreement renders one way and reports another",
+    ).toBe(DOCUMENT_DEFAULT_VERTICAL_ALIGN);
+
+    // 4. The renderer's OWN fallback, which fires for any style object that
+    //    omits the field and is a second, independent default.
+    expect(
+      /const vAlign = baseCellStyle\.verticalAlign \|\| "(\w+)";/.exec(
+        read("app/src/core/lib/gridRenderer/rendering/cells.ts"),
+      )?.[1],
+      "the canvas renderer's fallback is a SECOND default; leaving it behind " +
+        "gives a build where Rust says one thing and the pixels say another",
+    ).toBe(DOCUMENT_DEFAULT_VERTICAL_ALIGN);
+
+    // And the toggle this corpus expects to see lit really is a ribbon item.
+    expect(
+      read("app/extensions/BuiltIn/HomeTab/homeTabConfig.ts"),
+      `${DEFAULT_LIT_ALIGNMENT_TOGGLE} is not a Home-tab item any more`,
+    ).toContain(`id: "${DEFAULT_LIT_ALIGNMENT_TOGGLE}"`);
   });
 
   it("measures a latched toggle at all - the reader is not returning zero everywhere", () => {
@@ -541,12 +617,14 @@ describe("the stale-product-state detector actually fires", () => {
       spec: "visual/v.spec.ts",
       capture: "fresh",
       expectedPressedAccent: 546,
+      expectedPressedAccentMedianX: 460,
     },
     {
       file: "visual/__screenshots__/v.spec.ts/known.png",
       spec: "visual/v.spec.ts",
       capture: "known",
       expectedPressedAccent: 546,
+      expectedPressedAccentMedianX: 460,
     },
   ];
 
@@ -554,8 +632,16 @@ describe("the stale-product-state detector actually fires", () => {
     expect(
       describeStaleRibbonState(
         [
-          { file: "visual/__screenshots__/v.spec.ts/fresh.png", pressedAccentPixels: 546 },
-          { file: "visual/__screenshots__/v.spec.ts/known.png", pressedAccentPixels: 533 },
+          {
+            file: "visual/__screenshots__/v.spec.ts/fresh.png",
+            pressedAccentPixels: 546,
+            pressedAccentMedianX: 460,
+          },
+          {
+            file: "visual/__screenshots__/v.spec.ts/known.png",
+            pressedAccentPixels: 533,
+            pressedAccentMedianX: 459,
+          },
         ],
         population,
         [],
@@ -580,6 +666,54 @@ describe("the stale-product-state detector actually fires", () => {
     );
     expect(latched).toContain("fresh.png");
     expect(latched).toContain("BUG-0028");
+  });
+
+  it("fires on the RIGHT count at the WRONG position - a golden of the pre-parity build", () => {
+    // THE CASE THE COUNT AXIS ALONE COULD NEVER SEE, and the reason this axis
+    // was re-aimed rather than just re-worded (§21c item 2). Before the parity
+    // change the one lit toggle was Center Vertically, 33 px to the LEFT:
+    // identical box, identical fill, identical row, identical PIXEL COUNT.
+    // A corpus still holding that picture is a corpus of a build this tree no
+    // longer produces, and until the median was pinned it passed.
+    const preParity = describeStaleRibbonState(
+      [
+        {
+          file: "visual/__screenshots__/v.spec.ts/fresh.png",
+          pressedAccentPixels: 546,
+          pressedAccentMedianX: 427,
+        },
+      ],
+      population,
+      [],
+    );
+    expect(preParity).toContain("fresh.png");
+    expect(preParity).toContain("WRONG TOGGLE");
+    expect(preParity).toContain("427");
+    expect(preParity).toContain("BOTTOM ALIGN");
+
+    // ... and it does NOT fire for the same count at the RIGHT position, nor
+    // for jitter inside the band. A guard that fired on everything would be
+    // no guard at all.
+    for (const medianX of [460, 460 - PRESSED_ACCENT_MEDIAN_BAND, 460 + PRESSED_ACCENT_MEDIAN_BAND]) {
+      expect(
+        describeStaleRibbonState(
+          [
+            {
+              file: "visual/__screenshots__/v.spec.ts/fresh.png",
+              pressedAccentPixels: 546,
+              pressedAccentMedianX: medianX,
+            },
+          ],
+          population,
+          [],
+        ),
+        `median x=${medianX} is inside the band and must not fire`,
+      ).toBeNull();
+    }
+
+    // The band is narrower than the 33 px button pitch, or the axis is back to
+    // being unable to tell one toggle from its neighbour.
+    expect(PRESSED_ACCENT_MEDIAN_BAND).toBeLessThan(33);
   });
 
   it("names the stray FILE, its count, and why the other two axes cannot see it", () => {
@@ -663,15 +797,44 @@ describe("the pressed-accent reader", () => {
     expect(readPressedAccentFill(solid([16, 185, 129], 100))).toBe(0);
   });
 
+  it("locates the fill with a statistic the ribbon's stray antialiasing cannot move", () => {
+    // A 1280-wide row: one 30-px run of fill (the toggle box) plus scattered
+    // single pixels of the same colour spread across the whole ribbon, which
+    // is what the real goldens hold (measured: 29 stray px from x=39 to
+    // x=985 around a 546-px box).
+    const w = 1280;
+    const buf = new Uint8Array(w * 3);
+    const paint = (x: number) => {
+      buf[x * 3] = 222;
+      buf[x * 3 + 1] = 245;
+      buf[x * 3 + 2] = 237;
+    };
+    for (let x = 445; x < 475; x++) paint(x);
+    for (const x of [39, 80, 140, 300, 700, 900, 985]) paint(x);
+    const g = readPressedAccentGeometry({ width: w, height: 1, rgb: buf });
+    expect(g.pixels).toBe(37);
+    // The MEAN of those x values is ~437 - eight pixels off, and drifting with
+    // however much iconography happens to be in frame. The MEDIAN sits inside
+    // the box.
+    expect(g.medianX).toBeGreaterThanOrEqual(445);
+    expect(g.medianX).toBeLessThan(475);
+    expect(g.medianY).toBe(0);
+
+    // Nothing matching at all abstains rather than reporting a coordinate.
+    const blank = readPressedAccentGeometry({ width: 4, height: 1, rgb: new Uint8Array(12) });
+    expect(blank).toEqual({ pixels: 0, medianX: null, medianY: null });
+  });
+
   it("reads the real pair: a COVERED-toggle capture is dark, a VISIBLE one is lit", () => {
     // THIS CASE HAS BEEN RE-ANCHORED TWICE, both times because the state it
     // leaned on was a defect's face and the defect got fixed. First it read
     // the BUG-0029 file as its lit example (re-recorded 2026-08-12). Then it
     // read `core-empty-grid` as its UNLIT example — and BUG-0062 fixed the
     // ribbon to report the DOCUMENT DEFAULT style for empty cells, so an
-    // empty workbook now legitimately lights Center Vertically (the default
-    // is VerticalAlign::Middle) and there is no "unlit empty workbook" in
-    // the corpus at all any more.
+    // empty workbook now legitimately lights ONE alignment toggle -- Bottom
+    // Align since the 2026-08-15 Excel-parity change moved the document
+    // default from VerticalAlign::Middle to Bottom -- and there is no "unlit
+    // empty workbook" in the corpus at all any more.
     //
     // The permanent pair is geometric, not behavioural: `menu-data-open`
     // photographs the SAME empty workbook with the Data menu covering the

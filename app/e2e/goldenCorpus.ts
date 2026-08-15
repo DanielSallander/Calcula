@@ -603,13 +603,31 @@ export function describeProfileSplit(
 // THE TARGET MOVED ONCE, DELIBERATELY (2026-08-14, open-decisions §21).
 // BUG-0028's fix cleared to a NULL style, which was its own defect one layer
 // down: the font box fell back to "system-ui" and every toggle went dark,
-// where the document default (style 0, Calibri 11, VerticalAlign::Middle) is
-// what an empty cell truly carries. BUG-0062 made the ribbon report that
-// default, so the CURRENT build paints exactly ONE lit toggle (Center
-// Vertically, ~546 px) on a brand-new workbook. "Unlit" stopped being the
+// where the document default (style 0, Calibri 11) is what an empty cell truly
+// carries. BUG-0062 made the ribbon report that default, so the build paints
+// exactly ONE lit toggle on a brand-new workbook. "Unlit" stopped being the
 // fixed build's face; every empty-document golden was re-recorded with the
 // diff attributed, and the axis below pins each file's expected reading
 // instead of asserting zero.
+//
+// THE TARGET MOVED AGAIN, DELIBERATELY (2026-08-15, open-decisions §21c item
+// 2). Which toggle that one lit box IS has changed. Calcula's document default
+// carried `VerticalAlign::Middle`; Excel's is `Bottom` (Excel's default cell is
+// Horizontal: General, Vertical: Bottom, and `Range.VerticalAlignment` returns
+// `xlBottom` for a fresh cell), so `CellStyle::new()` now carries
+// `VerticalAlign::Bottom` and the lit toggle is BOTTOM ALIGN, not Center
+// Vertically. Horizontal stays unlit either way: a default cell is
+// `TextAlign::General` and the ribbon has no General button to light.
+//
+// THAT CHANGE IS INVISIBLE TO A PIXEL COUNT, WHICH IS WHY THIS AXIS NOW READS
+// GEOMETRY TOO. The two boxes are the same 30x26 at the same y, 33 px apart in
+// the alignment cluster (measured live: alignTop x=379, alignMiddle x=412,
+// alignBottom x=445, wrapText x=478, each 30 wide). A count-only axis reads
+// ~546 for either one and cannot tell a correct golden from a golden of the
+// previous build. So each entry also pins the MEDIAN X of the fill, and the
+// median -- not the mean or the bounding box -- because it has a 50% breakdown
+// point: the ~29 stray anti-aliasing pixels scattered across the whole ribbon
+// width cannot move it, while the box moving one button over does.
 //
 // HOW THE STATE IS READ OFF THE BYTES. A latched Home-tab toggle paints
 // `rgba(16,185,129,0.14)` over white -- (222,245,237) -- inside a 30x26 box.
@@ -637,20 +655,54 @@ const PRESSED_ACCENT_TOLERANCE = 3;
  */
 export const PRESSED_ACCENT_FLOOR = 200;
 
-/** Count the latched-toggle fill in a decoded golden. PURE. */
-export function readPressedAccentFill(image: DecodedPng): number {
+/**
+ * Where the latched-toggle fill IS, not just how much of it there is.
+ *
+ * `medianX` / `medianY` are the medians of the matching pixels' coordinates,
+ * and the median is the whole point: the ribbon's own iconography contributes
+ * ~29 stray anti-aliased pixels spread from x=39 to x=985 in a 1280-wide
+ * golden, which would drag a MEAN by tens of pixels and would blow a BOUNDING
+ * BOX out to the full ribbon width. A statistic with a 50% breakdown point sits
+ * inside the 30x26 box as long as the box is the majority of the fill, which is
+ * exactly the condition `PRESSED_ACCENT_FLOOR` already tests.
+ *
+ * Both are `null` when nothing matched at all.
+ */
+export interface PressedAccentGeometry {
+  pixels: number;
+  medianX: number | null;
+  medianY: number | null;
+}
+
+/** Count AND locate the latched-toggle fill in a decoded golden. PURE. */
+export function readPressedAccentGeometry(image: DecodedPng): PressedAccentGeometry {
   const [tr, tg, tb] = PRESSED_ACCENT_FILL;
-  let pixels = 0;
+  const xs: number[] = [];
+  const ys: number[] = [];
   for (let i = 0; i < image.rgb.length; i += 3) {
     if (
       Math.abs(image.rgb[i] - tr) <= PRESSED_ACCENT_TOLERANCE &&
       Math.abs(image.rgb[i + 1] - tg) <= PRESSED_ACCENT_TOLERANCE &&
       Math.abs(image.rgb[i + 2] - tb) <= PRESSED_ACCENT_TOLERANCE
     ) {
-      pixels += 1;
+      const p = i / 3;
+      xs.push(p % image.width);
+      ys.push(Math.floor(p / image.width));
     }
   }
-  return pixels;
+  if (xs.length === 0) return { pixels: 0, medianX: null, medianY: null };
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+  return {
+    pixels: xs.length,
+    medianX: xs[xs.length >> 1],
+    medianY: ys[ys.length >> 1],
+  };
+}
+
+/** Count the latched-toggle fill in a decoded golden. PURE. */
+export function readPressedAccentFill(image: DecodedPng): number {
+  return readPressedAccentGeometry(image).pixels;
 }
 
 /** One golden's latched-toggle measurement. */
@@ -658,25 +710,60 @@ export interface RibbonStateReading {
   /** Path relative to `app/e2e`, forward-slashed. */
   file: string;
   pressedAccentPixels: number;
+  /**
+   * Median x of the fill, or null when the file holds none. Optional so the
+   * synthetic populations in the self-test can exercise the count axis alone,
+   * but every real reading carries it.
+   */
+  pressedAccentMedianX?: number | null;
 }
+
+/**
+ * The document default this corpus is describing, named ONCE so the prose
+ * cannot drift from the product the way it did before.
+ *
+ * `goldenCorpus.test.ts` reads `core/engine/src/style.rs` and
+ * `app/src/core/types/types.ts` and fails if either disagrees with this
+ * constant. That is the guard the previous re-aim lacked: its comment said
+ * Calcula lit Center Vertically "the same way Excel shows Bottom Align pressed
+ * on a fresh sheet" -- documenting a MATCH IN ARITY as if it were a match in
+ * identity, and going stale silently the moment the default moved.
+ */
+export const DOCUMENT_DEFAULT_VERTICAL_ALIGN = "bottom";
+
+/**
+ * The one Home-tab toggle a brand-new workbook lights, and its `data-testid`.
+ *
+ * Measured live 2026-08-15 on the changed build: on a brand-new workbook
+ * `fmt-alignBottom` carries `data-active="true"` while `fmt-alignTop` and
+ * `fmt-alignMiddle` do not, and no horizontal-alignment button is lit at all
+ * (a default cell is `TextAlign::General`, and the ribbon has no General
+ * button). Same on any never-touched cell.
+ */
+export const DEFAULT_LIT_ALIGNMENT_TOGGLE = "alignBottom";
 
 /**
  * A golden whose capture is taken on a BRAND-NEW, EMPTY workbook, so the Home
  * tab must read the DEFAULT-STATE ribbon — which, since BUG-0062, is NOT
  * unlit.
  *
- * WHAT THE DEFAULT STATE LOOKS LIKE, and why this axis pins a NUMBER now
- * instead of asserting zero. BUG-0028 made the ribbon stop keeping the
- * PREVIOUS cell's format state over an empty cell — but its fix cleared to
- * null, and a null style made the font box read "system-ui" (a font no cell
- * renders in) with every toggle dark. BUG-0062 replaced the null with the
- * DOCUMENT DEFAULT style (index 0), and Calcula's default carries
- * `VerticalAlign::Middle` — so the fixed build paints exactly ONE lit toggle
- * (Center Vertically, 546 pressed-accent px when fully visible) on a
- * brand-new workbook, the same way Excel shows Bottom Align pressed on a
- * fresh sheet. "Unlit everywhere" is therefore no longer the fixed build's
- * face: it is the PRE-BUG-0062 build's face, and a golden reading it is
- * stale in the other direction.
+ * WHAT THE DEFAULT STATE LOOKS LIKE, and why this axis pins numbers instead of
+ * asserting zero. BUG-0028 made the ribbon stop keeping the PREVIOUS cell's
+ * format state over an empty cell — but its fix cleared to null, and a null
+ * style made the font box read "system-ui" (a font no cell renders in) with
+ * every toggle dark. BUG-0062 replaced the null with the DOCUMENT DEFAULT style
+ * (index 0), so the build paints exactly ONE lit toggle (546 pressed-accent px
+ * when fully visible) on a brand-new workbook. "Unlit everywhere" is therefore
+ * no longer the fixed build's face: it is the PRE-BUG-0062 build's face, and a
+ * golden reading it is stale in the other direction.
+ *
+ * WHICH toggle it is moved on 2026-08-15 (§21c item 2): the document default
+ * went from `VerticalAlign::Middle` to Excel's `Bottom`, so the lit box is
+ * BOTTOM ALIGN and sits 33 px to the right of where Center Vertically sat.
+ * The COUNT is blind to that — same 30x26 box, same fill, same row — so each
+ * entry also pins `expectedPressedAccentMedianX`. Without it this axis would
+ * pass over a golden of the previous build and go on describing it as current,
+ * which is the exact failure the axis exists to prevent.
  *
  * Each entry pins the reading its file measures against the CURRENT build,
  * captured deliberately and attributed pixel-by-pixel (open-decisions §21).
@@ -704,6 +791,15 @@ export interface EmptyDocumentGolden {
    * reads near zero because the Data menu covers the toggle cluster entirely.
    */
   expectedPressedAccent: number;
+  /**
+   * WHERE that fill sits — the median x of the matching pixels, which is what
+   * identifies WHICH toggle is lit.
+   *
+   * `null` for a golden whose reading is below `PRESSED_ACCENT_FLOOR`: there is
+   * no box in frame, so the median is a statistic over anti-aliasing noise and
+   * pinning it would be pinning nothing.
+   */
+  expectedPressedAccentMedianX: number | null;
 }
 
 /**
@@ -713,44 +809,88 @@ export interface EmptyDocumentGolden {
  */
 export const PRESSED_ACCENT_BAND = 150;
 
+/**
+ * How far the fill's median x may drift before the axis fails.
+ *
+ * MUST stay well under the alignment cluster's 33 px button pitch, or the axis
+ * goes back to being unable to tell one lit toggle from its neighbour. It is
+ * also comfortably above the observed jitter: every lit golden in the corpus
+ * measures its median to the SAME pixel (427 before the parity change), and the
+ * two shadow-grazed menu goldens lose ~13 pixels off one edge, which moves a
+ * median by about one.
+ */
+export const PRESSED_ACCENT_MEDIAN_BAND = 12;
+
+/**
+ * WHERE THE `expectedPressedAccentMedianX` NUMBERS COME FROM. They are not
+ * predictions and they are not carried over.
+ *
+ * The five lit goldens in this corpus all measured their median at x=427 with
+ * Center Vertically lit — one pixel, five files, because the box is the
+ * overwhelming majority of the fill. The alignment cluster's button pitch was
+ * measured live off the running app on 2026-08-15 (`getBoundingClientRect` of
+ * `fmt-alignTop` / `fmt-alignMiddle` / `fmt-alignBottom` / `fmt-wrapText`:
+ * x = 379 / 412 / 445 / 478, each 30 wide), so Bottom Align sits exactly 33 px
+ * right of Center Vertically and the median lands at 427 + 33 = 460.
+ *
+ * That derivation was then CHECKED against the running app rather than trusted:
+ * a full-window capture of the changed build measures its pressed-accent median
+ * at 921 device px at dpr 2 — 460.5 in the CSS coordinates these goldens are
+ * recorded in. The pin is a measurement of the build, taken twice by different
+ * routes.
+ *
+ * THE COUNTS ARE DELIBERATELY UNCHANGED. The box is the same size, the same
+ * fill and the same row; only its column moved. The two shadow-grazed menu
+ * goldens (534, 533) may drift a few pixels now that the box sits 33 px further
+ * from the open dropdown, and `PRESSED_ACCENT_BAND` (150) exists for exactly
+ * that: a drift of a dozen pixels is antialiasing, a drift of 500 is a toggle
+ * appearing or disappearing.
+ */
 export const EMPTY_DOCUMENT_GOLDENS: EmptyDocumentGolden[] = [
   {
     file: "visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-empty-grid",
     expectedPressedAccent: 546,
+    expectedPressedAccentMedianX: 460,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/ribbon-core-default-ribbon.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-default-ribbon",
     expectedPressedAccent: 546,
+    expectedPressedAccentMedianX: 460,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-file-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-file-open",
     expectedPressedAccent: 534,
+    expectedPressedAccentMedianX: 460,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-edit-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-edit-open",
     expectedPressedAccent: 533,
+    expectedPressedAccentMedianX: 460,
   },
   {
     // The open Data menu covers the alignment-toggle cluster, so the lit
-    // toggle is not in frame at all — the reading is ribbon-iconography AA.
+    // toggle is not in frame at all — the reading is ribbon-iconography AA,
+    // and its median is a statistic over that noise rather than over a box.
     file: "visual/__screenshots__/core-visual.spec.ts/menu-data-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-data-open",
     expectedPressedAccent: 29,
+    expectedPressedAccentMedianX: null,
   },
   {
     file: "tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png",
     spec: "tests/grid-rendering.spec.ts",
     capture: "empty-grid-full-window",
     expectedPressedAccent: 546,
+    expectedPressedAccentMedianX: 460,
   },
 ];
 
@@ -811,15 +951,28 @@ export function describeStaleRibbonState(
   population: EmptyDocumentGolden[] = EMPTY_DOCUMENT_GOLDENS,
   quarantine: StaleProductStateGolden[] = STALE_PRODUCT_STATE_GOLDENS,
 ): string | null {
-  const byFile = new Map(readings.map((r) => [r.file, r.pressedAccentPixels]));
+  const byFile = new Map(readings.map((r) => [r.file, r]));
   const off = population
     .filter((p) => staleProductStateFor(p.file, quarantine) === undefined)
-    .map((p) => ({ ...p, measured: byFile.get(p.file) }))
-    .filter(
-      (p) =>
-        p.measured !== undefined &&
-        Math.abs(p.measured - p.expectedPressedAccent) > PRESSED_ACCENT_BAND,
-    );
+    .map((p) => {
+      const reading = byFile.get(p.file);
+      if (reading === undefined) return null;
+      const countOff =
+        Math.abs(reading.pressedAccentPixels - p.expectedPressedAccent) >
+        PRESSED_ACCENT_BAND;
+      // The position axis only applies where a box is actually in frame, and
+      // only where the reading carries a median at all (the synthetic
+      // populations in the self-test exercise the count axis on its own).
+      const medianOff =
+        p.expectedPressedAccentMedianX !== null &&
+        reading.pressedAccentMedianX !== undefined &&
+        reading.pressedAccentMedianX !== null &&
+        Math.abs(reading.pressedAccentMedianX - p.expectedPressedAccentMedianX) >
+          PRESSED_ACCENT_MEDIAN_BAND;
+      if (!countOff && !medianOff) return null;
+      return { ...p, reading, countOff, medianOff };
+    })
+    .filter((p): p is NonNullable<typeof p> => p !== null);
   if (off.length === 0) return null;
 
   return (
@@ -828,19 +981,39 @@ export function describeStaleRibbonState(
     `  - ${off.length} empty-workbook golden(s) read a Home-tab state off the ` +
     `pinned band:\n` +
     off
-      .map(
-        (s) =>
-          `      ${s.file}  (${s.measured} pressed-accent px, pinned ` +
-          `${s.expectedPressedAccent} +/- ${PRESSED_ACCENT_BAND})`,
-      )
+      .map((s) => {
+        const parts: string[] = [];
+        if (s.countOff) {
+          parts.push(
+            `${s.reading.pressedAccentPixels} pressed-accent px, pinned ` +
+              `${s.expectedPressedAccent} +/- ${PRESSED_ACCENT_BAND}`,
+          );
+        }
+        if (s.medianOff) {
+          parts.push(
+            `fill centred at x=${s.reading.pressedAccentMedianX}, pinned ` +
+              `${s.expectedPressedAccentMedianX} +/- ${PRESSED_ACCENT_MEDIAN_BAND} ` +
+              `-- that is the WRONG TOGGLE, not a wrong amount of one`,
+          );
+        }
+        return `      ${s.file}  (${parts.join("; ")})`;
+      })
       .join("\n") +
     `\n  The FIXED build paints exactly ONE lit toggle on a brand-new workbook ` +
-    `-- Center Vertically, because the document default style is ` +
-    `VerticalAlign::Middle and the ribbon reports the DEFAULT style for an ` +
-    `empty cell since BUG-0062 (~546 px when fully visible). A reading far ` +
-    `BELOW the pin is the pre-BUG-0062 face (null style, everything dark, ` +
-    `font box "system-ui"); a reading far ABOVE it is a BUG-0028-style latch ` +
-    `(the PREVIOUS cell's toggles still lit, ~+500 px per extra box).\n` +
+    `-- BOTTOM ALIGN, because the document default style is ` +
+    `VerticalAlign::${DOCUMENT_DEFAULT_VERTICAL_ALIGN.toUpperCase()} (Excel ` +
+    `parity: a fresh cell is Horizontal General, Vertical Bottom) and the ` +
+    `ribbon reports the DEFAULT style for an empty cell since BUG-0062 (~546 px ` +
+    `when fully visible, centred at x=460 in a 1280-wide capture). No ` +
+    `horizontal-alignment toggle lights at all: a default cell is General and ` +
+    `the ribbon has no General button.\n` +
+    `  A reading far BELOW the count pin is the pre-BUG-0062 face (null style, ` +
+    `everything dark, font box "system-ui"); a reading far ABOVE it is a ` +
+    `BUG-0028-style latch (the PREVIOUS cell's toggles still lit, ~+500 px per ` +
+    `extra box). A reading with the RIGHT count at the WRONG x is a golden of ` +
+    `the pre-parity build: Center Vertically sat 33 px to the LEFT of Bottom ` +
+    `Align (median x=427 rather than 460), same box, same fill, same row -- ` +
+    `which is precisely why counting alone stopped being enough.\n` +
     `  THIS AXIS IS INVISIBLE TO BOTH CHECKS ABOVE: dpr and colour profile ask ` +
     `which MACHINE took the picture. This asks which BUILD did. A corpus can be ` +
     `perfectly consistent about the display and still contain a screenshot of a ` +

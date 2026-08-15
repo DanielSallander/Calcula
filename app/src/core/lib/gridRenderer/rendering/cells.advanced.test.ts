@@ -82,7 +82,7 @@ describe("drawRichTextRuns - many runs", () => {
     expect(ctx.fillText).toHaveBeenCalledTimes(12);
   });
 
-  it("handles 20 runs with truncation at a narrow width", () => {
+  it("handles 20 runs overflowing a narrow width", () => {
     const runs: RichTextRun[] = Array.from({ length: 20 }, (_, i) => ({
       text: `Word${i} `,
     }));
@@ -95,9 +95,13 @@ describe("drawRichTextRuns - many runs", () => {
 
     const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
     const allText = calls.map((c: unknown[]) => c[0]).join("");
-    expect(allText).toContain("...");
-    // Should not draw all 20 runs since truncation stops early
+    // Excel clips rich text; there is no ellipsis and no marker.
+    expect(allText).not.toContain("...");
+    expect(allText).not.toContain("#");
+    // Runs that begin past the right edge are skipped rather than drawn into a
+    // clip that would swallow them, so this costs far fewer than 20 fillTexts.
     expect(calls.length).toBeLessThan(20);
+    expect(calls.length).toBeGreaterThan(0);
   });
 
   it("positions all 10 runs sequentially with correct x coordinates", () => {
@@ -198,15 +202,16 @@ describe("drawTextWithTruncation - extreme lengths", () => {
     ctx = makeCtx({ charWidth: 1 });
   });
 
-  it("truncates 10K character text without error", () => {
+  it("clips 10K character text without error", () => {
     const longText = "A".repeat(10000);
     const width = drawTextWithTruncation(ctx, longText, 0, 0, 200);
     expect(width).toBe(10000); // original width returned
     const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls.length).toBe(1);
     const drawn = calls[0][0] as string;
-    expect(drawn).toContain("...");
-    expect(drawn.length).toBeLessThan(10000);
+    // The clip rectangle does the cutting, so the string goes out whole.
+    expect(drawn).toBe(longText);
+    expect(drawn).not.toContain("...");
   });
 
   it("handles 10K text that fits within maxWidth", () => {
@@ -217,15 +222,19 @@ describe("drawTextWithTruncation - extreme lengths", () => {
     expect(calls[0][0]).toBe(longText);
   });
 
-  it("truncates 50K character text efficiently", () => {
+  it("clips 50K character text efficiently, and measures it exactly once", () => {
     const hugeText = "X".repeat(50000);
+    (ctx.measureText as ReturnType<typeof vi.fn>).mockClear();
     const start = performance.now();
     drawTextWithTruncation(ctx, hugeText, 0, 0, 100);
     const elapsed = performance.now() - start;
-    // Binary search should handle this in O(log n) calls - should be fast
     expect(elapsed).toBeLessThan(1000); // generous bound for CI
+    // Clipping replaced a binary search that cost O(log n) measureText calls per
+    // over-long cell. One measurement is the whole budget now: the overflow
+    // signal itself. This is the paint-cost guard for the hottest path.
+    expect((ctx.measureText as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
     const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls[0][0] as string).toContain("...");
+    expect(calls[0][0] as string).toBe(hugeText);
   });
 });
 

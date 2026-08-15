@@ -4,7 +4,7 @@
 use crate::api_types::{PageSetup, PrintData, CellData, MergedRegion, StyleData};
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
-use crate::{AppState, format_cell_value};
+use crate::{AppState, format_cell_value_and_class};
 use tauri::State;
 use std::fs;
 
@@ -101,7 +101,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
         // Printed appearance honours the row/column style tiers.
         let effective_style_index = grid.effective_style_index(row, col);
         let style = styles.get(effective_style_index);
-        let display = format_cell_value(&cell.value, style, &locale);
+        let (display, overflow) = format_cell_value_and_class(&cell.value, style, &locale);
         if display.is_empty() && !cell.has_formula() {
             continue; // Skip truly empty cells
         }
@@ -123,6 +123,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
             row,
             col,
             display,
+            overflow,
             display_color: None,
             formula: cell.formula_string().map(|f| format!("={}", f)),
             style_index: effective_style_index,

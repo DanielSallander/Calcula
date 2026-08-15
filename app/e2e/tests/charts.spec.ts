@@ -40,7 +40,7 @@ test.describe("Charts", () => {
       // command the reset helper uses.
       await tauri.core
         .invoke("clear_range_with_options", {
-          params: { startRow: 0, startCol: 25, endRow: 3, endCol: 26, applyTo: "All" },
+          params: { startRow: 0, startCol: 25, endRow: 3, endCol: 26, applyTo: "all" },
         })
         .catch(() => {});
       // BOTH events, and the order matters. `delete_chart` removes the chart

@@ -4,7 +4,7 @@
 use crate::api_types::CellData;
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
-use crate::{format_cell_value, AppState};
+use crate::{format_cell_value_and_class, AppState};
 use engine::CellValue;
 use tauri::State;
 
@@ -491,7 +491,7 @@ pub fn replace_all(
                 // cell itself keeps its own index.
                 let effective_style_index = grid.effective_style_index(row, col);
                 let style = styles.get(effective_style_index);
-                let display = format_cell_value(&new_cell.value, style, &locale);
+                let (display, overflow) = format_cell_value_and_class(&new_cell.value, style, &locale);
 
                 // Get merge span info
                 let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
@@ -505,6 +505,7 @@ pub fn replace_all(
                     row,
                     col,
                     display,
+                    overflow,
                     display_color: None,
                     formula: new_cell.formula_string().map(|f| format!("={}", f)),
                     style_index: effective_style_index,
@@ -705,6 +706,8 @@ pub(crate) fn replace_single_off_sheet(
         row,
         col,
         display: String::new(),
+        // Empty: nothing to overflow, and text never marks.
+        overflow: crate::api_types::OverflowClass::Text,
         display_color: None,
         formula: None,
         style_index: 0,
@@ -853,7 +856,7 @@ pub fn replace_single(
 
             let effective_style_index = grid.effective_style_index(row, col);
             let style = styles.get(effective_style_index);
-            let display = format_cell_value(&new_cell.value, style, &locale);
+            let (display, overflow) = format_cell_value_and_class(&new_cell.value, style, &locale);
 
             // Get merge span info
             let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
@@ -867,6 +870,7 @@ pub fn replace_single(
                 row,
                 col,
                 display,
+                overflow,
                 display_color: None,
                 formula: new_cell.formula_string().map(|f| format!("={}", f)),
                 style_index: effective_style_index,

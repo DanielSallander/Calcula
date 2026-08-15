@@ -253,7 +253,7 @@ pub(crate) fn apply_named_style_impl(
             updated_cells.push(CellData {
                 row,
                 col,
-                display: fmt_result.text,
+                display: fmt_result.text, overflow: fmt_result.overflow,
                 display_color: fmt_result.color,
                 formula: updated_cell.formula_string().map(|f| format!("={}", f)),
                 style_index: effective_style_index,

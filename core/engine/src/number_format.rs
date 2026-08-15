@@ -30,7 +30,7 @@ pub fn format_number(value: f64, format: &NumberFormat, locale: &LocaleSettings)
             max_digits,
         } => format_fraction(value, *denominator, *max_digits),
         NumberFormat::Percentage { decimal_places } => format_percentage(value, *decimal_places, locale),
-        NumberFormat::Scientific { decimal_places } => format_scientific(value, *decimal_places),
+        NumberFormat::Scientific { decimal_places } => format_scientific(value, *decimal_places, locale),
         NumberFormat::Date { format: date_fmt } => format_date_number(value, date_fmt, locale),
         NumberFormat::Time { format: time_fmt } => format_time_number(value, time_fmt, locale),
         NumberFormat::Custom { format: custom_fmt } => format_custom(value, custom_fmt, locale),
@@ -68,7 +68,7 @@ fn format_general(value: f64, locale: &LocaleSettings) -> String {
 }
 
 /// Replace '.' with locale decimal separator in formatted output.
-fn localize_decimal_output(s: &str, locale: &LocaleSettings) -> String {
+pub(crate) fn localize_decimal_output(s: &str, locale: &LocaleSettings) -> String {
     if locale.decimal_separator == '.' {
         s.to_string()
     } else {
@@ -332,9 +332,54 @@ fn format_percentage(value: f64, decimal_places: u8, locale: &LocaleSettings) ->
 }
 
 /// Format a number in scientific notation.
-fn format_scientific(value: f64, decimal_places: u8) -> String {
-    format!("{:.prec$e}", value, prec = decimal_places as usize)
-        .replace("e", "E")
+///
+/// Excel's Scientific preset is the format code `0.00E+00`: a SIGNED,
+/// two-digit exponent and a locale decimal separator. Rust's `{:e}` gives
+/// neither -- it prints `1.23e3` -- so 1234.5678 used to display as
+/// `1.23E3` here and as `1,23E+03` in Excel, with the sv-SE decimal comma
+/// missing on top.
+fn format_scientific(value: f64, decimal_places: u8, locale: &LocaleSettings) -> String {
+    render_scientific(value, decimal_places, 2, true, locale)
+}
+
+/// Shared scientific renderer for the typed `Scientific` format and the
+/// custom-format engine's `0.00E+00` sections -- ONE spelling of Excel's
+/// exponent rules, so the ribbon preset and the same code typed into Format
+/// Cells cannot disagree.
+///
+/// `exponent_width` is the number of digit placeholders after the `E`
+/// (2 for `E+00`); `show_plus` is whether the format spelled `E+` rather
+/// than `E-`, i.e. whether a positive exponent carries its sign.
+pub(crate) fn render_scientific(
+    value: f64,
+    decimal_places: u8,
+    exponent_width: usize,
+    show_plus: bool,
+    locale: &LocaleSettings,
+) -> String {
+    let raw = format!("{:.prec$e}", value, prec = decimal_places as usize);
+    let (mantissa, exponent) = match raw.split_once('e') {
+        Some(parts) => parts,
+        None => (raw.as_str(), "0"),
+    };
+    let (negative, digits) = match exponent.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, exponent.strip_prefix('+').unwrap_or(exponent)),
+    };
+    let sign = if negative {
+        "-"
+    } else if show_plus {
+        "+"
+    } else {
+        ""
+    };
+    format!(
+        "{}E{}{:0>width$}",
+        localize_decimal_output(mantissa, locale),
+        sign,
+        digits,
+        width = exponent_width
+    )
 }
 
 /// Format a number as a date (Excel serial date number).
@@ -567,8 +612,20 @@ mod tests {
 
     #[test]
     fn test_format_scientific() {
-        assert_eq!(format_scientific(1234.0, 2), "1.23E3");
-        assert_eq!(format_scientific(0.00123, 3), "1.230E-3");
+        // Excel's Scientific preset is `0.00E+00`: signed, two-digit
+        // exponent. Rust's `{:e}` gives `1.23e3`, which is what this used to
+        // print.
+        let l = us();
+        assert_eq!(format_scientific(1234.0, 2, &l), "1.23E+03");
+        assert_eq!(format_scientific(0.00123, 3, &l), "1.230E-03");
+        assert_eq!(format_scientific(0.0, 2, &l), "0.00E+00");
+        assert_eq!(format_scientific(1.5e120, 2, &l), "1.50E+120");
+    }
+
+    #[test]
+    fn scientific_uses_the_locale_decimal_separator() {
+        assert_eq!(format_scientific(1234.5678, 2, &se()), "1,23E+03");
+        assert_eq!(format_scientific(1234.5678, 2, &us()), "1.23E+03");
     }
 
     #[test]
@@ -692,5 +749,31 @@ mod tests {
         // The engine constructor's own spelling (HH:MM:SS — MM resolves to
         // minutes after an hour token).
         assert_eq!(format_number(0.5625, &presets::time_24h(), &us()), "13:30:00");
+    }
+
+    /// EVIDENCE PROBE for the `####` parity work (§21c item 3): what does a
+    /// NEGATIVE value render as under a Date or a Time format today?
+    ///
+    /// Excel refuses such a value outright — "formulas that return dates and
+    /// times as negative values" is one of Microsoft's listed causes of `#####`,
+    /// and its remedy is not "widen the column" but "verify that dates and times
+    /// are positive values", i.e. it is width-INDEPENDENT. This test does not
+    /// assert Excel's answer; it RECORDS Calcula's, so BUG-0066 rests on a
+    /// measurement rather than on a reading of the code.
+    #[test]
+    fn negative_serials_under_date_and_time_formats_render_a_plausible_lie() {
+        let l = us();
+
+        let neg_date = format_number(-1.0, &NumberFormat::Date { format: "YYYY-MM-DD".to_string() }, &l);
+        let neg_time = format_number(-0.5, &NumberFormat::Time { format: "HH:MM:SS".to_string() }, &l);
+
+        // Neither is a refusal: both are ordinary-looking values, and the sign
+        // that made them impossible has been thrown away. A renderer downstream
+        // sees only these strings and cannot tell them from real ones.
+        assert!(!neg_date.contains('#'), "date: {neg_date}");
+        assert!(!neg_time.contains('#'), "time: {neg_time}");
+        assert!(!neg_date.contains('-') || neg_date.matches('-').count() == 2, "date: {neg_date}");
+        eprintln!("[BUG-0066 probe] -1.0 as Date(YYYY-MM-DD) -> {neg_date:?}");
+        eprintln!("[BUG-0066 probe] -0.5 as Time(HH:MM:SS)  -> {neg_time:?}");
     }
 }

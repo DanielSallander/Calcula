@@ -39,6 +39,25 @@ export const AppEvents = {
   GRID_REFRESH: "app:grid-refresh",
   GRID_DATA_REFRESH: "grid:refresh",
 
+  // New or updated STYLE-REGISTRY entries, carried by the formatting result
+  // that created them. Payload: { styles: StyleEntry[] }.
+  //
+  // Emitted by the `apply_formatting` / `apply_border_preset` wrappers in
+  // tauri-api, so EVERY caller primes the cache -- the ribbon, the Ctrl+B
+  // keyboard route, a script, a macro, an extension. It carries the entries
+  // rather than asking anyone to re-read the registry: the backend already
+  // returns exactly the indices it used or created ("New or updated styles
+  // that the frontend should cache", api_types.rs), so priming costs no IPC
+  // and lands BEFORE the first repaint that could photograph the wrong style.
+  //
+  // WHY THIS EXISTS: the renderer resolves a cell through
+  // `getStyleFromCache(styleCache, cell.styleIndex)`, which falls back to
+  // index 0 -- the document default -- when the index is missing. Formatting
+  // MINTS an index, so a route that refreshed cell data without refreshing the
+  // style table painted the cell UNFORMATTED while `get_style` reported the
+  // format correctly.
+  STYLE_ENTRIES_UPDATED: "app:style-entries-updated",
+
   // Generic post-mutation refresh (see api/events.ts). Core emits ONE of these
   // with a list of change domains; a Shell translator fans it out to the
   // per-feature refresh events, so Core never names a feature.

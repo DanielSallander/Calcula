@@ -10,7 +10,11 @@ import { formulaA1ToR1C1 } from "../../r1c1";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { getStyleFromCache, isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../styles/styleUtils";
-import { isNumericValue, isErrorValue } from "../styles/cellFormatting";
+// `isNumericValue` is no longer called here: the value-vs-text question is
+// asked once, by `classifyCellContent`, which consults the number format as
+// well as the string. It still lives in cellFormatting.ts and is still what
+// that function falls back to for a General cell.
+import { isErrorValue } from "../styles/cellFormatting";
 import { cellKey } from "../../../types";
 import {
   hasStyleInterceptors,
@@ -29,6 +33,12 @@ import {
 } from "../../../../api/cellTypes";
 import { drawCellFill } from "../styles/fillRenderer";
 import { buildMergeSlaveIndex } from "./mergeIndex";
+import {
+  classifyCellContent,
+  fitNumericDisplay,
+  blocksSpill,
+  type CellContentKind,
+} from "./overflowMarker";
 import { pointsToPixels, buildCellFont } from "../fonts";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
@@ -127,28 +137,39 @@ export function drawDeferredCellDecorations(deferred: DeferredCellDecoration[]):
 /**
  * What a call to {@link drawTextWithTruncationMetrics} actually put on the canvas.
  *
- * `fullWidth` is the width the UNTRUNCATED string would occupy — the overflow
- * signal callers use to decide whether a cell spills into its neighbour.
+ * `fullWidth` is the width the whole string would occupy — the overflow signal
+ * callers use to decide whether a cell spills into its neighbour.
  * `renderedWidth` / `renderedX` describe the glyphs that were really drawn.
  *
- * The two differ whenever the string was ellipsised, and a decoration measured
- * on `fullWidth` (clamped to the cell) is therefore drawn WIDER than the text it
- * decorates: "Quarterly reven..." got an underline the length of the whole cell.
+ * The two used to differ because an over-long string was ELLIPSISED, and a
+ * decoration measured on `fullWidth` (clamped to the cell) was therefore drawn
+ * wider than the text it decorated: "Quarterly reven..." got an underline the
+ * length of the whole cell. Excel does not ellipsise — it CLIPS at the cell edge
+ * mid-glyph — so the glyph run now really is the whole string and the clip
+ * rectangle cuts it. `renderedWidth` is that whole-string width; callers still
+ * clamp it to the cell, and the clamp and the clip agree by construction.
  */
 export interface DrawnTextMetrics {
-  /** Width of the full, untruncated string at the current font. */
+  /** Width of the full string at the current font. */
   fullWidth: number;
-  /** Width of the glyphs actually painted (ellipsis included). */
+  /** Width of the glyph run actually passed to fillText. */
   renderedWidth: number;
   /** Left edge of the glyphs actually painted. */
   renderedX: number;
-  /** True when the string did not fit and was ellipsised. */
+  /** True when the string did not fit and was clipped at the cell edge. */
   truncated: boolean;
 }
 
 /**
- * Draw text with ellipsis truncation if it exceeds the available width, and
- * report what was drawn.
+ * Draw text, letting the caller's clip rectangle cut it where it does not fit,
+ * and report what was drawn.
+ *
+ * EXCEL'S RULE, AND WHY THERE IS NO ELLIPSIS. Excel clips an over-long value
+ * mid-glyph; it never prints "..." and never prints a Unicode ellipsis. Drawing
+ * the whole string inside the clip the cell pass has already established
+ * reproduces that exactly — and is strictly cheaper than what it replaced, which
+ * binary-searched the truncation point with O(log n) `measureText` calls per
+ * over-long cell.
  *
  * Decorations (underline, strikethrough) MUST measure against the returned
  * `renderedWidth`/`renderedX`, never against the source string.
@@ -159,10 +180,16 @@ export function drawTextWithTruncationMetrics(
   x: number,
   y: number,
   maxWidth: number,
-  align: "left" | "right" | "center" = "left"
+  align: "left" | "right" | "center" = "left",
+  /**
+   * Width of `text` at the current font, when the caller has already measured
+   * it. `measureText` is the single most-called thing on this path, and the
+   * numeric branch has necessarily measured its candidate already; without this
+   * every numeric cell in the viewport would pay for the same measurement twice.
+   */
+  knownWidth?: number
 ): DrawnTextMetrics {
-  const metrics = ctx.measureText(text);
-  const textWidth = metrics.width;
+  const textWidth = knownWidth ?? ctx.measureText(text).width;
 
   // If text fits, draw it directly
   if (textWidth <= maxWidth) {
@@ -180,47 +207,21 @@ export function drawTextWithTruncationMetrics(
       truncated: false,
     };
   }
-  // Text needs truncation - use ellipsis
-  const ellipsis = "...";
-  const ellipsisWidth = ctx.measureText(ellipsis).width;
-  const availableWidth = maxWidth - ellipsisWidth;
-  if (availableWidth <= 0) {
-    // Not enough room even for ellipsis, just draw ellipsis
-    ctx.fillText(ellipsis, x, y);
-    return {
-      fullWidth: textWidth,
-      renderedWidth: ellipsisWidth,
-      renderedX: x,
-      truncated: true,
-    };
-  }
-  // Binary search for the right truncation point
-  let low = 0;
-  let high = text.length;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    const truncated = text.substring(0, mid);
-    const truncWidth = ctx.measureText(truncated).width;
-    if (truncWidth <= availableWidth) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
-  }
-  const truncatedText = text.substring(0, low) + ellipsis;
-  ctx.fillText(truncatedText, x, y);
-  // A truncated string is always drawn from the left edge regardless of
-  // alignment (it fills the cell), so the rendered origin is `x`.
+  // Does not fit: paint the whole string from the cell's own origin and let the
+  // clip cut it. A value that has run out of room fills the box regardless of
+  // alignment, so the rendered origin is `x` — the same origin the ellipsised
+  // version used, which keeps the START of the value visible.
+  ctx.fillText(text, x, y);
   return {
     fullWidth: textWidth,
-    renderedWidth: ctx.measureText(truncatedText).width,
+    renderedWidth: textWidth,
     renderedX: x,
     truncated: true,
   };
 }
 
 /**
- * Draw text with ellipsis truncation if it exceeds the available width.
+ * Draw text, clipped at the available width by the caller's clip rectangle.
  * Returns the measured width of the FULL text (the overflow signal).
  */
 export function drawTextWithTruncation(
@@ -335,63 +336,27 @@ export function drawRichTextRuns(
     }
   }
 
-  // If total exceeds maxWidth, we need truncation with ellipsis
+  // Over-long rich text is CLIPPED at the cell edge, exactly as plain text is:
+  // rich text is text by construction, so Excel's `####` never applies to it and
+  // an ellipsis is not Excel's marker either. Every run is drawn in full and the
+  // caller's clip rectangle cuts the overhang; runs that start beyond the box are
+  // skipped so a long value does not cost a fillText per run for nothing.
   const needsTruncation = totalWidth > maxWidth;
-  const ellipsis = "...";
-  let ellipsisWidth = 0;
-  let remainingWidth = maxWidth;
-  if (needsTruncation) {
-    // Measure ellipsis with base font
-    const baseFont = buildCellFont(baseFontStyle, baseFontWeight, baseFontSize, baseFontFamily);
-    ctx.font = baseFont;
-    ellipsisWidth = ctx.measureText(ellipsis).width;
-    remainingWidth = maxWidth - ellipsisWidth;
-    if (remainingWidth <= 0) {
-      // Not enough room even for ellipsis
-      ctx.font = baseFont;
-      ctx.fillStyle = baseTextColor;
-      ctx.fillText(ellipsis, x, y);
-      return ellipsisWidth;
-    }
-  }
+  const remainingWidth = maxWidth;
 
   // Second pass: draw each run
   let currentX = drawX;
-  let truncated = false;
 
   for (const m of measured) {
-    if (truncated) break;
+    // A run that begins past the right edge of the box has nothing visible to
+    // contribute — the clip would swallow every glyph of it — so stop.
+    if (needsTruncation && currentX - drawX >= remainingWidth) break;
 
     ctx.font = m.fontString;
     ctx.fillStyle = m.color;
 
-    let textToDraw = m.run.text;
-    let drawWidth = m.width;
-
-    // Check if this run needs truncation
-    if (needsTruncation && currentX + drawWidth - drawX > remainingWidth) {
-      // Truncate this run
-      const available = remainingWidth - (currentX - drawX);
-      if (available <= 0) {
-        truncated = true;
-        break;
-      }
-      // Binary search for truncation point
-      let low = 0;
-      let high = textToDraw.length;
-      while (low < high) {
-        const mid = Math.ceil((low + high) / 2);
-        const trunc = textToDraw.substring(0, mid);
-        if (ctx.measureText(trunc).width <= available) {
-          low = mid;
-        } else {
-          high = mid - 1;
-        }
-      }
-      textToDraw = textToDraw.substring(0, low);
-      drawWidth = ctx.measureText(textToDraw).width;
-      truncated = true;
-    }
+    const textToDraw = m.run.text;
+    const drawWidth = m.width;
 
     // Calculate vertical offset for superscript/subscript (offset is in px)
     const baseFontPx = pointsToPixels(baseFontSize);
@@ -432,12 +397,6 @@ export function drawRichTextRuns(
     currentX += drawWidth;
   }
 
-  // Draw ellipsis if truncated
-  if (truncated) {
-    ctx.font = buildCellFont(baseFontStyle, baseFontWeight, baseFontSize, baseFontFamily);
-    ctx.fillStyle = baseTextColor;
-    ctx.fillText(ellipsis, currentX, y);
-  }
 
   return totalWidth;
 }
@@ -622,6 +581,11 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
   const rowHeaderWidth = rowHeaderGutter(config);
   const colHeaderHeight = colHeaderGutter(config);
+  // One measure closure for the whole frame — `fitNumericDisplay` is pure and
+  // takes measurement as a callback, and allocating that callback per CELL would
+  // be a fresh function object per visible cell per frame. `ctx.font` is set by
+  // the caller before every use, so this always measures at the painting font.
+  const measureAt = (text: string) => ctx.measureText(text).width;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
 
@@ -976,32 +940,83 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         textColor = cell.displayColor;
       }
 
+      // Which of Excel's TWO overflow rules this cell gets. Text spills and
+      // clips; a number, date, time or error cannot spill at all and is marked
+      // with '####' when it does not fit. Decided ONCE, and used by everything
+      // downstream that needs to know what kind of value this is: General
+      // alignment just below, the spill gate, and every drawing path.
+      const contentKind: CellContentKind = classifyCellContent(
+        displayValue,
+        baseCellStyle.numberFormat ?? "",
+        state.showFormulas === true && !!cell.formula,
+        // Decided in Rust where the CellValue and CellStyle were both in
+        // hand; beats any inference from the formatted string (BUG-0066).
+        cell.overflow
+      );
+      const shrinkToFit = (baseCellStyle as { shrinkToFit?: boolean }).shrinkToFit === true;
+
       // In Show Formulas mode, force left alignment for formula cells
       if (state.showFormulas && cell.formula) {
         textAlign = "left";
       } else if (baseCellStyle.textAlign === "general" || baseCellStyle.textAlign === "") {
+        // GENERAL ALIGNMENT AND THE OVERFLOW RULE ASK THE SAME QUESTION — is
+        // this value text or is it a number? — so they get the same answer.
+        //
+        // They used to disagree, because this branch tested the DISPLAY STRING
+        // with `isNumericValue` while the format was ignored, and the two
+        // diverge in both directions. Measured live on 2026-08-15: a cell
+        // formatted Date (YYYY-MM-DD) was LEFT-aligned, because "2024-01-15"
+        // parses as no number; and "1234567890" under the TEXT format `@` was
+        // RIGHT-aligned, because its digits parse as one. Excel does the
+        // opposite of both — dates, times and currency are right-aligned, and a
+        // Text-format value "is shown exactly as typed; left-aligned".
+        //
+        // Left alone this would have become a contradiction inside one cell:
+        // the same date counted as numeric for '####' and as text for
+        // alignment, and alignment is what decides which way a value spills.
         if (isErrorValue(displayValue)) {
           textColor = theme.cellTextError;
           textAlign = "center";
-        } else if (isNumericValue(displayValue)) {
+        } else if (contentKind === "numeric") {
           textAlign = "right";
         }
       }
 
       // Calculate overflow width for text that extends beyond the cell.
-      // When a cell's text is wider than the column and:
-      // - not wrapping, not merged, left/general aligned
-      // - adjacent cells to the right have no text content
-      // the text visually overflows into those cells (like Excel).
+      //
+      // EXCEL'S FIVE SPILL CONDITIONS, all of which must hold: the value exceeds
+      // the column width; THE VALUE IS TEXT; neither this cell nor the adjacent
+      // one is merged; the adjacent cell is absolutely empty; wrap text is off.
+      //
+      // The `contentKind` term is the one that was missing, and its absence was a
+      // defect in its own right (BUG-0067): the gate keyed on alignment alone, so
+      // a NUMBER carrying an explicit Align Left spilled across its empty
+      // neighbours instead of showing '####'. Numbers usually escaped only
+      // because General alignment happens to right-align them.
+      //
+      // Shrink-to-fit is excluded because it is the competing remedy: Excel
+      // shrinks the font until the value fits, so there is no overhang to spill.
       let overflowRight = cellRight;
       const shouldWrapEarly = baseCellStyle.wrapText === true;
+      // The width this block measured, kept so the draw below does not measure
+      // the same string at the same font a second time. Only set when the spill
+      // block ran, which is exactly when shrink-to-fit is off — and shrink is
+      // the only thing downstream that can still change the font.
+      let preMeasuredTextWidth: number | null = null;
       // Collect overflowed cells so we can draw their backgrounds
       const overflowedCells: Array<{ key: string; col: number; x: number; width: number; styleIndex: number }> = [];
-      if (!shouldWrapEarly && !isMergedMaster && (textAlign === "left" || textAlign === "center")) {
+      if (
+        !shouldWrapEarly &&
+        !isMergedMaster &&
+        !shrinkToFit &&
+        contentKind === "text" &&
+        (textAlign === "left" || textAlign === "center")
+      ) {
         // Measure text to see if it exceeds cell width
         const testFont = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
         ctx.font = testFont;
-        const textWidth = ctx.measureText(displayValue).width + paddingX * 2 + indentOffset;
+        preMeasuredTextWidth = ctx.measureText(displayValue).width;
+        const textWidth = preMeasuredTextWidth + paddingX * 2 + indentOffset;
         if (textWidth > actualWidth) {
           // Extend overflow into adjacent empty columns
           let overflowCol = col + 1;
@@ -1010,8 +1025,11 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
           while (overflowW < textWidth && overflowCol < totalCols) {
             const adjKey = cellKey(row, overflowCol);
             const adjCell = cells.get(adjKey);
-            // Stop if adjacent cell has visible text content
-            if (adjCell && (adjCell.display ?? "") !== "") break;
+            // Stop at the first neighbour that is not ABSOLUTELY empty. Excel's
+            // wording is deliberate — "does not contain spaces, non-printing
+            // characters, empty strings, etc." — so a cell holding `=""` blocks
+            // the spill even though it displays nothing (BUG-0068).
+            if (blocksSpill(adjCell)) break;
             const adjWidth = getColumnWidth(overflowCol, config, dimensions);
             overflowW += adjWidth;
             // Track overflowed cell info so we can draw its background
@@ -1153,8 +1171,13 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         continue;
       }
 
-      // Shrink-to-fit: reduce font size to fit cell width
-      const shrinkToFit = (baseCellStyle as { shrinkToFit?: boolean }).shrinkToFit === true;
+      // Shrink-to-fit: reduce font size to fit cell width.
+      //
+      // ORDER MATTERS AND IT IS THIS ONE. Excel evaluates Shrink to Fit BEFORE
+      // it gives up on a value: Microsoft lists it as a remedy for '#####', so
+      // the marker appears only if even the shrunken text will not fit. Running
+      // it here means every measurement below — including the '####' decision —
+      // is taken at the font the cell will really paint.
       if (shrinkToFit && availableWidth > 0 && !isEmpty) {
         const testFont = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
         ctx.font = testFont;
@@ -1176,7 +1199,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       const fontSizePx = pointsToPixels(fontSize);
 
       // Get vertical alignment and text rotation from style
-      const vAlign = baseCellStyle.verticalAlign || "middle";
+      const vAlign = baseCellStyle.verticalAlign || "bottom";
       const textRotation = baseCellStyle.textRotation || "none";
 
       // -----------------------------------------------------------------------
@@ -1215,9 +1238,16 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // -----------------------------------------------------------------------
       // Text Wrapping
       // -----------------------------------------------------------------------
+      //
+      // WRAP IS A TEXT OPERATION. Excel does not break a formatted number across
+      // lines, so Wrap Text does not rescue a too-narrow numeric — it still shows
+      // '####'. Numerics therefore fall through to the single-line path below,
+      // which is where the marker decision lives. (The old code sent them to
+      // `wrapText`, whose long-word fallback chops on CHARACTERS, so a wrapped
+      // "1234.5678" was cut into "1234." / "5678" — a number Excel never shows.)
       const shouldWrap = baseCellStyle.wrapText === true;
 
-      if (shouldWrap) {
+      if (shouldWrap && contentKind === "text") {
         const lines = wrapText(ctx, displayValue, availableWidth);
         const lineHeight = fontSizePx * 1.2;
         const totalTextHeight = lines.length * lineHeight;
@@ -1230,7 +1260,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         } else if (vAlign === "bottom") {
           startY = cellBottom - paddingY - totalTextHeight + lineHeight / 2;
         } else {
-          // middle
+          // middle (explicit only -- the DOCUMENT default is bottom)
           startY = cellTop + (cellHeight - totalTextHeight) / 2 + lineHeight / 2;
         }
 
@@ -1299,6 +1329,27 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         const valueX = cellLeft + paddingX;
         const valueWidth = availableWidth;
 
+        // Accounting is a currency layout and currency is a number: an
+        // Accounting cell too narrow for symbol + value shows '####' across the
+        // whole box, exactly as any other explicit format does. Excel will not
+        // drop the symbol or the decimals to make it fit.
+        const acctWidth =
+          ctx.measureText(acctLayout.symbol).width + ctx.measureText(acctLayout.value).width;
+        if (acctWidth > valueWidth) {
+          const marker = fitNumericDisplay({
+            display: acctLayout.value,
+            numberFormat: baseCellStyle.numberFormat ?? "",
+            availableWidth: valueWidth,
+            measure: measureAt,
+            displayWidth: acctWidth,
+            transported: cell.overflow,
+          });
+          ctx.fillText(marker.text, valueX, acctTextY);
+          ctx.restore();
+          baseX += colWidth;
+          continue;
+        }
+
         if (acctLayout.symbolBefore) {
           // Symbol left-aligned, value right-aligned
           ctx.fillText(acctLayout.symbol, symbolX, acctTextY);
@@ -1328,7 +1379,9 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         ctx.textBaseline = "bottom";
         textY = cellBottom - paddingY;
       } else {
-        // "middle" (default)
+        // "middle" -- reached only when the cell carries an EXPLICIT middle
+        // alignment. The DOCUMENT default is "bottom" (Excel parity) and is
+        // applied by the `|| "bottom"` fallback above.
         ctx.textBaseline = "middle";
         textY = y + actualHeight / 2;
       }
@@ -1336,12 +1389,39 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // stems onto the pixel grid (crisper text, closer to Excel's ClearType).
       textY = Math.round(textY);
 
-      // Draw the text with truncation. The metrics describe what was really
-      // painted — an ellipsised string is SHORTER than the source string, and
-      // decorations must follow the glyphs, not the data.
-      const drawn = drawTextWithTruncationMetrics(
-        ctx, displayValue, textX, textY, availableWidth, textAlign
-      );
+      // What actually gets painted, and this is where Excel's two overflow rules
+      // part company:
+      //
+      //   TEXT      -> the string, clipped at the box edge by the clip rectangle
+      //                established above. Never a marker, never an ellipsis.
+      //   NUMERIC   -> `fitNumericDisplay`'s ladder: it fits; or General drops
+      //                decimals and then goes scientific; or '####' repeated to
+      //                fill the width.
+      //
+      // The numeric branch measures ONCE up front and hands that measurement to
+      // the ladder, so a numeric cell that fits — the overwhelming majority —
+      // costs exactly the one `measureText` the old ellipsis path already spent.
+      let drawn: DrawnTextMetrics;
+      if (contentKind === "numeric") {
+        const fit = fitNumericDisplay({
+          display: displayValue,
+          numberFormat: baseCellStyle.numberFormat ?? "",
+          availableWidth,
+          measure: measureAt,
+          transported: cell.overflow,
+        });
+        drawn = drawTextWithTruncationMetrics(
+          ctx, fit.text, textX, textY, availableWidth, textAlign, fit.width
+        );
+      } else {
+        // The metrics describe what was really painted; decorations follow the
+        // glyphs, not the data, and the same clip that cuts the glyphs cuts the
+        // rules drawn under them.
+        drawn = drawTextWithTruncationMetrics(
+          ctx, displayValue, textX, textY, availableWidth, textAlign,
+          preMeasuredTextWidth ?? undefined
+        );
+      }
 
       // Draw underline if needed
       if (underlineStyle !== "none") {

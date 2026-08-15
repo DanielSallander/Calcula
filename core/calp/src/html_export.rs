@@ -687,7 +687,7 @@ table.calp-grid td {
   padding: 1px 4px;
   overflow: hidden;
   white-space: nowrap;
-  vertical-align: middle;
+  vertical-align: bottom;
 }
 table.calp-gridlines td {
   border: 1px solid #d4d4d4;
@@ -745,7 +745,7 @@ table.calp-grid td {
   padding: 1px 4px;
   overflow: hidden;
   white-space: nowrap;
-  vertical-align: middle;
+  vertical-align: bottom;
 }
 table.calp-gridlines td {
   border: 1px solid #d4d4d4;

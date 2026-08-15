@@ -123,6 +123,19 @@ export function getNumberFormatCategories(dec = ".", thou = ","): NumberFormatCa
     ],
   },
   {
+    // Excel HAS a Text category on this tab, and it sits right before Special.
+    // Without it the ribbon's Text entry -- which applies the one-section
+    // format `@` -- reopened here as "Custom" with a raw format code in a text
+    // box, so the dialog described the user's own choice as something they had
+    // hand-written.
+    id: "text",
+    label: "Text",
+    description:
+      "Text format cells are treated as text even when a number is in the cell. " +
+      "The cell is displayed exactly as entered.",
+    formats: [{ label: "Text", value: "text", example: fmt("1234.5", dec, thou) }],
+  },
+  {
     id: "special",
     label: "Special",
     description:
@@ -200,6 +213,9 @@ const DISPLAY_NAME_TO_PRESET: Record<string, string> = {
   "Date (dd/mm/yyyy)": "date_eu",
   "Time (hh:mm:ss)": "time_24h",
   "Time (hh:mm:ss AM/PM)": "time_12h",
+  // Excel's Text format. `format_number_format_name` emits the raw code for a
+  // Custom format, and `@` IS the whole code.
+  "@": "text",
 };
 
 /** Display-name prefix -> category id, for named shapes with no exact preset
@@ -221,16 +237,122 @@ const PRESET_VALUE_TO_CATEGORY: Record<string, string> = Object.fromEntries(
   )
 );
 
+/** Case-folded index of the static map, built once. */
+const DISPLAY_NAME_TO_PRESET_CI: Record<string, string> = Object.fromEntries(
+  Object.entries(DISPLAY_NAME_TO_PRESET).map(([name, preset]) => [
+    name.toLowerCase(),
+    preset,
+  ])
+);
+
+// ============================================================================
+// The ribbon seam
+// ============================================================================
+// The Home > Number dropdown resolves its eleven entries IN RUST, against the
+// current locale, because five of them are regional (Excel writes Short/Long
+// Date and Time as `[$-x-sysdate]`-style handles and takes Currency and
+// Accounting from the OS currency pattern). It then reads the cell's format
+// back by comparing `get_style`'s DISPLAY NAME against that same backend
+// response -- it never inverts the mapping itself.
+//
+// The dialog did invert it, in `DISPLAY_NAME_TO_PRESET` above, and so could not
+// see three of those eleven: `Date (YYYY-MM-DD)` missed on CASE alone (the
+// locale table spells the pattern uppercase, this table's `date_iso` spells the
+// SAME pattern lowercase, and the engine's date formatter is case-insensitive),
+// `Currency ( kr, 2 decimals)` missed on the sv-SE symbol's leading space, and
+// Long Date had no row to highlight at all. The dialog opened on the right
+// category showing nothing selected: it could not report the cell's own format,
+// which is the defect BUG-0065 and BUG-0069 were each an instance of.
+//
+// Adding those three names here would have left the same hole open for the
+// other seventeen locale arms. So the dialog now consults the SAME backend
+// response the ribbon does, and the static table below stays only as the
+// offline fallback for the dialog's own presets, which that response does not
+// contain.
+
+/** One row of `get_ribbon_number_formats`, as the dialog needs it. */
+export interface RibbonResolvedFormat {
+  preset: string;
+  displayName: string;
+  sample?: string;
+}
+
+/**
+ * Ribbon presets that have no equivalent row in the categories above, and the
+ * row each one should become.
+ *
+ * These are exactly Excel's locale-responsive entries -- the ones Excel marks
+ * with an asterisk and re-resolves from Region settings. Their format strings
+ * are deliberately absent: the label is all this side knows, and the sample
+ * comes from the backend that resolved it.
+ */
+const RIBBON_ROWS: ReadonlyArray<{ preset: string; category: string; label: string }> = [
+  { preset: "currency", category: "currency", label: "Currency (regional)" },
+  { preset: "accounting", category: "accounting", label: "Accounting (regional)" },
+  { preset: "date_short", category: "date", label: "Short Date" },
+  { preset: "date_long", category: "date", label: "Long Date" },
+  { preset: "time", category: "time", label: "Time (regional)" },
+];
+
+/**
+ * Fold the ribbon's locale-resolved presets into the category list, so every
+ * format the ribbon can apply is a row the dialog can highlight.
+ *
+ * Rows are PREPENDED, matching Excel: its Date list leads with Short Date and
+ * Long Date, and its Currency list leads with the regional symbol.
+ */
+export function withRibbonPresets(
+  categories: NumberFormatCategory[],
+  ribbon: ReadonlyArray<RibbonResolvedFormat>
+): NumberFormatCategory[] {
+  if (ribbon.length === 0) return categories;
+  const byPreset = new Map(ribbon.map((r) => [r.preset, r]));
+  return categories.map((cat) => {
+    const additions = RIBBON_ROWS.filter(
+      (r) =>
+        r.category === cat.id &&
+        byPreset.has(r.preset) &&
+        !cat.formats.some((f) => f.value === r.preset)
+    ).map((r) => ({
+      label: r.label,
+      value: r.preset,
+      example: byPreset.get(r.preset)?.sample,
+    }));
+    return additions.length === 0
+      ? cat
+      : { ...cat, formats: [...additions, ...cat.formats] };
+  });
+}
+
+/** Preset -> category for the ribbon rows, so `categoryForFormat` can place them. */
+const RIBBON_PRESET_TO_CATEGORY: Record<string, string> = Object.fromEntries(
+  RIBBON_ROWS.map((r) => [r.preset, r.category])
+);
+
 /**
  * Normalize a format string (preset value OR backend display name) to a preset
  * value, or null if no preset is equivalent.
+ *
+ * `ribbon` is the backend's own preset/display-name pairs for the current
+ * locale, and is consulted FIRST: it is authoritative, it is regional, and it
+ * costs nothing to be right about. The static table is the offline fallback.
  */
-export function normalizeToPresetValue(format: string): string | null {
+export function normalizeToPresetValue(
+  format: string,
+  ribbon: ReadonlyArray<RibbonResolvedFormat> = []
+): string | null {
   if (!format) return null;
   if (PRESET_VALUE_TO_CATEGORY[format]) return format;
   const lower = format.toLowerCase();
   if (PRESET_VALUE_TO_CATEGORY[lower]) return lower;
-  return DISPLAY_NAME_TO_PRESET[format] ?? null;
+  // The backend resolved these against the live locale -- exact match first.
+  const resolved = ribbon.find((r) => r.displayName === format);
+  if (resolved) return resolved.preset;
+  const resolvedCi = ribbon.find((r) => r.displayName.toLowerCase() === lower);
+  if (resolvedCi) return resolvedCi.preset;
+  // Case-insensitively, because `Date (YYYY-MM-DD)` and `Date (yyyy-mm-dd)` are
+  // the SAME format to the engine's date formatter and must not be two here.
+  return DISPLAY_NAME_TO_PRESET[format] ?? DISPLAY_NAME_TO_PRESET_CI[lower] ?? null;
 }
 
 /**
@@ -238,9 +360,14 @@ export function normalizeToPresetValue(format: string): string | null {
  * display names land in their real category; anything else with format
  * characters is custom; empty/general falls back to general.
  */
-export function categoryForFormat(format: string): string {
-  const preset = normalizeToPresetValue(format);
-  if (preset) return PRESET_VALUE_TO_CATEGORY[preset] ?? "general";
+export function categoryForFormat(
+  format: string,
+  ribbon: ReadonlyArray<RibbonResolvedFormat> = []
+): string {
+  const preset = normalizeToPresetValue(format, ribbon);
+  if (preset) {
+    return PRESET_VALUE_TO_CATEGORY[preset] ?? RIBBON_PRESET_TO_CATEGORY[preset] ?? "general";
+  }
   if (!format || format.toLowerCase().includes("general")) return "general";
   for (const [prefix, category] of DISPLAY_PREFIX_TO_CATEGORY) {
     if (format.startsWith(prefix) && format.endsWith(")")) return category;

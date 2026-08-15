@@ -34,6 +34,10 @@ vi.mock("@api", () => ({
     if (!mockState.settings) throw new Error("no locale in this test");
     return mockState.settings;
   },
+  // The regional rows are resolved by the backend. This suite is about the
+  // locale-driven LABELS, so the ribbon response is empty here -- which also
+  // pins that an empty response leaves those labels exactly as they were.
+  getRibbonNumberFormats: async () => [],
   onLocaleChanged: (cb: (loc: NonNullable<Locale>) => void) => {
     mockState.localeListeners.push(cb);
     return () => {

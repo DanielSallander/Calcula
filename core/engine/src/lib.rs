@@ -52,7 +52,7 @@ pub use navigation::{
     EXCEL_MAX_ROW_INDEX,
 };
 pub use formula_locale::{delocalize_formula, localize_formula};
-pub use locale::{LocaleCurrencyPosition, LocaleSettings};
+pub use locale::{CalendarNames, LocaleCurrencyPosition, LocaleSettings};
 pub use number_format::{format_number, format_number_with_color, format_text_with_color};
 pub use row_visibility::{
     active as active_row_visibility, begin_pass as begin_visibility_pass, HiddenScope,

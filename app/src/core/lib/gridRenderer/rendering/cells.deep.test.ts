@@ -3,7 +3,7 @@
 // CONTEXT: Tests drawTextWithTruncation and drawRichTextRuns with comprehensive scenarios
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { drawTextWithTruncation, drawRichTextRuns } from "./cells";
+import { drawTextWithTruncation, drawTextWithTruncationMetrics, drawRichTextRuns } from "./cells";
 import type { RichTextRun } from "../../../types/types";
 
 // ============================================================================
@@ -91,30 +91,50 @@ describe("drawTextWithTruncation", () => {
     });
   });
 
-  describe("text exceeds maxWidth - truncation", () => {
-    it("truncates with ellipsis when text is too wide", () => {
+  // Excel CLIPS an over-long value at the cell edge — mid-glyph, no ellipsis and
+  // no marker of any kind. The whole string is handed to fillText and the
+  // caller's clip rectangle cuts it, which is why these assert on the FULL
+  // string rather than on a shortened one.
+  describe("text exceeds maxWidth - clipped at the cell edge", () => {
+    it("draws the whole string and lets the clip cut it", () => {
       // "Hello World!!" = 13 chars * 8 = 104px, maxWidth = 50
       drawTextWithTruncation(ctx, "Hello World!!", 10, 20, 50);
       const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls.length).toBe(1);
       const drawnText = calls[0][0] as string;
-      expect(drawnText).toContain("...");
-      expect(drawnText.length).toBeLessThan("Hello World!!".length + 3);
+      expect(drawnText).toBe("Hello World!!");
+      expect(drawnText).not.toContain("...");
     });
 
-    it("returns original text width even when truncated", () => {
-      // Original width should be returned regardless of truncation
+    it("draws a clipped value from the box origin, ignoring alignment", () => {
+      // A value that has run out of room fills the box, so it starts at `x`.
+      drawTextWithTruncation(ctx, "Hello World!!", 10, 20, 50, "right");
+      expect(ctx.fillText).toHaveBeenCalledWith("Hello World!!", 10, 20);
+    });
+
+    it("returns the original text width even when clipped", () => {
+      // Original width should be returned regardless of clipping — it is the
+      // overflow signal the spill logic reads.
       const width = drawTextWithTruncation(ctx, "Hello World!!", 10, 20, 50);
       expect(width).toBe(13 * 8); // 104
     });
 
-    it("draws just ellipsis when maxWidth is very small", () => {
-      // maxWidth smaller than ellipsis width
-      // "..." = 3 chars * 8 = 24px, available = 5 - 24 = negative
+    it("still draws the value when the box is far too small for it", () => {
       drawTextWithTruncation(ctx, "Hello", 10, 20, 5);
       const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls.length).toBe(1);
-      expect(calls[0][0]).toBe("...");
+      expect(calls[0][0]).toBe("Hello");
+    });
+
+    it("measures nothing when the caller already knows the width", () => {
+      // The numeric path has necessarily measured its candidate already; paying
+      // for the same measureText twice per numeric cell is the regression this
+      // parameter exists to prevent.
+      (ctx.measureText as ReturnType<typeof vi.fn>).mockClear();
+      const m = drawTextWithTruncationMetrics(ctx, "Hello", 10, 20, 100, "left", 40);
+      expect(ctx.measureText).not.toHaveBeenCalled();
+      expect(m.fullWidth).toBe(40);
+      expect(ctx.fillText).toHaveBeenCalledWith("Hello", 10, 20);
     });
   });
 
@@ -346,8 +366,10 @@ describe("drawRichTextRuns - deep tests", () => {
     });
   });
 
-  describe("truncation with rich text", () => {
-    it("adds ellipsis when total run width exceeds maxWidth", () => {
+  // Rich text is TEXT by construction, so it gets Excel's text rule: clipped at
+  // the cell edge, never ellipsised and never marked with '####'.
+  describe("overflow with rich text", () => {
+    it("draws each run in full and lets the clip cut the overhang", () => {
       // Each run measures to 8 * length. Two runs of 20 chars each = 320px
       const runs: RichTextRun[] = [
         { text: "12345678901234567890" }, // 160px
@@ -361,7 +383,11 @@ describe("drawRichTextRuns - deep tests", () => {
 
       const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
       const allText = calls.map((c: unknown[]) => c[0]).join("");
-      expect(allText).toContain("...");
+      expect(allText).not.toContain("...");
+      // The first run alone already overflows the 100px box, so the second run
+      // starts beyond the edge and is skipped rather than drawn invisibly.
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("12345678901234567890");
     });
 
     it("returns total width even when truncated", () => {
@@ -376,8 +402,9 @@ describe("drawRichTextRuns - deep tests", () => {
       expect(totalWidth).toBe(160);
     });
 
-    it("draws only ellipsis when maxWidth is tiny", () => {
-      // "..." = 24px. If maxWidth < 24, should just draw ellipsis
+    it("still draws the run when maxWidth is tiny", () => {
+      // A 10px box cannot hold "Hello World" (88px). Excel shows the first
+      // glyph or two and clips the rest; it does not substitute a marker.
       const runs: RichTextRun[] = [
         { text: "Hello World" },
       ];
@@ -389,7 +416,7 @@ describe("drawRichTextRuns - deep tests", () => {
 
       const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls.length).toBe(1);
-      expect(calls[0][0]).toBe("...");
+      expect(calls[0][0]).toBe("Hello World");
     });
   });
 

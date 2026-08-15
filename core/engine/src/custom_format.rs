@@ -831,7 +831,34 @@ pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat, local
 
     // If this is a datetime section, delegate to date/time formatting
     if section.is_datetime {
-        return format_datetime_section(value, section);
+        return format_datetime_section(value, section, locale);
+    }
+
+    // Excel's Text format (`@`) applied to a NUMBER.
+    //
+    // A section carrying the text placeholder and no digit placeholders has
+    // nothing for the numeric renderer to fill, and it used to fall through to
+    // it and produce the empty string -- so formatting a numeric cell as Text
+    // made the cell go BLANK. Excel shows the value's General rendering,
+    // left-aligned, and keeps it (the number is still there; only its display
+    // becomes text-like). This is the path the Home > Number dropdown's Text
+    // entry takes, so a blank cell was one click away.
+    if section.has_text_placeholder && !section.has_digits {
+        let general = format_number(value, &NumberFormat::General, locale);
+        let mut text = String::new();
+        for token in &section.tokens {
+            match token {
+                FormatToken::TextPlaceholder => text.push_str(&general),
+                FormatToken::Literal(s) => text.push_str(s),
+                FormatToken::SpaceWidth(_) => text.push(' '),
+                _ => {}
+            }
+        }
+        return FormatResult {
+            text,
+            color: section.color,
+            accounting: None,
+        };
     }
 
     // If no digit placeholders and no text placeholder, it's all literals
@@ -846,7 +873,7 @@ pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat, local
 
     // Scientific notation
     if section.has_scientific {
-        return format_scientific_section(value, section);
+        return format_scientific_section(value, section, locale);
     }
 
     // Fraction format
@@ -1310,11 +1337,43 @@ fn render_literals_only(section: &FormatSection) -> String {
 // FORMATTER — SCIENTIFIC NOTATION
 // ============================================================================
 
-fn format_scientific_section(value: f64, section: &FormatSection) -> FormatResult {
+/// Render `0.00E+00`-style scientific sections.
+///
+/// The format string has TWO digit fields separated by the `E`: the mantissa's
+/// decimals before it and the exponent's WIDTH after it. Counting placeholders
+/// across the whole section folded the exponent's zeros into the mantissa, so
+/// `0.00E+00` rendered 1234 as `1.2340E+3` -- four mantissa decimals and a
+/// one-digit exponent, both wrong. Excel renders `1.23E+03`: the exponent is
+/// zero-padded to the placeholder count, and the mantissa's decimal separator
+/// is the locale's (`1,23E+03` on sv-SE) like every other number this engine
+/// prints.
+fn format_scientific_section(
+    value: f64,
+    section: &FormatSection,
+    locale: &LocaleSettings,
+) -> FormatResult {
     let num = value.abs();
 
-    // Count digit placeholders after E
-    let (_, dec_places) = count_digit_placeholders(&section.tokens);
+    let e_index = section
+        .tokens
+        .iter()
+        .position(|t| matches!(t, FormatToken::Scientific { .. }));
+    let (mantissa_tokens, exponent_tokens): (&[FormatToken], &[FormatToken]) = match e_index {
+        Some(i) => (&section.tokens[..i], &section.tokens[i + 1..]),
+        None => (&section.tokens[..], &[]),
+    };
+
+    let (_, dec_places) = count_digit_placeholders(mantissa_tokens);
+    let exponent_width = exponent_tokens
+        .iter()
+        .filter(|t| {
+            matches!(
+                t,
+                FormatToken::DigitZero | FormatToken::DigitHash | FormatToken::DigitSpace
+            )
+        })
+        .count()
+        .max(1);
 
     // Find the scientific token to determine show_plus
     let show_plus = section
@@ -1326,19 +1385,13 @@ fn format_scientific_section(value: f64, section: &FormatSection) -> FormatResul
         })
         .unwrap_or(true);
 
-    // Format using Rust's scientific notation
-    let formatted = if dec_places > 0 {
-        format!("{:.prec$E}", num, prec = dec_places)
-    } else {
-        format!("{:.0E}", num)
-    };
-
-    // Adjust the E notation format
-    let text = if show_plus {
-        formatted.replace('E', "E+").replace("E+-", "E-")
-    } else {
-        formatted.replace("E+", "E").replace("E-", "E-")
-    };
+    let text = crate::number_format::render_scientific(
+        num,
+        dec_places as u8,
+        exponent_width,
+        show_plus,
+        locale,
+    );
 
     let text = if value < 0.0 {
         format!("-{}", text)
@@ -1533,7 +1586,15 @@ fn format_fraction_section(value: f64, section: &FormatSection) -> FormatResult 
 // FORMATTER — DATE/TIME
 // ============================================================================
 
-fn format_datetime_section(value: f64, section: &FormatSection) -> FormatResult {
+/// Render a date/time section.
+///
+/// `locale` is load-bearing, not decoration: `mmm`/`mmmm`/`mmmmm`/`ddd`/`dddd`
+/// are LANGUAGE tokens, and Excel renders them in the system locale -- a
+/// Swedish machine shows `den 15 januari 2024`. The names used to come from
+/// English-only free functions in this file, so the ribbon's Long Date entry
+/// would have shipped "den 15 January 2024" on the app's own sv-SE test locale.
+fn format_datetime_section(value: f64, section: &FormatSection, locale: &LocaleSettings) -> FormatResult {
+    let calendar = locale.calendar();
     // Excel serial date: days since Dec 30, 1899
     let days = value.floor() as i64;
     let time_fraction = value.fract().abs();
@@ -1588,13 +1649,18 @@ fn format_datetime_section(value: f64, section: &FormatSection) -> FormatResult 
                 result.push_str(&month.to_string());
             }
             FormatToken::DateMonthName3 => {
-                result.push_str(month_name_short(month));
+                result.push_str(calendar.month_short(month));
             }
             FormatToken::DateMonthName4 => {
-                result.push_str(month_name_full(month));
+                result.push_str(calendar.month_full(month));
             }
             FormatToken::DateMonthName1 => {
-                result.push_str(&month_name_full(month)[..1]);
+                // FIRST CHARACTER, not first BYTE: `[..1]` panicked the moment a
+                // month name stopped being ASCII (the Russian and CJK tables slice
+                // mid-codepoint), which localized names make reachable.
+                if let Some(initial) = calendar.month_full(month).chars().next() {
+                    result.push(initial);
+                }
             }
             FormatToken::DateDay2 => {
                 result.push_str(&format!("{:02}", day));
@@ -1603,10 +1669,10 @@ fn format_datetime_section(value: f64, section: &FormatSection) -> FormatResult 
                 result.push_str(&day.to_string());
             }
             FormatToken::DateDayName3 => {
-                result.push_str(day_name_short(dow));
+                result.push_str(calendar.day_short(dow));
             }
             FormatToken::DateDayName4 => {
-                result.push_str(day_name_full(dow));
+                result.push_str(calendar.day_full(dow));
             }
             FormatToken::TimeHour2 => {
                 if has_ampm {
@@ -1734,68 +1800,6 @@ fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
     let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let y = if month < 3 { year - 1 } else { year };
     ((y + y / 4 - y / 100 + y / 400 + t[(month - 1) as usize] + day as i32) % 7) as u32
-}
-
-fn month_name_short(month: u32) -> &'static str {
-    match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    }
-}
-
-fn month_name_full(month: u32) -> &'static str {
-    match month {
-        1 => "January",
-        2 => "February",
-        3 => "March",
-        4 => "April",
-        5 => "May",
-        6 => "June",
-        7 => "July",
-        8 => "August",
-        9 => "September",
-        10 => "October",
-        11 => "November",
-        12 => "December",
-        _ => "???",
-    }
-}
-
-fn day_name_short(dow: u32) -> &'static str {
-    match dow {
-        0 => "Sun",
-        1 => "Mon",
-        2 => "Tue",
-        3 => "Wed",
-        4 => "Thu",
-        5 => "Fri",
-        6 => "Sat",
-        _ => "???",
-    }
-}
-
-fn day_name_full(dow: u32) -> &'static str {
-    match dow {
-        0 => "Sunday",
-        1 => "Monday",
-        2 => "Tuesday",
-        3 => "Wednesday",
-        4 => "Thursday",
-        5 => "Friday",
-        6 => "Saturday",
-        _ => "???",
-    }
 }
 
 // ============================================================================
@@ -2169,8 +2173,53 @@ mod tests {
 
     #[test]
     fn test_scientific_notation() {
+        // `contains("E+")` was the whole assertion here, so the section
+        // formatter could -- and did -- fold the exponent's two zeros into the
+        // mantissa and emit "1.2340E+3" while this test passed.
         let result = format_custom_value(1234.0, "0.00E+00", &LocaleSettings::invariant());
-        assert!(result.text.contains("E+"), "Expected scientific notation, got: {}", result.text);
+        assert_eq!(result.text, "1.23E+03");
+    }
+
+    #[test]
+    fn scientific_sections_split_mantissa_from_exponent_width() {
+        let us = LocaleSettings::invariant();
+        // Exponent width follows the placeholder count after the E.
+        assert_eq!(format_custom_value(1234.0, "0.00E+00", &us).text, "1.23E+03");
+        assert_eq!(format_custom_value(1234.0, "0.00E+0", &us).text, "1.23E+3");
+        assert_eq!(format_custom_value(1234.0, "0.0000E+00", &us).text, "1.2340E+03");
+        // `E-` suppresses the sign on a positive exponent, keeps it negative.
+        assert_eq!(format_custom_value(1234.0, "0.00E-00", &us).text, "1.23E03");
+        assert_eq!(format_custom_value(0.00123, "0.00E-00", &us).text, "1.23E-03");
+        assert_eq!(format_custom_value(-1234.0, "0.00E+00", &us).text, "-1.23E+03");
+    }
+
+    /// Excel's Text format on a numeric cell. This used to render the empty
+    /// string -- the ribbon's Text entry sent `@`, and the cell went BLANK.
+    #[test]
+    fn text_format_on_a_number_shows_the_value_not_nothing() {
+        let us = LocaleSettings::invariant();
+        assert_eq!(format_custom_value(1234.5678, "@", &us).text, "1234.5678");
+        assert_eq!(format_custom_value(0.0, "@", &us).text, "0");
+        assert_eq!(format_custom_value(-42.0, "@", &us).text, "-42");
+        // Locale-correct, like every other number this engine prints.
+        let se = LocaleSettings::from_locale_id("sv-SE");
+        assert_eq!(format_custom_value(1234.5678, "@", &se).text, "1234,5678");
+        // Literals around the placeholder are kept.
+        assert_eq!(
+            format_custom_value(42.0, "\"id \"@", &us).text,
+            "id 42"
+        );
+    }
+
+    #[test]
+    fn text_format_on_actual_text_is_unchanged() {
+        assert_eq!(format_custom_text("hello", "@").text, "hello");
+    }
+
+    #[test]
+    fn scientific_sections_localize_the_mantissa() {
+        let se = LocaleSettings::from_locale_id("sv-SE");
+        assert_eq!(format_custom_value(1234.5678, "0.00E+00", &se).text, "1,23E+03");
     }
 
     #[test]
@@ -2314,6 +2363,68 @@ mod tests {
     fn test_month_name_full() {
         let result = format_custom_value(45306.0, "mmmm d, yyyy", &LocaleSettings::invariant());
         assert_eq!(result.text, "January 15, 2024");
+    }
+
+    // ---- Localized month/weekday names (Excel renders them in the system
+    // locale; the tables here used to be English-only) ----
+
+    #[test]
+    fn month_and_day_names_follow_the_locale_not_the_format_string() {
+        let se = LocaleSettings::from_locale_id("sv-SE");
+        assert_eq!(
+            format_custom_value(45306.0, "mmmm d, yyyy", &se).text,
+            "januari 15, 2024"
+        );
+        assert_eq!(
+            format_custom_value(45306.0, "dd-mmm-yyyy", &se).text,
+            "15-jan-2024"
+        );
+        assert_eq!(
+            format_custom_value(45306.0, "dddd", &se).text,
+            "m\u{00E5}ndag"
+        );
+        // Same serial, same format string, different language.
+        assert_eq!(
+            format_custom_value(45306.0, "dddd", &LocaleSettings::invariant()).text,
+            "Monday"
+        );
+    }
+
+    /// The exact string Excel's ribbon Long Date entry produces on a Swedish
+    /// machine. A quoted literal carrying its own trailing space is the only
+    /// way to write "den " without `d`/`e`/`n` lexing as date tokens.
+    #[test]
+    fn swedish_long_date_renders_the_os_pattern() {
+        let se = LocaleSettings::from_locale_id("sv-SE");
+        assert_eq!(
+            format_custom_value(45306.0, &se.long_date_format.clone(), &se).text,
+            "den 15 januari 2024"
+        );
+    }
+
+    #[test]
+    fn us_long_date_renders_the_os_pattern() {
+        let us = LocaleSettings::invariant();
+        assert_eq!(
+            format_custom_value(45306.0, &us.long_date_format.clone(), &us).text,
+            "Monday, January 15, 2024"
+        );
+    }
+
+    /// `mmmmm` is the one-letter month token. It used to be `&name[..1]`, a
+    /// BYTE slice -- fine while every name was ASCII, a panic the moment the
+    /// table gained a Cyrillic or CJK month.
+    #[test]
+    fn one_letter_month_token_never_slices_mid_codepoint() {
+        for id in ["en-US", "sv-SE", "ru-RU", "ja-JP", "pl-PL"] {
+            let locale = LocaleSettings::from_locale_id(id);
+            let text = format_custom_value(45306.0, "mmmmm", &locale).text;
+            assert_eq!(text.chars().count(), 1, "{} produced {:?}", id, text);
+        }
+        assert_eq!(
+            format_custom_value(45306.0, "mmmmm", &LocaleSettings::invariant()).text,
+            "J"
+        );
     }
 
     // ---- Fraction format tests ----

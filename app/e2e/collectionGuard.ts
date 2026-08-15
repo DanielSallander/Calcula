@@ -55,10 +55,10 @@
 // and both files missing from the 134-of-143 run had been written by that same
 // pass (the new 4-test spec, plus the only 5-test spec touched that day --
 // 4 + 5 = 9). The onEnd comparison catches the TRANSIENT form (the file has
-// its content back by the time `--list` runs); `verifySpecFileCoverage` below
-// catches the PERSISTENT form (the file is still empty), which the comparison
-// alone would wave through because both sides would agree on the truncated
-// population.
+// its content back by the time `--list` runs); `matchedSpecFiles` +
+// `describeZeroTestFiles` below catch the PERSISTENT form (the file is still
+// empty), which the comparison alone would wave through because both sides
+// would agree on the truncated population.
 
 import type {
   FullConfig,

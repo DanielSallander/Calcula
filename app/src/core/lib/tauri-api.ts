@@ -984,6 +984,49 @@ export async function setCellRichText(
   return invoke<CellData | null>("set_cell_rich_text", { row, col, runs });
 }
 
+/**
+ * Prime the frontend style cache with the registry entries a formatting command
+ * just used or created.
+ *
+ * WHY HERE. The renderer resolves a cell with
+ * `getStyleFromCache(styleCache, cell.styleIndex)`, and that lookup FALLS BACK
+ * to index 0 -- the document default -- when the index is unknown. Applying a
+ * format MINTS an index, so a caller that refreshed the CELLS without also
+ * refreshing the STYLE TABLE painted the cell unformatted while `get_style`
+ * reported the format correctly. Measured on the running app (BUG-0076): Ctrl+B
+ * on a cell with a background fill turned it WHITE and left it unbolded --
+ * 2,277 fill pixels went to 0 -- while `get_style` reported bold AND the colour.
+ *
+ * The ribbon happened to be correct because `useHomeTabState.applyFormat`
+ * dispatches `styles:refresh` by hand; the Core keyboard route
+ * (`format.toggleBold` -> `applyFormattingToSelection`) did not, and neither did
+ * the script host's `applyRangeFormat` for the ACTIVE sheet. That is the same
+ * shape as the outline / hyperlink / validation / annotation defect this file
+ * already carries a comment about: a refresh wired to ONE caller.
+ *
+ * Emitting from the wrapper cannot be routed around -- there is no other door to
+ * `apply_formatting` -- and it costs no IPC: `FormattingResult.styles` is exactly
+ * "New or updated styles that the frontend should cache" (api_types.rs),
+ * collected from `used_style_indices` in `commands/styles.rs`. It was previously
+ * read for a console.log of its LENGTH and otherwise discarded.
+ *
+ * EXPORTED, and that correction is BUG-0080. This function's own comment used to
+ * read "there is no other door to THE COMMAND", which is true of
+ * `apply_formatting` and false of the STYLE CACHE: `apply_named_style` and
+ * `apply_named_style_range` return the same `FormattingResult` with the same
+ * `styles` array, their wrappers live in `src/api/backend.ts`, and both are
+ * exported through `@api` for extensions. Neither announced anything. Measured
+ * at the unit tier (`formatStyleCachePrime.test.tsx`): a cell the backend
+ * reports as carrying the named style's `#00A650` fill painted `#ffffff`, the
+ * document default. The class is the door, not the command -- so every wrapper
+ * that receives a `FormattingResult` announces through THIS function.
+ */
+export function announceStyleEntries(result: FormattingResult): void {
+  if (result.styles.length > 0) {
+    emitAppEvent(AppEvents.STYLE_ENTRIES_UPDATED, { styles: result.styles });
+  }
+}
+
 export async function applyFormatting(
   rows: number[],
   cols: number[],
@@ -1036,6 +1079,7 @@ export async function applyFormatting(
     "styles=",
     result.styles.length
   );
+  announceStyleEntries(result);
   recordGridEvent({ kind: "formatting", rows, cols, formatting });
 
   // Sheet grouping: replicate formatting to all grouped (non-active) sheets
@@ -1102,6 +1146,7 @@ export async function applyBorderPreset(
     color,
     width,
   });
+  announceStyleEntries(result);
   return result;
 }
 
@@ -3167,6 +3212,34 @@ export async function previewNumberFormat(
   sampleValue: number,
 ): Promise<PreviewResult> {
   return invoke<PreviewResult>("preview_number_format", { formatString, sampleValue });
+}
+
+/** One row of Excel's Home > Number dropdown, resolved for the current locale. */
+export interface RibbonNumberFormat {
+  /** Preset keyword to send back through applyFormatting. */
+  preset: string;
+  /** What get_style reports for a cell carrying this preset. */
+  displayName: string;
+  /** The preset applied to the sample value. */
+  sample: string;
+}
+
+/**
+ * Resolve Excel's Home > Number dropdown for the CURRENT locale.
+ *
+ * The backend owns this mapping on purpose. Short Date / Long Date / Time /
+ * Currency / Accounting are REGIONAL presets -- Excel writes them as
+ * `[$-x-sysdate]`-style handles and resolves them from the OS -- and the
+ * `displayName` each one reads back as is `format_number_format_name`'s
+ * output. Deriving either half in TypeScript would be a second source of truth
+ * for exactly the mapping BUG-0065 was filed against.
+ */
+export async function getRibbonNumberFormats(
+  sampleValue?: number,
+): Promise<RibbonNumberFormat[]> {
+  return invoke<RibbonNumberFormat[]>("get_ribbon_number_formats", {
+    sampleValue: sampleValue ?? null,
+  });
 }
 
 // ============================================================================

@@ -126,6 +126,70 @@ export function describeUnreachableApp(
   );
 }
 
+/**
+ * The sentence for the OTHER way a run can be dead on arrival: the application
+ * is running, CDP answers, the page LOADED — and the frontend never mounted.
+ *
+ * WHY THIS EXISTS (BUG-0082). Measured three times on 2026-08-15, twice on cold
+ * `--project=soak` / `--project=invariant` starts and once on `--project=visual`,
+ * where it failed all 18 tests and therefore read as "the entire golden corpus
+ * broke". Captured live on the third occurrence, over CDP, while the app was
+ * still up:
+ *
+ *     document.readyState  "complete"
+ *     #root children       0            <- React never mounted
+ *     window.__TAURI__     defined      <- the Tauri bridge injected fine
+ *     window.__calcImport  UNDEFINED    <- main.tsx never ran its body
+ *     <script src>         /@vite/client, /src/main.tsx   (both in the DOM)
+ *
+ * So `/src/main.tsx` was requested and never evaluated. Without this message the
+ * only evidence is N identical `waitForSelector` timeouts and a blank white
+ * screenshot — indistinguishable at a glance from a product regression, which is
+ * the failure mode this whole harness exists to delete.
+ *
+ * PURE, like `describeUnreachableApp`, so the WORDING has a unit tier: the value
+ * of the guard IS the sentence a reader acts on.
+ */
+export function describeUnmountedApp(
+  rootChildCount: number,
+  calcImportPresent: boolean,
+  url: string,
+  consoleTail: string[],
+  cause: unknown,
+): string {
+  // THREE arms, not two. A page that could not be evaluated reports -1, and
+  // calling that "empty" would be a CLAIM about a page nothing could read —
+  // the same species of overreach as reporting a suite green for tests it
+  // never collected.
+  const diagnosis =
+    rootChildCount < 0
+      ? "the page could not be evaluated, so whether the frontend mounted is " +
+        "UNKNOWN. Treat nothing after this point as a test result until the app " +
+        "has been re-launched and the state re-read."
+      : rootChildCount > 0
+        ? `#root has ${rootChildCount} child element(s), so the frontend DID mount and ` +
+          "the spreadsheet container specifically is missing — that is a product " +
+          "question, not a startup one."
+        : "#root IS EMPTY: the page loaded but the frontend module never executed. " +
+          "This is a HARNESS/STARTUP failure, NOT a product failure — nothing " +
+          "reported after this point is a test result. Re-launch and re-run. " +
+          (calcImportPresent
+            ? "`window.__calcImport` IS present, so main.tsx began running and threw " +
+              "after installing it."
+            : "`window.__calcImport` is ABSENT, so main.tsx never got as far as " +
+              "installing it (see BUG-0082).");
+
+  return (
+    "[e2e] THE APPLICATION IS REACHABLE BUT THE SPREADSHEET NEVER APPEARED.\n" +
+    `      url: ${url}\n` +
+    `      ${diagnosis}\n` +
+    (consoleTail.length > 0
+      ? `      last console output:\n${consoleTail.map((l) => `        ${l}`).join("\n")}\n`
+      : "      the page produced NO console output to attribute it with.\n") +
+    `      Underlying error: ${cause instanceof Error ? cause.message : String(cause)}`
+  );
+}
+
 function reportAppGone(cause: unknown): Error {
   const apps = countAppProcesses();
   const message = describeUnreachableApp(apps, cause);
@@ -211,10 +275,58 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       // After a cold Rust build the React app may take 20-30s to render inside
       // WebView2, so use a generous timeout.  The invariant project sets its
       // test timeout to 120s, so 60s here is safe.
-      await page.waitForSelector("[data-focus-container='spreadsheet']", {
-        state: "visible",
-        timeout: 60_000,
-      });
+      //
+      // A TIMEOUT HERE IS RE-DIAGNOSED BEFORE IT IS RE-THROWN (BUG-0082). The
+      // bare Playwright error says only that a locator never appeared, and it
+      // says it once per test — 18 times in the visual project, which reads as
+      // the whole golden corpus breaking. `describeUnmountedApp` distinguishes
+      // "the page loaded but nothing mounted" (a startup failure; nothing after
+      // it is a test result) from "the app mounted and this container is
+      // missing" (a product question). The console tail is collected from here
+      // on so the NEXT occurrence carries the evidence this one lacked.
+      const consoleTail: string[] = [];
+      const record = (line: string): void => {
+        consoleTail.push(line);
+        if (consoleTail.length > 12) consoleTail.shift();
+      };
+      const onConsole = (m: { type: () => string; text: () => string }): void =>
+        record(`${m.type()}: ${m.text().slice(0, 300)}`);
+      const onPageError = (e: Error): void =>
+        record(`pageerror: ${String(e).slice(0, 300)}`);
+      page.on("console", onConsole);
+      page.on("pageerror", onPageError);
+
+      try {
+        await page.waitForSelector("[data-focus-container='spreadsheet']", {
+          state: "visible",
+          timeout: 60_000,
+        });
+      } catch (cause) {
+        // Read the page's own state. Every probe is guarded: a page that cannot
+        // be evaluated at all must still produce the diagnosis, not a second,
+        // more confusing error on top of the first.
+        const probe = await page
+          .evaluate(() => ({
+            rootChildCount: document.getElementById("root")?.childElementCount ?? -1,
+            calcImportPresent:
+              typeof (window as unknown as { __calcImport?: unknown }).__calcImport !==
+              "undefined",
+            url: document.location.href,
+          }))
+          .catch(() => ({ rootChildCount: -1, calcImportPresent: false, url: "(unreadable)" }));
+        const message = describeUnmountedApp(
+          probe.rootChildCount,
+          probe.calcImportPresent,
+          probe.url,
+          consoleTail,
+          cause,
+        );
+        console.error(message);
+        throw new Error(message);
+      } finally {
+        page.off("console", onConsole);
+        page.off("pageerror", onPageError);
+      }
 
       await use(page);
     },

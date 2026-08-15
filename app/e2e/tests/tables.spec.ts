@@ -2,7 +2,24 @@
  * Structured Tables E2E tests.
  *
  * Tests table creation, renaming, deletion, totals row, and column ops
- * via Tauri API commands. Uses cells in columns R-T, rows 1-15.
+ * via Tauri API commands. Uses cells in columns R-T, rows 1-18.
+ *
+ * THE TERRITORY IS PART OF THE CONTRACT, and this file broke it (BUG-0074).
+ * "rename a table" used to build its table over V1:W2 -- columns 21-22 --
+ * which is inside `comments-notes.spec.ts`'s declared W-X ground, and it never
+ * deleted it. Tables are not cells: the chrome is painted by the Table
+ * extension's STYLE INTERCEPTOR from the table definition, so a leftover table
+ * repaints W1 as an Excel TableStyleMedium2 header (#4472C4 fill, white bold
+ * text) and W2 as a banded row (#D9E2F3). No `clear_range` reaches that, and
+ * `resetGrid` does not delete tables at all.
+ *
+ * This file sorts AFTER comments-notes, so the damage never showed up in the
+ * run that caused it -- only in the NEXT run against the same app process,
+ * where three goldens photographed table chrome no test in their file creates.
+ * That is the whole of 'one build, three different answers': cold -> 3 fail,
+ * warm -> 6 pass / 1 fail, `--update-snapshots` on a warm app -> written as
+ * truth. Every table this file creates is now deleted in `test.afterAll`, and
+ * `zz-workbook-residue.spec.ts` fails the run if one survives.
  */
 import { test, expect } from "../fixtures";
 import { takeGridRegionScreenshot } from "../helpers/screenshots";
@@ -36,6 +53,48 @@ async function announceTablesChanged(page: Page): Promise<void> {
 }
 
 test.describe("Structured Tables", () => {
+  /**
+   * EVERY TABLE THIS FILE CREATES IS DELETED HERE.
+   *
+   * Three of the four tests used to leave their table behind for the rest of
+   * the process: Table1 (R1:T4), SalesData (V1:W2 -- see the file header) and
+   * TotalsTest (R7:S10). Measured after one full functional run on a cold app,
+   * `get_all_tables` returned exactly those three. A table survives `resetGrid`,
+   * survives `clear_range_with_options` (it is a definition, not cell state) and
+   * repaints its whole range through the style interceptor, so it reaches every
+   * later run's goldens.
+   *
+   * Deletes ALL tables rather than the ids the tests captured, on the same
+   * reasoning as `charts.spec.ts`: a test that failed before its assertion still
+   * created its object, and the cleanup has to cover that case too.
+   */
+  test.afterAll(async ({ sharedPage }) => {
+    await sharedPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      if (!tauri?.core?.invoke) return;
+      const tables: Array<{ id: string }> = await tauri.core
+        .invoke("get_all_tables", {})
+        .catch(() => []);
+      for (const t of tables) {
+        await tauri.core.invoke("delete_table", { tableId: t.id }).catch(() => {});
+      }
+      // The seeded cells, through the same command the reset helper uses.
+      // `applyTo` is lower case: see e2e/__tests__/clearApplyToVocabulary.test.ts.
+      await tauri.core
+        .invoke("clear_range_with_options", {
+          params: { startRow: 0, startCol: 17, endRow: 17, endCol: 19, applyTo: "all" },
+        })
+        .catch(() => {});
+      // The backend forgot the tables; the Table extension keeps its own cache
+      // and only re-reads it on these events. Without them the chrome keeps
+      // painting over cells the backend has already released -- the same shape
+      // as the chart cleanup in charts.spec.ts.
+      window.dispatchEvent(new Event("app:table-definitions-updated"));
+      window.dispatchEvent(new Event("grid:refresh"));
+    });
+    await sharedPage.waitForTimeout(400);
+  });
+
   test("create a table with headers", async ({ appPage, grid }) => {
     // Set up data
     await grid.setCellValueDirect("R1", "Product");
@@ -84,18 +143,19 @@ test.describe("Structured Tables", () => {
     // First create a table
     const createResult: any = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
-      // Set up data
-      await tauri.core.invoke("update_cell", { row: 0, col: 21, value: "X" });
-      await tauri.core.invoke("update_cell", { row: 0, col: 22, value: "Y" });
-      await tauri.core.invoke("update_cell", { row: 1, col: 21, value: "1" });
-      await tauri.core.invoke("update_cell", { row: 1, col: 22, value: "2" });
+      // Set up data. R17:S18 -- inside THIS file's territory, and clear of
+      // the three tables its other tests build (R1:T4, R7:S10, R13:S14).
+      await tauri.core.invoke("update_cell", { row: 16, col: 17, value: "X" });
+      await tauri.core.invoke("update_cell", { row: 16, col: 18, value: "Y" });
+      await tauri.core.invoke("update_cell", { row: 17, col: 17, value: "1" });
+      await tauri.core.invoke("update_cell", { row: 17, col: 18, value: "2" });
       return tauri.core.invoke("create_table", {
         params: {
           name: "",
-          startRow: 0,
-          startCol: 21,
-          endRow: 1,
-          endCol: 22,
+          startRow: 16,
+          startCol: 17,
+          endRow: 17,
+          endCol: 18,
           hasHeaders: true,
         },
       });

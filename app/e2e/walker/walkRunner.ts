@@ -20,6 +20,7 @@ import {
 } from "../invariants/stateSnapshot";
 import type { StateSnapshot } from "../invariants/stateSnapshot";
 import type { OracleBattery } from "../oracles";
+import { plannedCheckpointCount } from "../oracles";
 import type { OracleBaseline } from "../oracles/types";
 import { sweepNativeDialogs } from "../helpers/nativeDialogs";
 import type { ActionSource } from "./sources";
@@ -323,6 +324,15 @@ export class WalkRunner {
       snapshotTimeoutMs = 45_000,
       verbose = true,
     } = this.opts;
+
+    // REFUSE a configuration whose save/reload cadence can never come due.
+    // This is the only place the walk's length, its checkpoint cadence and the
+    // battery's own cadence are all in scope; the numbers live in three files
+    // and nothing had ever compared them (see
+    // `describeUnreachableSaveReloadCadence`).
+    oracleBattery?.assertCadenceReachable(
+      plannedCheckpointCount(maxActions, oracleEveryNActions),
+    );
 
     const startedAt = Date.now();
     const trace = createTrace(source.seed);

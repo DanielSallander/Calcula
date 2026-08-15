@@ -253,6 +253,72 @@ test.describe("the walker's object actions have real effects", () => {
     expect(await backendChartCount(appPage), "charts leaked past the reset").toBe(0);
   });
 
+  test("a chart the store never learned about does not survive the reset (BUG-0075)", async ({
+    appPage,
+    grid,
+  }) => {
+    // THE ONE ABOVE CANNOT CATCH THIS, and the difference is the whole bug.
+    // It creates charts through the product, so the frontend store and the
+    // backend agree and a teardown that enumerates EITHER of them works. This
+    // test creates the chart the way a spec does when it takes the shortcut —
+    // a raw `save_chart` invoke — which leaves `get_charts` holding a chart
+    // `getAllCharts()` has never heard of.
+    //
+    // Measured on 2026-08-15, that state does not merely survive the reset, it
+    // gets WORSE inside it: the reset's own TABLE teardown announces the
+    // `objects` domain (ObjectKind::Table -> UiDomain::Objects), the Shell fans
+    // that out to `charts:refresh`, and the extension reloads its store from a
+    // backend that still holds the outgoing document's chart — 500ms before
+    // `new_file` empties that backend. The store keeps the chart, the store is
+    // what paints, and a chart with no document behind it was photographed by
+    // `scenario-budget-model-title` (173,986 differing pixels).
+    //
+    // Hence the table: it is not scenery, it is the trigger.
+    await deepResetForWalk(appPage);
+    await appPage.waitForTimeout(400);
+
+    await act("table.create").execute(appPage, grid, {});
+    await appPage.waitForTimeout(400);
+
+    await appPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      const spec = {
+        mark: "bar",
+        data: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 5, endCol: 1 },
+        hasHeaders: true,
+        seriesOrientation: "columns",
+        categoryIndex: 0,
+        series: [{ sourceIndex: 1, name: "Value", color: "#4472C4" }],
+        title: "Blind_1",
+      };
+      await tauri.core.invoke("save_chart", {
+        entry: { id: crypto.randomUUID(), sheetIndex: 0, specJson: JSON.stringify(spec) },
+      });
+    });
+    await appPage.waitForTimeout(400);
+
+    // The precondition this test is about. If the product ever starts telling
+    // the store about a raw `save_chart`, this expectation fails and the test
+    // is no longer testing what it says — which is the right way to find out.
+    expect(await backendChartCount(appPage)).toBe(1);
+    expect(
+      await storeChartIds(appPage),
+      "a raw save_chart is supposed to leave the store blind — if it no longer " +
+        "does, this test's premise is stale",
+    ).toEqual([]);
+
+    await deepResetForWalk(appPage);
+    await appPage.waitForTimeout(500);
+
+    expect(await backendChartCount(appPage), "BUG-0075: chart left in the document").toBe(0);
+    expect(
+      await storeChartIds(appPage),
+      "BUG-0075: the chart store holds a chart the document does not contain — " +
+        "it PAINTS, so every capture after this point is of a workbook the " +
+        "product cannot produce",
+    ).toEqual([]);
+  });
+
   test("every object family's create and delete move the count the walker reads", async ({
     appPage,
     grid,

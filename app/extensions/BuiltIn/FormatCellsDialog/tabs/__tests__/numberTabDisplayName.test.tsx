@@ -23,6 +23,12 @@ vi.mock("@api", () => ({
   getLocaleSettings: async () => {
     throw new Error("no locale in this test");
   },
+  // REJECTS on purpose. The regional rows are an enhancement, never a
+  // requirement: a backend that cannot answer must cost those rows and nothing
+  // else, and every BUG-0065 expectation below must still hold.
+  getRibbonNumberFormats: async () => {
+    throw new Error("no ribbon formats in this test");
+  },
   onLocaleChanged: () => () => {},
 }));
 

@@ -9,12 +9,14 @@ import {
   getNumberFormatCategories,
   normalizeToPresetValue,
   categoryForFormat,
+  withRibbonPresets,
 } from "../utils/numberFormats";
-import type { NumberFormatCategory } from "../utils/numberFormats";
+import type { NumberFormatCategory, RibbonResolvedFormat } from "../utils/numberFormats";
 import {
   previewNumberFormat,
   getCachedLocale,
   getLocaleSettings,
+  getRibbonNumberFormats,
   onLocaleChanged,
 } from "@api";
 import type { LocaleSettings } from "@api";
@@ -37,6 +39,23 @@ function localeCategories(loc: LocaleSettings | null): NumberFormatCategory[] {
 export function NumberTab(): React.ReactElement {
   const { numberFormat, setNumberFormat } = useFormatCellsStore();
 
+  const [locale, setLocale] = useState<LocaleSettings | null>(() => getCachedLocale());
+  /**
+   * The ribbon's eleven entries, RESOLVED BY THE BACKEND for this locale.
+   *
+   * The dialog needs them for two things it cannot do on its own: recognise a
+   * format the Home > Number dropdown applied (their display names are
+   * regional -- `Date (YYYY-MM-DD)` on sv-SE, `Date (m/d/yyyy)` on en-US), and
+   * show the locale-responsive rows Excel puts at the top of its Date, Time,
+   * Currency and Accounting lists. Inverting either in TypeScript is what left
+   * three of the eleven unreportable here.
+   *
+   * Empty until the response lands, and empty forever if it fails: every
+   * fallback below is the previous behaviour, so a backend that cannot answer
+   * costs the regional rows and nothing else.
+   */
+  const [ribbon, setRibbon] = useState<RibbonResolvedFormat[]>([]);
+
   const [categories, setCategories] = useState<NumberFormatCategory[]>(() =>
     localeCategories(getCachedLocale())
   );
@@ -44,20 +63,34 @@ export function NumberTab(): React.ReactElement {
     let live = true;
     if (!getCachedLocale()) {
       getLocaleSettings()
-        .then((loc) => { if (live) setCategories(localeCategories(loc)); })
+        .then((loc) => { if (live) setLocale(loc); })
         .catch(() => { /* keep defaults if locale cannot be read */ });
     }
     const unsubscribe = onLocaleChanged((loc) => {
-      if (live) setCategories(localeCategories(loc));
+      if (live) setLocale(loc);
     });
     return () => { live = false; unsubscribe(); };
   }, []);
+
+  // Re-resolve the ribbon presets whenever the locale changes: their whole
+  // point is that they are regional.
+  useEffect(() => {
+    let live = true;
+    getRibbonNumberFormats()
+      .then((rows) => { if (live) setRibbon(rows); })
+      .catch(() => { /* regional rows are an enhancement, never a requirement */ });
+    return () => { live = false; };
+  }, [locale]);
+
+  useEffect(() => {
+    setCategories(withRibbonPresets(localeCategories(locale), ribbon));
+  }, [locale, ribbon]);
 
   // Which category the current format belongs to. categoryForFormat also
   // understands the backend DISPLAY NAMES get_style emits ("Date (yyyy-mm-dd)")
   // -- before BUG-0065 the dialog compared them against preset values, so a
   // formatted cell always reopened on General with nothing highlighted.
-  const findCurrentCategory = (): string => categoryForFormat(numberFormat);
+  const findCurrentCategory = (): string => categoryForFormat(numberFormat, ribbon);
 
   const [selectedCategory, setSelectedCategory] = useState(findCurrentCategory);
   const [customInput, setCustomInput] = useState(() => {
@@ -71,11 +104,12 @@ export function NumberTab(): React.ReactElement {
   // when the format lands or changes. Selecting a preset maps to its own
   // category, so this never yanks the user away while browsing categories.
   useEffect(() => {
-    const next = categoryForFormat(numberFormat);
+    const next = categoryForFormat(numberFormat, ribbon);
     setSelectedCategory((prev) => (prev === next ? prev : next));
     if (next === "custom") setCustomInput(numberFormat);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- track the format only
-  }, [numberFormat]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- format and the
+    // resolved ribbon rows; re-running when the rows land is the point.
+  }, [numberFormat, ribbon]);
   const [preview, setPreview] = useState<{ display: string; color?: string }>({ display: "Sample" });
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -86,7 +120,7 @@ export function NumberTab(): React.ReactElement {
   // The store may hold a preset value ("number_sep") or the backend display
   // name the dialog loaded ("Number (2 decimals, with separators)"); both
   // must light the same preset row.
-  const currentPresetValue = normalizeToPresetValue(numberFormat);
+  const currentPresetValue = normalizeToPresetValue(numberFormat, ribbon);
 
   // Fetch preview for custom format input
   const fetchPreview = useCallback(async (formatStr: string) => {

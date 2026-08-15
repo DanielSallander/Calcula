@@ -306,7 +306,23 @@ export async function resetGrid(page: Page): Promise<void> {
   await page.keyboard.press("Delete");
   await page.waitForTimeout(300);
 
-  // Clear all contents and formatting via Tauri API
+  // Clear all contents and formatting via Tauri API.
+  //
+  // `applyTo` IS `"all"`, LOWER CASE, AND THAT IS NOT A STYLE CHOICE. Rust's
+  // `ClearApplyTo` (app/src-tauri/src/api_types.rs) carries
+  // `#[serde(rename_all = "camelCase")]`, so the wire vocabulary is
+  // `all | contents | formats | hyperlinks | removeHyperlinks | resetContents`.
+  // This call passed `"All"` for its whole life; serde answered
+  // `unknown variant \`All\`` (measured live 2026-08-15 against the running
+  // backend), the invoke rejected, and the `catch` below swallowed it. So the
+  // formatting clear this helper documents at length NEVER RAN -- the reset was
+  // Ctrl+A + Delete and nothing else, and every fill, border and number format
+  // any spec applied survived into every later spec's golden. Four `afterAll`
+  // cleanups written specifically to close the sec 3a/3b residue class
+  // (animation, charts, dimensions, edge-cases) were inert for the same reason.
+  // A capitalised variant here is a silent no-op, which is why
+  // `e2e/__tests__/clearApplyToVocabulary.test.ts` reads the Rust enum and
+  // fails the build on one.
   await page.evaluate(async () => {
     const tauri = (window as any).__TAURI__;
     if (tauri?.core?.invoke) {
@@ -326,7 +342,7 @@ export async function resetGrid(page: Page): Promise<void> {
           // Older backend without get_used_range: the floor still applies.
         }
         await tauri.core.invoke("clear_range_with_options", {
-          params: { startRow: 0, startCol: 0, endRow, endCol, applyTo: "All" },
+          params: { startRow: 0, startCol: 0, endRow, endCol, applyTo: "all" },
         });
         window.dispatchEvent(new Event("grid:refresh"));
       } catch {
@@ -898,6 +914,23 @@ export async function takeGridRegionScreenshot(
     Math.min(Math.max(v, canvasBox.x), canvasBox.x + canvasBox.width);
   const clampY = (v: number) =>
     Math.min(Math.max(v, canvasBox.y), canvasBox.y + canvasBox.height);
+
+  // STABILISE AFTER THE PARK, NOT ONLY BEFORE IT.
+  //
+  // `waitForGridStable` runs at the top of this function, and then the helper
+  // goes on to dispatch up to three `app:navigate-to-cell` events (the park,
+  // plus two per re-framing attempt), each followed by a FLAT sleep. Every one
+  // of those moves the selection and can scroll, and the repaint they drive
+  // lands through `GridCanvas.refreshCells`, which is an async round trip: the
+  // last thing before the shutter was a sleep, not a wait.
+  //
+  // In COMPARISON mode `toHaveScreenshot` retries until the image settles, so
+  // an unsettled frame is invisible there. `--update-snapshots` takes ONE
+  // screenshot and writes it. That asymmetry is how a recapture can persist a
+  // frame the comparator would never have accepted, which is the general half
+  // of BUG-0074 and the reason this program requires a separate verify run.
+  // Costs one signal wait per capture; removes the asymmetry at its source.
+  await waitForGridStable(page);
 
   const x = includeHeaders ? canvasBox.x : clampX(canvasBox.x + rect.x - padding);
   const y = includeHeaders ? canvasBox.y : clampY(canvasBox.y + rect.y - padding);

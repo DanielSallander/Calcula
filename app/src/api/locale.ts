@@ -22,8 +22,20 @@ export interface LocaleSettings {
   thousandsSeparator: string;
   /** List/argument separator used in formulas: "," or ";" */
   listSeparator: string;
-  /** Default date format pattern, e.g. "YYYY-MM-DD" */
+  /** Default (short) date format pattern, e.g. "YYYY-MM-DD" */
   dateFormat: string;
+  /**
+   * OS long-date pattern, e.g. `"den "d mmmm yyyy` (sv-SE) or
+   * `dddd, mmmm d, yyyy` (en-US). Excel's ribbon Long Date entry is the
+   * `[$-x-sysdate]` handle, which means exactly "use this".
+   */
+  longDateFormat: string;
+  /**
+   * OS long-time pattern WITH seconds, e.g. `hh:mm:ss` (sv-SE, which has no
+   * AM/PM designator) or `h:mm:ss AM/PM` (en-US). Excel's ribbon Time entry is
+   * the `[$-x-systime]` handle.
+   */
+  timeFormat: string;
   /** Default currency symbol, e.g. "$", " kr" */
   currencySymbol: string;
   /** Currency position: "before" or "after" */

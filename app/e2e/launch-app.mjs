@@ -60,6 +60,11 @@ const child = spawn(
       // the colour-profile pin the PowerShell launcher had just set in the
       // environment it handed us — see webview2Args.mjs.
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: webview2BrowserArguments(CDP_PORT),
+      // Not hot-reloadable while a suite runs: a source save fast-refreshes the
+      // provider tree and resets the grid (selection -> A1, scroll -> 0) with no
+      // navigation for anything to observe. Read by vite.config.ts; pinned by
+      // e2e/__tests__/hmrDisabledForE2E.test.ts.
+      CALCULA_E2E: "1",
     },
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],

@@ -137,6 +137,79 @@ mod tests {
         assert_eq!(loaded_cells[&(1, 0)].style_index, 0);
     }
 
+    /// SAVE/LOAD ROUND TRIP for the vertical-alignment default (Excel parity).
+    ///
+    /// Two separate claims, because getting one right and the other wrong is
+    /// exactly how a default change leaks into files:
+    ///
+    /// 1. A DEFAULT-ALIGNED CELL PERSISTS AS "NO ALIGNMENT". It keeps style
+    ///    index 0 and `cells_to_sheet_styles` omits it from `styles.json`
+    ///    entirely, so nothing per-cell is stamped on the way out. That is why
+    ///    the parity change is a one-place change and not a migration.
+    /// 2. THE REGISTRY'S INDEX 0 -- the one thing that IS written -- comes back
+    ///    saying Bottom, and an explicitly-middle style beside it comes back
+    ///    saying Middle. If index 0 round-tripped as Middle, every new file
+    ///    would freeze the pre-parity default into itself.
+    #[test]
+    fn default_alignment_persists_as_no_style_and_the_registry_roundtrips_bottom() {
+        use engine::style::{StyleRegistry, VerticalAlign};
+
+        let mut registry = StyleRegistry::new();
+        let middle_idx =
+            registry.get_or_create(CellStyle::new().with_vertical_align(VerticalAlign::Middle));
+        assert_ne!(middle_idx, 0);
+
+        // A default-aligned cell and an explicitly-middle one, side by side.
+        let mut cells = HashMap::new();
+        cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Text("default".to_string()),
+                formula: None,
+                style_index: 0,
+                rich_text: None,
+                spill: None,
+            },
+        );
+        cells.insert(
+            (1, 0),
+            SavedCell {
+                value: SavedCellValue::Text("explicitly middle".to_string()),
+                formula: None,
+                style_index: middle_idx,
+                rich_text: None,
+                spill: None,
+            },
+        );
+
+        let sheet_styles = cells_to_sheet_styles(&cells);
+        assert_eq!(
+            sheet_styles.cells.len(),
+            1,
+            "only the explicitly-aligned cell may be written; a default-aligned \
+             cell must persist as NO alignment at all"
+        );
+        assert!(
+            !sheet_styles.cells.contains_key("A1"),
+            "the default-aligned cell must not be stamped into styles.json"
+        );
+        assert_eq!(sheet_styles.cells["A2"], middle_idx);
+
+        // The registry itself is what carries the default's identity.
+        let json = serialize_style_registry(registry.all_styles()).unwrap();
+        let restored = deserialize_style_registry(&json).unwrap();
+        assert_eq!(
+            restored[0].vertical_align,
+            VerticalAlign::Bottom,
+            "style index 0 must reload as Excel's default, Bottom"
+        );
+        assert_eq!(
+            restored[middle_idx].vertical_align,
+            VerticalAlign::Middle,
+            "an explicitly-middle cell must reload as Middle -- only the DEFAULT moved"
+        );
+    }
+
     #[test]
     fn test_style_registry_roundtrip() {
         let mut registry = engine::style::StyleRegistry::new();

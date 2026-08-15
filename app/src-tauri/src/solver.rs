@@ -13,7 +13,7 @@ use crate::api_types::{
     SolverParams, SolverResult, SolverVariableCell, SolverVariableValue,
 };
 use crate::{
-    evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
+    evaluate_formula_multi_sheet, get_column_row_dependents,
     get_recalculation_order, AppState,
 };
 use engine::{Cell, CellValue, Grid, StyleRegistry};
@@ -34,7 +34,7 @@ fn build_cell_data(
     // Honour the row/column style tiers for display and for the index we hand out.
     let effective_style_index = grid.effective_style_index(r, c);
     let style = styles.get(effective_style_index);
-    let display = format_cell_value(&cell.value, style, locale);
+    let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, locale);
 
     let merge = merged_regions
         .iter()
@@ -48,6 +48,7 @@ fn build_cell_data(
         row: r,
         col: c,
         display,
+        overflow,
         display_color: None,
         formula: cell.formula_string().map(|f| format!("={}", f)),
         style_index: effective_style_index,

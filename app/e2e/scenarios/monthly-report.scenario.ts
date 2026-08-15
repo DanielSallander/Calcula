@@ -147,8 +147,28 @@ defineScenario("monthly-report", [
     name: "add a sales chart",
     behaviors: ["chart.create-from-range", "undo.chart-lifecycle"],
     async run({ page }) {
+      // THE PRODUCT'S OWN CREATE, not a raw `save_chart` invoke. This is the
+      // same lesson the walker's `chart.create` learned as BUG-0031 and it is
+      // the ROOT CAUSE of BUG-0075, measured end to end on 2026-08-15:
+      //
+      //   `save_chart` persists the chart and tells the chart STORE nothing, so
+      //   the run ends with `get_charts` answering 1 while
+      //   `__CALCULA_CHARTS__.getAllCharts()` answers 0. The NEXT scenario's
+      //   `deepResetForWalk` tears charts down by enumerating that store, finds
+      //   it empty, and deletes nothing — so the backend chart survives the
+      //   teardown. Moments later, still inside the same reset, deleting this
+      //   scenario's TABLE announces the `objects` domain (ObjectKind::Table ->
+      //   UiDomain::Objects), the Shell fans it out to `charts:refresh`, and
+      //   the extension reloads its store from a backend that STILL HOLDS this
+      //   chart. `new_file` then clears the backend and nothing re-syncs the
+      //   store, so a chart with no document behind it paints over the NEXT
+      //   scenario's sheet and was photographed by `scenario-budget-model-title`
+      //   (173,986 differing pixels).
+      //
+      // `createChart` is what Insert > Chart calls: it pushes into the store AND
+      // persists through the same `save_chart`, so the backend sees exactly what
+      // it saw before and the store is no longer blind.
       await page.evaluate(async () => {
-        const tauri = (window as any).__TAURI__;
         const spec = {
           mark: "bar",
           data: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 12, endCol: 2 },
@@ -158,15 +178,43 @@ defineScenario("monthly-report", [
           series: [{ sourceIndex: 2, name: "Sales", color: "#4472C4" }],
           title: "Monthly Sales",
         };
-        await tauri.core.invoke("save_chart", {
-          entry: { id: crypto.randomUUID(), sheetIndex: 0, specJson: JSON.stringify(spec) },
+        const store = (await (window as any).__calcImport(
+          new URL("/extensions/Charts/lib/chartStore.ts", document.baseURI).href,
+        )) as {
+          createChart?: (spec: unknown, placement: Record<string, unknown>) => { chartId: string };
+          syncChartRegions?: () => void;
+        };
+        if (!store?.createChart) {
+          throw new Error(
+            "monthly-report: the chart store exposes no createChart — refusing to " +
+              "fall back to a raw save_chart invoke, which is what BUG-0075 was.",
+          );
+        }
+        store.createChart(spec, {
+          sheetIndex: 0,
+          x: 100,
+          y: 100,
+          width: 600,
+          height: 400,
+          name: "Monthly Sales",
         });
+        store.syncChartRegions?.();
       });
       await page.waitForTimeout(400);
     },
     async assertions({ page }) {
       const charts = (await invokeTauri(page, "get_charts")) as unknown[];
       expect(charts.length).toBe(1);
+      // THE TWO STORES MUST AGREE, and this is the assertion that keeps the
+      // raw-invoke shortcut from coming back: a backend chart the frontend
+      // store has never heard of is precisely the state BUG-0075 needed.
+      const storeCount = await page.evaluate(
+        () => ((window as any).__CALCULA_CHARTS__?.getAllCharts?.() ?? []).length,
+      );
+      expect(
+        storeCount,
+        "the frontend chart store must know about the chart the backend just persisted",
+      ).toBe(1);
     },
   },
   {

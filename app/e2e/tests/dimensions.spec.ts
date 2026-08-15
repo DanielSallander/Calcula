@@ -45,7 +45,7 @@ test.describe("Column Width & Row Height", () => {
       if (!tauri?.core?.invoke) return;
       await tauri.core
         .invoke("clear_range_with_options", {
-          params: { startRow: 0, startCol: 0, endRow: 1, endCol: 2, applyTo: "All" },
+          params: { startRow: 0, startCol: 0, endRow: 1, endCol: 2, applyTo: "all" },
         })
         .catch(() => {});
       window.dispatchEvent(new Event("grid:refresh"));

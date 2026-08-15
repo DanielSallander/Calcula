@@ -9,7 +9,7 @@ use crate::pivot::types::PivotState;
 use crate::ribbon_filter::types::{RibbonFilter, RibbonFilterState};
 use crate::slicer::types::{Slicer, SlicerState};
 use crate::{
-    extract_all_references, format_cell_value, update_column_dependencies,
+    extract_all_references, update_column_dependencies,
     update_cross_sheet_dependencies, update_dependencies, update_row_dependencies, AppState,
 };
 use engine::{CellChange, GridSnapshot, Transaction, UndoMergeRegion};
@@ -889,11 +889,12 @@ pub(crate) fn apply_changes(
                             cell.style_index
                         };
                         let style = styles.get(effective_style_index);
-                        let display = format_cell_value(&cell.value, style, &locale);
+                        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
                         updated_cells.push(CellData {
                             row: *row,
                             col: *col,
                             display,
+                            overflow,
                             display_color: None,
                             formula: cell.formula_string().map(|f| format!("={}", f)),
                             style_index: effective_style_index,
@@ -922,6 +923,8 @@ pub(crate) fn apply_changes(
                             row: *row,
                             col: *col,
                             display: String::new(),
+                            // Empty: nothing to overflow, and text never marks.
+                            overflow: crate::api_types::OverflowClass::Text,
                             display_color: None,
                             formula: None,
                             style_index: effective_style_index,

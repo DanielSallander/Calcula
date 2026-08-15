@@ -127,7 +127,7 @@ test.describe("Animation extension", () => {
         }
         await tauri.core
           .invoke("clear_range_with_options", {
-            params: { startRow: 0, startCol: 0, endRow: 20, endCol: 26, applyTo: "All" },
+            params: { startRow: 0, startCol: 0, endRow: 20, endCol: 26, applyTo: "all" },
           })
           .catch(() => {});
       }

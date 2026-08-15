@@ -91,6 +91,45 @@ test.describe("Workbook residue guard (runs last)", () => {
     ).toEqual([]);
   });
 
+  /**
+   * THE FOURTH RESIDUE CLASS, and the one that cost three goldens (BUG-0074).
+   *
+   * A table is not a floating object and it is not cell state, so neither guard
+   * above could see it and no reset in the suite removes it: `resetGrid` clears
+   * cells, `clear_range_with_options` clears cells, and a table is a DEFINITION
+   * the Table extension's style interceptor repaints from on every frame.
+   * `tables.spec.ts` built one over V1:W2 — inside `comments-notes.spec.ts`'s
+   * declared W-X ground — and never deleted it, so on the SECOND and every later
+   * run against the same app process, `comments-notes`' three captures
+   * photographed an Excel TableStyleMedium2 header (#4472C4, white bold text)
+   * and a banded row (#D9E2F3) that no test in their file creates.
+   *
+   * Measured after one full cold functional run before the fix: `get_all_tables`
+   * returned Table1 (R1:T4), SalesData (V1:W2) and TotalsTest (R7:S10) — three
+   * tables, from three tests, none of them cleaned up.
+   *
+   * It never showed up in the run that caused it, because `tables` sorts after
+   * `comments-notes`. That is exactly the shape a guard is for.
+   */
+  test("no spec left a table in the backend", async ({ appPage }) => {
+    const tables = await appPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      const list: Array<{ name: string; startRow: number; startCol: number; endRow: number; endCol: number }> =
+        await tauri.core.invoke("get_all_tables", {});
+      return list.map(
+        (t) => `${t.name} r${t.startRow}-${t.endRow} c${t.startCol}-${t.endCol}`,
+      );
+    });
+    expect(
+      tables,
+      "A spec created a table and never deleted it. A table survives resetGrid AND " +
+        "clear_range_with_options — the chrome is repainted from the DEFINITION by " +
+        "Table's style interceptor, so it will recolour every cell in its range for " +
+        "every spec that runs after it AND for every later run against this app " +
+        "process. Add a test.afterAll that deletes it; see e2e/tests/tables.spec.ts.",
+    ).toEqual([]);
+  });
+
   test("no spec left a side panel open, shrinking the grid area", async ({ appPage }) => {
     // The third residue class, and the cheapest one to miss: an open sidebar
     // panel takes ~320px off `[data-grid-area]`, so every later grid golden

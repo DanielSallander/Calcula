@@ -1203,6 +1203,102 @@ mod tests {
     use super::*;
     use crate::{SavedCell, SavedCellValue, Sheet};
 
+    /// EXCEL PARITY, xlsx FIDELITY: a default-aligned cell exports with NO
+    /// `vertical` attribute at all, and an explicitly-middle one exports as
+    /// `vertical="center"`.
+    ///
+    /// This is the export-side half of the Middle -> Bottom default change and
+    /// it is the half that could have silently gone wrong in either direction:
+    ///
+    ///   - Before the change every default cell carried `VerticalAlign::Middle`,
+    ///     so any cell that got a format at all wrote `vertical="center"` --
+    ///     a spurious explicit alignment in the exported file, and a round trip
+    ///     through Excel that was NOT idempotent (Excel writes nothing there).
+    ///   - After the change a naive writer could emit `vertical="bottom"` on
+    ///     every cell instead, which is harmless to Excel but is the same
+    ///     noise with a different spelling.
+    ///
+    /// `rust_xlsxwriter` gets this right on its own (`Format::has_alignment`
+    /// treats `FormatAlign::Bottom` as the Excel default and omits the
+    /// `<alignment>` element), so the correct behaviour follows from the
+    /// default move -- but "follows from a dependency's internals" is exactly
+    /// the kind of claim that needs bytes behind it, so the bytes are read.
+    #[test]
+    fn a_default_aligned_cell_exports_with_no_vertical_attribute_at_all() {
+        use engine::style::VerticalAlign;
+        use std::io::Read;
+
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        let mut sheet = Sheet::new("Align".to_string());
+        // Index 0 is the document default; index 1 is an EXPLICIT middle.
+        sheet.styles = vec![
+            CellStyle::new(),
+            CellStyle::new().with_vertical_align(VerticalAlign::Middle),
+        ];
+        sheet.cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Text("default".to_string()),
+                formula: None,
+                style_index: 0,
+                rich_text: None,
+                spill: None,
+            },
+        );
+        sheet.cells.insert(
+            (1, 0),
+            SavedCell {
+                value: SavedCellValue::Text("middle".to_string()),
+                formula: None,
+                style_index: 1,
+                rich_text: None,
+                spill: None,
+            },
+        );
+        workbook.sheets.push(sheet);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("align.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut styles_xml = String::new();
+        zip.by_name("xl/styles.xml")
+            .unwrap()
+            .read_to_string(&mut styles_xml)
+            .unwrap();
+
+        assert!(
+            !styles_xml.contains("vertical=\"bottom\""),
+            "the document default must be expressed by OMITTING the attribute, \
+             the way Excel does; got: {styles_xml}"
+        );
+        assert_eq!(
+            styles_xml.matches("vertical=\"center\"").count(),
+            1,
+            "exactly one xf -- the EXPLICITLY middle cell -- may carry a \
+             vertical alignment; got: {styles_xml}"
+        );
+
+        // And the round trip agrees with the bytes.
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        let s = &loaded.sheets[0];
+        let a1 = &s.styles[s.cells[&(0, 0)].style_index];
+        let a2 = &s.styles[s.cells[&(1, 0)].style_index];
+        assert_eq!(
+            a1.vertical_align,
+            VerticalAlign::Bottom,
+            "an absent vertical attribute must read back as Excel's default, Bottom"
+        );
+        assert_eq!(
+            a2.vertical_align,
+            VerticalAlign::Middle,
+            "an explicitly-middle cell must survive the xlsx round trip"
+        );
+    }
+
     /// Hidden rows and columns must survive an xlsx export/import.
     ///
     /// This used to be a second copy of the .cala data-loss bug: the writer

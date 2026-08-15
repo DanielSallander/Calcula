@@ -120,7 +120,7 @@ const DEFAULT_STATE: FormatCellsState = {
   strikethrough: false,
   textColor: "#000000",
   textAlign: "general",
-  verticalAlign: "middle",
+  verticalAlign: "bottom",
   wrapText: false,
   shrinkToFit: false,
   textRotation: "none",

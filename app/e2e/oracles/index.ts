@@ -55,6 +55,67 @@ export interface OracleBatteryOptions {
   disable?: Array<"undo-round-trip" | "recalc-consistency" | "save-reload-round-trip">;
 }
 
+/**
+ * The most checkpoints a walk of `maxActions` at a cadence of
+ * `oracleEveryNActions` can possibly reach.
+ *
+ * An UPPER bound on purpose: a wall-clock budget (soak) or an early failure can
+ * end a walk sooner, so this over-counts and never under-counts. That is the
+ * direction that makes the reachability check below safe — it can only fire on
+ * a configuration that could not reach the cadence even in its best case.
+ *
+ * PURE, so the arithmetic has a unit tier
+ * (`app/e2e/__tests__/oracleCadenceReachable.test.ts`).
+ */
+export function plannedCheckpointCount(
+  maxActions: number,
+  oracleEveryNActions: number,
+): number {
+  if (maxActions <= 0 || oracleEveryNActions <= 0) return 0;
+  // The walker checkpoints every Nth action AND at the last step, so a walk
+  // whose length is not a multiple of the cadence gets one extra.
+  return Math.ceil(maxActions / oracleEveryNActions);
+}
+
+/**
+ * The sentence a walk configuration deserves when its save/reload cadence can
+ * NEVER come due — or null when it can.
+ *
+ * WHY THIS EXISTS, MEASURED 2026-08-15 while closing the correctness programme.
+ * The `invariant` project runs 75 actions at a cadence of 25 (**3** checkpoints)
+ * and a rapid-fire walk of 50 at 25 (**2**), while `saveReloadEvery` defaults to
+ * **4**. `checkpointCount % 4 === 0` is therefore false at every checkpoint the
+ * project can reach: the save/reload round-trip oracle has never run in that
+ * project on ANY seed, and could not have. Every run printed
+ * "[WARNING] the save/reload round-trip never ran — persistence was not
+ * exercised" and then reported a clean pass, so the warning read like luck.
+ *
+ * A guard that cannot run is not a guard that passed. This turns "it happened
+ * not to fire" into a configuration error that names the three numbers.
+ *
+ * PURE.
+ */
+export function describeUnreachableSaveReloadCadence(
+  saveReloadEvery: number,
+  plannedCheckpoints: number,
+): string | null {
+  if (saveReloadEvery <= 0) return null; // 0 means "deliberately disabled"
+  if (plannedCheckpoints >= saveReloadEvery) return null;
+  return (
+    `the save/reload round-trip oracle can NEVER run in this walk: it fires on ` +
+    `every ${saveReloadEvery}th checkpoint, and this walk can reach at most ` +
+    `${plannedCheckpoints}. Persistence would go unexercised while the run ` +
+    `reported a clean pass.\n` +
+    `      Fix it in the SPEC, by one of:\n` +
+    `        - pass \`saveReloadEvery: ${Math.max(1, plannedCheckpoints)}\` to the ` +
+    `OracleBattery, so it runs once per walk;\n` +
+    `        - lengthen the walk or shorten \`oracleEveryNActions\` until at least ` +
+    `${saveReloadEvery} checkpoints are reachable;\n` +
+    `        - pass \`saveReloadEvery: 0\` to state on purpose that this walk does ` +
+    `not exercise persistence.`
+  );
+}
+
 export class OracleBattery {
   private readonly tmpDir: string;
   private readonly saveReloadEvery: number;
@@ -150,6 +211,25 @@ export class OracleBattery {
     this.tmpDir = options.tmpDir;
     this.saveReloadEvery = options.saveReloadEvery ?? 4;
     this.disabled = new Set(options.disable ?? []);
+  }
+
+  /**
+   * REFUSE a walk whose save/reload cadence cannot come due. Called by
+   * `WalkRunner.run` with the walk's own upper bound on checkpoints — the only
+   * place both numbers exist at once.
+   *
+   * Throwing rather than warning is the point: the warning already existed and
+   * a whole project ran for weeks with its persistence oracle unreachable.
+   */
+  assertCadenceReachable(plannedCheckpoints: number): void {
+    if (this.disabled.has("save-reload-round-trip")) return;
+    const message = describeUnreachableSaveReloadCadence(
+      this.saveReloadEvery,
+      plannedCheckpoints,
+    );
+    if (message !== null) {
+      throw new Error(`[oracles] ${message}`);
+    }
   }
 
   /** Capture the baseline at the start of a checkpoint window. */

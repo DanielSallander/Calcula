@@ -56,6 +56,26 @@ const SETTLE_MS = 250;
  *  every N actions */
 const ORACLE_EVERY_N_ACTIONS = 25;
 
+/**
+ * How often the SAVE/RELOAD round-trip runs, in checkpoints.
+ *
+ * IT MUST BE STATED HERE, and this is why. `OracleBattery` defaults it to 4,
+ * and this project reaches 3 checkpoints on the main walk (75 actions / 25) and
+ * 2 on the rapid-fire walk (50 / 25). `checkpointCount % 4 === 0` is therefore
+ * false at every checkpoint this project can reach, so the save/reload oracle
+ * had NEVER run here on any seed — while every run printed its own
+ * "[WARNING] the save/reload round-trip never ran" and still reported a clean
+ * pass. Measured 2026-08-15; see open-decisions-2026-08.md.
+ *
+ * Set to the walk's LAST reachable checkpoint so persistence is exercised
+ * exactly once per walk (it is the most expensive oracle and it resets the undo
+ * stack, so more often would cost the undo oracle its evidence).
+ * `WalkRunner.run` now REFUSES a walk whose cadence cannot come due, so this
+ * cannot silently rot again.
+ */
+const SAVE_RELOAD_EVERY_MAIN = 3;   // 75 actions / 25 = 3 checkpoints
+const SAVE_RELOAD_EVERY_RAPID = 2;  // 50 actions / 25 = 2 checkpoints
+
 /** Bundles, live traces and the oracle's temp .cala files. */
 const RESULTS_DIR = path.resolve(HERE, "../results/invariant");
 
@@ -110,6 +130,7 @@ test.describe("State consistency (invariant monkey testing)", () => {
       invariants: ALL_INVARIANTS,
       oracleBattery: new OracleBattery({
         tmpDir: path.join(RESULTS_DIR, "tmp"),
+        saveReloadEvery: SAVE_RELOAD_EVERY_MAIN,
       }),
       oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
       maxActions: ACTIONS_PER_RUN,
@@ -183,6 +204,7 @@ test.describe("State consistency (invariant monkey testing)", () => {
       invariants: ALL_INVARIANTS,
       oracleBattery: new OracleBattery({
         tmpDir: path.join(RESULTS_DIR, "tmp"),
+        saveReloadEvery: SAVE_RELOAD_EVERY_RAPID,
       }),
       oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
       maxActions: 50,

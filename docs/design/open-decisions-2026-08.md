@@ -15246,13 +15246,30 @@ green.
   Excel's dropdown has Short Date / Long Date / Time / Currency / Accounting / Fraction. Dates
   are dialog-only today, which is why BUG-0061's route was the dialog. Excel-parity gap, small
   to add (values feed `parse_number_format`, which already knows `date_iso` etc.).
+  **DECIDED AND SHIPPED 2026-08-15 — see §25.** The "small to add" half of that note was wrong
+  and is corrected there: the dropdown's values are format CODES and `parse_number_format` is
+  keyed on preset KEYWORDS, two disjoint vocabularies, and five of Excel's eleven entries cannot
+  be written as a code at all because they are regional. Filed BUG-0069 (the dropdown),
+  BUG-0070 (Text blanked a numeric cell), BUG-0071 (scientific notation), BUG-0072 (month and
+  weekday names were English in every locale, and no long-date or time pattern existed).
 - **Default vertical alignment is Middle; Excel's is Bottom** (`CellStyle` default,
   `style.rs:358`). Deliberate-looking, near-invisible at 20px rows, but it is a parity deviation
   the ribbon now makes visible (Middle lights on every default cell).
+  **DECIDED AND SHIPPED 2026-08-15 — see §24. The default is now `VerticalAlign::Bottom`.**
 - **Overflow rendering: Calcula ellipsizes (`1234,5…`); Excel shows `####` for too-narrow
   numerics and overflows text into empty neighbors.** Deliberate (pinned by
   `truncatedTextDecoration.test.ts`), flagged by the validator; parity decision, not a defect
   filing.
+  **DECIDED AND SHIPPED 2026-08-15 — see §25.** Excel's rule is TWO rules chosen by the value's
+  type, and the naive reading of this bullet ("swap the ellipsis for `####`") would have been a
+  regression: text spills and clips and never shows the marker. Both halves shipped together.
+  The register also understated the defect twice — Calcula did not merely *fail* to mark
+  numerics, it SPILLED them (BUG-0067), and its spill ran through neighbours holding `=""`
+  (BUG-0068). One rung was not shipped by that pass and was filed rather than faked:
+  **BUG-0066**, the width-independent `####` for a negative date/time, which needs the value's
+  sign on the wire. **CLOSED on the integration pass — see §27c**, which owned all three files at
+  once and so no longer had the reason §26 recorded for declining it.
+  (Section number is **§26**; §25 was taken by the concurrent dropdown pass.)
 - **`workflow-multisheet-sheet1` is a placeholder**: the "data entry across sheets" spec writes
   to ONE sheet and says so in a comment ("when sheet creation E2E helpers are available" — they
   are, now). Coverage gap, not contamination; the golden truthfully shows one sheet tab.
@@ -15449,3 +15466,1630 @@ functional number-formatting spec covers ribbon routes, re-verified live here); 
 round-trips decided in 5 of 6 seed runs), and §21c's owner calls (ribbon dropdown date/currency
 options, default vertical-align Middle vs Excel Bottom, ellipsis vs `####`). The dev app is LEFT
 RUNNING on CDP 9222.
+
+
+## 24. §21c item 2 decided: the document default vertical alignment is Bottom (2026-08-15)
+
+Owner's tiebreaker for the §21c calls: *"Lets go with what makes it as similar to Excel as
+possible."* No backward compatibility required — a change that alters how existing workbooks render
+is accepted and expected. This section records item 2 only; the number dropdown (item 1) and the
+overflow marker (item 3) are separate passes.
+
+### 24a. The finding, and why it was one line of product and a wide blast radius
+
+Excel's default cell is **Horizontal: General, Vertical: Bottom**, and it is not configurable.
+`Range.VerticalAlignment` returns `xlBottom` for a fresh cell; OOXML's `CT_CellAlignment/@vertical`
+is `use="optional"` with **no schema default**, so "Bottom" is Excel's *application* behaviour for
+an ABSENT attribute rather than a declared value — which is why Excel OMITS `vertical` when it
+writes a default cell.
+
+Calcula's own xlsx READER already knew this: `xlsx_style_reader.rs:1648`'s fallback arm is
+`_ => VerticalAlign::Bottom` with the comment "Excel default is bottom". `CellStyle::new()` said
+`Middle`. So an imported .xlsx and a natively-created workbook disagreed about the same "unset"
+cell, and every Calcula-authored cell sat half a row higher than the same cell in Excel.
+
+**No special cases.** Wrap Text does not change it (the block of lines is still bottom-anchored),
+a merged region takes the anchor cell's alignment and its default is Bottom, and rotated text keeps
+`vertical` Bottom (rotation changes what the axis MEANS, not the default). One default, applied
+everywhere; anything branching the default by wrap/merge/rotation would be invented behaviour.
+
+### 24b. Every baked-in site (the work was the sweep, not the one-liner)
+
+**The default itself:**
+
+| Site | Was | Now |
+|---|---|---|
+| `core/engine/src/style.rs` `CellStyle::new()` | `VerticalAlign::Middle` | `Bottom` |
+| `core/engine/src/style.rs` `enum VerticalAlign` `#[default]` | on `Middle` | on `Bottom` |
+| `app/src/core/types/types.ts` `DEFAULT_STYLE` | `"middle"` | `"bottom"` |
+| `app/src/core/lib/gridRenderer/rendering/cells.ts:1179` renderer fallback | `\|\| "middle"` | `\|\| "bottom"` |
+| `app/src-tauri/src/commands/styles.rs` (2 parse arms) | `_ => Middle` | `_ => Bottom` |
+| `app/extensions/BuiltIn/FormatCellsDialog/hooks/useFormatCellsState.ts` store default | `"middle"` | `"bottom"` |
+| `core/calp/src/html_export.rs` (2 base-CSS blocks) | `td { vertical-align: middle }` | `bottom` |
+| `app/src/api/scriptHost/__tests__/formatReadback.test.ts` "REAL default CellStyle" fixture | `"middle"` | `"bottom"` |
+
+The `#[default]` on the enum is easy to miss and is a SECOND default: it is where any
+`#[serde(default)]` field or `..Default::default()` construction lands. The renderer fallback is a
+THIRD: it fires for any style object that omits the field, so leaving it at `"middle"` would give a
+build where Rust says bottom and the canvas says middle.
+
+**Deliberately NOT changed** (verified correct as-is): `api_types.rs:935` and
+`html_export.rs:509` (serializers — `Middle => "middle"` is still right); `xlsx_style_reader.rs`
+(`"center" => Middle` is the OOXML spelling; its `_ => Bottom` fallback was already correct);
+`xlsx_writer.rs:946` (`Middle => FormatAlign::VerticalCenter`); `validators.ts` `VERTICAL_ALIGNS`
+and the `"top" | "middle" | "bottom"` union types (all three stay legal);
+`printGenerator.ts:173` (emits `vertical-align:bottom` explicitly and treats middle as the CSS
+default, which is still correct); `HomeTab/useHomeTabState.ts:234-236` (toggling a vertical toggle
+OFF already went to `"bottom"` — it was already written for this default);
+`calp/examples/publish_report.rs:59` (an example that sets Middle explicitly).
+
+### 24c. The xlsx fidelity follow-on came out BETTER, and it is pinned
+
+`xlsx_writer` calls `set_align` for every style unconditionally, so the worry was that every
+exported cell would now carry `vertical="bottom"`. It does not: `rust_xlsxwriter`'s
+`Format::has_alignment` treats `FormatAlign::Bottom` as the Excel default and omits the
+`<alignment>` element entirely. So the change FIXES export noise that existed before — previously a
+default-styled cell that got a format for any other reason wrote a spurious `vertical="center"`,
+and a round trip through Excel was not idempotent.
+
+Pinned by `a_default_aligned_cell_exports_with_no_vertical_attribute_at_all`
+(`core/persistence/src/xlsx_writer.rs`), which reads `xl/styles.xml` out of the zip: zero
+`vertical="bottom"`, exactly one `vertical="center"` (the explicitly-middle cell), and a round trip
+that agrees with the bytes.
+
+### 24d. Save/load: a default-aligned cell persists as NO alignment
+
+Answered rather than assumed. A default-aligned cell keeps `style_index == 0`, and
+`cells_to_sheet_styles` writes only `style_index > 0`, so nothing per-cell is stamped on the way
+out. The one thing that IS written is `styles/registry.json` — a plain serde dump of
+`all_styles()` whose entry 0 is `CellStyle::new()`, so a new file now stamps `"Bottom"` there and
+reloads as Bottom. Nothing had to be migrated.
+
+Pinned by `default_alignment_persists_as_no_style_and_the_registry_roundtrips_bottom`
+(`core/calcula-format/src/sheet_styles.rs`) and
+`a_freshly_saved_default_style_carries_bottom_in_its_serialized_bytes` (`style.rs`).
+
+### 24e. ONLY THE DEFAULT MOVED — measured live, not asserted
+
+Live run on an isolated app (own `WEBVIEW2_USER_DATA_FOLDER`, CDP 9223, so the other session's
+instance was untouched). Row 1 set to 60 CSS px so where the glyphs sit is unambiguous; the four
+cells hold the same string and differ only in alignment, applied through the RIBBON:
+
+| Cell | Alignment | Ink top below row top | Ink bottom above row bottom | Style index |
+|---|---|---|---|---|
+| A1 | **default** | 45.0 px | 3.5 px | 0 |
+| B1 | explicit Middle | 24.0 px | 24.5 px | 47 |
+| C1 | explicit Top | 3.5 px | 45.0 px | 48 |
+| D1 | explicit Bottom | 45.0 px | 3.5 px | 0 |
+
+A1 and D1 are pixel-identical: the default IS bottom. B1 and C1 are unchanged — an explicitly
+aligned cell keeps its alignment, and an explicit Middle is still a distinct registry entry that
+survives a serde round trip (pinned by
+`an_explicit_middle_alignment_is_distinct_from_the_default_and_survives`). D1 deduping back to
+index 0 is correct: an explicit Bottom now IS the default style.
+
+Ribbon, read off `data-active` on the live app:
+
+| Selected cell | Top Align | Center Vertically | Bottom Align |
+|---|---|---|---|
+| brand-new empty A1 | dark | dark | **LIT** |
+| A1 (default) | dark | dark | **LIT** |
+| B1 (explicit Middle) | dark | **LIT** | dark |
+| C1 (explicit Top) | **LIT** | dark | dark |
+| D1 (explicit Bottom) | dark | dark | **LIT** |
+
+No horizontal toggle lights for a default cell, before or after: a default cell is
+`TextAlign::General` and the ribbon has no General button. That matches Excel, where
+`Range.HorizontalAlignment` returns `xlGeneral` and none of Left/Center/Right can be pressed.
+
+### 24f. The golden corpus's product-state axis: re-aimed, because it could not see this
+
+`EMPTY_DOCUMENT_GOLDENS` pinned a pressed-accent PIXEL COUNT per golden. Bottom Align and Center
+Vertically are the same 30x26 box with the same fill in the same row, 33 px apart — so the count is
+**identical** for both and the axis would have passed over six goldens of the previous build while
+its own prose claimed they were current. Its comment had already documented the coincidence:
+Calcula lit Center Vertically *"the same way Excel shows Bottom Align pressed on a fresh sheet"* —
+a match in ARITY described as a match in IDENTITY.
+
+Three changes:
+
+1. **A position axis.** `readPressedAccentGeometry` returns the MEDIAN x/y of the fill alongside
+   the count, and each entry pins `expectedPressedAccentMedianX` with
+   `PRESSED_ACCENT_MEDIAN_BAND = 12` — deliberately under the 33 px button pitch, so a one-button
+   move fails, and well over the observed jitter (every lit golden in the corpus measures its
+   median to the SAME pixel). The median, not the mean or a bounding box: the ribbon's own
+   iconography contributes ~29 stray matching pixels spread from x=39 to x=985, which would drag a
+   mean by tens of pixels and blow a bbox out to the full ribbon width. A 50%-breakdown statistic
+   ignores them.
+2. **The numbers are measurements, taken twice by different routes.** All five lit goldens measured
+   median x=427 (the Center Vertically box, 412..441). The cluster pitch was read live off the
+   running app — `fmt-alignTop` / `fmt-alignMiddle` / `fmt-alignBottom` / `fmt-wrapText` at
+   x = 379 / 412 / 445 / 478, each 30 wide — giving 427 + 33 = **460**. A full-window capture of the
+   changed build then measured its own pressed-accent median at 921 device px at dpr 2 = 460.5 CSS.
+   The COUNTS are deliberately unchanged (same box, same fill, same row); `PRESSED_ACCENT_BAND`
+   (150) exists for the few pixels the two shadow-grazed menu goldens may drift.
+3. **A source-of-truth cross-check.** A new case reads `core/engine/src/style.rs` (both
+   `CellStyle::new()` and the enum's `#[default]`), `app/src/core/types/types.ts`, and the
+   renderer's `|| "bottom"` fallback, and fails if any disagrees with the corpus's
+   `DOCUMENT_DEFAULT_VERTICAL_ALIGN` — plus that `DEFAULT_LIT_ALIGNMENT_TOGGLE` is still a real
+   Home-tab item. That is the guard the previous re-aim lacked: whichever authority a future pass
+   changes, the corpus fails and names the others instead of going quietly stale.
+
+`goldenCorpus.test.ts` is **39/40 with one EXPECTED RED**: the five lit empty-document goldens
+still photograph Center Vertically at x=427 against a pin of 460, and the axis says so by name and
+by mechanism. That is the axis working. No suppression was added —
+`STALE_PRODUCT_STATE_GOLDENS` / `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` remain empty. Both
+directions are proven at the unit tier: a synthetic reading at the right count and the WRONG x
+fires and names "WRONG TOGGLE"; the same count at 460 and at both band edges does not.
+
+### 24g. What must be re-captured
+
+Not done here — the closing pass re-records in ONE attributed pass, per the standing rule.
+
+- The six `EMPTY_DOCUMENT_GOLDENS`: `core-empty-grid`, `ribbon-core-default-ribbon`,
+  `menu-file-open`, `menu-edit-open`, `menu-data-open`, `empty-grid-full-window`. The lit box moves
+  from x 412..441 to 445..474 — ~590 accent pixels leaving one location and arriving at another
+  against a 200-pixel comparator budget, so none of them can pass as they stand. `menu-data-open`
+  (29 px, no box in frame) should be unchanged but must be confirmed, not assumed.
+- **Every visual golden that contains text in a row taller than its font**, which is most of them.
+  `cells.ts` snaps the baseline to a whole device pixel and `textBaseline` is now `"bottom"` rather
+  than `"middle"` for default cells, so glyphs move down by roughly (rowHeight - fontHeight)/2 and
+  the snap lands on the descender line. Budget for a broad, attributed re-record — not a
+  ribbon-only one.
+
+### 24h. Verification
+
+| Suite | Result |
+|---|---|
+| `cargo check --workspace` (core) | clean |
+| core workspace `cargo test` | **1,369 / 0** (was 1,355; +5 new: 3 in `style.rs`, 1 in `sheet_styles.rs`, 1 in `xlsx_writer.rs`) |
+| app-lib `cargo test --lib` | 1,647 passed / **1 failed** — `commands::styles::tests::swedish_ribbon_presets_render_excel_shapes` at `styles.rs:1939` (the `percentage` preset). NOT this change: it is inside the §21c **item 1** number-dropdown work landing concurrently in the same file, and touches no alignment code. |
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| `goldenCorpus.test.ts` | 39 / 1 — the expected red above |
+
+Not re-run: the E2E projects. The visual project cannot be green until the re-capture in 24g, and
+running it before that would produce exactly the mystery diffs the axis exists to replace with a
+sentence.
+
+## 25. §21c item 1 decided: the Home > Number dropdown is Excel's dropdown (2026-08-15)
+
+Owner's tiebreaker, the same one §24 works from: *"Lets go with what makes it as similar to Excel
+as possible."* No backward compatibility required.
+
+### 25a. What Excel's dropdown is, and what ours was
+
+Microsoft's *Available number formats in Excel* enumerates eleven entries, and the ribbon adds a
+twelfth row — a separator and **More Number Formats...**, which opens Format Cells on the Number
+tab. `Special` and `Custom` are Format Cells CATEGORIES and are not dropdown rows.
+
+Calcula's dropdown had six entries: `General / Number / Thousands / Percentage / Scientific /
+Text`. **"Thousands" is not an Excel entry name at all.** Missing: Currency, Accounting, Short
+Date, Long Date, Time, Fraction, and More Number Formats.
+
+### 25b. The sharper half — the dropdown could not report its own result
+
+The option **values** were format codes (`"0.00"`, `"#,##0.00"`, `"@"`). `get_style` reports
+**display names** (`"Number (2 decimals)"`). Two disjoint vocabularies, so `const known =
+NUMBER_FORMATS.some(f => f.value === fmt)` was false for every entry but General:
+
+> **MEASURED live on CDP 9223 (sv-SE), pre-fix:** type `1234,5678` in A1, pick **Number**. The
+> cell renders `1234,57` and the box shows a **greyed-out, unselectable** `Number (2 decimals)`.
+> The control could not display the format it had itself just applied.
+
+That is BUG-0065's asymmetry one surface over. Filed **BUG-0069**.
+
+### 25c. The correction to §21c's own note
+
+§21c said the values "feed `parse_number_format`, which already knows `date_iso` etc." — true only
+by accident. The codes survived through the `_ =>` guessing arm (`try_parse_format_code`), which
+recognises percentages, `$`-currency, `[$SYM]`-currency and plain number patterns and **no date or
+time codes at all**. A dropdown sending `"yyyy-mm-dd"` would have landed in `NumberFormat::Custom`,
+not `Date`, and Short Date would have round-tripped differently from the dialog's Date ISO.
+
+More decisively: **five of the eleven entries cannot be written as a format code without
+hard-coding a region.** Excel writes Short Date as the built-in id whose rendering is
+locale-dependent, Long Date and Time as the `[$-x-sysdate]` / `[$-x-systime]` system handles, and
+Currency / Accounting take the symbol AND its side from the OS currency pattern. Shipping
+`m/d/yyyy` or `$` into a product whose own test locale is sv-SE would have been **BUG-0064 a second
+time**.
+
+### 25d. What shipped — Rust owns the list, TypeScript owns the words
+
+- `RIBBON_NUMBER_FORMAT_PRESETS` (`app/src-tauri/src/commands/styles.rs`) — Excel's eleven
+  entries in Excel's order, as preset KEYWORDS: `general, number, currency, accounting,
+  date_short, date_long, time, percentage, fraction_1, scientific, text`.
+- `parse_number_format_with_locale(format, locale)` — the regional six resolve against the
+  locale; `parse_number_format` stays as an invariant wrapper for the pivot call sites that
+  already format against `LocaleSettings::invariant()`. `apply_formatting` and
+  `apply_formatting_to_sheets` both take the locale-aware path (the second had to take the
+  `locale` lock, placed LAST to match the first's order so the two cannot deadlock).
+- `get_ribbon_number_formats` (one new Tauri command) returns, per entry, `preset` +
+  `displayName` + `sample`. The frontend renders the backend's response, so list and order cannot
+  drift, and the `displayName` it needs to answer "which row is this cell on?" comes from
+  `format_number_format_name` itself rather than from a TypeScript re-derivation — the second
+  source of truth that BUG-0065 was filed against.
+- `numberFormatOptions.ts` (HomeTab) carries the LABELS and the pre-first-response order mirror,
+  plus `selectedPresetFor`. A format matching no entry reads back as **"Custom"** — what Excel's
+  box shows — with the real format kept on the option's `title`.
+- **More Number Formats...** opens Format Cells on the Number tab and applies nothing; the
+  controlled `<select>` snaps back to the cell's own format.
+
+### 25e. Three defects the work uncovered, all fixed
+
+1. **BUG-0070 — choosing Text BLANKED a numeric cell.** Excel's Text entry is `@`; the old
+   dropdown already sent it. In `apply_custom_format_number` a section with a text placeholder and
+   no digit placeholders fell through to the numeric renderer and produced the **empty string**, so
+   the value vanished from the grid while still sitting in the cell. Excel shows the value's
+   General rendering. Found by a pin written for the new dropdown, not by reading.
+2. **BUG-0071 — Scientific had the wrong shape in BOTH engines and ignored the locale.** The typed
+   path handed the value to Rust's `{:e}` and upper-cased the `e`: `1.23E3` where Excel shows
+   `1,23E+03` on sv-SE — no sign, no zero padding, no decimal comma. Its test asserted `"1.23E3"`,
+   pinning the defect. The custom path counted digit placeholders across the whole section, folding
+   `0.00E+00`'s two exponent zeros into the mantissa: `1.2340E+3`. Its test asserted only
+   `contains("E+")`, which that string satisfies. One shared `render_scientific` now; both weak
+   tests were replaced with exact-output assertions rather than deleted.
+3. **BUG-0072 — month and weekday names were English in EVERY locale, and no long-date or time
+   pattern existed anywhere in the product.** `mmm/mmmm/mmmmm/ddd/dddd` are language tokens;
+   `format_datetime_section` took no locale and resolved them through four English-only free
+   functions. `engine::LocaleSettings` carried only a short date pattern, so Long Date and Time had
+   nothing to resolve against in any language. Added `long_date_format` + `time_format` to all
+   eighteen locale arms and `CalendarNames` for sixteen languages (English fallback), mirrored into
+   `LocaleSettingsData` and `app/src/api/locale.ts`. The one-letter token `mmmmm` was `&name[..1]`,
+   a BYTE slice — safe only while every name was ASCII, a mid-codepoint panic the moment the tables
+   gained a Cyrillic or CJK month; fixed in the same change and pinned across five languages.
+
+### 25f. Measured live on sv-SE (CDP 9223, isolated WebView2 profile)
+
+Every entry applied through the REAL ribbon `<select>`, then read back from the backend. The
+`display` column is the string the canvas renderer paints.
+
+| Entry | Input | Rendered / `display` | `get_style` reports |
+|---|---|---|---|
+| General | 1234,5678 | `1234,5678` | `General` |
+| Number | 1234,5678 | `1234,57` | `Number (2 decimals)` |
+| Currency | 1234,5678 | `1 234,57 kr` (NBSP group) | `Currency ( kr, 2 decimals)` |
+| Accounting | 1234,5678 | `1 234,57  kr` (symbol its own column) | `Accounting (kr, 2 decimals)` |
+| Short Date | 45306,5625 | `2024-01-15` | `Date (YYYY-MM-DD)` |
+| Long Date | 45306,5625 | `den 15 januari 2024` | `Date ("den "d mmmm yyyy)` |
+| Time | 45306,5625 | `13:30:00` (sv-SE has no AM/PM designator) | `Time (hh:mm:ss)` |
+| Percentage | 1234,5678 | `123456,78%` | `Percentage (2 decimals)` |
+| Fraction | 1234,5678 | `1234 4/7` | `Fraction (up to 1 digits)` |
+| Scientific | 1234,5678 | `1,23E+03` | `Scientific (2 decimals)` |
+| Text | 1234,5678 | `1234,5678` | `@` |
+
+Read-back, measured by moving the selection to an unformatted cell and back so the value comes
+from `get_style` and not from the click that set it: **all eleven** return to their own row
+(`Number` -> `Number`, `Long Date` -> `Long Date`, ...). `number_sep` (a Format Cells preset with
+no dropdown row) and a hand-typed `#,##0.0,;[Red](#,##0.0,)` both read back as **`Custom`** with
+the real format on the tooltip. More Number Formats opens Format Cells with the Number tab active
+and leaves the box where it was.
+
+### 25g. Left ambiguous, deliberately
+
+- **The per-row sample is a tooltip, not a second column.** Excel renders each row as
+  `icon + name + a live sample of the ACTIVE CELL's value`. A native `<select>` cannot draw a
+  two-column row, and putting the sample in the option text degrades badly at the band's 112px.
+  The sample rides on each option's `title` instead, computed from a FIXED 1234.5678 — the frontend
+  holds only the cell's display text, and an invoke per arrow key is not worth a tooltip. A true
+  gallery (the `Launcher` primitive, like Cell Styles) is the parity answer and is separate work.
+- **What Excel's box shows for a format with no dropdown row.** Confirmed: it shows `Custom` for a
+  genuinely custom format. NOT confirmed from any source: whether `#,##0.00` or `0.00000` show
+  `Custom` or `Number`. Shipped as exact-match-or-Custom, which is the strongest documented fact;
+  it is also strictly better than the pre-fix behaviour, which showed a greyed backend display name
+  that is not an Excel string at all.
+- **The locale table is an approximation of the OS.** Excel reads Windows' actual regional settings
+  (`GetLocaleInfoEx`: `LOCALE_SSHORTDATE`, `SLONGDATE`, `STIMEFORMAT`, `SCURRENCY`), so a user who
+  customises their short date to `dd-MMM-yy` sees that in Excel. Calcula's per-locale-id table is a
+  fixed default. "As similar to Excel as possible" argues for reading the OS on the `"system"`
+  path, with the table as the fallback for explicit overrides — a larger change, and the field
+  names added here (`longDateFormat` / `timeFormat`) are the same either way, so it is not
+  prejudged. **Owner call, still open.**
+- **Currency negatives.** Excel's single-section `$#,##0.00` renders a negative with a leading
+  minus; Calcula's `format_currency` wraps it in parentheses. Not changed here: it is engine
+  behaviour shared with the Format Cells currency presets, outside this item, and worth deciding
+  with the rest of the negative-number section work rather than in passing. Recorded so it is not
+  lost.
+
+### 25h. Suites (this change only)
+
+| Suite | Result |
+|---|---|
+| core workspace `cargo test` | **1,375 / 0** (engine 569; +13 new here, the rest §24's) |
+| app-lib `cargo test --lib` | **1,648 / 0** (was 1,641; +7 new) — this item's `swedish_ribbon_presets_render_excel_shapes` is §24's recorded red, and it is the BUG-0070 blank-cell find |
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| vitest, HomeTab + FormatCellsDialog + registry | **410 / 0** (11 files; 18 new pins in `numberFormatDropdown.test.tsx`) |
+| live, CDP 9223 sv-SE | the 25f table, measured through the real dropdown |
+
+**No golden recaptured.** The dropdown's closed box reads `General` on a brand-new workbook before
+and after, so `ribbon-core-default-ribbon` and its siblings photograph the same string; the changed
+rows are only visible with the list open, which no golden captures. The close phase owns any
+recapture.
+
+## 26. §21c item 3 decided: the overflow marker is Excel's, which is two rules and not one (2026-08-15)
+
+Owner's tiebreaker, applied verbatim: "as similar to Excel as possible". The register's bullet
+read like a one-line change — replace the ellipsis with `####` — and that reading is a
+**regression**, because Excel does not have one overflow behaviour. It has two, and which one a
+cell gets is decided by the VALUE'S TYPE, not by the text:
+
+- **Text** spills into absolutely-empty neighbours and is **clipped mid-glyph** against occupied
+  ones. It never shows a marker of any kind, and Excel never ellipsises anything.
+- **Numbers, dates, times and error literals** cannot spill at all — Excel's own spill conditions
+  require "the cell value is text" — so a too-narrow one has nowhere to go and Excel paints `#`
+  **repeated to fill the column**. ASCII `0x23`, never a Unicode glyph, and not literally four in a
+  column with room for more.
+
+Shipping only the marker half would have put `####` on left-aligned numbers that spill correctly
+today and left text ellipsised: worse on both counts. Both halves shipped together.
+
+### 26a. The ladder, and the one rung that is filed instead
+
+Excel's decision for a numeric, in order — the whole point being that **`General` is the only
+NEGOTIATING format**, and every explicit format renders what you asked for or gives up, because
+Excel will not silently alter a format you chose:
+
+1. Negative value under a Date or Time format -> `####`, **at any width**. NOT SHIPPED — **BUG-0066**.
+2. Shrink to Fit on -> shrink the font first; the marker appears only if even that will not fit.
+3. `General` -> drop displayed decimals (rounding, not truncating), then switch to scientific.
+4. It fits -> paint it.
+5. -> `#` repeated to fill the available width (the whole merged region, when merged).
+
+Rung 1 is the honest gap. It is not a missing check, it is **missing data**: `CellData` carries
+only the formatted `display` string, so the sign that made the value impossible is gone before the
+renderer ever sees it. Measured rather than reasoned — a probe added to
+`core/engine/src/number_format.rs` prints `-1.0` under `Date (YYYY-MM-DD)` as **"1900-01-01"** and
+`-0.5` under `Time (HH:MM:SS)` as **"12:00:00"**. Both are plausible-looking lies: a subtraction
+that came out backwards reads as a real date. BUG-0066 carries the exact fix (one `CellData` field
+computed at `format_cell_value_with_color`, defaulted to `text` so a missed construction site
+degrades to today's behaviour rather than to a wrong `####`) and the reason it was not taken here:
+two other live sessions were editing `api_types.rs` and `commands/styles.rs` at the time, and the
+field forces all 62 `CellData` construction sites through both files.
+
+### 26b. Two defects the register had not recorded, both fixed
+
+- **BUG-0067 — numbers SPILLED.** The gate read `textAlign === "left" || "center"` and nothing
+  else, so any numeric carrying an *explicit* Align Left ran across its empty neighbours. Numbers
+  escaped only by accident, because General alignment right-aligns them. §21c said Calcula "fails
+  to mark" numerics; it also spilled them, which is a different and worse thing.
+- **BUG-0068 — a neighbour holding `=""` did not block a spill.** The test was on `display`;
+  Excel's wording is "absolutely empty — does not contain spaces, non-printing characters, **empty
+  strings**, etc." Long text painted straight over a cell that had a formula in it.
+
+### 26c. The contradiction the live probe exposed, and why alignment moved with it
+
+General alignment and the overflow rule ask the SAME question — is this value text or a number? —
+and they were answering it differently, because alignment tested the display string with
+`isNumericValue` while ignoring the format. Photographed live on 2026-08-15: a cell formatted
+**Date (YYYY-MM-DD) was LEFT-aligned** (because `"2024-01-15"` parses as no number) and
+**`"1234567890"` under the TEXT format `@` was RIGHT-aligned** (because its digits parse as one).
+Excel does the opposite of both.
+
+Left alone that becomes a contradiction inside a single cell: the same date counted as numeric for
+`####` and as text for alignment — and alignment is what decides which way a value spills. One
+classifier now drives both. This is a **visible change to existing workbooks** (dates, times and
+currency move right; Text-format values move left), which the owner's standing "no backward
+compatibility" rule permits and which is Excel's behaviour in both directions.
+
+### 26d. Paint cost — measured, not asserted
+
+This is the hottest paint path in the product, so the change was measured on a real canvas at real
+Calibri metrics rather than reasoned about.
+
+- **The drawing primitive, A/B on one 630-value corpus.** Old (ellipsis + binary search):
+  **4,830 `measureText` per pass, 3.80 ms**. New (draw whole, let the clip cut): **630 per pass,
+  2.28 ms** — 87% fewer measurements, 40% faster. Clipping is not only Excel's behaviour, it is
+  strictly cheaper than the ellipsis it replaced.
+- **A dense adversarial viewport** (630 cells, every one occupied and every one an overflow
+  decision; a third long text, a third `General` numbers with many decimals, a third dates):
+  **4,422 `measureText` per frame, 24.2 ms median** over 10 measured frames.
+- The first version of the ladder WALKED the decimal rung from the longest form down and cost
+  **7,875 per frame / 27.9 ms**. Width is monotone in the digit count, so each rung is now a binary
+  search off its own cheapest candidate: **-44% measurements** for identical output, which
+  `searching finds the SAME answer walking did` pins by comparing against an exhaustive scan at 63
+  widths.
+- A numeric that fits — the overwhelming majority — costs exactly **one** `measureText`, as before;
+  text costs one, because the draw now reuses the width the spill gate already measured.
+
+### 26e. Live verification
+
+Excel's rungs photographed in the real frontend at a 42px column and again at 200px (the Rust
+target directory was locked by another session's `app.exe`, so this used the sanctioned
+vite + stubbed-IPC path — the renderer, the canvas and the font metrics are the product's own):
+number -> `####`; date -> `####`; time -> `####`; text with an empty neighbour -> **spilled in
+full**; text with an occupied neighbour -> **clipped mid-glyph**, no ellipsis and no marker;
+`General` `1234.5678` -> **`1235`** (the rounding rung, not a marker); digits under `@` -> spilled
+as text. **Widening the column restored every value.**
+
+### 26f. Tests re-aimed, not deleted
+
+`truncatedTextDecoration.test.ts` had its teeth in the gap between where an ELLIPSISED string ended
+and where the old "measure the full string, clamp to the cell" bug drew. Under clipping those two
+coincide, so the fixture could no longer tell a correct renderer from a broken one — it would have
+gone on passing while measuring nothing. The invariant is unchanged ("a rule spans the glyphs
+painted, not the string the cell holds"); the fixtures moved to where it still bites, and a new
+case pins the rule under a `####` marker, where the glyph run is the marker and not the value it
+replaced. `census-followon.spec.ts` test 5 was re-aimed the same way and for the same reason.
+
+**No golden recaptured** — glyphs move in every cell that overflows and in every date/currency cell
+that changed alignment, so this needs a broad, attributed re-record that the close phase owns.
+
+Ledger after this pass: **72 entries, 71 fixed, 1 open** — BUG-0066, the one rung that needs a
+backend field. `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS` all still
+empty; nothing was suppressed to keep the count tidy.
+(BUG-0066 was closed the same day by the integration pass — §27c.)
+
+## 27. The three §21c passes integrated on one tree — and the seam between them was the defect (2026-08-15)
+
+Owner's tiebreaker, restated because it decided every call below: *"Lets go with what makes it as
+similar to Excel as possible."* No backward compatibility required.
+
+Sections 24, 25 and 26 were written by three passes running CONCURRENTLY, each owning one §21c
+item. This section is the integration: one tree, one golden recapture, one set of suite numbers,
+and the two defects that only exist where two of those passes meet.
+
+### 27a. Baselines re-measured, not inherited
+
+Every figure in the brief was a PRE-pass baseline, and each of the three passes measured at a
+different moment mid-landing, so three different totals were reported for the same suites. Measured
+on the integrated tree before any change of mine:
+
+| Suite | Brief (pre-pass) | Measured at integration start | After this pass |
+|---|---|---|---|
+| vitest | 106,819 / 784 files | **106,914 passed, 1 failed / 787 files** | **106,930 passed, 1 failed / 788 files** |
+| core `cargo test --workspace` | 1,355 | **1,375 / 0** | **1,375 / 0** |
+| app-lib `cargo test --lib` | 1,641 | **1,648 / 0** (5 ignored) | **1,656 / 0** (5 ignored) |
+| `test_pivot` | 56 | **56 / 0** | **56 / 0** |
+| model-engine-lib | 2,156 + 36 doctests | **2,156 / 0** (75 ignored) **+ 36 doctests / 0** | unchanged |
+| check-types · lint:boundaries · check:line-endings · check:script-typings · `tsc -p e2e` | — | all clean | all clean |
+| `cargo check --all-targets` (core and app) | — | clean | clean, zero warnings |
+
+The single vitest failure at integration start was the goldenCorpus product-state axis, red BY
+DESIGN: §24 re-aimed the pin at Bottom Align (median x=460) while the goldens still photographed
+Center Vertically (x=427). Closing it is what the golden pass below does.
+
+**One reported conflict had already resolved itself.** §24 recorded app-lib at 1,647/1, the failure
+being `swedish_ribbon_presets_render_excel_shapes` from §25's work landing in the same file. On the
+integrated tree that test passes: it was a transient mid-landing state, not a real disagreement
+between the two passes.
+
+### 27b. The seam the passes could not see: the ribbon can apply formats the dialog cannot report
+
+**BUG-0073, found by measurement rather than by reading.** The brief named this seam — "the dropdown
+and the dialog share format definitions" — so it was tested rather than inspected: the eleven display
+names `get_ribbon_number_formats` resolves on sv-SE were fed through the Format Cells dialog's own
+`normalizeToPresetValue`. **Three returned null.**
+
+| Ribbon entry | `get_style` reads back | Dialog's answer |
+|---|---|---|
+| Short Date | `Date (YYYY-MM-DD)` | **null** — no preset highlighted |
+| Long Date | `Date ("den "d mmmm yyyy)` | **null** |
+| Currency | `Currency ( kr, 2 decimals)` | **null** |
+
+The mechanism is the same one twice. `DISPLAY_NAME_TO_PRESET` is a HAND-WRITTEN TypeScript mirror of
+a Rust serializer's output, and §25 added names it does not contain. Short Date misses on **case
+alone** — the locale table spells the pattern `YYYY-MM-DD`, the dialog's own `date_iso` preset spells
+the same pattern `yyyy-mm-dd`, and the engine's date formatter has been case-insensitive since
+BUG-0061, so these are the SAME format failing to compare equal. Currency misses on the sv-SE
+symbol's **leading space** (`" kr"` vs `"kr"`). Long Date had no row to highlight at all.
+
+This is BUG-0065 and BUG-0069 again — a surface that cannot report its own result — through a route
+§25 opened. §25 avoided the trap on the RIBBON side by asking the backend for the mapping; the
+dialog was left inverting it in TypeScript.
+
+**Stated at its real size and no larger:** this is not data corruption. The store keeps the display
+name, Rust's `try_parse_display_name` round-trips all three losslessly, and OK preserves the format.
+What is lost is the dialog's ability to tell the user what is applied.
+
+The fix closes the CLASS, not the three instances — adding those three names would have left the
+same hole open for the other seventeen locale arms:
+
+1. The dialog now resolves ribbon display names **through the backend**, exactly as the ribbon does.
+   `NumberTab` fetches `getRibbonNumberFormats()` beside the locale it already fetched, and
+   `normalizeToPresetValue` consults that response first. No display name was hard-coded.
+2. The five ribbon presets with no dialog row — Currency, Accounting, Short Date, Long Date, Time —
+   became rows in their categories, sourced from the same response (label from the preset, example
+   from its `sample`). Resolving a preset with nothing to select would have fixed half the defect:
+   Long Date resolved and still had no row. This is also the Excel shape — Excel's Date list leads
+   with the locale-responsive Short/Long Date entries.
+3. **Excel's Text category was missing entirely.** `@` fell through to Custom, so the dialog
+   described the user's own dropdown choice as a hand-written format code. Added, where Excel puts
+   it: immediately before Special.
+4. The static table stays as the OFFLINE fallback for the dialog's own presets, with a
+   case-insensitive lookup so two spellings of one pattern stop being two formats.
+
+`ribbonFormatSeam.test.ts` spells the whole seam out for sv-SE **and** en-US: every display name the
+ribbon resolves must map to a preset the dialog can HIGHLIGHT, so the next entry added to one side
+without the other fails there rather than in a user's dialog.
+
+### 27c. BUG-0066 closed — the rung §26 filed rather than faked
+
+§26 shipped Excel's overflow ladder except one rung, and filed BUG-0066 with the reason recorded
+rather than dressed up: the width-INDEPENDENT `####` for a negative serial under a Date or Time
+format needs the value's SIGN, and `CellData` carries only a formatted string. The engine renders
+`-1.0` as `"1900-01-01"` and `-0.5` as `"12:00:00"` — plausible lies a user cannot tell from real
+values. The pass declined it because two other live sessions held `api_types.rs` and
+`commands/styles.rs`. **This pass owned all three files, so the reason no longer applied.**
+
+Fixed as filed. `OverflowClass { Text | Numeric | Unrepresentable }` on `CellData`, defaulted to
+`Text` and `skip_serializing_if` that default — text is the FAIL-SAFE direction (text never shows
+the marker), so a site that gets it wrong degrades to yesterday's behaviour rather than to a wrong
+`####`, and text cells cost nothing on the wire.
+
+Two details that are the whole reason it is trustworthy:
+
+- **The decision is ONE function called from ONE place.** `overflow_class_for(&CellValue,
+  &CellStyle)` is stamped in `format_cell_value_with_color`, the only function in the app holding
+  both. Its inner match was split into `format_cell_value_parts` so the class is applied once on the
+  way out — an arm that forgot would have fallen back to `Text` silently.
+- **All 56 construction sites were made to decide BY THE COMPILER**, across 18 files: the field
+  carries no struct-literal default, so `cargo check` enumerated every one. The 30 sites binding
+  `let display = format_cell_value(&x.value, style, &locale)` were rewritten to
+  `let (display, overflow) = format_cell_value_and_class(...)` rather than given a second call.
+  That is not tidiness: `format_cell_value(&a.value, ..)` beside `overflow_class_for(&b.value, ..)`
+  type-checks perfectly while describing two different cells, and the mistake would surface only as
+  a missing `####` in one workbook. Two tuple-destructure sites had the class threaded through the
+  tuple so BOTH branches must decide.
+
+The engine still renders `-1.0` as `"1900-01-01"` **on purpose**, per the entry's own triage: the
+marker is a RENDERING outcome and must not enter `display`, where it would travel into copy/paste,
+CSV export and the formula bar. The engine probe that RECORDS that lie still passes.
+
+**The same field closed the residual imprecision `classifyCellContent` documented against itself**:
+text stored under an explicitly numeric format read as numeric if it contained a digit, so a pasted
+header in a Date column would have been marked. It now reads as text.
+
+### 27d. Teeth, proven by sabotage in both languages
+
+Neither fix was accepted on a green tick.
+
+- Replacing the Rust guard `is_date_or_time && *n < 0.0` with `false` turned **exactly one** of the
+  eight new Rust tests red and left the other seven green. Restored; 8/8.
+- Disabling the renderer's `unrepresentable` short-circuit turned **exactly two** of the new
+  TypeScript cases red. Restored, sha256 recorded; 56/56.
+- Disabling the dialog's ribbon lookup turned **three** seam cases red, naming the regression in
+  both locales (`expected 'date_iso' to be 'date_short'`). The FIRST sabotage attempt disabled only
+  the exact-match lookup and the suite stayed green — the case-insensitive lookup caught it. That
+  is worth recording: a half-sabotage that passes is not evidence of teeth, it is evidence the
+  sabotage was wrong.
+
+### 27e. The golden pass — one recapture, every changed file attributed to a named cause
+
+72 goldens sha256'd before, copies kept, sha256'd after. **18 files changed, and every one was
+attributed BEFORE `--update-snapshots` was run**, by measuring expected-vs-actual: the pixel diff
+box, the glyph-dark pixel count and vertical centroid inside that box, and the pressed-accent
+count and median x.
+
+The diagnostic visual run failed **15 of 18**. The causes, measured:
+
+| Cause | Evidence | Files |
+|---|---|---|
+| Ribbon: Center Vertically no longer lit, Bottom Align is | diff confined to **x[412..474] y[69..94]** — exactly the two 30x26 toggle boxes; accent 546px@x=427 -> 555px@x=460; glyph centroid shift **0.00** | `core-empty-grid`, `menu-file-open`, `menu-edit-open`, `ribbon-core-default-ribbon` |
+| Cell text baseline moved DOWN 1px (default valign Middle -> Bottom) | glyph row bounds shift by exactly 1 (`y[23..92]` -> `y[23..93]`); centroid +0.21..+1.00 | `grid-core-data-entry`, `grid-core-selection-single`, `grid-core-selection-range`, `grid-core-editing-mode`, `core-formula-bar-display`, `workflow-multisheet-sheet1`, `grid-workflow-table-headers-bold`, `grid-workflow-table-complete`, `grid-workflow-copy-paste-result`, `grid-workflow-keyboard-entry` |
+| ...**plus** `#######` where a Date no longer fits, and the General ladder rendering `2469,136` / `46235,32` where the old build ellipsised `2469,1...` / `46235,...` | +78 glyph-dark px, identical in all three | `grid-fmt-number-formats`, `grid-fmt-alignment`, `sheets-default-tabs` |
+| ...**plus** text CLIPPED instead of ellipsised: `Underli...` -> `Underline` | −25 glyph-dark px and centroid **−0.42** (moved UP — the ellipsis dots sit low and are gone) | `grid-fmt-bold-italic-underline` |
+
+**Three files changed that never failed**, and the gap was investigated rather than waved through:
+`grid-core-selection-range`, `ribbon-core-default-ribbon` and `grid-workflow-table-complete` are
+SECOND captures inside tests that failed on an earlier assertion, so the comparison never reached
+them. All three were attributed against their kept before-copies; they fall into the table above.
+**Zero goldens were recaptured without a named cause.**
+
+The one that moved UP is the useful one. A recapture pass that had only checked "did it move down
+like the alignment change predicts" would have flagged `grid-fmt-bold-italic-underline` as
+unexplained, or worse, waved it through with the others.
+
+### 27f. What §24 predicted about the corpus axis, and what actually happened
+
+§24 predicted the axis would need all six `EMPTY_DOCUMENT_GOLDENS` re-recorded and that
+`menu-data-open` (29px, box out of frame) "should be unchanged but must be confirmed, not assumed".
+Measured: `menu-data-open` was **not** in the changed set at all — confirmed unchanged, not assumed.
+The other five moved to median x=460 exactly as pinned. The axis went 5 red -> 1 red after the
+visual recapture, the survivor being `empty-grid-full-window.png`, which belongs to the FUNCTIONAL
+project and needed that project's own recapture.
+
+### 27g. BUG-0050 — the owner's decision under evidence that could not settle it
+
+The evidence pass searched Microsoft Support, Microsoft Learn, Microsoft Q&A and the established
+secondary literature and found **no source stating either that Excel undoes a sheet hide or that it
+does not**. It declined to manufacture a confirmation, and LOWERED its confidence to low-moderate,
+one notch below the filing's own.
+
+What is corroborated is the surrounding family: deleting a worksheet clears the undo stack
+(unanimous), as does running a macro (first-party). Hide is named in none of them. What carries the
+reading is the MECHANISM: the operations that clear the stack change a sheet's existence or
+identity, which makes prior records unreplayable; `Worksheet.Visible` is a property of a sheet that
+continues to exist and stays referenceable by formulas, so no prior record is invalidated.
+
+**The evidence did NOT contradict the shipped behaviour, and no code changed.** The shipped
+undoable `sheet_tab_state` CustomRestore is exact parity if Excel undoes hide and a harmless
+superset if it does not; the alternative — invalidating history on every hide — DESTROYS
+user-recoverable history to model a behaviour nobody has confirmed. Only the pre-fix third state
+was broken under every reading. **Owner's decision, taken knowingly under that uncertainty: keep
+it.**
+
+Two things were corrected rather than left standing. The filing's evidence sentence — "the Undo
+button is available after Format > Hide & Unhide > Hide Sheet" — is WEAK and has been replaced: an
+enabled Undo button does not show that Ctrl+Z will undo the HIDE, because it stays enabled for the
+PREVIOUS action whenever the stack was neither cleared nor appended to, which is exactly the
+ambiguous middle case. And a trap is now recorded in the ledger: thebricks.com's "How to Undo Hide
+in Excel" claims Ctrl+Z recovers a DELETED worksheet, which is false, contradicts Microsoft and
+every established secondary source, and ranks highly on this exact query.
+
+One consequence stays visible (§22b): the invariant walker's undo round-trip oracle decided 0
+round-trips in 5 of 6 recent seed runs because walks hit stack-clearing structure actions. Hide NOT
+clearing the stack is what keeps hide-heavy walks decidable.
+
+### 27h. One comment that named a function which does not exist
+
+`collectionGuard.ts`'s header credited `verifySpecFileCoverage` with catching the PERSISTENT form of
+the empty-spec-file defect. There is no such function; the work is done by `matchedSpecFiles` and
+`describeZeroTestFiles`. In a file whose entire value is that the next reader can find the mechanism
+from the prose, a name that resolves to nothing is a real cost. Corrected.
+
+### 27i. Proved live from a cold app, with the wrong value asserted first
+
+Every check below states the WRONG value first and requires it NOT to match, then states the right
+one. 13 checks, 0 failed, against a cold app on CDP 9222 (`get_ribbon_number_formats` sample
+45306.5625, locale sv-SE).
+
+**Item 1.** All eleven entries render sv-SE-correct text, and the US spelling `45306.5625` matched
+none of them: General `45306,5625` - Number `45306,56` - Short Date `2024-01-15` - Long Date
+`den 15 januari 2024` - Time `13:30:00` - Text `45306,5625` - Currency `45 306,56 kr` (NBSP group,
+symbol after, no `$` anywhere). Driven through the REAL ribbon `<select>`, the box read `general`
+on a default cell and `number` after choosing Number: the dropdown reports its own result, which is
+what BUG-0069 was.
+
+**Item 2.** A1 untouched carries `styleIndex 0` and reads `bottom`; B1 explicitly set to Middle
+reads `middle`. The default moved and the explicit value did not.
+
+**Item 3, photographed rather than asserted.** One frame, column A at 60px, four cells:
+
+| Cell | Format | Painted | Rule |
+|---|---|---|---|
+| A1 | `Number (2 decimals)` (EXPLICIT) | `########` | an explicit format never negotiates |
+| A2 | `General`, same value | `1,23E+08` | General DOES negotiate: the scientific rung |
+| A3 | prose, empty neighbour | spilled in full across B and C | text spills |
+| A4 | prose, neighbour holds `X` | `Clipped by ` cut mid-word | text CLIPS, no ellipsis, no marker |
+
+A1 beside A2 is the whole of item 3 in two cells: same number, same width, two different answers
+because the FORMAT differs. Widening column A to 260px restored every one: `########` ->
+`123456789,12`, `1,23E+08` -> `123456789,1200000048`, and `Clipped by neighbour` in full. The
+underlying `display` was never `#` at any width - the marker is a rendering outcome and never
+enters the value.
+
+**A METHOD NOTE THAT IS ALSO A SECOND WITNESS.** The first attempt at that frame drove the format
+with `apply_formatting` + `grid:refresh` and painted `1,23E+08` for A1 - i.e. it applied GENERAL's
+ladder to a cell whose `get_style` reported `Number (2 decimals)`. That is not a renderer defect:
+it is the stale-style-cache observation §24 recorded and could not attribute ("the frontend style
+cache had no entry for the new index... I could not establish a product route that hits it").
+Reproduced here independently, and the discriminator is now recorded: the SAME format through the
+ribbon paints `########`, the direct invoke paints the default style's answer. A dimension change
+needs `dimensions:refresh` as well, or the column does not repaint at all. Any probe that skips
+those events is measuring the default style, not the cell's - which is exactly how a live proof
+manufactures a false defect.
+
+### 27j. Suites, and the two findings the VERIFY runs produced that the recaptures did not
+
+| Suite | Integration start | After this pass |
+|---|---|---|
+| vitest FULL | 106,914 passed / **1 failed** / 787 files | **106,931 passed / 0 failed / 788 files** |
+| core `cargo test --workspace` | 1,375 / 0 | **1,375 / 0** |
+| app-lib `cargo test --lib` | 1,648 / 0 | **1,656 / 0** (+8 = the new `overflow_class_tests`) |
+| `test_pivot` | 56 / 0 | **56 / 0** |
+| model-engine-lib | 2,156 / 0 + 36 doctests | **2,156 / 0 (75 ignored) + 36 doctests / 0** |
+| `cargo check --all-targets` core + app | clean | **clean, zero warnings** |
+| check-types - lint:boundaries - check:line-endings - check:script-typings - `tsc -p e2e` | clean | **clean** |
+| e2e functional | 550 / 0 / 4 skipped (baseline) | **547 / 3 / 4** - the 3 are BUG-0074 |
+| e2e visual | 18 / 18 | **18 / 18, twice cold, hashes byte-identical** |
+| e2e scenario | (no recorded baseline) | **22 / 1 / 6 skipped** - the 1 is BUG-0075 |
+
+The vitest suite is now FULLY green: the product-state axis red that §24 left behind was closed by
+the recapture, not by re-aiming anything.
+
+**BOTH E2E FAILURES WERE FOUND BY VERIFYING A RECAPTURE, NOT BY MAKING ONE**, and that is the
+finding worth more than either bug. `toHaveScreenshot` in comparison mode RETRIES until the image
+settles; `--update-snapshots` takes ONE screenshot and writes it. So a recapture can persist a
+frame the comparator would never have accepted, and a recapture that is checked only by the run
+that wrote it is not checked at all.
+
+- **BUG-0074** (functional, 3 goldens in `comments-notes.spec.ts`): the same build gave THREE
+  different answers - the update run wrote them and reported 550 passed; a clean cold comparison
+  run failed all three; the file run ALONE passed 6 and failed 1. The variable is the cell's
+  selection fill. Checked explicitly for the parity signatures and none is present: zero glyph
+  movement, no marker, no baseline shift.
+- **BUG-0075** (scenario, `scenario-budget-model-title`): the verify runs photograph the
+  'Monthly Sales' chart from a DIFFERENT scenario sitting over the budget sheet - 173,986
+  differing pixels against a parity signature worth a few thousand. Reproduced twice. The pre-pass
+  golden has no chart, so this is what the suite produces now, not something inherited.
+
+Neither was suppressed. `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS`
+remain empty, and the ledger carries both as OPEN with the fix scoped and the reason it was not
+guessed at written down.
+
+### 27k. Contract checks, attacked rather than read
+
+- **The collection guard fails a run whose collected set disagrees with `--list`** - sabotaged and
+  confirmed twice, in both of its halves. Truncating a spec file to zero bytes in `e2e/visual` made
+  the run report `18 passed` and EXIT 1 anyway, naming the empty file. And a run invoked with a
+  bare `--reporter=dot` was REFUSED at global-setup ("this run's reporter list does not include the
+  collection guard"), which happened by accident here and is exactly the handshake that stops the
+  guard being silently dropped by the standard invocation. Probe removed; visual re-run 18/18.
+- **Census families and harness self-tests**: 124 / 124 across the ten files that own them
+  (`cascadeAnnouncementCensus`, `crossLayerConstantDrift`, `structuralDeleteCascadeAnnouncement`,
+  `sheetDisplayFlagsBridge`, `cheapInvariants`, `goldenCorpus`, `oracleCoverage`,
+  `walkerExclusions`, `walkerSheetCoverage`, `bugLedger`, `collectionGuard`).
+- **Sheet-switch tear**: `sheetSwitchPrefetch` 11 / 11, including "refuses a payload primed for
+  ANOTHER sheet" and "brackets the fetch with the renderSignal in-flight marks so a capture cannot
+  photograph mid-prime". The overflow renderer sits on that path and did not disturb it.
+- **New tests proved to have teeth by sabotage**, in three places and in two languages - see 27d.
+
+## 28. The default-style repaint, attributed at last — a formatted cell painted the DOCUMENT DEFAULT, and the cure was in the command's own return value (2026-08-15)
+
+Two independent passes hit this behaviour and neither could attribute it. §24 recorded it as an
+unexplained observation ("the frontend style cache had no entry for the new index... I could not
+establish a product route that hits it") and §27i reproduced it, recorded the discriminator, and
+correctly refused to call it a renderer defect. This section owns it: the mechanism is measured in
+both directions, the product routes are named, and it is filed as **BUG-0076** and fixed.
+
+### 28a. The mechanism, measured rather than inferred
+
+The renderer resolves a cell with `getStyleFromCache(styleCache, cell.styleIndex)`
+(`app/src/core/lib/gridRenderer/styles/styleUtils.ts:33`). That lookup **falls back to index 0** —
+the document default — for an index the cache does not hold:
+
+```ts
+const style = styleCache.get(styleIndex);
+if (style) return style;
+return styleCache.get(0) || DEFAULT_STYLE;   // <- the silent lie
+```
+
+Applying a format **mints** an index (`get_or_create`, `commands/styles.rs`). The frontend cache is
+refreshed by exactly **one** event, `styles:refresh`; `grid:refresh` refetches CELLS only. So every
+route that refreshed cells without hand-dispatching `styles:refresh` handed the renderer an index it
+had never heard of, and the renderer painted the default — plausibly, silently, and with `get_style`
+reporting the truth the whole time.
+
+**The backend was already handing over the cure, and the frontend was throwing it away.**
+`FormattingResult.styles` is documented in `api_types.rs` as *"New or updated styles that the
+frontend should cache"* and is collected from `used_style_indices`. The only frontend reference to
+it was `console.log(..., result.styles.length)`.
+
+### 28b. The live A/B — one binary, one document, the fix stripped for ONE page
+
+Another session was running `--project=functional` against the same Vite dev server throughout, so
+the fix could not be reverted on disk: a source edit hot-reloads into every app attached to 5173,
+including theirs. Instead the two modules carrying the fix were intercepted with Playwright's
+`page.route()` and served **stripped to one page only** — the prime returns immediately, the heal
+never registers its listener. Same binary, same backend, same document.
+
+The signal is a **background fill**, chosen deliberately: immune to font metrics, baselines and the
+overflow ladder, and impossible to confuse with antialiasing. A4 is given a colour no style in the
+registry has yet, one honest `styles:refresh` makes both halves start from a cache that holds it,
+and then **Ctrl+B is pressed on the grid container** — the product's own keyboard route.
+
+| | backend `styleIndex` | backend `bold` | fill px (of 3248) | glyph-dark px |
+|---|---|---|---|---|
+| HEAD, before Ctrl+B | 47 | false | 2277 | 2408 |
+| HEAD, **after** Ctrl+B | 48 | **true** | **0** | **269** |
+| FIXED, before Ctrl+B | 49 | false | 2277 | 2408 |
+| FIXED, **after** Ctrl+B | 50 | **true** | **1848** | 2292 |
+
+**On HEAD, Ctrl+B on a red cell turns it WHITE and leaves it unbolded** while `get_style` reports
+bold and the colour. On the fixed build the fill survives and the glyphs are heavier. Both halves ran
+in ONE invocation against an app whose identity was verified before and after (28k); the crops are
+kept beside the instrument.
+
+A **fresh** style is what makes this measurable, and it is the trap that wasted two earlier attempts:
+`get_or_create` **dedupes**, so re-applying a format the registry already holds returns an index the
+cache already has and the defect hides. An earlier run of this same experiment came out green on the
+UNFIXED build for exactly that reason.
+
+§27i's own probe was re-run too, and it now answers the way Excel does: an explicitly
+Number-formatted cell in a 60 px column paints `#####` while the same value at General falls down the
+ladder to `2E+08` — two different pictures, where before the fix it painted General's answer in both.
+
+### 28c. The product routes — this is not a probe artifact
+
+- **Core's own keyboard shortcuts.** Ctrl+B / Ctrl+I / Ctrl+U / Ctrl+5, the Ctrl+2/3/4 aliases, and
+  the seven number-format shortcuts: `useGridKeyboard` -> `handleCommand` ->
+  `applyFormattingToSelection` (`useSpreadsheetSelection.ts:1230`), which calls
+  `canvas.refreshCells()` + `redraw()` and announces nothing. This is the route §24 could not find.
+- **The script host, on the ACTIVE sheet.** `applyRangeFormat` (`api/scriptHost/host.ts:7791`) ->
+  `afterCellDataChange` -> `scheduleGridDataRefresh()`, which is `grid:refresh` alone. The OFF-sheet
+  arm three lines below emits the `styles` mutation domain and was always correct — the same
+  function, both behaviours, five lines apart.
+- **MCP `format_range`** (`mcp/tools.rs:388`) mints in Rust and emits only `grid:refresh`.
+- **Every direct-invoke route in the e2e harness**: `setNumberFormatDirect`, `alignment.spec.ts`,
+  `workflow-invoice.spec.ts`.
+
+The ribbon was correct only because `useHomeTabState.applyFormat` dispatches `styles:refresh` **by
+hand**. And the Reports extension had already hit this wall and patched it at its own call site,
+with the symptom written down: *"Materialization also CREATES new styles ... so the style cache must
+refetch too or the report renders unstyled"* (`Reports/lib/reportRefresh.ts`). Three independent
+encounters, three local patches, no attribution — which is what a class looks like before anyone
+names it.
+
+This is the same shape as the outline / hyperlink / validation / annotation defect the tree already
+fixed; `app/src/api/__tests__/refreshAnnouncements.test.ts`'s header states the rule that was not
+applied here: *"a refresh event wired to one caller is how the ribbon path stayed correct while the
+script path silently left the cache — and therefore the painted grid — describing a document that no
+longer existed."*
+
+### 28d. Why 106,931 unit tests and 550 functional tests never saw it
+
+Every formatting test reads the format back from the **backend** (`get_cell` -> `get_style`), which
+was always right. `alignment.spec.ts` applies a text colour through the direct invoke and then
+asserts... `getCellStyleStringProp`. The only assertions that could have caught this are pixels, and
+every visual formatting golden applies its format through the **ribbon**. The invariant walker does
+drive Ctrl+B (`actionCatalog.ts:824`) — and its oracles compare state, not paint.
+
+### 28e. It is invisible for a whole class of formats, and that is why casual checking cleared it
+
+A format that changes only the **display string** — a number format on a cell wide enough to fit —
+paints identically under the default style, because `display` is computed by the backend and travels
+with the cell. Measured: replaying `core-visual.spec.ts`'s number-format block through the direct
+route and then repairing the cache changed **0 of 20,592 pixels**. That is why
+`setNumberFormatDirect`'s author could read the rendered crop back, see the formatted text, and
+reasonably conclude the route worked.
+
+It becomes visible the moment the style decides how the cell is **drawn**: fill, font, colour,
+alignment, borders — or the overflow ladder, which is where §27i's probe hit it.
+
+**Consequence for the goldens, measured and not assumed: none found.** `grid-fmt-number-formats` is
+the only visual golden that formats through the direct route, and its four cells are display-only
+changes at a width that fits. The other formatting goldens use the ribbon. `alignment.spec.ts` and
+`workflow-invoice.spec.ts` assert backend state and take no pictures. The visual and functional
+projects were NOT re-run here — another session held both apps for the two open golden bugs — so
+this remains a prediction backed by a pixel measurement rather than a suite result, and it is owed a
+run by the closing pass.
+
+### 28f. The fix — two mechanisms, because the class has two directions
+
+1. **PRIME, at the one door.** `applyFormatting` and `applyBorderPreset` in `tauri-api.ts` emit
+   `AppEvents.STYLE_ENTRIES_UPDATED` carrying `FormattingResult.styles`, and `useSpreadsheetStyles`
+   merges the entries into the cache. Emitting from the WRAPPER cannot be routed around — there is
+   no other door to the command — and it costs **no IPC**, because the backend already returns
+   exactly the indices it used or created. It also lands **before** the repaint, so no frame is ever
+   painted with the wrong style; a heal alone would flash the default first, and a screenshot can
+   photograph a flash.
+2. **HEAL, for the mints that never touch a frontend wrapper** (MCP, `.calp` pulls, backend
+   recalculations, the e2e direct-invoke helpers). On `grid:refresh` and on `sheet:normalSwitch` the
+   cache compares its size against `get_style_count()` — a scalar IPC beside the viewport cell fetch
+   those events already pay for — and re-reads the registry in full only when the two disagree.
+   `!==` rather than `>`: a document replaced under the frontend can leave the registry SHORTER, and
+   a cache holding entries the backend no longer has is just as wrong. Coalesced with an in-flight
+   guard, so a burst of refreshes costs one probe.
+
+`sheet:normalSwitch` is in the trigger list for a reason: it is the other moment the viewport's
+cells are replaced wholesale, and the one where an index minted while ANOTHER sheet was active first
+becomes visible.
+
+### 28g. Teeth, proved by sabotage in both directions
+
+`app/src/core/components/Spreadsheet/__tests__/formatStyleCachePrime.test.tsx` (6 cases) mounts the
+REAL `useSpreadsheetStyles` + `useSpreadsheetSelection` against the REAL `tauri-api` — only Tauri's
+`invoke` is doubled, by a fake registry that dedupes the way `get_or_create` does — dispatches a real
+Ctrl+B keydown on the grid container, and asserts the renderer's own question:
+`getStyleFromCache(cache, cell.styleIndex).bold`.
+
+- Disabling the prime turns **exactly two** cases red ("expected false to be true") and leaves the
+  heal cases green.
+- Disabling the heal turns **exactly one** case red.
+- Two of the six are cost assertions: a format costs no `get_all_styles`, and a quiet `grid:refresh`
+  costs the scalar probe and no full re-read.
+
+### 28h. The `dimensions:refresh` half of §27i's note — a probe artifact, and the register should say so
+
+§27i also recorded that "a dimension change also needs `dimensions:refresh` as well, or the column
+does not repaint at all". Swept: every PRODUCT route that changes a row height or column width
+dispatches into Core's grid state directly (`dispatch(setColumnWidth(...))` in
+`useSpreadsheetSelection`), and the script host's `syncDimensionToGrid` mirrors into Core state AND
+calls `refreshGridDimensions()`. `dimensions:refresh` exists to re-read the BACKEND's dimensions into
+Core, and only a probe that invokes `set_column_width` behind Core's back needs it. No MCP tool
+changes a dimension. **Not a defect** — unlike its sibling, which was one.
+
+### 28i. What was NOT done, stated rather than glossed
+
+- **No E2E project was run.** Another session was actively running `--project=functional` for
+  BUG-0074 and had run `--project=scenario` for BUG-0075 while this work landed. Running visual or
+  functional concurrently would have cost them their run (§3bq's lesson), and taking over either app
+  would have been worse.
+- **The tree changed under their verification runs**, which they need to know: the paint of any cell
+  formatted through a non-ribbon route is different now. The two open bugs' own signatures
+  (selection fill; a foreign chart) are unrelated to styles, so this should not disturb either
+  diagnosis — but "should not" is a prediction, and their next cold run is the check.
+- Two brief windows early in this pass had the new code paths disabled on disk while sabotage was
+  measured. Both reverted to **HEAD behaviour**, not to a novel broken state, so nothing worse than
+  the baseline was ever served; the later measurements moved to `page.route` interception precisely
+  so the shared tree stayed untouched.
+- **This probe wrote into another session's app for about six minutes, and that is 28k.**
+
+### 28k. THE PROBE MIGRATED ONTO ANOTHER SESSION'S APP, and nothing said so
+
+Worth more than the bug it was measuring. This pass launched an isolated instance on CDP 9223 and
+drove it with `chromium.connectOverCDP("http://127.0.0.1:9223")`. Partway through, that instance
+DIED — silently, with its stdout tee never even creating its log file — and at 04:59:41 the BUG-0074
+session launched ITS pinned app, which took the freed port. Every probe from 05:01 onward therefore
+connected to **their** app: it wrote cells, applied formats and called `page.reload()` twice inside
+another agent's document, in the window when they were verifying goldens. The measurements were
+still physically valid — same binary, same fix, the strip applied per page — but the ownership was
+accidental, and any golden they captured between 05:01 and 05:07 must be treated as suspect and
+re-taken.
+
+`launch-vba-batch.ps1` already refuses to LAUNCH onto an answering port, and §3bq recorded a whole
+pass lost to a second agent's launcher. Neither guard covers this: the collision is on the
+**attach** side, and `connectOverCDP` will happily bind to whatever answers. Two things follow, and
+both are done:
+
+- The A/B was re-run on a fresh instance (`calcula-pin-styles2`, CDP 9225) behind an **ownership
+  gate**: `e2e/results/cdp-owner.ps1` resolves the PID listening on the port and returns its
+  `--user-data-dir`, and the probe refuses to drive anything whose profile is not its own. It is
+  checked at start AND at end, so a mid-run migration is caught rather than averaged in. It failed
+  closed on its first attempt (a mangled quote made the check unparseable) and refused to run, which
+  is the correct direction for a gate.
+- The numbers in 28b are from that gated run. The pre-gate run agreed on the decisive figure —
+  fill 2277 -> 0 on HEAD, 2277 -> 1848/2184 on FIXED — which is why the finding is a process defect
+  rather than a data defect.
+
+**The general rule this earns:** a CDP port is not an identity. Any probe that attaches to one owes
+an ownership check against the target's `--user-data-dir`, at the start and at the end, or it is one
+silent crash away from measuring — and mutating — somebody else's session.
+
+### 28j. Verification
+
+| Suite | Result |
+|---|---|
+| `formatStyleCachePrime.test.tsx` | **6 / 0**, both sabotage directions confirmed |
+| vitest FULL | **106,937 passed / 0 failed / 789 files** (+6 cases, +1 file) |
+| `npm run check-types` | clean |
+| `npm run lint:boundaries` | clean |
+| `node scripts/check-line-endings.mjs` | `[OK] no mixed line endings` |
+| e2e visual / functional / scenario | **not run** — see 28i |
+
+The ledger closes back to two: **76 entries, 74 fixed, BUG-0074 and BUG-0075 still open** and owned
+elsewhere. `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS` remain empty.
+
+---
+
+## 29. BUG-0075 closed: the chart in the wrong scenario was a phantom — and the reset's own teardown is what conjured it (2026-08-15)
+
+`scenario-budget-model-title` photographed the monthly-report scenario's "Monthly Sales" chart
+sitting over the budget sheet. The brief for this pass put the question the right way round: **not
+"how do I fix the golden" but "is the product leaking?"** — because a chart surviving a document
+boundary would be a §2w defect, and this programme has found that class repeatedly.
+
+**It is not. The product is clean, and the harness's own reset is what put the chart there.** Both
+halves were measured rather than read, and the defect was then reproduced and extinguished at will.
+
+### 29a. The chart's owner, named
+
+`Monthly Sales` is created in exactly one place in the tree (`rg "Monthly Sales" app/e2e` → one hit,
+`monthly-report.scenario.ts:159`). In the failing frame it renders the BUDGET document's data —
+categories `Rent`, `Transport`, `Savings`, a bar at 27300 — so this is not a stale image of another
+document: it is monthly-report's chart OBJECT, alive inside budget-model's workbook, redrawing
+itself against whatever is in `A1:C13` now. Rows 10-13 are EMPTY in that frame, which also rules out
+"the reset never ran": monthly-report's twelve data rows are gone, so `new_file` did happen.
+
+### 29b. The product does not leak, measured on both halves
+
+| Question | How it was measured | Answer |
+|---|---|---|
+| Does `new_file` clear the backend chart store? | Live over CDP on a running app: `get_charts` → 1 chart, `invoke("new_file")`, `get_charts` → `[]` | **Yes** |
+| Is `charts` covered by `reset_document_scoped_stores`? | `state.charts.write(effect)…clear()`, `persistence.rs`, in the same block as `media`, `tables`, `floating_ranges` | **Yes** |
+| Can a FRONTEND store survive a document boundary in the product? | `fileNew` / `fileOpen` in `extensions/BuiltIn/StandardMenus/FileMenu.ts` both `window.location.reload()` after the backend switch | **No — structurally** |
+| And on the non-reloading path? | `file-api.ts` `newFile()`/`openFile()` emit `AFTER_NEW`/`AFTER_OPEN`; the Charts extension answers both with `reloadCharts()`, which REPLACES `charts` from `get_charts` | **No** |
+
+So there is exactly one way to replace a document without either a window reload or an announcement:
+the harness's `resetToNewWorkbook`, which raw-invokes `new_file` through `window.__TAURI__`. **Only
+the harness can reach this state, so only the harness owed the re-sync.** The two guards that exist
+for this class are backend-only by construction — `reset_document_scoped_stores` and the save-source
+census cannot see a frontend store at all — and the frontend's equivalent guard IS `deepResetForWalk`.
+That is where the hole was.
+
+### 29c. The causal chain, instrumented in-page
+
+The residue at the end of every scenario run was measured directly (and found on the previous pass's
+abandoned app on 9222 as well): **backend 1 chart, frontend store 0.** `monthly-report` persists its
+chart with a raw `save_chart` invoke, which tells the store nothing — the same anti-pattern BUG-0031
+removed from the walker's `chart.create` on 2026-08-12, still live one directory over.
+
+Timestamps below are one run of an in-page instrument (a 25 ms sampler plus listeners on
+`charts:refresh` / `app:sheet-changed`), so there is no IPC latency of the observer in them:
+
+```
+     +0ms   backend=1 store=0   the residue: a chart the store has never heard of
+ +10251ms   charts:refresh      the reset's TABLE teardown announces the `objects` domain
+                                (ObjectKind::Table -> UiDomain::Objects, object_deps.rs), and
+                                bootstrap.ts fans that domain out to "charts:refresh"
+ +10331ms   backend=1 store=1   the extension reloads its store from a backend that STILL HOLDS
+                                the outgoing document's chart
+ +10794ms   backend=0 store=1   resetToNewWorkbook's new_file cleared the backend.
+                                NOTHING re-syncs the store.
+```
+
+Read the last line again: **the store now holds a chart the document does not contain, and the store
+is what paints.** The phantom rides through all eight budget-model phases and is photographed by
+phase 06. The teardown that was supposed to prevent this ran 10 seconds earlier and deleted nothing,
+because it enumerates the frontend store — which was empty at that moment — and the thing that
+re-filled it was the reset's own next teardown step.
+
+Two collateral confirmations that the frame is not a product state: `get_charts` answers 0 while the
+chart is on screen, and a `new_file`-fresh, empty workbook paints it (photographed).
+
+### 29d. Reproduced and extinguished at will — 173,986 pixels, to the pixel
+
+The number in the filing is not approximately recovered, it is recovered exactly. With the fixes
+removed and the residue rebuilt (`monthly-report` run, then the store emptied without touching the
+backend, which is precisely what a raw `save_chart` leaves):
+
+- **sabotaged:** `budget-model 06` fails, `173986` differing pixels, bbox `x 170..769 y 312..711`,
+  glyph-dark pixels 836 → 19446 — the filed signature;
+- **fixed:** 8/8, store 0, backend 0.
+
+### 29e. The fix: three changes, and which one is load-bearing
+
+1. **Root cause** (`monthly-report.scenario.ts`): the chart is created through the product's
+   `chartStore.createChart` — what Insert > Chart calls — instead of a raw `save_chart`. A new
+   assertion requires the backend and the store to AGREE after the create, so the shortcut cannot
+   return silently. This removes the PRECONDITION.
+2. **Defence** (`walker/reset.ts`): the chart teardown also enumerates the BACKEND's own list (a
+   store is not a census of the document), and — the half that closes the CLASS rather than the
+   trigger — `resyncChartStoreToBackend()` runs AFTER `new_file`, drives the product's own
+   `charts:refresh` re-sync, and **asserts** the store reached zero, throwing a sentence that names
+   the state if it will not. It is deliberately last: the final read of the backend has to be the one
+   taken against the NEW document, or the race is merely narrowed. This is the FloatingRange block's
+   own lesson (BUG-0056) applied to the object type that had learned only half of it.
+3. **Teeth** (`soak/walker-action-effects.spec.ts`): a regression test that builds the precondition
+   deliberately — a table (the trigger, not scenery) and then a raw `save_chart` — and asserts both
+   stores are empty after the reset.
+
+**Proved by sabotage, in both directions and in isolation.** With the re-sync removed the new test
+fails and the golden fails at the filed pixel count; with the backend enumeration still disabled and
+monthly-report still store-blind, **the re-sync alone** makes the run green — so the necessity of the
+piece that closes the class is established, not assumed.
+
+### 29f. Verification — comparison runs only, never a writing run
+
+**The golden was not recaptured and needed no recapture.** It is correct as committed; the diff was
+the phantom, not a stale baseline. That is worth stating plainly, because the same pass's method rule
+("a recapture checked only by the run that wrote it is not checked") cuts both ways: the honest
+answer here was to leave the file alone.
+
+| Suite | Result |
+|---|---|
+| e2e `scenario`, COLD app — three separate cold launches | **24 / 24** each |
+| e2e `scenario`, second consecutive run on the same app (the one that used to fail), twice | **24 / 24** each |
+| `soak/walker-action-effects.spec.ts` | **6 / 6** (incl. the new BUG-0075 test) |
+| `invariant` (`state-consistency`) | **2 / 2** |
+| `journeys/cascade-announcement-live.spec.ts` | **2 / 2** |
+| `soak/synthetic-click-drag.spec.ts` | **3 / 3** |
+| `bugLedger` / `walkerExclusions` / `collectionGuard` unit tests | **39 / 39** |
+| `tsc -p e2e`, `check:line-endings` | clean |
+
+`EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` / `STALE_PRODUCT_STATE_GOLDENS` remain empty. The ledger is
+**76 entries, 75 fixed, BUG-0074 open** and owned elsewhere.
+
+### 29g. A second witness for §28i, from the other side of the collision
+
+§28i's rule — "a CDP port is not an identity" — was demonstrated again in this pass, unplanned. This
+agent's isolated instance was launched on **9223**, the port §17 names as THE isolation port; the
+BUG-0074 agent's instance took the same port from the same recipe, and this one died mid-measurement
+(`Target page, context or browser has been closed`, then a stranger's `calcula-e2e-pin-0074\app.exe`
+answering on 9223 forty seconds later). One timeline sample was taken from the wrong app before the
+kill was noticed — the tell was a document (`123 456 789,12` in A1) that this agent had never
+written, i.e. ink attribution again.
+
+**The recipe as written does not scale past one agent, because the port is baked into it.** Anything
+that follows §17 verbatim collides by construction. Remedies used here, in order of strength: name
+the pin directory after the WORK (`calcula-e2e-pin-0075`), take a port nobody's recipe names (9224),
+and treat an unexplained `pageAge` reset or a vanished in-page marker as evidence about ownership
+rather than as flakiness — `performance.now()` at the start of a probe is a two-line ownership check
+that would have caught it immediately.
+
+### 29h. What is left, stated rather than implied
+
+- **The trigger is general, and only charts were fixed.** Every teardown step in `deepResetForWalk`
+  that announces a domain can re-fill a frontend store that an EARLIER step in the same reset just
+  emptied. Charts were the instance that shipped a corrupted golden; sparklines, slicers and pane
+  controls sit on the same `objects`/`paneControl` fan-out and have not been driven the same way. The
+  general form of the fix — re-sync every object store to backend truth AFTER `new_file`, and assert
+  it — is one function per store away, and the assertion is the part that matters.
+- **A separate instability in the SAME golden was observed once and is not this bug.** During
+  diagnosis, one `-g budget-model` run against a freshly launched app failed at **2071** pixels with
+  no chart in frame, and passed on every later run of the same build. It was not reproduced and is
+  not filed; the shape (a small, order-dependent diff in a golden that is otherwise stable) belongs to
+  BUG-0074's family, and the next pass that sees a low-thousands diff on `scenario-budget-model-title`
+  should read this paragraph before assuming a stale baseline.
+
+## 30. BUG-0074 closed: the variable was never the selection — it was a table another spec left in the shared workbook (2026-08-15)
+
+BUG-0074 was filed as "three goldens in `comments-notes.spec.ts` are not deterministic, and the
+variable is the cell's selection highlight", with a repaint race between `navigateTo` and
+`announceAnnotationsChanged` as the mechanism. **Both halves of that are wrong, and the second was
+cheap to disprove.** What was right — and what the entry itself insisted was the part worth keeping —
+is that `--update-snapshots` is not self-validating. That half is now fixed at its source too.
+
+### 30a. The selection is in the frame, and it is byte-identical
+
+`takeGridRegionScreenshot` parks the selection before every capture, and `parkSelectionAwayFrom` uses
+`parkCol = min(a.col, b.col)` — the **same column** as the range. So a parked capture always carries
+the selected-column header highlight (`#E3ECF7`) in the 4 px of padding above the cell. That is the
+selection's own signature, inside the golden, at no cost.
+
+Measured on the committed golden against the actual from a failing cold run, for both
+`-cell-with-indicator` files:
+
+| rows 0-3 of the clip | comments | notes |
+|---|---|---|
+| pixels byte-identical to the golden | **284 / 284** | **284 / 284** |
+| of which the selected-header highlight `#E3ECF7` | 256 | 256 |
+
+The selection was in the same place in the golden and in the picture that failed against it. There is
+nothing for a race to have raced.
+
+The positive control agrees: replaying the helper's exact sequence (`navigateTo` →
+`announceAnnotationsChanged` → `waitForGridStable` → park → re-frame → shutter) **eight times in one
+session** produced eight byte-identical frames, sha `38c2aa112ed3`, 71x28 each.
+
+### 30b. What the pixels actually say
+
+Every differing pixel is Excel table chrome:
+
+| expected → actual | count | what it is |
+|---|---|---|
+| `#4472C4` → white | 829 | `HEADER_BG`, Table's style interceptor |
+| `#D9E2F3` → white | 264 | `BAND_EVEN_BG`, same interceptor |
+| light → dark glyph | 186 | the caption is **white bold on blue** in the golden, dark on white now |
+
+`#4472C4` and `#D9E2F3` occur in exactly one place in the tree:
+`extensions/Table/lib/tableStyleInterceptor.ts`. The geometry corroborates it — the comments diff
+begins at y=5, i.e. below the header band, and the notes diff is confined to `x[0..3]`, the four
+padding pixels that show W1's right edge.
+
+### 30c. The source, and why it could only ever show up on the SECOND run
+
+`tables.spec.ts`'s "rename a table" built its table over **V1:W2** (`startCol: 21, endCol: 22`) —
+inside the W-X ground `comments-notes.spec.ts`'s own header declares — and never deleted it. Measured
+after one full cold functional run, `get_all_tables` returned three leftovers from three tests:
+
+```
+SalesData   r0-1  c21-22     <- inside comments-notes' territory
+Table1      r0-3  c17-19
+TotalsTest  r6-9  c17-18
+```
+
+A table is neither cell state nor a floating object. Its colours are repainted **every frame from the
+definition** by a style interceptor, so `resetGrid` cannot reach it, `clear_range_with_options` cannot
+reach it, and — this is the part that kept it invisible — the residue guard could not see it either.
+`zz-workbook-residue.spec.ts` guarded floating objects, charts and open side panels. Tables were the
+one class with no guard.
+
+And `tables` sorts **after** `comments-notes`, so the damage never appears in the run that causes it.
+That is the whole of "one build, three answers", and all three were reproduced on one build, one
+machine:
+
+| run | result | why |
+|---|---|---|
+| cold ordered run | **3 failed** (1363 / 52 / 1338 px) | no table on W yet |
+| the file alone, on an app that had just finished a full run | **6 passed, 1 failed** | SalesData now covers W1:W2 |
+| `--update-snapshots` on a warm app | written as truth | update mode compares nothing |
+
+The middle row is the ledger's own observation (c) reproduced exactly. The one that still failed warm
+is the W6 golden, which needs a table reaching row 5 — more contamination than one ordered run can
+even produce, so that file encodes a workbook the suite cannot reach.
+
+### 30d. Fixed at the cause, then defended, then guarded
+
+1. **Cause.** `tables.spec.ts`'s rename test moves into its own R-T ground (R17:S18), and a
+   `test.afterAll` deletes **every** table the file creates and clears its cells — the `charts.spec.ts`
+   shape, including the `app:table-definitions-updated` event without which the chrome keeps painting
+   from the extension's cache after the backend has forgotten the table.
+2. **Defence.** `comments-notes.spec.ts` reclaims W1:X10 in `beforeEach` (deletes any overlapping
+   table, clears formats), so the golden is a function of the test even if a future spec squats again.
+3. **Guard**, which is worth more than either: `zz-workbook-residue.spec.ts` gains *"no spec left a
+   table in the backend"*. The class can no longer be invisible.
+4. **The general half.** `takeGridRegionScreenshot` ran `waitForGridStable` **before** the park and
+   then dispatched up to three navigate events, each followed by a flat sleep — so the last thing
+   before the shutter was a sleep. Comparison mode retries and hides that; `--update-snapshots` takes
+   one frame and writes it. It now stabilises **after** the park, before the shutter.
+
+Also corrected: this spec's own header instructed future readers *not* to count `#FF0000` / `#7B68EE`
+because "the renderer paints through the skin/theme". It does not. Both the committed goldens and a
+fresh capture decode the source constants to the bit (`255,0,0` and `123,104,238`); the
+`226,57,34` / `124,111,229` the comment warned about are those same colours through a **wide-gamut
+display profile**, from captures taken before `--force-color-profile=sRGB` was pinned. The
+environment had drifted, not the renderer.
+
+### 30e. Three more defects, found by pulling the same thread
+
+**BUG-0077 — five residue cleanups had never run, because of an enum's capital letter.**
+`ClearApplyTo` carries `#[serde(rename_all = "camelCase")]`, so the wire vocabulary is
+`all|contents|formats|…`. Measured live against the running backend:
+
+```
+"All"      -> REJECTED: unknown variant `All`      "all"      -> ACCEPTED
+"Formats"  -> REJECTED                              "formats"  -> ACCEPTED
+"Contents" -> REJECTED                              "contents" -> ACCEPTED
+```
+
+Five call sites were on the rejected side, and every one wraps its invoke in `.catch(() => {})`
+because "the command may not exist" — so the rejection was swallowed and the clear silently did not
+happen. They were not incidental call sites: `resetGrid` itself (its used-range and formatting clear
+never ran; Ctrl+A + Delete was the whole reset), and the `test.afterAll` cleanups in `animation`,
+`charts`, `dimensions` and `edge-cases` — **the four written specifically to close the §3a/§3b residue
+class.** The register's own remediation for that class was unenforced.
+
+Fixed at all five, and the class closed rather than the instances:
+`e2e/__tests__/clearApplyToVocabulary.test.ts` parses the variants out of the Rust enum, camelCases
+them the way serde does, and fails the build naming file and line. It was proved to fail before it was
+trusted — it flagged its own failure-message template on the first run, then
+`dimensions.spec.ts:48` when one site was deliberately reverted.
+
+*Consequence, attributed rather than absorbed.* The two whole-grid `evaluate-formula` goldens changed,
+because they had been photographing residue their owner's `afterAll` was written to remove.
+Attribution is one-directional and exact: **3,379 ink pixels present in the golden are absent now and
+zero new ink appears**, all of it in the column band that resolves to **AE** after the spec's own
+`navigateTo("AI1")` scroll — which is `edge-cases.spec.ts`'s declared AE1:AH200 ground.
+`grid-evaluate-formula-init` was already **112,174 px** wrong on a cold app *before* this pass and is
+2,498 px after it. Both were re-recorded in the ordered cold run, under a byte audit of all 72
+committed goldens that confirmed **exactly those two files** changed.
+
+**BUG-0078 — the app under test is on the editor's hot-reload channel.** The E2E app is a `tauri dev`
+build served by Vite, which pushes to whatever is connected. Measured while another agent saved
+`app/src/core/lib/events.ts`: `hmr update` for ~170 modules, `page reload (circular import
+invalidate)` for several, and React fast-refresh remounted the provider tree — `GridProvider`'s
+`useReducer` restarted from `getInitialState()`, so the selection snapped from W7 back to A1 and
+`scrollX` from 286 to 0, **2.5 s after the harness had deliberately parked them.**
+
+What makes it a defect rather than an annoyance: **there is no navigation.** `performance.timeOrigin`
+is unchanged and a `window` marker installed beforehand survives, so neither the page nor Playwright
+can tell the app was reset underneath a capture. Cutting the channel made the same state hold still
+for 10 s and the same capture come back byte-identical 8 runs out of 8.
+
+It then demonstrated itself twice more, in this pass, unprompted:
+
+- A cold verify run failed `workflow-dashboard.spec.ts` with *"Execution context was destroyed, most
+  likely because of a navigation"* and left **3 tests that did not run**. The app log has the cause on
+  its own line: `08:00:50 [vite] vite.config.ts changed, restarting server...`.
+- More seriously: **the 05:13 HMR storm degraded the dev server's module graph for three hours.**
+  Every cold run taken against it carried 18-20 failures in `macro-debug-*`, `macro-editor-inventory`,
+  `macro-live-edit`, `udf-evaluation`, `worker-extension-*` and `cell-behaviors` — script-host
+  surfaces, all of them looking like product or environment defects. After the server restarted with a
+  clean graph, the same suite, same build, same binary ran **551 passed / 0 failed**, twice.
+
+Fixed: both launchers set `CALCULA_E2E=1` on the `tauri dev` child, and `vite.config.ts` resolves
+`server.hmr` to `false` under it, so an E2E instance has no hot-reload channel while interactive
+development is untouched. Verified by loading the real config through Vite's own
+`loadConfigFromFile`: `CALCULA_E2E=1 -> server.hmr === false`, unset `-> undefined`. Pinned by
+`e2e/__tests__/hmrDisabledForE2E.test.ts`, which checks **both** halves, and which was proved to fail
+before the change.
+
+**BUG-0079 — `comments-notes.spec.ts` could not run twice against one app.** Found by verifying the
+BUG-0074 fix rather than by trusting it: a second run of the file on the same app failed four tests,
+none of them a pixel comparison. `add_comment` / `add_note` refuse a cell that already carries one, so
+`expect(result.success).toBe(true)` failed at W1, W2, W3 and X1 against the annotations the *first*
+run left. Annotations are a residue class of their own — not cell state, not a floating object — and
+nothing in the suite had ever removed one. Fixed with a `test.afterAll`, deliberately **not** a
+`beforeEach`: the `notes-cell-with-indicator` golden clips X1 with 4 px of padding, and those pixels
+contain 15 px of the comment triangle test 1 puts on W1. The file's tests may depend on each other;
+the *run* may not depend on the previous run.
+
+### 30f. Verified, and never by the run that wrote the goldens
+
+Every capture in this section was taken on an **isolated pinned `app.exe`** with its own
+`WEBVIEW2_USER_DATA_FOLDER` on CDP 9223, relaunched between runs and confirmed by PID change, so the
+other session's instance was never shared or disturbed.
+
+| check | result |
+|---|---|
+| `comments-notes` recaptured cold, then two further cold runs | 7/7 and 7/7, golden bytes unchanged (`04887c89f178` / `090d396df34b` / `c57d60ff6d69`) |
+| the property that was broken — repeat runs against one app | cold 7/7, warm 7/7, warm 7/7 |
+| golden byte audit across the whole corpus after the update run | 72 files hashed, **2 changed**, both `evaluate-formula`, both attributed |
+| `--project=functional`, cold, comparison mode | **551 passed / 0 failed / 4 skipped** |
+| the same again, fresh app.exe | **551 passed / 0 failed / 4 skipped** |
+| goldens after both verify runs | unchanged |
+| vitest | **106,941 passed / 791 files, 0 failed** |
+| `check-types` · `tsc -p e2e` · `lint:boundaries` · `check:line-endings` · `check:script-typings` | all clean |
+
+The functional project was **523 / 27 / 4** on a cold app at the start of this pass. The eight tests
+that this pass's *own* fixes flipped were measured under a controlled comparison (same degraded
+server, before and after): all five `comments-notes` tests, `clipboard`'s copy-and-paste, and both
+`dimensions` tests. The remaining 18 were BUG-0078 and are gone with it.
+
+Ledger: **79 entries, 79 fixed, open = NONE.** `EXCLUDED_UNTIL_FIXED` / `KNOWN_ISSUES` /
+`STALE_PRODUCT_STATE_GOLDENS` all still empty; nothing was suppressed.
+
+**Residual, stated rather than implied.** The two `evaluate-formula` goldens are whole-grid captures
+of a spec whose subject sits off-screen until its own `navigateTo`, so what they photograph is still
+largely *whatever the specs before them left on rows 1-26*. They are stable now (two cold runs agree)
+because the resets they depend on finally run, but they assert layout and residue rather than the
+feature named in the test. Turning them into region captures of the AI column is a change to that
+spec's goldens and belongs to whoever owns it next.
+
+## 31. The close-out: the three unrun projects, an oracle that could not fire, and a live proof that first proved itself wrong (2026-08-15)
+
+The pass that verifies §24-§30 rather than adding to them. Its brief: run what the previous passes
+did not, check every golden claim with a SEPARATE cold comparison run, and report the true state —
+including what is still open.
+
+### 31a. Baselines re-measured, and every delta accounted for
+
+Measured on this tree before any change of mine. The brief's figures were pre-BUG-0074/0076, which
+is why three differ.
+
+| Suite | Brief | Measured here | Why the delta |
+|---|---|---|---|
+| vitest FULL | 106,931 / 788 files | **106,941 / 0 failed / 791 files** | +10 tests, +3 files: BUG-0076's `formatStyleCachePrime` (+6, +1 file), BUG-0074's `clearApplyToVocabulary` + `hmrDisabledForE2E` (+2 files) |
+| core `cargo test --workspace` | 1,375 | **1,375 / 0** (21 targets) | — |
+| app-lib `cargo test --lib` | 1,656 | **1,656 / 0** (5 ignored) | — |
+| `test_pivot` | 56 | **56 / 0** | — |
+| model-engine-lib | 2,156 + 36 doctests | **2,156 / 0 (75 ignored) + 36 doctests / 0** | the brief's 75 is the UNIT figure; the doctests ignore 5 more, so a naive total reads 80 |
+| `cargo check --all-targets`, core + app | — | **clean, zero warnings** | — |
+| check-types · lint:boundaries · check:script-typings · check:line-endings · `tsc -p e2e` | — | **all clean** | — |
+| ledger | 79 / 79 fixed | **79 / 79 / 0 open** | agrees |
+| the three suppression lists | empty | **empty**, established by PARSING each declaration and stripping comments — not by reading the prose around it | — |
+
+### 31b. The three projects nobody had run against the parity changes
+
+`journey`, `invariant` and `soak` had not seen §24/§25/§26 at all. Each cold, one at a time, guard in
+the reporter list, `app.exe` count verified zero afterwards.
+
+| Project | Result |
+|---|---|
+| **journey** | **148 passed / 1 skipped / 0 failed** of 149, 29.1 m |
+| **invariant**, known seed 20260811 | 2 / 2, 2.6 m |
+| **invariant**, fresh seed 20260815 | 2 / 2, 2.5 m |
+| **soak**, known seed 90140201 (`floating:8`, 150 actions, oracleEvery 25) | 12 passed / 1 skipped, 7.2 m |
+| **soak**, fresh seed 20260815 | 12 passed / 1 skipped, 7.7 m |
+
+No parity change disturbed a walker. The `####` change sits on the paint path these projects exercise
+hardest and produced nothing.
+
+### 31c. BUG-0081 — the invariant project's save/reload oracle could not fire on any seed
+
+Not "did not fire". **Could not**, and never had.
+
+`OracleBattery` runs the save/reload round-trip when `checkpointCount % saveReloadEvery === 0` and
+defaults `saveReloadEvery` to **4**. `state-consistency.spec.ts` runs 75 actions at a cadence of 25
+(**3** checkpoints) and a rapid-fire walk of 50 at 25 (**2**). `3 % 4` and `2 % 4` are never zero.
+
+Every invariant run in this programme printed its own warning —
+
+```
+recalc consistency: 3 run(s); save/reload round-trip: 0 run(s)
+[WARNING] the save/reload round-trip never ran — persistence was not exercised
+```
+
+— and then reported `2 passed`. §22b recorded the sibling gap (the undo oracle deciding nothing) and
+read this line as the same bad luck. It is arithmetic: the default was chosen for `soak` (150/25 = 6,
+where it does fire) and inherited by a project whose walks are half as long. This is the collection
+guard's own failure mode one layer down — a clean pass certifying coverage that structurally did not
+happen.
+
+Fixed in two halves, the second worth more:
+
+1. Both walks now **state** their cadence (`SAVE_RELOAD_EVERY_MAIN = 3`, `..._RAPID = 2`) so
+   persistence runs exactly once per walk. Not more: save/reload resets the undo baseline, so a
+   tighter cadence buys persistence evidence with the undo oracle's.
+2. `WalkRunner.run` **refuses** a walk whose cadence cannot come due. `plannedCheckpointCount` is an
+   UPPER bound (a wall-clock budget can only make it over-count), so it fires only on a configuration
+   that could not reach the cadence in its best case. `describeUnreachableSaveReloadCadence` names all
+   three numbers and prescribes the three legal fixes — including `saveReloadEvery: 0` for
+   *deliberately no persistence here*, so an explicit decision is not turned into an error.
+
+`oracleCadenceReachable.test.ts` (10 cases) pins the arithmetic, the boundary one checkpoint short,
+the opt-out, and the real spec's configuration **read out of its source** — plus that both batteries
+STATE a cadence rather than inheriting the default, which is exactly how this rotted.
+
+**Teeth:** restoring `SAVE_RELOAD_EVERY_MAIN` to 4 turned exactly one case red with the measured
+sentence; restored byte-identical (sha256), 10/10.
+
+**After the fix, both seeds cold:** `save/reload round-trip: 1 run(s)` on all four walks, `2 passed`
+each. The persistence oracle found no defect — now a statement about the product rather than about a
+modulus.
+
+### 31d. BUG-0080 — BUG-0076's mechanism through a door its own comment said did not exist
+
+`announceStyleEntries`'s docstring read *"there is no other door to the command"*. True of
+`apply_formatting`; false of the **style cache**, which is what the sentence was about.
+`apply_named_style` and `apply_named_style_range` return the same `FormattingResult` with the same
+`styles` array, their wrappers live in `src/api/backend.ts`, and both are exported through `@api`.
+Neither announced anything.
+
+Measured at the unit tier on the real hooks: after `applyNamedStyleRange('Accent1', 0,0,0,0)` with no
+`grid:refresh`, the renderer's own `getStyleFromCache` lookup returned `#ffffff` — the document
+default — while the backend reported `#00A650`.
+
+**Scope, at its real size, because the negative result is the useful part.** No LIVE reproduction was
+achieved. A staged probe (three stages, with the primed door as a control) found *both* doors
+painting the fill: every caller in the tree compensates — ScriptNotebook hand-dispatches
+`styles:refresh` (a **third** local patch of this class, after `useHomeTabState` and
+`Reports/lib/reportRefresh.ts`) and the script host's `afterCellDataChange` schedules `grid:refresh`,
+which fires BUG-0076's heal. So it is reachable by any NEW `@api` caller and by no current one. Fixed
+at the seam anyway: `announceStyleEntries` is exported and every wrapper receiving a
+`FormattingResult` goes through that one function.
+
+### 31e. The live proof — which produced a false regression, and the false regression is the finding
+
+20 checks on a cold app on CDP 9222, each stating the WRONG value first. **19 passed; the one failure
+was mine.**
+
+Items 1-3 held exactly: eleven dropdown entries in Excel's order, all sv-SE (`45306,5625` ·
+`45306,56` · `2024-01-15` · `den 15 januari 2024` · `13:30:00` · `45 306,56 kr`, no `$`, no US decimal
+point anywhere) and **all eleven round-trip through `get_style` under the name the dropdown
+advertises**; A1 untouched at `styleIndex 0` reading `bottom` with an explicit-Middle B1 unmoved; the
+ladder painted — explicit 734 ink vs General 503 vs clipped text 592, `display` never a run of `#`,
+widening clearing it.
+
+The failure read `BUG-0076: fill 6804 → 0 after Ctrl+B` — the exact filed signature. It was wrong
+twice:
+
+- **Uncontrolled variable.** It measured the fill UNSELECTED, then clicked the cell to give Ctrl+B a
+  target and measured again.
+- **Exact-colour metric** (`|r-255|≤30 && |g|≤30 && |b|≤30`).
+
+Both measured, not reasoned. Holding the selection constant across four states — filled/unselected
+**5967**, filled/selected **5659**, +bold/selected **5589**, +bold/unselected **5847** — the fill
+plainly survives. And the tint is exact: unselected the fill decodes `255,0,0` ×5706; **selected it
+decodes `222,17,32` ×5450**, so the exact-colour count is **0** while 5589 red pixels are on screen.
+
+Third time this family has bitten (§24's unattributed note, §27i's method note, now this). The rule
+earned: **a pixel probe must hold the selection constant and must never test for an exact colour.**
+
+### 31f. Teeth on the running build
+
+Sabotaging `overflowMarker.ts`'s `if (displayWidth <= availableWidth)` to `if (true)` and reloading:
+explicit ink **734 → 544**, General **503 → 624**, verdict inverted to RED. Restored, sha256 verified,
+measurement back to **734 / 503** exactly.
+
+Two method notes worth more than the sabotage:
+
+- **The first sabotage was a no-op that passed.** Forcing `isGeneralFormat` true changed nothing,
+  because `parseGeneralNumber` cannot parse an NBSP-grouped display and falls through to the marker
+  anyway. §27d's rule again: a half-sabotage that passes is evidence the sabotage was wrong.
+- **A source change does not reach the running app on a plain reload.** With HMR off for E2E, Vite was
+  serving the sabotaged module (`if (true)` in the response body) while the page ran the original from
+  its HTTP cache. `Network.setCacheDisabled` over CDP is required. Any future live A/B that edits a
+  frontend source and reloads is measuring the OLD code without it.
+
+### 31g. BUG-0082, filed OPEN — a cold start that comes up with an empty `#root`
+
+Struck **three times** in one session: killing an `invariant` run right after `[e2e] CDP ready`,
+failing **all 12** soak tests, and failing **all 18** visual tests — where it reads as the entire
+golden corpus breaking, with zero goldens actually compared.
+
+Captured live on the third occurrence, over CDP, while the app was still up:
+
+```
+document.readyState   "complete"
+#root children        0            <- React never mounted
+window.__TAURI__      defined      <- the Tauri bridge injected fine
+window.__calcImport   UNDEFINED    <- main.tsx never ran its body
+<script src>          /@vite/client, /src/main.tsx   (both in the DOM)
+```
+
+So `/src/main.tsx` was requested and never evaluated. Not reproducible: an immediate cold re-run from
+a verified-zero process table passed. One hypothesis was **eliminated** rather than assumed — the
+process table held zero `app.exe`, and the 30 surviving `msedgewebview2` processes were inspected and
+belong to Windows SearchHost, so "a new app joins a stale WebView2 browser process" is out. The
+network half is unresolved: Playwright's trace starts after load and its network log is empty.
+
+**The diagnosis half has landed**, because the cost here is misattribution, not the flake:
+`describeUnmountedApp` now distinguishes three states — `#root` empty ("a HARNESS/STARTUP failure,
+NOT a product failure; nothing after this is a test result"), `#root` populated ("the frontend DID
+mount; that is a product question"), and unreadable ("UNKNOWN", because calling an unreadable page
+empty would be a claim). It dates the failure with `__calcImport` and carries a console tail —
+collected from the fixture onward — and says so explicitly when there is none. Five cases pin the
+wording, as `appGoneMessage.test.ts` does for the app-gone arm.
+
+**Attribution and any retry remain OPEN**, in that order, and the order is the point: a retry that
+hides the state would delete the evidence the attribution needs.
+
+**And then a fourth observation reframed it.** The app this pass left running on 9222 for the next
+session was polled from launch: it reached `http://localhost:5173/` and then sat with `#root` EMPTY
+for approximately **55 seconds** — eleven consecutive 5-second readings of `{root: 0, spreadsheet:
+false}` — before mounting. **The fixture ceiling is 60 s.** So the empty-`#root` state is not exotic
+at all: it is the ORDINARY cold-start condition while Vite transforms the module graph for the first
+time, and the three failures are that transform running just past a ceiling it normally clears by
+about five seconds. It also explains why every re-run passed (Vite's cache was warm by then) and why
+it struck the FIRST project run after an idle period.
+
+That makes the leading fix a measured ceiling rather than a mystery — and it is deliberately NOT
+taken here, on one sample: the number bounds every project, so it deserves its own baseline of cold
+mount times. What is still unproven is whether the overrun is transform time alone or an occasional
+stall, which is what the Vite request log in step (2) would settle.
+
+### 31h. The parity decisions get a live guard instead of a paragraph
+
+Measured while closing: **zero** references to `verticalAlign`, to the overflow marker, or to the
+Number dropdown anywhere under `app/e2e`. All three §21c decisions shipped with unit tests, Rust tests
+and a one-off live probe recorded in a design document — evidence that expires the moment nobody
+re-reads it.
+
+`e2e/journeys/parity-21c.spec.ts` makes the three proofs permanent and carries **no golden**: every
+pixel claim is relative, between two cells in the same frame on the same run, so it cannot rot against
+a recapture, a dpr change or a colour profile. It drives the product's own `applyFormatting` wrapper
+over `__calcImport` rather than a raw invoke with hand-written events — hand-priming the cache would
+let item 3 pass over a regression of BUG-0076 instead of catching it. Item 1 is locale-TOLERANT: it
+asserts the round-trip and reads the decimal separator from the backend, because a spec that
+hard-codes `45306,56` is a second hard-coded locale table, which is the defect rather than the test.
+
+**Its first run failed, and the failure was the spec's.** Rows 40+ sit below the default viewport, and
+`page.screenshot({clip})` outside the image does not return blank pixels — it throws *"Clipped area is
+either empty or outside the resulting image"*. It passed standalone only because the probe used rows
+10-17. `cellInk` now refuses out-of-frame cells with the rect, the canvas box and the scroll in the
+message (and names the side-panel case, which is the other way a cell leaves the frame), the subjects
+are scrolled in first, and the column-width change is restored in a `finally` so a thrown assertion
+cannot leave a 60 px column A for the ~20 specs that follow.
+
+### 31i. Contract checks, attacked rather than read
+
+- **The collection guard fires both ways.** Truncating `workflow-visual.spec.ts` to zero bytes:
+  the run reported **12 passed** and **exited 1**, naming the empty file by absolute path. Restored
+  byte-identical (sha256), 18/18, exit 0. And `--reporter=dot` was **refused at global-setup** before
+  any app launched, naming the 134-of-143 incident and printing the exact flag to add back.
+- **Census families and harness self-tests: 190 / 190 across 14 files** (`cascadeAnnouncementCensus`,
+  `crossLayerConstantDrift`, `structuralDeleteCascadeAnnouncement`, `sheetDisplayFlagsBridge`,
+  `cheapInvariants`, `goldenCorpus`, `oracleCoverage`, `walkerExclusions`, `walkerSheetCoverage`,
+  `bugLedger`, `collectionGuard`, `sheetSwitchPrefetch`, plus this pass's `oracleCadenceReachable` and
+  `unmountedAppMessage`).
+- **A census was attacked, not read.** Changing `DEFAULT_STYLE.verticalAlign` in
+  `app/src/core/types/types.ts` from `bottom` to `middle` turned exactly one goldenCorpus case red —
+  *"types.ts DEFAULT_STYLE mirrors the Rust default; a disagreement renders one way and reports
+  another"* — with the other 39 green. Restored byte-identical (sha256), 40/40. The four-authority pin
+  works.
+- **Sheet-switch tear: `sheetSwitchPrefetch` 11 / 11**, including "refuses a payload primed for
+  ANOTHER sheet".
+- **The three suppression lists are still empty**, verified by parsing.
+- **The ledger:** 82 entries, `nextId` 83 checked against the highest id present, no id reused, every
+  bug this pass touched populated with violation, repro, triage and fix.
+
+### 31j. Suites on the final tree
+
+| Suite | Result |
+|---|---|
+| vitest FULL | **106,957 passed / 0 failed / 793 files** (+16 tests, +2 files over the baseline: `oracleCadenceReachable` 10, `unmountedAppMessage` 5, `formatStyleCachePrime` +1 — every one accounted for) |
+| core `cargo test --workspace` | **1,375 / 0** |
+| app-lib `cargo test --lib` | **1,656 / 0** (5 ignored) |
+| `test_pivot` | **56 / 0** |
+| model-engine-lib | **2,156 / 0 (75 ignored) + 36 doctests / 0** |
+| `cargo check --all-targets`, core + app | **clean, zero warnings** |
+| check-types · lint:boundaries · check:script-typings · check:line-endings · `tsc -p e2e` | **clean** |
+| e2e **functional** | **551 passed / 4 skipped / 0 failed** of 555 collected, TWICE — 38.5 m before the BUG-0082 diagnosis landed in the fixture, 38.4 m after |
+| e2e **visual** | **18 / 18, three cold runs**, golden corpus sha256 byte-identical before and after |
+| e2e **scenario** | **24 / 24**, 0 skipped, 2.1 m |
+| e2e **journey** | **151 passed / 1 skipped / 0 failed** of 152, 30.0 m |
+| e2e **invariant** | 2/2 and 2/2, both seeds, `save/reload: 1 run` per walk |
+| e2e **soak** | 12/1 skipped and 12/1 skipped, both seeds |
+
+No `--update-snapshots` was run at any point in this pass. Every golden claim above is a COMPARISON,
+and the visual corpus was hashed before and after to prove it.
+
+### 31k. What is still open
+
+1. **BUG-0082** — the empty-`#root` cold start. Diagnosis landed, and a fourth observation moved the
+   leading hypothesis from *unknown* to *a ~55 s cold Vite transform against a 60 s ceiling*. Raising
+   that ceiling is **open**, deliberately, on one sample; the Vite request log that would separate an
+   overrun from a stall is open; a retry stays last.
+2. **The undo round-trip oracle decides nothing.** Measured across **every walk run today** — 10
+   walks, 32 checkpoints, **0 decided**, on both projects and on four seeds. §22b recorded this as
+   thin evidence; it is now uniformly zero. Walks reach workbook-structure actions that clear the undo
+   stack (Excel parity, correct), so the oracle is never decidable over a 25-action window. A green
+   invariant run currently carries NO undo evidence, and the walker says so per run. Closing it needs
+   the checkpoint window shortened, or structure actions down-weighted for a dedicated undo walk —
+   deliberately not done here, because it changes what the seeds mean and belongs to a pass that can
+   re-baseline them.
+3. **A journey run left the Animation side panel open** (grid canvas 1218 → 898 px), failing
+   `remaining-correctness` and skipping 10 tests behind it. It appeared only in the run where the
+   parity spec was failing and did NOT reproduce once that spec was fixed (151/1/0). Not filed — not
+   reproducible, and the opener was not identified. The actionable asymmetry IS worth recording: the
+   functional project has a residue guard for open side panels (`zz-workbook-residue.spec.ts`) and
+   **the journey project has none**, so the class is invisible there.
+4. **§25g's owner calls** stand: reading the OS regional settings on the `"system"` locale path, and
+   currency negatives (parentheses vs leading minus).
+5. **§30's residual** stands: the two `evaluate-formula` goldens are whole-grid captures asserting
+   residue rather than their feature.
+6. **§29's residual** stands: only charts are re-synced after the walker's `new_file`;
+   sparklines/slicers/pane controls sit on the same fan-out.

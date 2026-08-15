@@ -1,19 +1,34 @@
 //! FILENAME: app/src/core/lib/gridRenderer/rendering/truncatedTextDecoration.test.ts
 // PURPOSE: An underline (and a strikethrough) must be as wide as the text the
 //          user can SEE, not as wide as the text the cell holds.
-// CONTEXT: The defect: the decoration was measured with
+// CONTEXT: The original defect: the decoration was measured with
 //          `ctx.measureText(displayValue)` — the FULL string — and then clamped
-//          to the cell. Once a value is too long for its column the renderer
-//          draws an ellipsised version of it, which is strictly narrower than
-//          the clamp, so the rule painted a line that ran on past the "...".
+//          to the cell, while the renderer drew an ellipsised version that was
+//          strictly narrower than the clamp. The rule ran on past the "...".
+//
+// RE-AIMED FOR EXCEL'S OVERFLOW RULE. Calcula no longer ellipsises anything:
+// over-long TEXT is clipped mid-glyph at the cell edge (Excel's behaviour), and
+// an over-long NUMBER is replaced by '####' repeated to fill the column. Both
+// changed what "the glyphs actually painted" MEANS, so the fixtures below moved
+// with them — but the contract did not, and that is the point of keeping this
+// file rather than replacing it:
+//
+//   the rule must span exactly the glyph run that was drawn, clamped to the
+//   same box that clips the glyphs.
+//
+// Under clipping the glyph run IS the whole string, and the clamp to the cell is
+// what the clip does to it — so the two agree by construction instead of by
+// arithmetic. Under '####' the glyph run is the marker, which is sized to the
+// box, so the rule follows the marker rather than the value it replaced. A test
+// that only knew about ellipses would have gone quietly green here while
+// underlining nothing in particular.
 //
 // HOW THIS IS VERIFIED. The frame goes through the real `renderGrid`. The fake
 // 2D context records what was painted: every fillText (the glyphs) and every
 // horizontal stroke segment (the rules). The assertion then compares the two
-// against each other — the underline must span exactly the string that fillText
-// received, measured with the same measureText the renderer used. Nothing here
-// restates the renderer's arithmetic, so the test cannot pass by agreeing with
-// a wrong implementation.
+// against each other, measured with the same measureText the renderer used.
+// Nothing here restates the renderer's arithmetic, so the test cannot pass by
+// agreeing with a wrong implementation.
 
 import { describe, it, expect } from "vitest";
 
@@ -165,6 +180,9 @@ function styleCacheWith(overrides: Partial<StyleData>): StyleDataMap {
   return cache;
 }
 
+/** What the neighbouring cell holds to block the spill. Never a '#'. */
+const BLOCKER = "x";
+
 function cellsWith(display: string): CellDataMap {
   const cells: CellDataMap = new Map();
   cells.set(cellKey(ROW, COL), {
@@ -176,12 +194,13 @@ function cellsWith(display: string): CellDataMap {
   } as CellData);
   // The neighbour is OCCUPIED on purpose. An empty neighbour makes the renderer
   // spill the text across it (correct, Excel-like), and a spilled value is not
-  // ellipsised at all — so there would be no truncation to measure.
+  // clipped at all — so there would be no overflow to measure. The blocker is
+  // deliberately NOT "#", so it can never be confused with the overflow marker.
   cells.set(cellKey(ROW, COL + 1), {
     row: ROW,
     col: COL + 1,
-    value: "#",
-    display: "#",
+    value: BLOCKER,
+    display: BLOCKER,
     styleIndex: 0,
   } as CellData);
   return cells;
@@ -203,52 +222,75 @@ function render(display: string, overrides: Partial<StyleData>) {
     { columnWidths: new Map(), rowHeights: new Map() },
     styleCacheWith(overrides),
   );
-  // Headers paint their own labels and the blocking neighbour paints "#", so
-  // keep only the draws that are the fixture value or an ellipsised prefix of it.
+  // Headers paint their own labels and the blocking neighbour paints "x", so
+  // keep only the draws that are the fixture value itself or the '####' marker
+  // that replaced it.
   const glyphs = texts.filter(
-    (t) => t.text !== "" && t.text !== "#" && display.startsWith(t.text.replace(/\.\.\.$/, "")),
+    (t) => t.text !== "" && t.text !== BLOCKER && (t.text === display || /^#+$/.test(t.text)),
   );
   return { glyphs, rules };
 }
 
 /**
- * A value that does not fit: 30 chars at 6px = 180px against a 58px text box.
+ * A TEXT value that does not fit: 30 chars at 6px = 180px against a 58px box.
  */
 const LONG = "Quarterly revenue, EMEA region";
 /** A value that fits comfortably: 5 chars = 30px. */
 const SHORT = "Total";
+/** A NUMBER that does not fit: 9 chars = 54px of digits into 58px, then the
+ *  General ladder rounds it — so make it long enough that even "1235" style
+ *  rounding cannot save it. 20 digits under an explicit format cannot negotiate. */
+const LONG_NUMBER = "12345678901234.5678";
 
 describe("decorations follow the RENDERED text, not the stored value", () => {
-  it("precondition: the long value really is ellipsised by the renderer", () => {
+  it("precondition: over-long TEXT is clipped, not ellipsised and not marked", () => {
     const { glyphs } = render(LONG, { underline: "single" as UnderlineStyle });
     expect(glyphs.length).toBeGreaterThan(0);
     const drawn = glyphs[glyphs.length - 1].text;
-    expect(drawn.endsWith("...")).toBe(true);
-    expect(drawn.length).toBeLessThan(LONG.length);
+    // Excel clips mid-glyph: the whole string is painted and the clip cuts it.
+    expect(drawn).toBe(LONG);
+    expect(drawn).not.toContain("...");
+    expect(drawn).not.toMatch(/#/);
   });
 
-  it("underlines a TRUNCATED value exactly as wide as the ellipsised glyphs", () => {
+  it("underlines CLIPPED text no wider than the box that clips the glyphs", () => {
     const { glyphs, rules } = render(LONG, { underline: "single" as UnderlineStyle });
     const drawn = glyphs[glyphs.length - 1];
     const glyphWidth = drawn.text.length * CHAR_WIDTH;
 
     const underline = rules.find((r) => Math.abs(r.x0 - drawn.x) < 0.001);
     expect(underline, "an underline was drawn starting at the glyph origin").toBeTruthy();
-    expect(underline!.x1 - underline!.x0).toBeCloseTo(glyphWidth, 6);
-
-    // ...and that is genuinely narrower than the old behaviour, which clamped
-    // the FULL string's width to the cell's text box.
-    expect(glyphWidth).toBeLessThan(AVAILABLE_WIDTH);
+    // The glyphs overflow the box; the rule must stop at the box, because that
+    // is where the clip stops the glyphs.
+    expect(glyphWidth).toBeGreaterThan(AVAILABLE_WIDTH);
+    expect(underline!.x1 - underline!.x0).toBeCloseTo(AVAILABLE_WIDTH, 6);
   });
 
-  it("strikes a TRUNCATED value exactly as wide as the ellipsised glyphs", () => {
+  it("strikes CLIPPED text no wider than the box that clips the glyphs", () => {
     const { glyphs, rules } = render(LONG, { strikethrough: true });
     const drawn = glyphs[glyphs.length - 1];
-    const glyphWidth = drawn.text.length * CHAR_WIDTH;
 
     const strike = rules.find((r) => Math.abs(r.x0 - drawn.x) < 0.001);
     expect(strike).toBeTruthy();
-    expect(strike!.x1 - strike!.x0).toBeCloseTo(glyphWidth, 6);
+    expect(strike!.x1 - strike!.x0).toBeCloseTo(AVAILABLE_WIDTH, 6);
+  });
+
+  it("underlines the '####' MARKER, not the number the marker replaced", () => {
+    // An explicit format cannot negotiate, so this lands on the marker rung.
+    const { glyphs, rules } = render(LONG_NUMBER, {
+      underline: "single" as UnderlineStyle,
+      numberFormat: "Number (4 decimals)",
+    });
+    const drawn = glyphs[glyphs.length - 1];
+    expect(drawn.text, "the number was replaced by ASCII hashes").toMatch(/^#+$/);
+    // The marker is sized to the box, so its rule is the marker's own width and
+    // has nothing to do with the 19-character value underneath it.
+    const markerWidth = drawn.text.length * CHAR_WIDTH;
+    expect(markerWidth).toBeLessThanOrEqual(AVAILABLE_WIDTH);
+
+    const underline = rules.find((r) => Math.abs(r.x0 - drawn.x) < 0.001);
+    expect(underline, "an underline was drawn starting at the marker origin").toBeTruthy();
+    expect(underline!.x1 - underline!.x0).toBeCloseTo(markerWidth, 6);
   });
 
   it("still underlines the whole of a value that FITS", () => {

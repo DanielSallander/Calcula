@@ -203,7 +203,7 @@ function defaultStyle(): EmuStyle {
     textColor: "#000000", backgroundColor: "#ffffff",
     textColorTheme: "dark1", textColorTint: 0,
     bgColorTheme: "light1", bgColorTint: 0,
-    textAlign: "general", verticalAlign: "middle", numberFormat: "General",
+    textAlign: "general", verticalAlign: "bottom", numberFormat: "General",
     wrapText: false, textRotation: "none", indent: 0, shrinkToFit: false,
     borderTop: { ...NO_BORDER }, borderRight: { ...NO_BORDER },
     borderBottom: { ...NO_BORDER }, borderLeft: { ...NO_BORDER },

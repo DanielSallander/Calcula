@@ -11,7 +11,7 @@ use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
 use crate::{
     evaluate_formula_multi_sheet,
-    format_cell_value, get_column_row_dependents, get_recalculation_order, AppState,
+    get_column_row_dependents, get_recalculation_order, AppState,
 };
 use engine::{Cell, CellValue, Grid, StyleRegistry};
 
@@ -468,7 +468,7 @@ fn finalize_result(
         // Resolve against `g` - the same grid the cell was read from.
         let effective_style_index = g.effective_style_index(r, c);
         let style = styles.get(effective_style_index);
-        let display = format_cell_value(&cell.value, style, &locale);
+        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
 
         let merge = merged_regions.iter().find(|m| m.start_row == r && m.start_col == c);
         let (row_span, col_span) = match merge {
@@ -480,6 +480,7 @@ fn finalize_result(
             row: r,
             col: c,
             display,
+            overflow,
             display_color: None,
             formula: cell.formula_string().map(|f| format!("={}", f)),
             style_index: effective_style_index,

@@ -4,7 +4,7 @@
 
 use crate::api_types::{CellData, MergedRegion, MergeResult};
 use crate::persistence::FileState;
-use crate::{format_cell_value, AppState};
+use crate::{format_cell_value_and_class, AppState};
 use engine::UndoMergeRegion;
 use tauri::State;
 
@@ -393,15 +393,18 @@ pub fn merge_cells(
 
     // Return the master cell with span info
     let style = styles.get(master_style_index);
-    let display = master_cell
+    // An EMPTY merge master has no value, so it has nothing to overflow --
+    // which is Text, the fail-safe direction.
+    let (display, overflow) = master_cell
         .as_ref()
-        .map(|c| format_cell_value(&c.value, style, &locale))
-        .unwrap_or_default();
+        .map(|c| format_cell_value_and_class(&c.value, style, &locale))
+        .unwrap_or_else(|| (String::new(), crate::api_types::OverflowClass::Text));
 
     updated_cells.push(CellData {
         row: min_row,
         col: min_col,
         display,
+        overflow,
         display_color: None,
         formula: master_cell.as_ref().and_then(|c| c.formula_string()).map(|f| format!("={}", f)),
         style_index: master_style_index,
@@ -616,15 +619,18 @@ pub fn unmerge_cells(
         let master_cell = grid.get_cell(region.start_row, region.start_col).cloned();
         let master_style_index = grid.effective_style_index(region.start_row, region.start_col);
         let style = styles.get(master_style_index);
-        let display = master_cell
+        // An EMPTY merge master has no value, so it has nothing to overflow --
+        // which is Text, the fail-safe direction.
+        let (display, overflow) = master_cell
             .as_ref()
-            .map(|c| format_cell_value(&c.value, style, &locale))
-            .unwrap_or_default();
+            .map(|c| format_cell_value_and_class(&c.value, style, &locale))
+            .unwrap_or_else(|| (String::new(), crate::api_types::OverflowClass::Text));
 
         let updated_cells = vec![CellData {
             row: region.start_row,
             col: region.start_col,
             display,
+            overflow,
             display_color: None,
             formula: master_cell.as_ref().and_then(|c| c.formula_string()).map(|f| format!("={}", f)),
             style_index: master_style_index,

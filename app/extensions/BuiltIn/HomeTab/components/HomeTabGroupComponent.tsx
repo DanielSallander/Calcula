@@ -5,9 +5,12 @@
 // the @api/layout primitives; specialized widgets (color pickers, style gallery)
 // keep their own popover implementations. State comes from useHomeTabState.
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { css } from "@emotion/css";
 import { DialogExtensions } from "@api/ui";
+import { getRibbonNumberFormats } from "@api/numberFormats";
+import type { RibbonNumberFormat } from "@api/numberFormats";
+import { onLocaleChanged } from "@api/locale";
 import {
   ControlRow,
   ControlGrid,
@@ -26,21 +29,25 @@ import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery
 import { FONT_LIST, FONT_SIZES } from "../../../_shared/lib/fontList";
 import { useHomeTabState } from "./useHomeTabState";
 import { homeTabIcon } from "./homeTabIcons";
+import {
+  CUSTOM_FORMAT_LABEL,
+  CUSTOM_FORMAT_VALUE,
+  MORE_NUMBER_FORMATS_VALUE,
+  RIBBON_NUMBER_FORMATS,
+  selectedPresetFor,
+} from "./numberFormatOptions";
 
 /** Icon size for full-height hero commands (Paste, Cell Styles) in the ribbon
  *  band only — in panel/popover surfaces CommandButton renders a standard-height
  *  inline button, where heroes use the 16px default like every other icon. */
 const HERO_ICON_SIZE = 26;
 
-// Excel-style quick number formats for the Number group dropdown.
-const NUMBER_FORMATS: Array<{ label: string; value: string }> = [
-  { label: "General", value: "General" },
-  { label: "Number", value: "0.00" },
-  { label: "Thousands", value: "#,##0.00" },
-  { label: "Percentage", value: "0.00%" },
-  { label: "Scientific", value: "0.00E+00" },
-  { label: "Text", value: "@" },
-];
+/** Sample the Number dropdown previews per row, the way Excel previews the
+ *  active cell's value beside each entry. A `<select>` cannot render a
+ *  two-column row, so the sample rides on each option's tooltip; the value is
+ *  fixed because the frontend holds only the cell's DISPLAY text, and asking
+ *  the backend for the raw value on every arrow key is not worth a tooltip. */
+const NUMBER_FORMAT_SAMPLE_VALUE = 1234.5678;
 
 // ============================================================================
 // Styles (color-picker trigger only — generic buttons use @api/layout)
@@ -171,6 +178,32 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
   const [cellStylesOpen, setCellStylesOpen] = useState(false);
 
+  // Excel's Number dropdown resolved for the CURRENT locale: the backend
+  // returns, per entry, the preset keyword to send, the display name get_style
+  // will report for a cell carrying it, and a formatted sample. Re-fetched on a
+  // locale change because five of the eleven entries move with the region.
+  const [resolvedNumberFormats, setResolvedNumberFormats] = useState<RibbonNumberFormat[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = () => {
+      getRibbonNumberFormats(NUMBER_FORMAT_SAMPLE_VALUE)
+        .then((entries) => {
+          if (live) setResolvedNumberFormats(entries);
+        })
+        .catch(() => {
+          // Keep the static rows: a backend that cannot answer must not empty
+          // the dropdown, only leave it without samples and without knowing
+          // which row the selection is on.
+        });
+    };
+    load();
+    const unsubscribe = onLocaleChanged(load);
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, []);
+
   // Popover anchors: dropdowns portal to <body> (the band clips overflow),
   // so each trigger records its wrapper element to anchor against.
   const cellStylesAnchorRef = React.useRef<HTMLDivElement | null>(null);
@@ -232,27 +265,47 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     }
 
     if (item.id === "numberFormat") {
+      // get_style reports a DISPLAY NAME ("Number (2 decimals)", "@"), never a
+      // preset keyword, so the selected row is resolved through the backend's
+      // own preset/name pairs. A format that is not one of Excel's eleven
+      // entries shows as "Custom", which is what Excel's box shows, with the
+      // real format kept on the tooltip so nothing is hidden.
       const fmt = state.currentStyle?.numberFormat ?? "General";
-      const known = NUMBER_FORMATS.some((f) => f.value === fmt);
+      const selected = selectedPresetFor(fmt, resolvedNumberFormats);
+      const samples = new Map(resolvedNumberFormats.map((f) => [f.preset, f.sample]));
       return (
         <Select
           key={item.id}
           title={item.tooltip}
           width={layout.container === "band" ? 112 : undefined}
-          value={fmt}
+          value={selected}
           data-testid="fmt-numberFormat"
-          onChange={(e) => state.handleNumberFormatChange(e.target.value)}
+          onChange={(e) => {
+            const value = e.target.value;
+            if (value === MORE_NUMBER_FORMATS_VALUE) {
+              // Excel's last row opens Format Cells on the Number tab. The
+              // Select is controlled, so the box snaps back to the cell's own
+              // format on the next render -- the sentinel never reaches the
+              // formatter.
+              DialogExtensions.openDialog("format-cells", { tab: "number" });
+              return;
+            }
+            if (value === CUSTOM_FORMAT_VALUE) return;
+            void state.handleNumberFormatChange(value);
+          }}
         >
-          {!known && (
-            <option value={fmt} disabled>
-              {fmt}
+          {selected === CUSTOM_FORMAT_VALUE && (
+            <option value={CUSTOM_FORMAT_VALUE} title={fmt} disabled>
+              {CUSTOM_FORMAT_LABEL}
             </option>
           )}
-          {NUMBER_FORMATS.map((f) => (
-            <option key={f.value} value={f.value}>
+          {RIBBON_NUMBER_FORMATS.map((f) => (
+            <option key={f.preset} value={f.preset} title={samples.get(f.preset)}>
               {f.label}
             </option>
           ))}
+          <hr />
+          <option value={MORE_NUMBER_FORMATS_VALUE}>More Number Formats...</option>
         </Select>
       );
     }

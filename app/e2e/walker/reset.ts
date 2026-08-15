@@ -117,6 +117,21 @@ async function resetBody(page: Page): Promise<void> {
       for (const c of chartApi?.getAllCharts?.() ?? []) {
         chartApi.deleteChart(c.chartId ?? c.id);
       }
+      // AND FROM THE BACKEND'S OWN LIST, because the store is not a census of
+      // the document (BUG-0075). Anything that persists a chart WITHOUT going
+      // through the store — a raw `save_chart` invoke from a spec, an import, a
+      // script — leaves `get_charts` holding a chart `getAllCharts()` has never
+      // heard of, and a teardown that enumerates only the store deletes NOTHING
+      // and reports success. Measured 2026-08-15: 1 chart in the backend, 0 in
+      // the store, at the start of every scenario run.
+      const entries = (await tauri.core.invoke("get_charts").catch(() => [])) as Array<{
+        id?: string;
+      }>;
+      for (const entry of entries ?? []) {
+        if (entry?.id) {
+          await tauri.core.invoke("delete_chart", { id: entry.id }).catch(() => {});
+        }
+      }
       chartApi?.syncChartRegions?.();
     } catch { /* extension absent */ }
 
@@ -223,4 +238,77 @@ async function resetBody(page: Page): Promise<void> {
   // that call and here pushes a transaction: Escape and Ctrl+Home navigate.
   await resetToNewWorkbook(page);
   await page.waitForTimeout(200);
+
+  await resyncChartStoreToBackend(page);
+}
+
+/**
+ * Make the FRONTEND chart store agree with the document that now exists — and
+ * FAIL if it will not.
+ *
+ * THE TEARDOWN ABOVE IS NOT ENOUGH, AND THE REASON IS ORDERING, NOT COVERAGE.
+ * Measured end to end on 2026-08-15 with an in-page instrument (BUG-0075):
+ *
+ *     +0ms       backend=1 store=0   the residue a raw `save_chart` leaves
+ *     +10251ms   charts:refresh      the TABLE teardown a few lines above
+ *                                    announces the `objects` domain, and the
+ *                                    Shell fans that out to `charts:refresh`
+ *     +10331ms   backend=1 store=1   the extension reloads its store from a
+ *                                    backend that still holds the OUTGOING
+ *                                    document's chart
+ *     +10794ms   backend=0 store=1   `new_file` cleared the backend; NOTHING
+ *                                    re-syncs the store
+ *
+ * The store is what paints, so from here a chart with no document behind it
+ * rides through the whole next scenario. It was photographed by
+ * `scenario-budget-model-title` — 173,986 differing pixels — and the frame is
+ * unreachable in the product: File > New and File > Open both
+ * `window.location.reload()` after the backend switch (`FileMenu.ts`), and even
+ * the non-reloading `file-api.ts` path emits AFTER_NEW / AFTER_OPEN, which the
+ * Charts extension answers by reloading the store from the backend. Only this
+ * harness replaces a document with a raw `new_file` invoke, which announces
+ * nothing — so only this harness owes the re-sync.
+ *
+ * It is done AFTER `new_file` on purpose: the last read of the backend has to be
+ * the one taken against the NEW document, or the race is merely narrowed. The
+ * FloatingRange block above forces the same re-sync for the same reason
+ * (BUG-0056); this is that discipline applied to the object type that had it
+ * only halfway.
+ *
+ * AND IT IS ASSERTED. A reset that cannot reach a clean state is a finding, not
+ * something to leave for the next capture to discover.
+ */
+async function resyncChartStoreToBackend(page: Page): Promise<void> {
+  const DEADLINE_MS = 5_000;
+  const started = Date.now();
+  let last = { backend: -1, store: -1 };
+
+  while (Date.now() - started < DEADLINE_MS) {
+    last = await page.evaluate(async () => {
+      const w = window as any;
+      // The product's own re-sync path: the same event the undo handler and the
+      // `objects` domain translator use, so the harness stays on public surfaces.
+      window.dispatchEvent(new Event("charts:refresh"));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      let backend = -1;
+      try {
+        backend = ((await w.__TAURI__.core.invoke("get_charts")) as unknown[]).length;
+      } catch {
+        /* no Tauri runtime — leave it at -1 */
+      }
+      const store = (w.__CALCULA_CHARTS__?.getAllCharts?.() ?? []).length;
+      w.__CALCULA_CHARTS__?.syncChartRegions?.();
+      return { backend, store };
+    });
+    if (last.store === 0 && last.backend <= 0) return;
+    await page.waitForTimeout(150);
+  }
+
+  throw new Error(
+    `deepResetForWalk: the chart store still holds ${last.store} chart(s) after ` +
+      `new_file (backend reports ${last.backend}) and ${DEADLINE_MS / 1000}s of ` +
+      `re-syncing. That is the BUG-0075 state: a chart with no document behind it, ` +
+      `which PAINTS, so every screenshot taken after this point is of a workbook ` +
+      `the product cannot produce.`,
+  );
 }

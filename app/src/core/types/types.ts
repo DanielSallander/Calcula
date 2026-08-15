@@ -359,7 +359,26 @@ export interface CellData {
   richText?: RichTextRun[];
   /** Accounting layout for split rendering (symbol left, value right) */
   accountingLayout?: AccountingLayout;
+  /**
+   * Which of Excel's two overflow rules this cell's VALUE is entitled to
+   * (mirrors Rust `OverflowClass`). Absent means `"text"`, the fail-safe
+   * default: text spills and clips, and never shows a marker.
+   *
+   * The renderer can infer this from `display` plus the number format for
+   * almost every cell, but two cases are NOT recoverable downstream — a
+   * negative serial under a Date/Time format (Excel refuses it at every width;
+   * the engine renders it as a plausible date), and text stored under an
+   * explicitly numeric format. Both are decided in Rust where the `CellValue`
+   * and the `CellStyle` are both in hand. See BUG-0066.
+   */
+  overflow?: OverflowClass;
 }
+
+/**
+ * Which of Excel's overflow rules a value is entitled to (mirrors Rust
+ * `OverflowClass`). `unrepresentable` is the width-INDEPENDENT refusal.
+ */
+export type OverflowClass = "text" | "numeric" | "unrepresentable";
 
 /** The value type of a cell as the engine knows it (never inferred from text). */
 export type CellValueType = "number" | "text" | "boolean" | "empty" | "error";
@@ -656,7 +675,7 @@ export const DEFAULT_STYLE: StyleData = {
   textColor: "#000000",
   backgroundColor: "#ffffff",
   textAlign: "general",
-  verticalAlign: "middle",
+  verticalAlign: "bottom", // Excel default: Vertical = Bottom (mirrors CellStyle::new())
   numberFormat: "General",
   wrapText: false,
   textRotation: "none",

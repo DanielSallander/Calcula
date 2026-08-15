@@ -3,7 +3,7 @@
 
 use serde::{Serialize, Deserialize};
 use tauri::State;
-use crate::{AppState, format_cell_value};
+use crate::{AppState, format_cell_value, format_cell_value_and_class};
 use crate::api_types::CellData;
 use crate::eval_budget::{self, EvalSurface, PendingCell, PendingRecalc, ProgressEmitter};
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_warn, log_info};
@@ -1238,6 +1238,8 @@ pub(crate) fn run_calculation_pass(
                         style,
                         &locale,
                     ),
+                    // An error literal cannot spill; a too-narrow one is marked.
+                    overflow: crate::api_types::OverflowClass::Numeric,
                     display_color: None,
                     formula,
                     style_index: effective_style_index,
@@ -1425,11 +1427,12 @@ pub(crate) fn run_calculation_pass(
                 // renderer gets; the stored cell keeps its own (inherit) index.
                 let effective_style_index = grid.effective_style_index(*row, *col);
                 let style = styles.get(effective_style_index);
-                let display = format_cell_value(&updated.value, style, &locale);
+                let (display, overflow) = format_cell_value_and_class(&updated.value, style, &locale);
                 updated_cells.push(CellData {
                     row: *row,
                     col: *col,
                     display,
+                    overflow,
                     display_color: None,
                     formula: updated.formula_string().map(|f| format!("={}", f)),
                     style_index: effective_style_index,
@@ -1494,11 +1497,12 @@ pub(crate) fn run_calculation_pass(
 
                         let effective_style_index = grid.effective_style_index(*row, *col);
                         let style = styles.get(effective_style_index);
-                        let display = format_cell_value(&updated.value, style, &locale);
+                        let (display, overflow) = format_cell_value_and_class(&updated.value, style, &locale);
                         updated_cells.push(CellData {
                             row: *row,
                             col: *col,
                             display,
+                            overflow,
                             display_color: None,
                             formula: updated.formula_string().map(|f| format!("={}", f)),
                             style_index: effective_style_index,
@@ -1622,11 +1626,12 @@ pub(crate) fn run_calculation_pass(
                 if let Some(cell) = grid.get_cell(*row, *col) {
                     let effective_style_index = grid.effective_style_index(*row, *col);
                     let style = styles.get(effective_style_index);
-                    let display = format_cell_value(&cell.value, style, &locale);
+                    let (display, overflow) = format_cell_value_and_class(&cell.value, style, &locale);
                     updated_cells.push(CellData {
                         row: *row,
                         col: *col,
                         display,
+                        overflow,
                         display_color: None,
                         formula: cell.formula_string().map(|f| format!("={}", f)),
                         style_index: effective_style_index,
