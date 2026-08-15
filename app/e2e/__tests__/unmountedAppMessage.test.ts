@@ -57,6 +57,38 @@ describe("describeUnmountedApp", () => {
     expect(msg).not.toContain("Re-launch and re-run");
   });
 
+  // -------------------------------------------------------------------------
+  // The fourth arm. BUG-0083's root error boundary renders INTO `#root`, so a
+  // crashed boot arrives here as `rootChildCount > 0` and the arm above would
+  // describe it as "the frontend DID mount and this container is missing" --
+  // technically true, and useless: the reader is sent to hunt a missing
+  // container when the page is showing them the stack trace already.
+  // -------------------------------------------------------------------------
+
+  it("names the root error boundary when it is on screen", () => {
+    const msg = describeUnmountedApp(1, true, "u", [], "x", "TypeError: x is null");
+    expect(msg).toContain("ROOT ERROR BOUNDARY");
+    expect(msg).toContain("TypeError: x is null");
+    // It must NOT be described as a missing container...
+    expect(msg).not.toContain("the frontend DID mount");
+    // ...nor as a startup failure, which is what BUG-0082's arm would say.
+    expect(msg).not.toContain("#root IS EMPTY");
+  });
+
+  it("says a boot crash is ONE product failure, not N test results", () => {
+    const msg = describeUnmountedApp(1, true, "u", [], "x", "boom");
+    expect(msg).toContain("ONE failure");
+    expect(msg).toContain("product failure");
+  });
+
+  it("keeps the ordinary arms unchanged when no boundary is present", () => {
+    // The new parameter defaults to null, so every existing caller and every
+    // arm above must behave exactly as before.
+    expect(describeUnmountedApp(0, false, "u", [], "x")).toContain("#root IS EMPTY");
+    expect(describeUnmountedApp(3, true, "u", [], "x")).toContain("the frontend DID mount");
+    expect(describeUnmountedApp(-1, false, "u", [], "x")).toContain("UNKNOWN");
+  });
+
   it("carries the console tail, and SAYS SO when there is none", () => {
     const withTail = describeUnmountedApp(0, false, "u", [
       "error: Failed to fetch dynamically imported module",

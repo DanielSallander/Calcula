@@ -13,9 +13,15 @@ import type { FullConfig } from "@playwright/test";
 import { webview2BrowserArguments } from "./webview2Args.mjs";
 import { APP_DIED_MARKER } from "./appDiedMarker";
 import { assertCollectionGuardPresent } from "./collectionGuard";
+import { clearStartupFailure } from "./startupGuard";
+import { assertAppMounted } from "./startupBarrier";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
+// Module scope, because BOTH the auto-launch branch (which kills whatever holds
+// the port) and the startup barrier (which checks the page is actually ON this
+// origin) need it, and the barrier runs before the auto-launch branch is reached.
+const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
 const STARTUP_TIMEOUT_MS = 300_000; // 5 min — Rust rebuild after engine changes can be slow
 const PID_FILE = path.join(__dirname, ".tauri-pid");
 
@@ -71,10 +77,20 @@ export default async function globalSetup(config: FullConfig) {
     if (fs.existsSync(APP_DIED_MARKER)) fs.unlinkSync(APP_DIED_MARKER);
   } catch { /* a stale marker we cannot remove must not stop the run */ }
 
+  // Same three-stage mechanism for the OTHER way a run is dead on arrival: the
+  // app is up, the page loaded, and the frontend never mounted (BUG-0082). This
+  // clears; `startupBarrier.ts`/`fixtures.ts` write; `collectionGuard.ts` reads.
+  clearStartupFailure();
+
   // Manual mode — caller manages the app lifecycle.
   if (process.env.E2E_MANUAL === "1") {
     console.log("[e2e] Manual mode — expecting Calcula already running with CDP on port", CDP_PORT);
     await waitForCDP(CDP_PORT, 15_000);
+    // THE BARRIER RUNS IN MANUAL MODE TOO — in fact especially here. Every
+    // BUG-0082 occurrence was a manual-mode run (`soak`, `invariant`, `visual`
+    // are all driven with E2E_MANUAL=1 against an app the operator launched), so
+    // a barrier that skipped this branch would skip every case it exists for.
+    await assertAppMounted({ cdpPort: CDP_PORT, vitePort: VITE_PORT });
     return;
   }
 
@@ -88,7 +104,6 @@ export default async function globalSetup(config: FullConfig) {
   }
 
   // Kill any process occupying the Vite port so `cargo tauri dev` can start cleanly.
-  const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
   try {
     const netstatOut = execSync(`netstat -ano | findstr :${VITE_PORT} | findstr LISTENING`, {
       encoding: "utf-8",
@@ -203,6 +218,16 @@ export default async function globalSetup(config: FullConfig) {
   // On cold builds, Rust compiles first (3-5 min) before Vite starts, so use
   // the same generous timeout as CDP.
   await waitForHTTP(VITE_PORT, STARTUP_TIMEOUT_MS);
+
+  // THE LAST GATE BEFORE THE FIRST TEST: the frontend has to be MOUNTED, not
+  // merely served. Vite answering `/` says the dev server is up; it says nothing
+  // about whether `/src/main.tsx` ever executed, and BUG-0082 is precisely the
+  // gap between those two facts -- a page with the full index.html DOM, a
+  // `<title>app</title>`, and an EMPTY `#root`. Without this line the harness
+  // discovers it 60 seconds later, once per test, as N identical
+  // `waitForSelector` timeouts that read as a product collapse (18 of 18 in the
+  // visual project). Throwing here fails the RUN with zero test results instead.
+  await assertAppMounted({ cdpPort: CDP_PORT, vitePort: VITE_PORT });
 }
 
 /** Poll http://localhost:<port>/ until it responds with a 2xx/3xx status. */

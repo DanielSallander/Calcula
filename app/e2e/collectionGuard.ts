@@ -4,6 +4,16 @@
 //          the missing files -- instead of letting the run report a green number
 //          for a suite it quietly did not run.
 //
+//          SECOND DUTY (BUG-0082, open-decisions §32): fail any run during which
+//          the application stopped being MOUNTED. `startupBarrier.ts` refuses the
+//          run up front when the frontend never mounted, but a worker that starts
+//          later can still find an empty `#root`; `fixtures.ts` records that fact
+//          and this reporter is where it becomes the run's verdict. It lives here
+//          rather than in a second reporter on purpose -- one first-position
+//          reporter, one global-setup handshake protecting it, one status
+//          override. A guard that needs its own reporting channel is a guard that
+//          can be dropped separately.
+//
 // WHY THIS EXISTS (docs/design/open-decisions-2026-08.md §15e, finding 2).
 // A `--project=journey` pass on 2026-08-13 printed "Running 134 tests" while
 // `--list` said 143 for the same filter, then reported a clean
@@ -66,11 +76,14 @@ import type {
   FullResult,
   Reporter,
   Suite,
+  TestCase,
+  TestResult,
 } from "@playwright/test/reporter";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readStartupFailure, startupFailureBanner } from "./startupGuard";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -476,7 +489,9 @@ export function assertCollectionGuardPresent(config: FullConfig): void {
     throw new Error(
       "[collection-guard] this run's reporter list does not include the collection" +
         " guard (a CLI --reporter flag replaces the config's reporters, which is how" +
-        " a 134-of-143 collection produced a clean pass on 2026-08-13). Add it:\n" +
+        " a 134-of-143 collection produced a clean pass on 2026-08-13). It also" +
+        " carries the startup arm that ends a run whose app stopped being mounted" +
+        " (BUG-0082), so dropping it drops both. Add it:\n" +
         "    --reporter=./e2e/collectionGuard.ts,dot,json\n" +
         "  or drop --reporter to use the config's list. COLLECTION_GUARD=off skips" +
         " this check, loudly, if you genuinely need an unguarded run.",
@@ -492,6 +507,8 @@ export default class CollectionGuard implements Reporter {
   private collected: string[] | null = null;
   private configDir: string = path.resolve(HERE, "..");
   private ranProjects: FullProject[] = [];
+  /** How many tests this run reported as anything other than passed/skipped. */
+  private failedTests = 0;
 
   printsToStdio(): boolean {
     return false;
@@ -505,10 +522,32 @@ export default class CollectionGuard implements Reporter {
     this.ranProjects = config.projects.filter((p) => ranNames.has(p.name));
   }
 
+  onTestEnd(_test: TestCase, result: TestResult): void {
+    // Counted only so the startup banner can say how many of the numbers in
+    // this report are worth nothing.
+    if (result.status !== "passed" && result.status !== "skipped") {
+      this.failedTests++;
+    }
+  }
+
   async onEnd(
     _result: FullResult,
   ): Promise<{ status?: FullResult["status"] } | undefined> {
     if (process.env.COLLECTION_GUARD_CHILD === "1") return undefined;
+
+    // THE STARTUP ARM COMES FIRST, and is NOT under COLLECTION_GUARD=off.
+    // An empty `#root` makes every result in the report meaningless, so it
+    // outranks the collection comparison -- and it is a different guard with a
+    // different escape hatch (STARTUP_GUARD=off, which suppresses the barrier at
+    // its source rather than the verdict here). It also sits ahead of the
+    // `collected === null` early return, so a run aborted in global-setup still
+    // ends with the banner.
+    const startupDetail = readStartupFailure();
+    if (startupDetail) {
+      console.error(startupFailureBanner(startupDetail, this.failedTests));
+      return { status: "failed" };
+    }
+
     if (process.env.COLLECTION_GUARD === "off") return undefined;
     const argv = process.argv.slice(2);
     if (argv.includes("--list")) return undefined;

@@ -15,6 +15,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { GridHelper } from "./helpers/grid";
 import { APP_DIED_MARKER } from "./appDiedMarker";
+import { recordStartupFailure } from "./startupGuard";
 
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
 const MAX_RETRIES = 3;
@@ -156,13 +157,26 @@ export function describeUnmountedApp(
   url: string,
   consoleTail: string[],
   cause: unknown,
+  bootErrorText: string | null = null,
 ): string {
   // THREE arms, not two. A page that could not be evaluated reports -1, and
   // calling that "empty" would be a CLAIM about a page nothing could read —
   // the same species of overreach as reporting a suite green for tests it
   // never collected.
+  //
+  // FOUR arms now. The root error boundary (BUG-0083) renders INTO `#root`, so
+  // `rootChildCount > 0` stopped meaning "the app is up" the day it landed: a
+  // crashed boot satisfies it too. Checked FIRST, because the other arms would
+  // each describe a crashed app as something it is not.
   const diagnosis =
-    rootChildCount < 0
+    bootErrorText !== null
+      ? "the ROOT ERROR BOUNDARY is on screen, so React ran and the product threw " +
+        "during boot. This IS a product failure, but it is ONE failure -- every " +
+        "remaining spec will time out on the same selector and none of those are " +
+        "independent evidence. The boundary reported:" +
+        "\n      " +
+        bootErrorText.split("\n").join("\n      ")
+      : rootChildCount < 0
       ? "the page could not be evaluated, so whether the frontend mounted is " +
         "UNKNOWN. Treat nothing after this point as a test result until the app " +
         "has been re-launched and the state re-read."
@@ -312,15 +326,44 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
               typeof (window as unknown as { __calcImport?: unknown }).__calcImport !==
               "undefined",
             url: document.location.href,
+            // The root error boundary (BUG-0083) renders INTO `#root`, so the
+            // child count alone would call a crashed boot a healthy mount.
+            bootErrorText: (() => {
+              const el = document.querySelector("[data-testid='root-error-boundary']");
+              return el ? (el.textContent ?? "").trim().slice(0, 4000) : null;
+            })(),
           }))
-          .catch(() => ({ rootChildCount: -1, calcImportPresent: false, url: "(unreadable)" }));
+          .catch(() => ({
+            rootChildCount: -1,
+            calcImportPresent: false,
+            url: "(unreadable)",
+            bootErrorText: null as string | null,
+          }));
         const message = describeUnmountedApp(
           probe.rootChildCount,
           probe.calcImportPresent,
           probe.url,
           consoleTail,
           cause,
+          probe.bootErrorText,
         );
+        // THE SAME FACT THE STARTUP BARRIER GATES ON, FOUND LATE. This branch
+        // runs in the WORKER-scoped fixture, i.e. while the worker is starting
+        // up (including the restart Playwright performs after a fixture
+        // failure), so an empty #root here is never "a test broke the page" --
+        // it is the app that was supposed to be ready before the run began.
+        // Recording it hands the verdict to the ONE guard reporter, which ends
+        // the run with a banner saying the failures in the report are not test
+        // results. `> 0` is deliberately excluded: a MOUNTED app missing this
+        // one container is a product question and must stay one.
+        // A BOOT ERROR IS EXCLUDED TOO, and for the opposite reason to `> 0`:
+        // the banner this marker triggers says "these failures are NOT test
+        // results, this is not a product failure". When the root error
+        // boundary is on screen that sentence is false -- React ran and the
+        // product threw. The message above already says so, in its own arm.
+        if (probe.rootChildCount <= 0 && probe.bootErrorText === null) {
+          recordStartupFailure(message);
+        }
         console.error(message);
         throw new Error(message);
       } finally {

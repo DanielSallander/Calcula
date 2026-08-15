@@ -49,6 +49,57 @@ export default defineConfig({
     // both launchers still set the flag -- the guard is worthless if either
     // half drifts.
     hmr: process.env.CALCULA_E2E === "1" ? false : undefined,
+
+    // ========================================================================
+    // THE DEV SERVER MUST NOT WATCH THE RUST BUILD TREE. (BUG-0082)
+    // ========================================================================
+    // Vite's default watcher is `chokidar.watch(root)` -- root is `app/` -- and
+    // `app/src-tauri/` holds an in-repo Cargo `target/` of **100,175 files in
+    // 9,118 directories**. Registering a native `fs.watch` for each of those on
+    // Windows blocks the dev server's ONE thread, and it does it AFTER
+    // `server.listen()` has already printed "ready in 380 ms" and started
+    // answering HTTP. So the server looks up, serves `index.html` instantly,
+    // and then starves every module request behind the walk.
+    //
+    // THAT is the empty-`#root` cold start. The page loads, `<div id="root">`
+    // is present and empty, `window.__calcImport` is absent because
+    // `/src/main.tsx` has not been served yet, and the harness's 60 s fixture
+    // ceiling reports it as N product timeouts.
+    //
+    // MEASURED 2026-08-15, dev server alone (no cargo, no app.exe, no WebView2
+    // -- so CPU contention is excluded), crawling the 1,420-module graph over
+    // HTTP exactly as the browser does:
+    //
+    //   watcher default   1,420 modules in 37.0 s / 37.4 s / 62 s / >120 s
+    //                     (one run served THREE modules in 120 s)
+    //   watcher ignoring  1,420 modules in  3.4 s /  3.3 s /  3.7 s
+    //     src-tauri
+    //
+    //   chokidar watched  9,720 dirs / 113,460 entries  ->  545 / 3,443
+    //   second traversal  0.4-0.6 s in BOTH  <- the transform is never the cost
+    //
+    // A CPU profile of the slow traversal put **74.5 % of samples** in one
+    // stack: `_addToNodeFs` -> `_watchWithNodeFs` -> `createFsWatchInstance` ->
+    // `node:fs.watch` -> native `FSWatcher.start`. Not transform time, not a
+    // deadlock, not Vite's dependency optimizer (which logged "Hash is
+    // consistent. Skipping"). Watcher registration, once per dev-server start,
+    // which is why every re-run "passed": the SECOND traversal against a server
+    // that is already up costs 0.5 s.
+    //
+    // Nothing here needs watching. `src-tauri` is Rust -- Tauri's own dev
+    // watcher rebuilds it and a change there restarts the app; Vite has no
+    // stake in it. The rest are outputs: goldens, results, bundles.
+    //
+    // Pinned by e2e/__tests__/viteWatchExclusions.test.ts.
+    watch: {
+      ignored: [
+        "**/src-tauri/**",
+        "**/e2e/results/**",
+        "**/e2e/**/*-snapshots/**",
+        "**/test-results/**",
+        "**/dist/**",
+      ],
+    },
   },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {

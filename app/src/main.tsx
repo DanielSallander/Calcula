@@ -9,6 +9,7 @@ installLogFilter();
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./shell";
+import { RootErrorBoundary } from "./shell/RootErrorBoundary";
 import { exposeExtensionRuntimeGlobals } from "./api/extensionRuntime";
 import { initObjectScriptBadges } from "./api/objectScriptBadge";
 import { initSkinLoader } from "./core/theme/skinLoader";
@@ -46,9 +47,18 @@ if (import.meta.env.DEV) {
     (u: string) => import(/* @vite-ignore */ u);
 }
 
-// Render the application
+// Render the application.
+//
+// The boundary is OUTSIDE StrictMode, not inside it: it must survive whatever
+// it is catching, and it has to be above every provider in the tree — a
+// boundary nested under the thing that threw catches nothing. Without it a
+// render-time exception unmounts the tree and leaves `<div id="root">` empty,
+// which under Tauri is a white window with no message and no devtools. See
+// src/shell/RootErrorBoundary (BUG-0083).
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
+  <RootErrorBoundary surface="Calcula">
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  </RootErrorBoundary>
 );

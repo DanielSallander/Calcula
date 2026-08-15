@@ -17093,3 +17093,323 @@ and the visual corpus was hashed before and after to prove it.
    residue rather than their feature.
 6. **§29's residual** stands: only charts are re-synced after the walker's `new_file`;
    sparklines/slicers/pane controls sit on the same fan-out.
+
+## 32. BUG-0082's instrument: a launch that never mounted fails the RUN, and the state was reproduced on demand (2026-08-15)
+
+§31k left BUG-0082 open with a diagnosis and no instrument. `describeUnmountedApp` names the cause
+once the fixture has already failed, which is too late to change what the report says: a cold launch
+that never mounts still lands as N product failures -- 12 on a soak run, 18 on `--project=visual`,
+where it reads as the entire golden corpus breaking. This pass builds the guard. It also, while
+measuring the bound the guard needed, REPRODUCED the never-mounted state on demand and caught its
+console output, which moves BUG-0082's root cause from "leading unproven candidate" to a named
+mechanism with a repro recipe.
+
+### 32a. What shipped
+
+| File | Role |
+|---|---|
+| `app/e2e/startupGuard.ts` (new) | The decision and every sentence. No Playwright import, so it has a real unit tier: probe shape, `waitForMount`, `documentIsPending`, `isExpectedOrigin`, `progressKey`, the six failure messages, the banner, the marker path, `mountBounds`. |
+| `app/e2e/startupBarrier.ts` (new) | The CDP glue: connect, instrument `Network`, listen to `console`/`pageerror`, read the page once a second, feed `waitForMount`, throw. |
+| `app/e2e/global-setup.ts` | CLEARS the marker; calls `assertAppMounted` in BOTH branches -- the manual one first, because every measured occurrence was a manual-mode run. |
+| `app/e2e/fixtures.ts` | RECORDS the marker when a worker finds `#root` empty later (`<= 0` only -- a mounted app missing the container stays a product question). |
+| `app/e2e/collectionGuard.ts` | READS the marker in `onEnd`, ahead of its own early returns, prints the banner and fails the run. |
+| `app/e2e/__tests__/startupGuard.test.ts` (new, 33 cases) | The detector and the wording, on a virtual clock. |
+| `app/e2e/__tests__/startupBarrierWired.test.ts` (new, 10 cases) | The four halves are still connected to each other. |
+
+**Position, not politeness, is what makes it work.** The barrier runs inside global-setup, so a
+failure produces ZERO test results -- there is no number to misread, and a CLI
+`--reporter=dot,json` (this programme's standard invocation) cannot drop it, because it is not a
+reporter. The mid-run half deliberately reuses the EXISTING guard reporter rather than adding a
+second one: one first-position reporter, one `assertCollectionGuardPresent` handshake protecting
+both duties, one status override. The escape hatch is `STARTUP_GUARD=off`, which prints why it is
+dangerous, exactly as `COLLECTION_GUARD=off` does.
+
+### 32b. The bound: a quiet window chosen by `document.readyState`, not a mount deadline
+
+The brief was explicit that ~55 s measured once must not become a hard timeout. It did not. What the
+barrier bounds is SILENCE, and which silence budget applies is decided by the page's own readiness:
+
+| Condition | Budget | Verdict when exceeded |
+|---|---|---|
+| `#root` empty, `readyState === "complete"`, resource count frozen | **45 s** | `never-mounted-stalled` -- nothing is outstanding, so nothing is coming |
+| `#root` empty, `readyState` still `interactive`/`loading` | **300 s** | `dev-server-not-answering` -- blamed on Vite, not on the frontend |
+| anything, still moving | **900 s** cap | `never-mounted-cap` -- an anti-hang backstop, named, never a retry |
+
+**The split is measured, not reasoned, and the measurement is why the guard is not a flake
+generator.** On a launch taken **before the parallel pass's `server.watch.ignored` fix landed** (the
+tree at 16:40; `vite.config.ts` changed at 16:49) and with `app/node_modules/.vite` deleted, the page
+loaded two resources at 12.4 s and the NEXT one at 230.9 s: **218 seconds in which nothing whatsoever
+changed**, because the browser was blocked on a single `/src/main.tsx` request. Measured directly at
+the same time: `curl -m 30 http://localhost:5173/src/main.tsx` did not answer within 30 s while
+`/@vite/client` answered in 11.8 s. That is the same starved dev server the parallel pass profiled
+independently ("one run served THREE modules in 120 seconds"), seen from the page's side.
+
+A stall window over network activity alone -- the obvious design -- would have failed that launch at
+57 s. Throughout the silence `readyState` was `"interactive"`. In the BUG-0082 end state it is
+`"complete"`. That one field separates "waiting on work happening elsewhere" from "this page is
+finished and it did not mount", and it is why the guard survives the class of slowness the watcher
+fix has just removed one instance of.
+
+The 218 s is ONE sample. The same recipe repeated AFTER the watcher fix mounted in **7.8 s** with a
+longest quiet of 2.1 s, which is the fix working, not a contradiction. The comment in `mountBounds`
+says both, because the patient arm is set by patience rather than by fit: it applies only while the
+document is still loading, and being wrong there costs a wait, whereas being wrong the other way
+fails a healthy run.
+
+### 32c. The never-mounted state, reproduced live -- and a SECOND mechanism the watcher fix does not cover
+
+On that same pre-fix launch the page did not merely arrive late: it arrived and never mounted.
+`readyState complete`, 250 resources loaded, `#root` empty, **unchanged for the following ten
+minutes** (`NEVER MOUNTED within 10 min`; a second sampler confirmed the resource count frozen at 250
+for 171 s more). A reload with console listeners attached said what nothing had captured before:
+
+```
+[console]   error Warning: Invalid hook call. Hooks can only be called inside of the body of a
+                  function component...
+[pageerror] TypeError: Cannot read properties of null (reading 'useReducer')
+[console]   error The above error occurred in the <GridProvider> component:
+                at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:11:32)
+```
+
+A SECOND React instance: `main.tsx` ran (it had installed `window.__calcImport`), React's dispatcher
+was null, `<GridProvider>` threw during render, and React unmounted the tree -- leaving a page that
+is complete, quiet, and blank. That is a DIFFERENT failure from the starved-watcher one the parallel
+pass fixed. A starved server makes the page arrive late; this makes an arrived page render nothing,
+and no amount of waiting recovers it.
+
+**The mechanism, offered as a hypothesis with evidence rather than as a finding.** The dependency
+cache had been deleted, so Vite re-optimised while the page was already loading; modules fetched
+before and after the re-optimisation carry different `?v=` hashes, which is how a page ends up with
+two Reacts. Vite's answer to that is to push a `full-reload` down the HMR channel -- and BUG-0078's
+fix cut that channel for E2E launches (`CALCULA_E2E=1` -> `hmr: false`), so a re-optimised page is
+never told to reload. Two caveats, stated because they matter: the re-optimisation window was
+plainly widened by the starved server, and the same recipe after the watcher fix mounted cleanly in
+7.8 s, so this may be reachable only through a long serve window. It is handed to whoever owns the
+root cause with the exact recipe (`rm -rf app/node_modules/.vite` then launch) and the console line
+to look for. The guard is deliberately indifferent to which mechanism produced the state: it fires
+on the state, and its message now names this one, the console signature, and the repro.
+
+### 32d. Both directions proved live
+
+| Direction | Setup | Result |
+|---|---|---|
+| **FIRES, on the real product** | `--project=visual` (the project BUG-0082 turned into "18 of 18 failed") against the genuinely dead launch above | **exit 1, ZERO tests reported**, one named failure. `grep -c` for any test line: **0** |
+| **FIRES, controlled** | Vite look-alike stub on 127.0.0.1:5273, CDP 9333, page never mounts | fired at 45.5 s, `never-mounted-stalled`, exit 1, zero tests |
+| **FIRES, adjacent shape** | same stub with `window.__TAURI__` undefined | fired at **0.0 s**, `no-tauri-bridge`, naming `tauri.e2e.conf.json`; exit 1, zero tests |
+| **DOES NOT FIRE** | `--project=visual` against a healthy app | `[startup-guard] the frontend mounted after 0.0s (1 reading(s), 250 resources, readyState complete)`, then the suite ran normally |
+| **DOES NOT FIRE on slow** | unit tier, virtual clock: a 100 s mount, and the measured 218 s pending silence | both pass the barrier |
+
+Every guard in this tree is sabotaged before it is believed. `const stalled = false` in
+`waitForMount` failed exactly the firing case; `const stalled = true` failed the four cases that
+assert patience; deleting one `assertAppMounted` call and flipping the fixture's `<= 0` failed the
+two wiring pins that exist for them.
+
+### 32e. What this pass did NOT do
+
+1. **No retry.** A retry hides the state the next diagnosis needs; BUG-0082's own fix note keeps
+   retries last, and this pass agrees.
+2. **The fixture's 60 s first-selector ceiling is untouched.** With the barrier in front of it the
+   ceiling is no longer what decides a cold run: global-setup absorbs the wait, so the fixture sees
+   an app that is already mounted. Raising it on one sample was the open item; it is now moot rather
+   than done, and the sample series is accumulated instead (`app/e2e/results/mount-timings.log`, one
+   line per run).
+3. **The root cause is not this pass's finding.** The starved Vite watcher was found and fixed in
+   parallel (`server.watch.ignored`, pinned by `viteWatchExclusions.test.ts`); this pass contributes
+   the page-side measurement that matches it, and the second, unexplained mechanism in §32c. The
+   guard was built anyway, on the standing argument that its value is the NEXT occurrence from ANY
+   cause -- and §32c is that argument being right within the same afternoon.
+4. **Two things the guard could still be taught**, both deliberately left: `#root` populated but the
+   spreadsheet container missing is passed through as a product question (the fixture's own 60 s wait
+   still owns it), and the barrier reads only the FIRST context's pages, so a second Tauri window
+   opened before global-setup would be surveyed but not judged.
+
+## 33. The production half: the frontend had no error boundary at all, so a boot throw showed a blank window (BUG-0083, 2026-08-15)
+
+**THIS SECTION IS A RECONSTRUCTION, and the reason is itself the first finding.** The pass that fixed
+BUG-0083 reported appending a section here. It is not on disk: before this pass, the register
+contained **zero** occurrences of `BUG-0083` and zero of `RootErrorBoundary`, while §32 (written
+concurrently by the other effort) was the last section in the file. Two agents appended to the same
+1.2 MB document in the same window and one whole-file write landed on top of the other. Every
+CODE change from that pass survived intact -- the five wrapped roots, `RootErrorBoundary/`,
+`viteWatchExclusions.test.ts`, the `server.watch.ignored` block, and the ledger entry -- so the loss
+is confined to this file. What follows is written from the artifacts that DID survive plus this
+pass's own live verification, not from the missing text.
+
+*Standing lesson: the register is append-only prose with no merge discipline. Concurrent passes must
+not both append to it, or the second one silently wins.*
+
+### 33a. The defect
+
+There was **no error boundary anywhere in the frontend**: zero matches for `componentDidCatch`,
+`getDerivedStateFromError`, `ErrorBoundary` or `react-error-boundary` across all of `app/src` and
+`app/extensions`, across **five** React roots (`main` plus `chartSpecEditorMain`, `objectScriptMain`,
+`modelEditorMain`, `packageInspectorMain`). All five HTML shells are `<div id="root"></div>` and
+nothing else -- no fallback content, no `<noscript>` -- and there was no app-level `window.onerror`
+or `unhandledrejection` either. React 18 unmounts the whole tree on an unbounded throw, so any
+boot-time throw gave a white window that stayed white. Under Tauri that is worse than in a browser:
+no devtools, no address bar, so blank is indistinguishable from hung, and the two useful actions
+(reload, report) are the two nothing tells the user exist.
+
+### 33b. The fix
+
+`RootErrorBoundary` above all five roots, **outside** StrictMode and above every provider -- a
+boundary nested under the thing that threw catches nothing. It **imports React and nothing else**:
+styled-components, the theme, the store and `@api` are all plausible *causes* of what it is catching,
+so all styling is inline literals. It renders which window failed, the error, both stacks, and Reload
+/ Copy details buttons. Eleven tests, including a census that enumerates entry points **from disk**
+(discriminator `createRoot(document.getElementById(`) so a sixth window added later cannot ship
+unwrapped with every test still green.
+
+### 33c. Proved live, which the original pass could not do
+
+The original pass recorded this as `fixed-pending-live-proof`: the E2E app, cargo and port 5173 were
+held by the concurrent effort throughout, so the boundary had only ever been seen under jsdom. It is
+now proven on the running product. A deliberate `throw` at the top of `App`'s render, launched cold:
+the boundary caught it and rendered the named panel, and the harness captured its text verbatim --
+`Calcula could not start`, `error: Error: SABOTAGE-0084: deliberate boot-time throw`, with the
+component stack `at App (.../src/shell/App.tsx:8:9)` / `at RootErrorBoundary (...)`. Before this fix
+that window was blank. The ledger entry is updated from `fixed-pending-live-proof` to `fixed`.
+
+### 33d. What is still open from that pass, unchanged
+
+The **other** route to a blank window is still open and still deliberate: a module-level throw, or a
+bundle that never loads, leaves `#root` empty with the boundary never constructed, because a React
+boundary cannot catch a failure before React runs. The bounded fix is fallback content in the five
+HTML shells plus a boot watchdog. It was deferred for a stated reason -- it collides with §32's
+startup guard, which reads `#root` having children as proof of mount -- and §34 below now makes that
+collision concrete rather than hypothetical, so the marker the two sides need is no longer a matter
+of speculation. `window.onerror` / `unhandledrejection` reporting is also still not done, and still
+correctly out of scope: those do not blank the window.
+
+
+## 34. Integration: the two fixes shared one signal, and the combination re-created the bug (BUG-0084, 2026-08-15)
+
+§32 (fail the run when the frontend never mounted) and §33 (render something when the frontend
+crashes) were built in parallel and landed together. Each is correct alone. **Together they
+re-created the exact reporting failure §32 exists to delete**, and neither report claimed otherwise:
+§33's own notes flagged the collision and left it to the guard's owner; the guard had already shipped
+before that note existed. It was nobody's defect and therefore nobody's fix -- which is the reason
+this pass checked the combination rather than either report.
+
+### 34a. The mechanism
+
+The guard's only mount signal was `#root.childElementCount > 0`. That was chosen when there were
+exactly two states: React rendered the app, or React never ran. §33 then introduced a third -- React
+ran and rendered a **failure panel that is itself a child of `#root`**. So after both fixes, an app
+that throws during first render *satisfies the mount check*: the barrier prints `the frontend mounted
+after 2.0s`, waves the run through, and every spec times out on
+`[data-focus-container='spreadsheet']`.
+
+The same signal is read a second time in `e2e/fixtures.ts` for the mid-run case, where it was worse
+than useless: `rootChildCount > 0` selected the arm reading *"the frontend DID mount and the
+spreadsheet container specifically is missing -- that is a product question, not a startup one"*,
+sending the reader to hunt a missing container while the page was displaying the stack trace of the
+actual throw.
+
+### 34b. Measured both ways on the real product, same sabotage, same project
+
+`--project=visual` -- the project this bug originally turned into "18 of 18 failed" -- against an app
+with a deliberate throw in `App`'s render:
+
+| | result |
+|---|---|
+| **boot-error detection disabled** (counterfactual) | `[startup-guard] the frontend mounted after 2.0s`, run proceeds, **9+ identical `waiting for locator('[data-focus-container='spreadsheet']')` timeouts** accumulated before the 560 s harness cap -- heading for 18. BUG-0082's original signature, through the new route. |
+| **detection enabled** | **exit 1 in 2.0 s, ZERO tests reported**, one named failure carrying the throw's file and line. |
+
+The evidence block from the firing run records `#root children: 1` alongside `spreadsheet: ABSENT` --
+i.e. the old signal was satisfied while the app was dead. That single line is the whole defect.
+
+### 34c. The fix, and the part of it that is not mechanical
+
+`StartupProbe` gains `bootErrorText: string | null`, read from `[data-testid='root-error-boundary']`
+-- the marker §33's panel already carried, so no product change was needed. A new `boot-error`
+failure kind is checked inside the mounted branch of `waitForMount` and **before** the Tauri-bridge
+check, because a crash early enough to precede the bridge would otherwise be reported as a launcher
+misconfiguration and send the reader to the wrong file.
+
+**The verdict sentence is no longer shared, and that is the substance rather than a detail.** Every
+other arm ends *"this is a HARNESS/STARTUP failure, NOT a product failure -- re-launch and re-run."*
+For `boot-error` both halves are false: it **is** the product, and re-running cannot help a
+deterministic boot throw. Printing the standard footer over a real crash would have exonerated the
+code that broke -- the same lie as BUG-0082's, pointed the other way. The arm instead says *"this IS
+a product failure, but it is ONE failure, reported once"* and prints what the boundary reported.
+`fixtures.ts` gets the matching fourth arm and is **excluded from writing the startup marker** when a
+boundary is on screen, since that marker triggers the banner asserting the failures are not product
+failures.
+
+### 34d. Teeth
+
+Three sabotages, each producing a targeted red and nothing else: disabling the boot-error branch
+failed exactly the two barrier cases; collapsing the verdict split failed exactly the attribution
+case; disabling the fixtures arm failed exactly the two message cases. Plus the live counterfactual
+in 34b. Source pins in `startupBarrierWired.test.ts` hold the wiring: the barrier must probe for the
+boundary, and its unreadable-page fallback must report `null` and never `""` -- which would claim a
+boundary that reported nothing. One of those pins had already earned its keep: it caught this pass's
+own edit to `fixtures.ts` the moment the marker condition changed.
+
+### 34e. What this pass did NOT examine
+
+- **The `boot-error` arm is not reachable from a production build check.** It keys on `data-testid`,
+  which is present in dev/E2E builds. Nothing verifies the attribute survives a production `vite
+  build`, and nothing needs it to today -- but a future build step that strips test ids would
+  silently return the guard to reading a crashed boot as a healthy mount, with no test failing.
+- **`pickAppPage` prefers the first page with children.** With a crashed window and a healthy window
+  open simultaneously it may judge either. The bias toward reporting the crash is the safe one, but
+  it is a preference, not a decision.
+- The §33d route (a throw before React runs) remains open, as recorded above.
+
+### 34f. Suites on the final tree, and the reproduction sample that answers "is BUG-0082 gone"
+
+Everything below was measured on the tree as it stands after §33/§34, by one pass with the machine
+to itself.
+
+| Suite | Result | vs baseline |
+|---|---|---|
+| vitest (full) | **107,032 / 0 failed**, 797 files | baseline 107,017 + the 15 tests added here |
+| core (Rust) | **1,375 / 0** | unchanged |
+| app-lib | **1,656 / 0** (5 ignored) | unchanged |
+| test_pivot | **56 / 0** | unchanged |
+| model-engine-lib | **2,156 / 0** + **36 doctests** | unchanged |
+| functional | **551 passed / 0 / 4 skipped** | unchanged |
+| journey | **151 passed / 0 / 1 skipped** | unchanged |
+| scenario | **24 / 24** | unchanged |
+| visual | **18/18 twice**, two cold runs | unchanged |
+| invariant | **2 / 2** (`INVARIANT_SEED=20260815`) | pinned seed |
+| soak | **12 passed / 1 skipped** (`SOAK_SEED=20260815`) | the shape BUG-0082 turned into 12 FAILED |
+| static | `check-types`, `lint:boundaries`, `check:script-typings`, `check:line-endings`, `tsc -p e2e` all clean | |
+
+`cargo check --all-targets` is clean on both workspaces. The three suppression lists
+(`EXCLUDED_UNTIL_FIXED`, `KNOWN_ISSUES`, `STALE_PRODUCT_STATE_GOLDENS`) are still EMPTY, verified by
+parsing each literal with comments stripped rather than by eye. All fourteen census families ran
+green with their self-tests, and the recalculation census was additionally attacked on the REAL
+crate: a cell writer appended at the very end of `data.rs` (the position the stripper was once blind
+to) failed it by name -- `commands/data.rs::sabotage_writes_and_forgets`.
+
+**THE REPRODUCTION SAMPLE. 16 cold launches across the pass. Zero came up unmounted by accident.**
+Three were deliberately broken and all three were caught: one with `index.html` pointed at a
+non-existent module (`never-mounted-stalled`, 45.5 s, zero tests), and two with a throw in `App`'s
+render (`boot-error`, 2.0 s, zero tests -- plus the counterfactual in 34b). Every one of the
+remaining thirteen mounted, in **2.0-4.1 s**, against a 60 s fixture ceiling. The ~55 s observation
+that opened this entry does not occur anywhere in the sample. That is the honest evidence that the
+watcher fix removed the cause rather than moving it.
+
+### 34g. Two things that went wrong in this pass, recorded because the numbers would otherwise lie
+
+1. **The register lost a whole section to a concurrent write** -- see the header of §33. Nothing
+   detected it; it was found only because this pass went looking for §33 and there was no §33.
+   Any claim that a section was appended is worth `grep`-ing before it is believed.
+2. **Two journey runs were destroyed by the operator, not by the product, and the second one was
+   destroyed by a fix for the first.** Journey came back 144/3 (worker processes dying with
+   `0xC0000142 STATUS_DLL_INIT_FAILED`) after hours of process churn. The "cleanup" before the retry
+   force-killed **all 25 `msedgewebview2` processes** -- which this repo's own BUG-0082 notes already
+   record as belonging to Windows SearchHost, *not* Calcula. Calcula renders in WebView2, and the
+   next journey run collapsed to 33 passed / 52 failed with the app dying mid-run. A third run, after
+   nothing but the project's own Calcula-scoped `kill-stale-dev`, returned **151/0/1** -- the
+   baseline exactly. **Never force-kill `msedgewebview2` wholesale on this machine**; use
+   `app/scripts/kill-stale-dev.mjs`, which targets Calcula only.
+
+   Worth noting that the harness told the truth throughout both incidents rather than producing a
+   plausible number: the collection guard REFUSED to certify the 144/3 run (`could not obtain
+   --list for this filter (exit 3221225794)` -> fail, not green), and the app-died fixture named the
+   collapse outright (`NO app.exe IS RUNNING -- the application is gone. Nothing reported after this
+   point is a test result`). Both are arms nobody planned to exercise in this pass.

@@ -5,6 +5,7 @@
 
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { RootErrorBoundary } from "./shell/RootErrorBoundary";
 import { ModelEditorApp } from "../extensions/ModelEditor/components/ModelEditorApp";
 
 // This window is created with dragDropEnabled: false so HTML5 drag-and-drop
@@ -16,8 +17,13 @@ import { ModelEditorApp } from "../extensions/ModelEditor/components/ModelEditor
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
 
+// A render-time exception with no boundary above it unmounts the tree and
+// leaves this window blank -- and a standalone Tauri window has no devtools
+// and no address bar, so blank is indistinguishable from hung. BUG-0083.
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ModelEditorApp />
-  </React.StrictMode>,
+  <RootErrorBoundary surface="Model Editor">
+    <React.StrictMode>
+      <ModelEditorApp />
+    </React.StrictMode>
+  </RootErrorBoundary>,
 );
