@@ -4,19 +4,45 @@
 **Owner docs:** PHILOSOPHY.md ("Never Wait for the Vendor", "Bricks of Every Size", "No First-Class Citizens"), ARCHITECTURE.md, docs/design/wave3-scripting-security.md, docs/design/backend-facade.md, docs/design/granular-bricks.md
 **Scope:** the BI semantic model (`bi_engine` DataModel: tables, measures, relationships, calc groups, script functions, sources, …) and every surface that touches it
 
+> **Audit note (2026-08-16, code-verified).** All four phases were re-verified
+> in the tree and are shipped. Read §1 and §2 as **the 2026-07 starting
+> position, not as current state** — every gap they describe is now closed by
+> this document's own phases. Three standing corrections to the numbers and
+> paths used throughout:
+>
+> - **The engine is in this repo** at `model-engine-lib/` (own Cargo workspace,
+>   merged 2026-07-24; package `bi-engine`, lib `bi_engine`). Every
+>   `engine-core/...` path below resolves to
+>   `model-engine-lib/crates/engine-core/...`; the old sibling repo is ARCHIVED.
+>   Host-facing engine changes also require an entry in
+>   `model-engine-lib/docs/host-integration-changelog.md`.
+> - **`MODEL_FORMAT_VERSION` is 23**, not 22
+>   (`engine-core/src/model/schema/mod.rs:461`). v22 was this roadmap's bump
+>   (`extension_data`) and that claim stands; v23 came later from an unrelated
+>   expression-language batch.
+> - **The capability vocabulary is 16 ids**, not six/seven/eight
+>   (`ALL_CAPABILITY_IDS`, `app/src/api/scriptHost/capabilityIds.ts:216`).
+>   `bi.model` and `bi.connector` were indeed the seventh and eighth added.
+>
+> Line numbers cited in this document have drifted since it was written; the
+> symbols have not. Where a citation was checked and moved, it has been
+> rewritten to name the symbol instead.
+
 ## 1. Why
 
 Calcula's founding argument is that Power BI took away the user's ability to
 build their own solution. Yet on one axis, Power BI is today *more* open than
 Calcula: its model layer has a third-party tooling ecosystem (Tabular Editor,
 DAX Studio, best-practice analyzers, docs generators) built on XMLA/TOM.
-Calcula's equivalent surface is walled off:
+Calcula's equivalent surface is walled off *(this was the position on
+2026-07-15; all four gaps below were closed by Phases 1-4 — see Status)*:
 
 - The Model Editor extension is honestly dogfooded — it uses only public
   `@api` `biModel*` functions (`app/src/api/backend.ts`), no backdoors. **A
   trusted extension can programmatically author models today.**
 - But every one of those commands — including all mutation — sits on the
-  `biData` denylist (`app/src/api/backendCommands.ts:78-135`). A non-trusted
+  `biData` denylist (the `biData` group in `app/src/api/backendCommands.ts`,
+  from line 104). A non-trusted
   (third-party / distributed) extension's only sanctioned door is the broker's
   consent-gated, **read-only** `bi.query`. A sandboxed script can query a
   model; it cannot add a measure to one.
@@ -33,7 +59,7 @@ each independently shippable, each a *governed* door — declared in a manifest
 ceiling, granted by consent, recorded in the audit trail, reversible in the
 user's undo stack.
 
-## 2. Current state (verified 2026-07-15)
+## 2. Current state as of 2026-07-15 — the BEFORE picture
 
 What already aligns with the philosophy:
 
@@ -41,35 +67,37 @@ What already aligns with the philosophy:
 |---|---|
 | Model authoring via `@api` | Full CRUD for trusted extensions: measures, calc columns, relationships, hierarchies, KPIs, roles, perspectives, calc groups, contexts, variables, script functions, sources, writeback columns (`app/src/api/backend.ts`, `app/src-tauri/src/bi/model_editor.rs`) |
 | Custom code *inside* the model | `script_functions`: sandboxed Rhai, persisted in the model, compiled to scalar UDFs (`engine-core/src/compute/script.rs`); host UDF registry also exists (`engine-core/src/compute/udf.rs`, `Engine::register_udf`) |
-| Query layer for scripts | `bi.query` (structured) / `bi.sql` (raw read-only) / `cube.*`, consent + Rust-side grant re-check + always-on audit (`bi/commands.rs:2160`, `:2280`) |
+| Query layer for scripts | `bi.query` (structured) / `bi.sql` (raw read-only) / `cube.*`, consent + Rust-side grant re-check + always-on audit (`bi/commands.rs`, the `bi.query` gate at `:2445` and the `bi.sql` gate at `:2565`) |
 | Engine connector seam | `Connector` trait + `ConnectorCapabilities` (`engine-connectors/src/traits.rs`), closed-enum dispatch macro `define_any_connector!` (`engine-query/src/registry.rs`) — microkernel-shaped, compile-time only |
-| Distribution | Dataset `.calp` packages ship the whole serialized model, signed Ed25519+TOFU, credential-free (`calp_commands.rs:670` `calp_publish_model`); subscribed models are read-only (`model_editor.rs:316`) |
+| Distribution | Dataset `.calp` packages ship the whole serialized model, signed Ed25519+TOFU, credential-free (`calp_publish_model`, `calp_commands.rs:814`); subscribed models are read-only (`model_editor.rs:326`) |
 
 What is closed with no door at all:
 
 - **Model mutation for non-trusted callers** — the `biData` denylist (above).
 - **Custom data sources** — no runtime connector registration of any kind.
 - **Model metadata** — no `extension_data` on `DataModel`
-  (`engine-core/src/model/schema/mod.rs:443`; format v21,
-  `MODEL_FORMAT_VERSION` at `:436`).
+  (`engine-core/src/model/schema/mod.rs`; format v21 then, `MODEL_FORMAT_VERSION`
+  at `:461` and now **23**; the field this phase added is at `:579`).
 - **Model events** — nothing emits on model change or refresh completion
   (`app/src/api/events.ts` has no BI events; `model_editor.rs` never emits).
 
 Mechanics this design reuses (all existing):
 
-- Capability machinery: `capabilityIds.ts` (six ids today: `net.fetch`,
-  `bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`), allowlist rows +
-  validators (`scriptHost/allowlist.ts`), broker ceiling + JIT consent +
-  `SERVER_AUDITED_METHODS` (`scriptHost/broker.ts:189`).
-- The single mutation funnel `apply_model_edit` (`model_editor.rs:408`):
+- Capability machinery: `capabilityIds.ts` (six ids at the time of writing:
+  `net.fetch`, `bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`; the
+  vocabulary is **16** as of 2026-08-16), allowlist rows + validators
+  (`scriptHost/allowlist.ts`), broker ceiling + JIT consent +
+  `SERVER_AUDITED_METHODS` (`scriptHost/broker.ts:202`).
+- The single mutation funnel `apply_model_edit` (`model_editor.rs`, now `:774`):
   fresh snapshot under the engine lock → pure edit → `build_combined_model` →
   `set_model` → mirror `base_model` onto every connection sharing the
   `ModelKey` → `record_model_undo`. Every `bi_model_*` command flows through
-  it (undo/redo/import flow through the sibling install helper at `:380`).
-- Model undo stacks keyed by `ModelKey` (`model_editor.rs:348`).
-- Workbook `extension_data` precedent (`persistence.rs:3199` get / `:3209`
-  set; ledgered variant; carried + merged by `.calp` pulls,
-  `calp_commands.rs:1608`).
+  it (undo/redo/import flow through the sibling install helper next to it).
+- Model undo stacks keyed by `ModelKey` (`ModelUndoStacks` /
+  `model_undo_store`, `model_editor.rs:368-381`).
+- Workbook `extension_data` precedent (`persistence.rs`, `get_extension_data`
+  `:5206` / `set_extension_data` `:5216`; ledgered variant; carried + merged by
+  `.calp` pulls, `merge_pulled_extension_data`, `calp_commands.rs:2091`).
 - Distribution bricks: `registerDistributableObjectProvider`
   (`app/src/api/distributableObjects.ts:63`), package kinds, signed sidecar
   manifests with declared-capability ceilings for distributed scripts.
@@ -77,7 +105,7 @@ Mechanics this design reuses (all existing):
   reopen via `SourceCredential::Connector` — `engine/src/source_wiring.rs:229`,
   `SourceKind::InMemory` at `engine-core/src/model/source.rs:34`),
   `RefreshReport` (`engine/src/refresh.rs:53`), `RefreshStrategy` DTO mapping
-  (`model_editor.rs:954-1013`).
+  (`refresh_strategy_from_dto`, `model_editor.rs:1365`).
 
 ## 3. Goals / non-goals — what stays kernel
 
@@ -121,7 +149,8 @@ scripts, signed distributed packages.
 | 3 | Custom script connectors (`bi.connector`) | L | +2 (`bi_script_source`, `connector_secrets`) | 1 (binding persistence), 2 (gateway pattern) |
 | 4 | Distributable model customizations | M | +0 | 1–3 (carries their artifacts) |
 
-Command budget matters: the app has ~660 Tauri commands and a /STACK:32MB
+Command budget matters: the app has ~750 Tauri commands (~660 when this was
+written) and a /STACK:32MB
 main-thread reserve baked into the PE header (see MEMORY: stack-overflow
 gotcha). Every new surface here is **one multiplexed command**, never a
 command per operation. Total: **+4**.
@@ -169,7 +198,8 @@ model undo, subscribed-read-only guard) already exists.
 
 ### 5.1 The bag: an engine-side field, not an app sidecar
 
-Add to `DataModel` (`engine-core/src/model/schema/mod.rs:443`):
+Add to `DataModel` (`engine-core/src/model/schema/mod.rs`; as built, the field
+sits at `:579`):
 
 ```rust
 /// Open, namespaced metadata for host applications and their extensions
@@ -198,7 +228,7 @@ extension_data: BTreeMap<String, serde_json::Value>,
 Rules (mirroring the workbook bag): namespaced keys (`vendor.feature` — the
 `calcula.` prefix is reserved), opaque JSON, additive, **256 KB per key**
 (matching `cap.storageSet`'s quota), writes rejected on package-subscribed
-models with the existing read-only error (`model_editor.rs:316`).
+models with the existing read-only error (`model_editor.rs:326`).
 
 ### 5.2 Command + `@api`
 
@@ -230,8 +260,8 @@ a thin frontend bridge (same pattern as the `MUTATION_REFRESH` fan-out):
 - `bi:refresh-completed` — `{ connectionId, tables: [{ name, ok, error? }], durationMs }`,
   sourced from the engine `RefreshReport` (`engine/src/refresh.rs:53`).
 
-**Emission choke points:** `apply_model_edit` (`model_editor.rs:408`) after a
-successful install, and the sibling install helper (`:380`) for the
+**Emission choke points:** `apply_model_edit` (`model_editor.rs:774`) after a
+successful install, and the sibling install helper beside it for the
 undo/redo/import paths — every mutation route already funnels through these
 two, so emission is exactly-once by construction.
 
@@ -241,7 +271,8 @@ events can never become an un-capability-checked read channel. Subtlety: even
 object *names* are model metadata that today requires `bi.query` to
 enumerate. Therefore: the trusted main-thread bus gets the full payload
 (with `objectName`); when these events are added to
-`SCRIPT_SUBSCRIBABLE_APP_EVENTS` (`allowlist.ts:119`), the worker bridge
+`SCRIPT_SUBSCRIBABLE_APP_EVENTS` (`allowlist.ts:1177`; the BI rows are at
+`:1193-1194` and the thinning at `:1404-1408`), the worker bridge
 forwards a **thinned** payload — `{ connectionId, domain, revision }` only.
 No new capability is needed for the thinned form; it leaks nothing `bi.query`
 wouldn't already gate.
@@ -261,9 +292,10 @@ wouldn't already gate.
 
 ### 6.1 One capability, policy-data granularity
 
-Add `"bi.model"` to `ALL_CAPABILITY_IDS` (`capabilityIds.ts:36`) — the
-seventh id. **Not** per-object-type capabilities: the consent vocabulary must
-stay human-sized ("this script may modify BI model definitions"). Which object
+Add `"bi.model"` to `ALL_CAPABILITY_IDS` (`capabilityIds.ts:216`) — the
+seventh id at the time (the list is 16 ids as of 2026-08-16). **Not**
+per-object-type capabilities: the consent vocabulary must stay human-sized
+("this script may modify BI model definitions"). Which object
 kinds are reachable is enforced by the allowlist row validators
 (`allowlist.ts`) — the single object already consumed by broker dispatch, the
 transparency panel, and consent text — and re-checked in Rust.
@@ -275,7 +307,7 @@ columns, relationships, hierarchies, KPIs, calculation groups, contexts +
 context columns, global/table variables, calculated tables, date-table /
 default-lookup-resolution settings, descriptive metadata, `extension_data`,
 **perspectives** (the schema documents them as "purely presentational — NOT a
-security boundary", `schema/mod.rs:526-529`), and **script functions**.
+security boundary", `schema/mod.rs:552-556`), and **script functions**.
 
 Script-function justification: Rhai script functions already travel inside
 dataset packages — a subscriber already executes publisher Rhai inside the
@@ -304,7 +336,7 @@ The Rust handler, in order:
 
 1. Re-checks the grant server-side exactly as `bi_query` does
    (`record_capability_call(..., "bi.model", ...)` denial path,
-   `bi/commands.rs:2160` pattern; extend the `grant_script_bi` store).
+   the `bi.query` gate at `bi/commands.rs:2445` pattern; extend the `grant_script_bi` store).
 2. Enforces the allowed-kind set **in Rust** (frontend validators are UX;
    Rust is authority). RLS/connection kinds are rejected here regardless of
    what the frontend asked.
@@ -375,7 +407,7 @@ tables/columns/measures/relationships/hierarchies/KPIs/calc-groups metadata —
 **no `security_roles` at all** (not even names, v1 conservative), no
 connection targets (host/database), no credential-adjacent fields. Precedent
 for treating the full overview as sensitive: it is window-guarded to
-`MAIN_AND_MODEL_EDITOR` (`model_editor.rs:2106`).
+`MAIN_AND_MODEL_EDITOR` (`bi_model_get_overview`, `model_editor.rs:2485`).
 
 ### 6.5 Open questions (Phase 2)
 
@@ -457,7 +489,8 @@ allowlisted well-known auth headers).
 
 "Refresh" = re-run the script → replace the `InMemoryConnector` data →
 `Engine::refresh_table`. The model's existing `RefreshStrategy`
-(interval / dailyAfter — DTO mapping in `model_editor.rs:954-1013`) is
+(interval / dailyAfter — DTO mapping in `refresh_strategy_from_dto`,
+`model_editor.rs:1365`) is
 evaluated by a **host scheduler** for script sources. Failures surface exactly
 like engine refresh failures (`RefreshReport` collects per-table errors
 instead of aborting) plus the Phase-1 `bi:refresh-completed` event and the
@@ -548,9 +581,12 @@ any kind suffice. +0 commands.
 - **Format versioning.** One engine bump for the whole roadmap: **v22**
   (`extension_data`). Phases 2–4 add no model fields. Host stamps explicitly
   at `.cala` save + `.calp` publish per the existing stamp-helper chain
-  (…v20 → v21 → v22).
+  (…v20 → v21 → v22). *(Held true; the engine has since moved to **v23** for an
+  unrelated expression-language batch — see the version-history table in
+  `model-engine-lib/docs/host-integration-changelog.md`.)*
 - **Stack headroom.** +4 commands total, all multiplexed (see MEMORY:
-  ~660-command `generate_handler!` vs /STACK:32MB).
+  the `generate_handler!` frame — ~660 commands when this was written,
+  ~750 as of 2026-08-16 — vs /STACK:32MB).
 - **Naming.** TS `camelCase` / Rust `snake_case` via
   `#[serde(rename_all = "camelCase")]` on every new DTO (`api_types.rs` /
   `types.ts` mirroring), per CLAUDE.md.
@@ -561,7 +597,12 @@ any kind suffice. +0 commands.
 2. Memory ceiling + deny/spill policy for script-fed sources (7.6).
 3. Background refresh consent UX for distributed connectors (7.6).
 4. Storage-mode/refresh knobs under `bi.model` with rate limits (6.5).
-5. Per-minute mutation rate limit default (6.5 — recommend 30/min).
+   **Still open and still closed in code** (2026-08-16): no storage-mode or
+   refresh kind appears in `GATEWAY_MUTABLE_KINDS`.
+5. ~~Per-minute mutation rate limit default (6.5 — recommend 30/min).~~
+   **RESOLVED as recommended and shipped:** `BI_MODEL_MUTATIONS_PER_MINUTE = 30`
+   and `BI_MODEL_READS_PER_MINUTE = 120`, two buckets keyed
+   `(script_id, bucket)` (`model_editor.rs:5505/5510`).
 6. Notebook surface mutation (6.3/6.5 — currently a documented anti-goal).
 7. Overlay name-collision: shadow vs hard-reject (8.3).
 8. Incremental (append/watermark) refresh handshake (7.4).

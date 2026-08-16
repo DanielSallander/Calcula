@@ -1,7 +1,12 @@
 # Customizable Pivot Drill-Through Behavior
 
-**Status:** Design — approved to build layered (declarative first, script hook second)
-**Date:** 2026-06-19
+**Status:** **BOTH LAYERS SHIPPED** — Layer 1 (declarative `query` mode) and
+Layer 2 (`script` mode) are in the product, verified against code 2026-08-16.
+**Layer 2 shipped in a materially different shape than sections 4, 5, 7 and 9 of
+this document describe**, and one requirement of section 6 (the badge) was never
+built. Read **"9a. As built"** before trusting any contract below; sections 4-9
+are preserved unchanged as the original design record, not as current API.
+**Date:** 2026-06-19 (design); code-verified 2026-08-16
 **Related:** `wave3-scripting-security.md`, `vision-gap-review.md`, the BI-engine adoption work (secured drillthrough)
 
 ## 1. Summary
@@ -77,6 +82,15 @@ The script is an event handler that receives a **drill context** and returns
 rows the host writes to the DrillThrough sheet (the default, capability-minimal
 contract).
 
+> **SUPERSEDED 2026-08-16 by what shipped — see 9a.** The shipped
+> `PivotDrillContext` is `{ pivotId, cell }` and nothing else: no `factTable`,
+> no `measure`, no `maxRecords`, and **no `ctx.bi.detail` / `ctx.bi.query`
+> primitives**. The handler returns nothing; the script performs the drill
+> itself through capabilities it was already granted, so the "return rows, the
+> host writes the sheet" contract below was NOT built. The rationale in this
+> section (capability-minimal output, one query primitive instead of a mode
+> enum) is kept because it still describes the *intended* end state.
+
 ```ts
 // Conceptual shape — refined during Layer 2.
 interface DrillContext {
@@ -135,6 +149,13 @@ This maps directly onto the engine's `DetailRequest` builder
 Add the behavior to the pivot's saved metadata. New field on
 `SavedBiPivotMetadata` (and its runtime `BiPivotMetadata`):
 
+> **PARTLY SUPERSEDED 2026-08-16.** The `drill_through` field, the
+> `DrillThroughBehavior` / `DrillThroughKind` / `DrillQueryOverride` types and
+> the `.calp` carry all shipped as sketched (`app/src-tauri/src/pivot/types.rs`
+> lines 1547-1616 and 1645-1646; captured at `calp_commands.rs:13095`). The
+> **`script_id` field was never built**: script mode dispatches the pivot's OWN
+> attached object script, so there is no id to store. See 9a.
+
 ```rust
 #[serde(default, skip_serializing_if = "Option::is_none")]
 pub drill_through: Option<DrillThroughBehavior>,
@@ -181,6 +202,15 @@ script. Requirements, all satisfied by existing Wave-3 machinery:
    a **badge/indicator** (mirroring the object-script badges) so the user knows a
    double-click runs code, and the drill script appears in the "Code in This
    File" inspector and the script-surface taxonomy.
+   > **NOT BUILT (2026-08-16 audit).** The shared badge primitive exists
+   > (`@api` `drawScriptBadge` / `hasObjectScript`,
+   > `app/src/api/objectScriptBadge.ts:90`), but the only caller in the repo is
+   > `Controls/Shape/shapeRenderer.ts:617` — **the Pivot extension paints no
+   > badge**, for either `query` or `script` mode. A pivot whose double-click
+   > runs code is therefore visually identical to one that does not. The drill
+   > script IS discoverable as an ordinary pivot object script (it is one), so
+   > the inspector/taxonomy half of this requirement holds; the on-object
+   > affordance does not.
 7. **Fail-safe everywhere.** Consent denied, capability missing, script error, or
    timeout → fall back to `builtin` (or no-op with a toast), exactly as the
    dimension-attribute fallback already degrades. The drill never breaks the pivot.
@@ -203,6 +233,10 @@ A **"Drill-through behavior…"** entry on the pivot (context menu + Pivot edito
 - Live indicator that the pivot has a non-default drill, with a link to inspect.
 
 ## 8. Layered build plan
+
+> **Both layers are DONE (verified 2026-08-16); the plan below is the record of
+> how it was scoped, not remaining work.** Layer 1 landed as written. Layer 2
+> landed with the deviations listed in 9a.
 
 **Layer 1 — declarative `query` override (no code, no consent).**
 1. Types: `DrillThroughBehavior` / `DrillThroughKind` / `DrillQueryOverride`
@@ -228,6 +262,18 @@ A **"Drill-through behavior…"** entry on the pivot (context menu + Pivot edito
 
 ## 9. Open decisions (flag for sign-off)
 
+> **All four were decided by the implementation (2026-08-16 audit); two went
+> AGAINST the recommendation here.** (1) Script output contract: **neither**
+> option — the script neither returns rows nor writes the sheet through a grid
+> capability; it simply does whatever its own consented capabilities allow.
+> (2) Capability ceiling: not special-cased at all — a drill script is an
+> ordinary pivot object script, so it carries the tier/capability set that
+> script already declared. (3) Trigger generality: the dispatch IS a generic app
+> event (`pivot:drillThrough`), so another pivot event can join it as
+> recommended. (4) Where the script body lives: **the pivot's own object
+> script**, not a package script surface referenced by `script_id` — the
+> opposite of the recommendation, which is why `script_id` does not exist.
+
 1. **Script output contract** — *return rows* (recommended; capability-minimal,
    consistent UX) vs *script writes the sheet* (needs grid capability; powerful;
    defer).
@@ -238,6 +284,64 @@ A **"Drill-through behavior…"** entry on the pivot (context menu + Pivot edito
    so other pivot events (right-click "Actions") can join later. Recommend yes.
 4. **Where the script body lives** — reuse the existing package script surface
    referenced by `script_id` (recommended) vs inline source on the pivot.
+
+## 9a. As built (verified against code 2026-08-16)
+
+Every claim here was read out of the files named; line numbers drift, the
+symbols do not.
+
+**Persistence and distribution (as designed).**
+`DrillThroughKind { Builtin, Query, Script }`, `DrillQueryOverride`
+(`columns`, `dimension_columns`, `order_by`, `limit`, `filters` via
+`DrillColumnRef` / `DrillOrderBy` / `DrillFilter`) and `DrillThroughBehavior
+{ kind, query }` live in `app/src-tauri/src/pivot/types.rs` (1547-1616), with
+`drill_through: Option<DrillThroughBehavior>` on both `SavedBiPivotMetadata`
+and `BiPivotMetadata`. Missing field deserializes to `None` = builtin, pinned by
+`missing_drill_through_field_deserializes_to_none`. It travels in `.calp`
+(`calp_commands.rs:13095`). TS mirror: `app/src/api/pivotTypes.ts:1019/1051`.
+
+**Layer 1, `query` mode (as designed).** `build_bi_detail_request`
+(`pivot/commands.rs:4637`) reads the override only when
+`kind == DrillThroughKind::Query` (`:4824`) and merges it with the cell-derived
+filters; `drill_through_to_sheet` (`:4780`) writes the "DrillThrough" sheet
+(`:5014`). Set/read commands: `set_pivot_drill_behavior` /
+`get_pivot_drill_behavior` (registered in `lib.rs:5049/5051`). Authoring UI:
+`app/extensions/Pivot/components/DrillThroughBehaviorDialog.tsx`, registered at
+`Pivot/index.ts:1277`, offering all three modes as radio buttons (`:302/:314/:326`).
+
+**Layer 2, `script` mode - the deviations that matter.**
+
+- **No `script_id`, no package script surface.** The double-click interceptor
+  (`Pivot/index.ts:1725-1748`) checks the behavior, and if
+  `kind === "script"` AND `hasObjectScript("pivot", pivotId)` it resolves the
+  drilled cell to `(table, column, value)` triples and emits the app event
+  `pivot:drillThrough`. The pivot's own object script receives it.
+- **The context is two fields.** `PivotDrillContext = { pivotId, cell }`
+  (`app/src/api/scriptableObjects.ts:1236-1257`, mirrored in
+  `objectContexts.d.ts:6497`); the worker-side forwarder is
+  `app/src/api/scriptHost/host.ts:12090`, which filters by `pivotId` and
+  forwards `{ pivotId, cell }`. There is no `bi` sub-object on the context, no
+  `factTable`, no `measure`, no `maxRecords`.
+- **The host does not write the sheet in script mode.** It returns immediately
+  after emitting; whatever the drill produces is the script's own doing through
+  its own capabilities. Section 4's output contract is therefore aspirational,
+  not shipped.
+- **Fallback is one-sided.** `script` mode with **no script attached** falls
+  through to the built-in drill, deliberately, so a double-click is never a
+  silent no-op (`Pivot/index.ts:1734-1741`). But a pivot that HAS a script which
+  never registered `onDrillThrough` gets neither a drill nor a message: the
+  event is emitted and dropped. That is the one place where section 6's
+  "fail-safe everywhere" is not honored (a toast would satisfy it).
+- **Consent/audit/signing** are inherited wholesale, because a drill script IS
+  an object script: per-script hardened worker realm, package consent gate,
+  audit ring, Ed25519/TOFU on the carrying package. Nothing drill-specific was
+  added, and nothing drill-specific was needed.
+
+**Known stale comments in the CODE (not defects, but they mislead a reader):**
+`pivot/types.rs:1540-1544` still says "A future `Script` mode ... is planned"
+directly above the shipped `Script` variant, and
+`DrillThroughBehaviorDialog.tsx:6` says "A Script mode is planned (Layer 2)"
+while the same file renders the Script radio button at `:326`.
 
 ## 10. Out of scope (future)
 

@@ -12,6 +12,46 @@ semantics* bug-for-bug (not assumed-Excel semantics) unless a divergence is expl
 
 ---
 
+## 0. Status — what of this shipped (re-verified against the tree 2026-08-16)
+
+**12 of the 22 findings are IN THE TREE (4 of those partially); 10 are NOT BUILT (1 of those
+solved a different way).** This audit is a *plan* for
+Waves 2-3; only Waves 0 and 1 are a description of the code. Every row below was checked by
+opening the file named, not by reading §5b.
+
+| Item | State | Evidence |
+|---|---|---|
+| PERF-01 dev/release profiles | **SHIPPED** | `app/src-tauri/Cargo.toml:74-85`, `core/Cargo.toml:20-36` (no `panic="abort"` in either) |
+| PERF-09 logging gate | **SHIPPED** | `static DEBUG_LOG_ENABLED: AtomicBool` — `app/src-tauri/src/logging.rs:40` |
+| PERF-05 FxHash | **SHIPPED** | `rustc-hash = "2"` in `core/engine/Cargo.toml:12` and `app/src-tauri/Cargo.toml:60` |
+| PERF-06 recalc ordering | **SHIPPED** | `recalc_order_from_seeds` — `app/src-tauri/src/lib.rs:3969` |
+| PERF-16 spill probe | **SHIPPED** | `check_spill_protection` — `app/src-tauri/src/commands/data.rs:74` |
+| PERF-20 cascade payload | **SHIPPED** | `CASCADE_FORMULA_LIMIT = 64` — `commands/data.rs:42`, applied at `:2070`, `:3516`, `:6570`, `calculation.rs:2447` |
+| PERF-03 lookup cache | **SHIPPED** | `core/engine/src/lookup_cache.rs` (848 lines) |
+| PERF-11 comparators | **SHIPPED (partial)** | `core/engine/src/text_cmp.rs` (131 lines). Deferred: compiled wildcard patterns, `as_text_into` buffer reuse, XMATCH |
+| PERF-04(a)(b) | **SHIPPED** | `into_flatten` (11 uses in `evaluator.rs`), `table_row_views` at `evaluator.rs:13572` |
+| PERF-04(c) RangeView | **NOT BUILT** | no `RangeView` symbol anywhere in `core/engine/src` |
+| PERF-12 O(1) INDEX | **SHIPPED** | flat row-major fast path + wrap quirk, `evaluator.rs:6179` |
+| PERF-14 criteria index | **SHIPPED (v1)** | in `lookup_cache.rs`; SUMIFS/COUNTIFS/AVERAGEIF still scan |
+| PERF-22 benches | **SHIPPED (partial)** | `vlookup_exact`, `countif`, `vlookup_filldown_1k_lookups` in `core/engine/benches/grid_engine.rs:161-216` — plus a `budget` group added later. **Still missing: the app-crate end-to-end recalc bench and the parse/extract throughput bench**, which were the two the audit called the gate |
+| PERF-02 drivers stop re-parsing | **NOT BUILT** | `app/src-tauri/src/calculation.rs:159` still `parser::parse(formula)` per cell, `:176-177` still `row_heights.clone()` / `column_widths.clone()` per cell (re-anchored 2026-08-16; the clones had drifted from `:172-173`) |
+| PERF-08 Arc AST | **NOT BUILT** | `pub ast: Option<Box<Expression>>` — `core/engine/src/cell.rs:287` |
+| PERF-07 rect dependency nodes | **NOT BUILT** | finite rects still expand per-cell; only the whole-column stripe treatment exists |
+| PERF-15 CF tick | **NOT BUILT** as specified | `cfStore.ts` debounces (`lib/cfStore.ts:37,146-156`), but the per-range sparse-iteration inversion and viewport guard are not there |
+| PERF-17 DataValidation | **ADDRESSED DIFFERENTLY** | the N+1 un-debounced round-trips are gone via `@api/coalescedRefresh` (`request()`/`join()`/`invalidate()`), not the proposed 200 ms trailing debounce. The OTHER half stands: `get_invalid_cells` still takes `grids` and scans (`app/src-tauri/src/data_validation.rs:827-852`) |
+| PERF-10 number-format parse cache | **NOT BUILT** | no `OnceLock`/`RwLock<HashMap>` in `core/engine/src/custom_format.rs` |
+| PERF-18 per-column ordered index | **NOT BUILT** | no `BTreeSet` column index in `core/engine/src/grid.rs` |
+| PERF-21 numeric AST coordinates | **NOT BUILT** | `CellRef { col: String, .. }` — `core/parser/src/ast.rs:42-45` |
+| PERF-13 box the Lambda payload | **NOT BUILT** | no `size_of::<EvalResult>()` assertion in `core/engine/src` |
+| PERF-19 volatile tracking | **NOT BUILT for built-ins** | volatile UDF cells ARE spliced into cascade roots (`commands/data.rs:2028-2035`), but NOW/TODAY/RAND/INDIRECT/OFFSET still refresh only on full recalc |
+
+**Do not read the "Fix:" paragraphs of a NOT BUILT item as a description of the code.** They are
+proposals, several of them carrying verifier amendments that were never exercised because the work
+was never done. The measured *problem* statements in each were verified at audit time and, for the
+NOT BUILT items, spot-checks above confirm the cited code still has the cited shape.
+
+---
+
 ## 1. Measured baseline (criterion, `core/engine/benches/grid_engine.rs`)
 
 | Benchmark | 1k | 100k | 1M | Unit cost |
@@ -32,7 +72,13 @@ bracket clears the noise floor decisively. See PERF-22 for the harness fix.
 
 ## 2. Correctness bugs found along the way (fix regardless of performance)
 
-1. **Recalc order is not topological — stale cells on every edit with dependency depth >= 2.**
+**Status re-verified 2026-08-16: (1) and (2) are FIXED; (3) is fixed for volatile UDFs only and
+still open for the built-ins; (4) and (5) are UNCHANGED — deliberately, in (4)'s case.** Each entry
+keeps its original wording below because the mechanism is the reusable part; the status line is
+prepended.
+
+1. **[FIXED — PERF-06, 2026-07-13]** **Recalc order is not topological — stale cells on every edit
+   with dependency depth >= 2.**
    `get_recalculation_order` (app/src-tauri/src/lib.rs:3247-3314) counts in-degrees including
    edges from the changed cell but seeds the ready queue with `deg == 0`, so Kahn's algorithm
    emits nothing (or almost nothing) and 100% of the output flows through the O(n^2)
@@ -41,17 +87,29 @@ bracket clears the noise floor decisively. See PERF-22 for the harness fix.
    `reevaluate_formula_cell` does not cascade, so C1 keeps a stale value.
    `multi_root_recalc_order` (app/src-tauri/src/control_values.rs:241-292) already implements the
    seeding correctly — generalize and share it. (Found by the PERF-06 verifier.)
-2. **Batch paste in-batch staleness.** `update_cells_batch` (commands/data.rs:2412-2431) runs one
+2. **[FIXED — PERF-06(b), 2026-07-13: one multi-root traversal with the batch cells as ordering
+   members]** **Batch paste in-batch staleness.** `update_cells_batch` (commands/data.rs:2412-2431) runs one
    BFS+Kahn per pasted cell, merges first-seen, and excludes batch cells from dependent recalc
    (`!updated_set.contains(&dep)`), so a pasted formula reading another pasted cell processed
    after it keeps a stale value. The fix (single multi-root traversal) is also the perf fix.
-3. **Volatile functions go stale.** NOW/TODAY/RAND/INDIRECT/OFFSET only refresh on full recalc;
+3. **[OPEN for built-ins; a volatile-root mechanism now EXISTS and is wired for UDFs only]**
+   **Volatile functions go stale.** NOW/TODAY/RAND/INDIRECT/OFFSET only refresh on full recalc;
    docs (docs/functions/NOW.md:19 etc.) promise otherwise. See PERF-19 — fixing this *adds* work
    per edit, so it must be done deliberately (volatile-root set, never full recalc per edit).
-4. **INDEX column-overflow wrap.** `fn_index`'s 2D branch computes `row_num*cols + col_num` on a
+   *2026-08-16 note:* `udf_volatile_cells` splices cells whose author marked a JS UDF volatile into
+   the cascade roots on every edit (`app/src-tauri/src/commands/data.rs:2028-2035`), and the splice
+   is skipped entirely for a workbook with no volatile UDF, so the hot path is untouched. That is
+   PERF-19's shape, built for one surface. Extending it to the built-in volatiles is the remaining
+   work, and it is still a correctness item that COSTS performance.
+4. **[UNCHANGED, AND DELIBERATELY SO — PERF-12's fast path replicates the wrap bug-for-bug
+   (`core/engine/src/evaluator.rs:6179`), verified by dedicated quirk tests. Fixing it is an
+   owner call, not an oversight.]**
+   **INDEX column-overflow wrap.** `fn_index`'s 2D branch computes `row_num*cols + col_num` on a
    flat array, so `INDEX(A1:B3, 1, 3)` silently returns A2's value instead of #REF!
    (evaluator.rs:5243-5244). Any fast path must replicate this bug or fix it deliberately.
-5. **XMATCH binary search modes are silently linear** ("simplified to linear", evaluator.rs:10784)
+5. **[UNCHANGED — still present, now at `core/engine/src/evaluator.rs:11927`; XMATCH was excluded
+   from the PERF-03 cache v1 as its own fourth equality family]**
+   **XMATCH binary search modes are silently linear** ("simplified to linear", evaluator.rs:10784)
    and XMATCH wildcard matching depends on `wildcard_match`'s internal re-uppercasing (its caller
    does not pre-fold case) — a trap for any refactor.
 
@@ -346,6 +404,12 @@ discipline. Every Wave 1-3 item lands with a before/after bench.
 
 ## 5. Recommended execution order
 
+*(Executed through step 3 as of 2026-08-16, with PERF-04(c) deliberately deferred as the order
+itself anticipated. Steps 4 and 5 — Waves 2 and 3 — were NOT started. See §0 for the per-item
+evidence, and note that the gate in step 2 is only partly in place: the lookup and criteria benches
+exist, the app-crate end-to-end recalc bench and the parse/extract bench do not, so a Wave 2 item
+would land today without the before/after measurement this plan requires of it.)*
+
 1. **Wave 0** (each independent, hours-to-days): PERF-01 profiles -> PERF-09 logging ->
    PERF-06(a) tail fix -> PERF-06(b) ordering correctness -> PERF-05 FxHash -> PERF-16 spill ->
    PERF-20 IPC. Wave 0 alone: dev builds get 4.5-15x faster, formatted-sheet recalcs lose
@@ -392,8 +456,13 @@ discipline. Every Wave 1-3 item lands with a before/after bench.
   through `reevaluate_formula_cell`, `cascade_cross_sheet_dependents`, batch + fill
   loops, and the control-value recalc.
 
-Verified: `cargo check --all-targets` clean on both workspaces; engine tests 380/380.
+Verified at the time: `cargo check --all-targets` clean; engine tests 380/380.
 (App test run: see session notes; 5 pre-existing failures were already on HEAD.)
+*Corrected 2026-08-16: this line originally said "both workspaces". There are **three** Cargo
+workspaces in this repo — `core/`, `app/src-tauri/` and `model-engine-lib/` — and `cargo check
+--all-targets` is clean on all three as of this date. Current suite sizes for orientation, not as a
+re-run of the 2026-07-13 evidence: core **1,377**, app-lib **1,662**, test_pivot **56**,
+model-engine-lib **2,156 + 36 doctests**.*
 
 **Wave 1 implemented 2026-07-13** (engine-contained; PERF-04(c) RangeView deliberately
 deferred as planned):

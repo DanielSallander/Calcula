@@ -56,7 +56,7 @@ Calcula/
 │   │   └── api/            # The "Sandpit"
 │   │                       # The ONLY interfaces extensions are allowed to touch
 │   │
-│   └── extensions/         # MOVED OUTSIDE 'src'. ~68 feature extensions, flat:
+│   └── extensions/         # MOVED OUTSIDE 'src'. 66 feature extensions, flat:
 │       ├── Charts/          #   Charts, Pivot, Sorting, Slicer, Table, ... (one dir each)
 │       ├── Pivot/
 │       ├── ...              #   (full list registered in extensions/manifest.ts)
@@ -178,7 +178,7 @@ enforced by the compiler, not by review.
   `document_effect.rs` pins those two
   declarations by their exact text, so a silent revert to a bare `Mutex` fails the build). The 43
   still on a bare `Mutex`/`RwLock` are mid-migration and listed as a work item in
-  `docs/design/open-decisions-2026-08.md`; they are overwhelmingly DERIVED caches (the dependency
+  `docs/design/open-items.md`; they are overwhelmingly DERIVED caches (the dependency
   maps, the spill maps, `id_registry`, `gather_cache`) rather than persisted state, so a command
   touching only those can still mutate without deciding — but check the field before assuming it.
   Declare any NEW persisted store `Persisted<T>` from the start.
@@ -203,15 +203,16 @@ enforced by the compiler, not by review.
 
 ### `.cala` Format Versioning
 
-One `format_version` lives in `manifest.json` and is currently at **6**
+One `format_version` lives in `manifest.json` and is currently at **7**
 (`CALA_MAX_SUPPORTED_FORMAT_VERSION`, `core/calcula-format/src/manifest.rs`). The writer stamps the
 highest minimum any feature ACTUALLY PRESENT requires (`stamp_feature_format_version`, raise never
 lower); the reader refuses anything higher rather than half-understanding it.
 
 - **Bump explicitly** when the saved shape changes — nothing infers it.
 - **Stamp conditionally.** `USER_HIDDEN_MIN_FORMAT_VERSION` (4), `SHEET_VIEW_MIN_FORMAT_VERSION` (5)
-  and `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6) are written only when a sheet actually carries
-  that state, so an ordinary workbook keeps the lowest version that can express it and stays
+  `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6) and `SPILL_EXTENT_MIN_FORMAT_VERSION` (7) are
+  written only when the document actually carries that state -- per SHEET for the first three, per
+  CELL for the spill extent (`zip_io.rs:200` stamps it only when some cell has an `sp` field), so an ordinary workbook keeps the lowest version that can express it and stays
   openable by older builds.
 - **The test for whether a section deserves a version link at all:** would an older reader
   MISHANDLE the document, or merely lose something? Ignoring an unknown section is usually fine — it
@@ -291,7 +292,35 @@ When developing a new feature, ask these three questions:
 In order for Rust environment to work it must first be set using the script:
 core\setup-rust-env.ps1
 
-`generate_handler!` in `app/src-tauri/src/lib.rs` registers ~750 commands. Its debug-build
+**What is currently OPEN lives in `docs/design/open-items.md`** -- a short, dated, code-cited
+list. `docs/design/open-decisions-2026-08.md` is the 18k-line narrative ARCHIVE behind it: read
+it for WHY a decision was made, never as a live status (its own S35a measured its "still open"
+claims as roughly a third stale in the already-fixed direction). Defects with a reproduction go
+in `tests/regression/bug-ledger.json` via its allocator, which assigns ids and rejects duplicates.
+
+**Four environment rules that cost a run each when broken** (verified 2026-08-16):
+
+- **`CARGO_TARGET_DIR` must point outside the repo** (`C:/Users/Salle/AppData/Local/calcula-target`).
+  Dropbox locks the in-repo `target/` mid-build (os error 32), and the in-repo tree is currently
+  corrupt -- it fails to link `app_lib.dll` with ~40 `LNK2001 anon.*.llvm.*`. Nothing sets the
+  variable for you: there is no `.cargo/config.toml`, so **which binary an E2E run exercises is a
+  function of ambient shell state**. `app/e2e/buildTarget.ts` resolves it the way cargo will and
+  `global-setup` prints the target, the binary, its size and its build time before launching.
+- **Never force-kill `msedgewebview2` wholesale.** Those processes also belong to Windows
+  SearchHost, and Calcula itself RENDERS in WebView2 -- killing them by image name destroyed a
+  journey run. Use `app/scripts/kill-stale-dev.mjs`, which targets `app.exe`/`Calcula.exe` by PID.
+- **No gate proves the app can be LINKED.** CI (`.github/workflows/ci.yml`) runs `cargo test
+  --workspace` and `cargo check --workspace --benches` with `working-directory: core`; `cargo
+  check` does not link, and `cargo test --lib` links a test executable, not the `app_lib.dll` the
+  app loads. A green CI is compatible with an app that cannot start. Only a `tauri` build or an
+  E2E launch exercises the link -- and never edit `src-tauri` during an E2E run.
+- **A sabotage that is a no-op passes.** When proving a test has teeth, first confirm the sabotage
+  actually changed behaviour; several "verified" guards here were verified by edits that did
+  nothing. Shell tools lie the same way here: Git Bash `sed`/`cat -A` STRIP `\r`, so they report
+  a pure-CRLF file as LF, and `grep -c $'\x00'` degrades to an empty pattern that "matches" every
+  line, so it can never detect a NUL byte. Measure endings and NUL bytes with node, not the shell.
+
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers 761 commands (counted 2026-08-16; bracket-matched parse, all unique -- the same figure docs/design/backend-facade.md reports independently). Its debug-build
 dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
 larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
 to hold it. Adding commands in bulk eats that headroom -- the symptom is

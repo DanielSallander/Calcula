@@ -9,6 +9,38 @@ re-verified against the code (verifiers were instructed to refute each claim). O
 claims, the top 48 were verified: **27 confirmed missing, 21 partial, 0 refuted** — no reviewer
 claim turned out to be wrong, only incomplete.
 
+> **AUDITED AGAINST THE CODE 2026-08-16. Verdict: this file has aged better than any other
+> document in `docs/design/`, and the reason is structural, not luck.** It carries a
+> correction log (§8, now fifteen entries) and a self-review (§10, Wave K), so its passes went
+> back and struck their own earlier text instead of only appending. That is precisely the
+> discipline the 1.33 MB decision register lacks, and it is why that register's "open" claims
+> run about a third stale while this one's do not. Three notes from today's pass:
+>
+> 1. **The capability vocabulary is 16, not 8.** §1's verdict line and §5's struck block have
+>    both been corrected in place. The canonical list is `ALL_CAPABILITY_IDS`
+>    (`app/src/api/scriptHost/capabilityIds.ts:216-233`) and it must never be re-typed
+>    elsewhere; a new id also needs rows in `RUST_MIRRORED_CAPABILITIES` and
+>    `GRANTABLE_CAPABILITIES` or consent is recorded in the renderer and refused by the
+>    backend forever after — `schedule` is the id that omission already broke once.
+> 2. **Citations drift even when mechanisms do not.** Four `file:line` anchors in the Wave H/I
+>    packaging row (§1 scorecard, "Code reuse / packaging") pointed 100-1,000 lines off. Every
+>    mechanism they described was verified intact — `base.callImport` really does take an alias
+>    and derive authority from caller identity, `callExposed` really does refuse at the realm
+>    boundary — so the prose was right and only the anchors had moved. They have been refreshed
+>    to `allowlist.ts:105`, `host.ts:2216`/`:2248`, `host.ts:2359-2362`, `broker.ts:480`.
+> 3. **§8's fifteenth entry is half-closed, and the open half is deliberate.** The
+>    `materialize_saved_controls` route it names is still a plain insert loop with no size bound
+>    (`app/src-tauri/src/controls.rs:175-202`, re-read today). What BUG-0086 closed is the
+>    *decode-hazard* half: oversize/oversized-dimension/too-many-pixel payloads are now cleared
+>    to `""`. **Policy** refusals (SVG, BMP, unknown, malformed) are still left inline and still
+>    unbounded on the pull path — a judgement, not an oversight, because dropping pictures out of
+>    documents that display them today is the worse failure. Tracked as an owner call in
+>    [`docs/design/open-items.md`](./open-items.md) §1.6.
+>
+> **For what is open today across the whole project, read
+> [`docs/design/open-items.md`](./open-items.md).** The `DEFERRED` and `PARTIAL` items in §7
+> below were NOT individually re-verified by this pass and should be treated as of 2026-08-05.
+
 ## 0. How to read this document
 
 This file started as a REVIEW and is now also the PROGRAM RECORD. Every §7 roadmap item carries one
@@ -108,7 +140,9 @@ The lesson is the fourteenth correction note in §8.
 ## 1. Verdict
 
 **On the pillars VBA never had, Calcula already exceeds it decisively:** hardened worker realms,
-restricted/unlocked tiers, an 8-capability vocabulary with declared ceilings, Rust-side
+restricted/unlocked tiers, an 8-capability vocabulary with declared ceilings (**16 as of
+2026-08-16 — see `ALL_CAPABILITY_IDS`, `app/src/api/scriptHost/capabilityIds.ts:216-233`, which is
+the only place the list may be typed; §5 carries the same correction**), Rust-side
 authoritative re-checks, per-source-hash consent, an always-on audit trail, and a governed
 in-product model-mutation gateway (something Power BI users need external Tabular Editor for).
 The security/transparency vision is delivered.
@@ -160,7 +194,7 @@ The "now" column is the one to trust; each cell names the code that makes it tru
 
 | Dimension | Was | Now | What changed, and what still isn't there |
 |---|---|---|---|
-| Code reuse / packaging | ❌ Missing | ✅ Competitive | **New dimension, added by Wave H; the "half" was closed by Wave I.** VBA's answer was "copy the module into every workbook, or reference another .xls and inherit its whole trust". Calcula's is a real package manager: `// @uses <alias> <package>@<pin>` resolves against a **signed** .calp registry through the *existing* trust root (Ed25519 + TOFU, no second signer, no second key store), pins into a workbook lockfile (`.calcula/script-deps.json`) that **mount never re-resolves against the registry**, caches the exact bytes content-addressed and re-hashes them on every read. Each library runs in its **own** worker realm at `declared(library) INTERSECT declared(consumer)`, chained one level narrower for a library's own dependency. **What made it "half" is gone: authority is now caller identity, not a bearer token.** `base.callImport` (`allowlist.ts:83`) takes an ALIAS and nothing else; the host resolves it in `scriptImports` — a map keyed by the CALLING handle's mount id that only the linker writes (`host.ts:1210`) — and then caps the call against the caller's OWN grants at CALL time, per-origin for `net.fetch` (`host.ts:1315`). The realm's entry point moved into a host-only namespace `callExposed` refuses before it even looks up the target (`broker.ts:401`), which closes the same-trust hole `public: false` could not. The 128-bit token is deleted, and so is §7.18-C's residual: an ungranted-but-declared consumer is now JIT-prompted on first use through the library, with the library named in the prompt (`viaLibrary`). Also closed: `kind: "library"` is now a publishable package kind, so the manager is complete on the authoring side too.
+| Code reuse / packaging | ❌ Missing | ✅ Competitive | **New dimension, added by Wave H; the "half" was closed by Wave I.** VBA's answer was "copy the module into every workbook, or reference another .xls and inherit its whole trust". Calcula's is a real package manager: `// @uses <alias> <package>@<pin>` resolves against a **signed** .calp registry through the *existing* trust root (Ed25519 + TOFU, no second signer, no second key store), pins into a workbook lockfile (`.calcula/script-deps.json`) that **mount never re-resolves against the registry**, caches the exact bytes content-addressed and re-hashes them on every read. Each library runs in its **own** worker realm at `declared(library) INTERSECT declared(consumer)`, chained one level narrower for a library's own dependency. **What made it "half" is gone: authority is now caller identity, not a bearer token.** `base.callImport` (`allowlist.ts:105`) takes an ALIAS and nothing else; the host resolves it in `scriptImports` — a map keyed by the CALLING handle's mount id that only the linker writes (`host.ts:2216` declared, written at `:2248`) — and then caps the call against the caller's OWN grants at CALL time, per-origin for `net.fetch` (`host.ts:2359-2362`). The realm's entry point moved into a host-only namespace `callExposed` refuses before it even looks up the target (`broker.ts:480`), which closes the same-trust hole `public: false` could not. The 128-bit token is deleted, and so is §7.18-C's residual: an ungranted-but-declared consumer is now JIT-prompted on first use through the library, with the library named in the prompt (`viaLibrary`). Also closed: `kind: "library"` is now a publishable package kind, so the manager is complete on the authoring side too.
 | Security model | ✅ Beyond VBA | ✅ Beyond VBA | QuickJS wall-clock deadline + memory cap (`core/script-engine/src/limits.rs:118,173`). **16-capability** vocabulary (`capabilityIds.ts:192-209`, mirrored `core/persistence/src/lib.rs:1343` as a compile-time-sized `[&str; 16]` that is also `include_str!`-diffed against the TypeScript source). Wave G added `file.picker` and `ui.shortcut`; **Wave I added three**: `grid.read` (the host-PUSH capability — see the Add-in row), `distribution.publish` and `distribution.subscribe`. The engine also gained a real recursion ceiling: `MAX_LAMBDA_DEPTH = 256` at the single choke point every lambda call funnels through (`core/engine/src/evaluator.rs:474,6171`), measured against a 1 MiB thread rather than guessed, and the one nested-`Evaluator` site (`eval_3d_ref`) now inherits the depth instead of resetting the budget. **Wave K closed the last wedge:** the evaluator itself now carries a deterministic WORK budget plus a user-reachable cancellation (`core/engine/src/budget.rs`, `app/src-tauri/src/eval_budget.rs`), so a shallow exponential or a million-cell array formula becomes `#LIMIT!` in one cell instead of hanging the application — measured at under the noise floor of the benchmark machine (§8). **What did not hold, and had to be fixed:** a `.calp`'s custom-function library ran with no consent at all (§7.19-A) and a package's module script could be executed by a package-supplied button (§7.19-B). Both are closed and both are now the reason §0 carries a seventh audit instruction. **2026-08-08 added a third of the same kind, and it was not in a `.calp` at all — it was in the tier model.** `object.setState` is RESTRICTED with no capability, and `vSetState` accepted the `shape.setProperty` aspect with no key allowlist and no length bound, so a distributed script could write an arbitrary multi-megabyte string — a whole `data:` image among them — into persisted control properties that travel in the saved workbook and in anything the user publishes. "A restricted script may reference existing media but never introduce bytes" was a sentence in a design note and a property of nothing; it is now `checkShapeSetProperty` (`src` = a `media:` handle or `""` and nothing else, keys allowlisted, values bounded at 8,192 chars, `onSelect`/`macroRef` refused outright), reached by both the own-object and cross-instance doors. The ingress it was covering for — Insert ▸ Image reading files through a hidden WebView `<input type="file">` and base64ing them into signed `.calp` artifacts — is now one Rust validator (`inspect_media`) on all four doors. §7 item 32.
 | Transparency/audit | ✅ Beyond VBA | ✅ Beyond VBA | §6.2 drift closed: `scriptSurfaces.ts` now has a two-directional completeness guard against the allowlist (`scriptSurfaces.test.ts` "no surface understates"/"overstates"). Scheduled jobs are listed and cancellable per workbook. **The named residual is closed:** the interpreter's reach is now DERIVED — `core/script-engine/src/manifest.rs` boots a real QuickJS runtime, enumerates the registered surface, diffs it against `OP_MANIFEST` in both directions, and proves `model.*` throws without a provider; `api/codeInventory.ts` mirrors it and `api/__tests__/interpreterReachDrift.test.ts` reads the Rust source. It is also SHOWN: the "Code in This File" panel no longer prints "Grid-only" for a notebook that can be granted `bi.query`/`bi.sql` on request. **Wave H closed three more holes:** the three script-held states that had no reader (keybindings, private clipboards, the submission watch) are joined and *revocable* in the panel (`codeInventory.ts:1030` `getScriptHeldState`); add-in installs are audited machine-side (`extension_audit.rs`); and **imported libraries are now code units** (`codeInventory.ts`, surface `script-library`) — third-party code that no script's source contains, but whose bytes live in the workbook, was previously invisible to the one panel whose job is "what code is in this file". |
 | Event observation | ✅ Competitive+ | ✅ Competitive+ | Unchanged, plus sheet-collection and recalculation-completed events. |

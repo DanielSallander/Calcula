@@ -1,9 +1,14 @@
 # Script Package Manager — registry + shared-library imports
 
 **Date:** 2026-07-31 (design) / 2026-08-01 (first slice implemented)
-**Status:** First slice SHIPPED. §10 records what was built, where it DEVIATES from this design,
-and the one security limit that remains open. Read §10 before §5-§6: the call shim that shipped is
-not the `base.callImport` this document specifies, and the reason matters.
+**Status:** First slice SHIPPED. §10 records what was built and where it DEVIATED from this design.
+
+> **[UPDATED 2026-08-16] The security limit this header used to advertise as open is CLOSED.**
+> The header read: *"...and the one security limit that remains open. Read §10 before §5-§6: the
+> call shim that shipped is not the `base.callImport` this document specifies, and the reason
+> matters."* `base.callImport` has since shipped exactly as §1/§5.3 specify, and it deleted the
+> bearer token rather than layering on it — precisely as §10.3 predicted. **§5-§6 now describe what
+> is actually built.** Evidence and the full closure note are in §10.3.
 **Answers:** `docs/design/scripting-vba-review.md` roadmap item 14.
 **Related:** `docs/design/calp-distribution.md`, `docs/design/wave3-scripting-security.md`,
 `docs/design/third-party-addin-authoring.md` (the sibling decision for *extensions*; this doc is
@@ -541,7 +546,47 @@ time. Sources are stored content-addressed under their SHA-256 and re-hashed on 
 (`readLockedSource`), so a `.cala` edited outside Calcula fails the mount instead of running
 unreviewed code, and a workbook opened on a machine with no registry still behaves identically.
 
-### 10.3 THE OPEN SECURITY LIMIT: the call shim is a bearer token, not a caller-identity check
+### 10.3 ~~THE OPEN SECURITY LIMIT~~ CLOSED 2026-08-16: the bearer token is gone, calls are caller-identified
+
+> **[CLOSED 2026-08-16.]** Everything below is the 2026-08-01 as-built record and its reasoning,
+> kept because the analysis is the reason the fix took the shape it did. **It no longer describes
+> the code.** `base.callImport` shipped:
+>
+> * the broker row + validator: `app/src/api/scriptHost/allowlist.ts:105`
+>   (`"base.callImport": { tier: "restricted", class: "emit", validate: vCallImport, ... }`);
+> * the host dispatch: `app/src/api/scriptHost/host.ts:2645`;
+> * the worker shim: `worker/contextShims.ts`.
+>
+> **Authorization is now identity, not possession.** `scriptImports`
+> (`host.ts:2216`) is HOST state keyed by the **consumer's** authoritative mount id and written
+> only by trusted linker code. `authorizeImportCall` (`host.ts:2304-2328`) resolves the alias in
+> the table built for *this* handle's script id — gate (1) refuses an alias the caller never
+> declared, gate (2) refuses a name that is not an `// @export`, and
+> `requireCallerCoversLibrary` (`host.ts:2331`) then caps the call by *this* script's own declared
+> capabilities, failing closed if the ceiling and the realm ever disagree.
+>
+> **The token is gone, not hidden.** `app/src/api/scriptLibraries/linker.ts:38-39` states it
+> outright: *"There is no bearer token any more. The previous design minted a 128-bit token per
+> (realm, consumer) and baked it into the prelude."* The realm's entry point no longer needs to be
+> script-reachable at all — it lives under `HOST_ONLY_EXPOSED_PREFIX` with `public: false`, so
+> `callExposed` refuses it for **every** script and only `hostCallExposed` can reach it
+> (`host.ts:2176-2182`).
+>
+> The leak scenario below is therefore void: *"there is no credential left to leak. Handing a peer
+> the alias string achieves nothing: the peer's own table is consulted, not the sender's"*
+> (`host.ts:2174-2177`).
+>
+> **§10.4's non-enumerability audit is no longer load-bearing** — nothing depends on the token
+> staying unreachable — but it is kept as rationale, because the property it establishes about
+> cross-origin exposure is still true and still worth knowing.
+>
+> One stale mirror of the retired design was found in the code during this audit and filed rather
+> than silently patched: the `script-library` row in `app/src/api/scriptSurfaces.ts` still
+> describes the token. See the bug ledger.
+
+---
+
+**Historical record (2026-08-01), superseded by the note above:**
 
 §1 and §5.3 specify a `base.callImport(alias, method, args)` broker method that resolves the alias
 against host-side state keyed by the CALLING handle. That is the right design and it is **not what
@@ -670,8 +715,14 @@ states this explicitly instead of claiming the stronger property.
 
 ### 10.8 Still not done
 
-* `base.callImport` (§10.3) — **the follow-up that matters**, and it now closes two limits rather
-  than one: the bearer token *and* the grant-vs-declare gap in §10.7-C.
+* ~~`base.callImport` (§10.3) — **the follow-up that matters**, and it now closes two limits rather
+  than one: the bearer token *and* the grant-vs-declare gap in §10.7-C.~~ — **DONE, verified
+  2026-08-16.** It closed both, as predicted: the token is absent from `linker.ts` and
+  `requireCallerCoversLibrary` (`host.ts:2331`) caps each call by the CALLER's declared
+  capabilities, which is the §10.7-C gap. See §10.3.
+
+  *The remaining bullets in this section were NOT re-verified by the 2026-08-16 audit — treat them
+  as of 2026-08-01 and check the code before relying on any of them.*
 * Library PUBLISHING: `.calp` publish does not yet emit `kind: "library"` packages, so libraries are
   hand-assembled or published through an existing path with the kind overridden. §8 step 1's publish
   half is not built.

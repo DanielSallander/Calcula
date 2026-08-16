@@ -4,7 +4,9 @@
 
 Calcula aims to make all objects customizable and "open" for users. Rather than limiting users to fixed property panels, every object exposes its code so users can extend behavior and appearance directly.
 
-This feature sits at the heart of Calcula's founding vision. Excel was loved for letting users solve any specific problem themselves -- formulas, VBA, add-ins -- while the industry's successor tools (Power BI) lock users to vendor visuals and vendor data models, leaving them to wait for Microsoft to ship features. Scriptable Objects restore that "build it yourself, today" power through a modern, discoverable, typed experience. But they deliberately avoid repeating VBA's two failure modes: **security** (VBA macros run with full machine access; Calcula scripts are limited by tiered access levels -- see Design Decision 2) and **opacity** (VBA code hides inside binary files where a recipient never knows what a workbook will do; Calcula scripts are visible TypeScript, discoverable on the object that carries them, and must not run from a distributed package without explicit consent -- the Script Security consent dialog exists, with provenance wiring pending; pulled scripts are forced to restricted access in the meantime).
+This feature sits at the heart of Calcula's founding vision. Excel was loved for letting users solve any specific problem themselves -- formulas, VBA, add-ins -- while the industry's successor tools (Power BI) lock users to vendor visuals and vendor data models, leaving them to wait for Microsoft to ship features. Scriptable Objects restore that "build it yourself, today" power through a modern, discoverable, typed experience. But they deliberately avoid repeating VBA's two failure modes: **security** (VBA macros run with full machine access; Calcula scripts are limited by tiered access levels -- see Design Decision 2) and **opacity** (VBA code hides inside binary files where a recipient never knows what a workbook will do; Calcula scripts are visible TypeScript, discoverable on the object that carries them, and must not run from a distributed package without explicit consent -- the Script Security consent dialog exists and **provenance wiring is live** -- `buildHandleFromDefinition` (`app/src/api/scriptHost/broker.ts:85-97`) derives `isDistributed` from `definition.provenance === "distributed"`, and that drives the tier ceiling, whether `ui.html` is auto-granted, and whether consent is required).
+
+> **[CORRECTED 2026-08-16]** The clause above previously read *"with provenance wiring pending; pulled scripts are forced to restricted access in the meantime"*. That was a Wave-2-era statement (see `script-sandbox-architecture.md` §12) and had been stale for some time. Distributed scripts are still forced to the restricted tier -- but now because provenance is a real, plumbed input to the broker, not as an interim blanket measure.
 
 ## Core Concept
 
@@ -35,6 +37,13 @@ Workbook              (one script - lifecycle, global events)
       |-- [Components]  (per-instance scripts - slicer, chart, etc.)
 ```
 
+**[UPDATED 2026-08-16]** The diagram is the original concept and is still the right mental model,
+but the set has grown. The authoritative list is the `ScriptableObjectType` union in
+`app/src/api/scriptableObjects.ts:34-54`, which now carries, beyond the five primitives above:
+`slicer`, `chart`, `pivot`, `button`, `textbox`, `timeline`, `shape`, `table`, `namedRange`,
+`range` (a cell-behavior binding target from granular-bricks phase 2 -- its `instanceId` is the
+binding id in the cell-behaviors store) and `panel` (UI objects keyed by panel id).
+
 ## Design Decisions
 
 ### 1. Approach: Layered
@@ -54,6 +63,30 @@ Workbook              (one script - lifecycle, global events)
 - No live link back to the template - once stamped, each copy is independent
 - Templates stored in user-level folder (e.g., `%APPDATA%/Calcula/templates/`)
 - Exportable as `.calcula-template` files for sharing
+
+> **[SECURITY -- added 2026-08-16, after BUG-0092.]** A `.calcula-template` file is **executable
+> code plus the privilege level it asks to run at**, not a document. The bullets above describe it
+> as a sharing format, and that framing is exactly what produced the defect: `importTemplate` was
+> `JSON.parse(json) as ObjectTemplate` -- a **cast, which validates nothing** -- and the parsed
+> object was persisted verbatim, `accessLevel` included. `stampFromTemplate` copies that field onto
+> the stamped definition and `buildHandleFromDefinition` (`broker.ts`) turns
+> `accessLevel === "unlocked"` into `tier: "unlocked"`: whole-workbook reach (`getCellValue`,
+> `setCellValue`, `updateCellsBatch` over 100,000 cells, `executeCommand`). Object scripts run on
+> their object's events, so no further user gesture was needed to execute it. **An imported file
+> chose the privilege tier of the code it installed.**
+>
+> Two rules now hold, enforced in `app/extensions/ScriptableObjects/lib/templateManager.ts:209-263`
+> and pinned by `__tests__/templateImportTier.test.ts`:
+>
+> 1. **The file never chooses its tier.** `accessLevel` is hard-coded `"restricted"` under the
+>    comment *"NEVER `raw.accessLevel`."*
+> 2. **The file never chooses its identity.** The id is a fresh `crypto.randomUUID()`, *"so an
+>    imported file cannot choose the identity that a capability grant or a source hash is keyed to."*
+>
+> Import is a field-by-field validator; anything unknown or malformed is refused with
+> `TemplateImportError`. Any future "share a template" affordance must keep both rules, and the UI
+> must not invite the user to "import a file" as though they were choosing a document. Full write-up:
+> `wave3-scripting-security.md` §12.
 
 ### 4. Discoverability: Monaco Editor + Scaffolded Templates
 - Code tab uses an embedded **Monaco editor** with full IntelliSense

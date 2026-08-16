@@ -6,6 +6,24 @@
 phase-by-phase status. This document was originally written ahead of v1.0
 to ensure the necessary doors were left open.
 
+> **Documentation audit 2026-08-16.** Re-verified against code. The scope
+> decisions, three-layer model, manifest declarations, storage layout, fold
+> semantics and the GATHER family all hold. Three things do not, and are marked
+> `CORRECTED 2026-08-16` where they appear:
+>
+> 1. **`list_object` mode was never implemented.** The variant exists in the
+>    type and round-trips through the manifest; nothing reads it.
+> 2. **The GATHER cache is NOT persisted in the `.cala`.** It is in-memory only,
+>    so "offline opening with last known aggregates" does not happen.
+> 3. **The v1.0 prerequisite that edits be REFUSED on writeback cells was
+>    deliberately reversed in v1.1** — writeback cells are editable, which is
+>    the entire point of the feature. The prerequisite was correct for v1.0 and
+>    is now historical.
+>
+> Separately: `GATHER.AT` — the function this document singles out as the
+> primitive making tabular consolidation possible — works but is missing from
+> the function catalog, so no user can discover it. Filed as **BUG-0095**.
+
 ## Motivation
 
 The v1.0 distribution system is read-only from the consumer perspective:
@@ -126,6 +144,21 @@ WritebackRegion {
 - `per_subscriber` - private slot per submitter; publisher aggregates via
   `GATHER()` family of functions
 - `list_object` - shared list-object cell; each submitter appends one entry
+
+> **CORRECTED 2026-08-16 — `list_object` was designed but NEVER BUILT, and
+> the field it is declared in is dead.** `WritebackMode` exists
+> (`core/calp/src/writeback.rs:21`) and `mode` round-trips through the signed
+> manifest, but **no production code reads `decl.mode`** — every reference to
+> it outside a serde round-trip test is in `writeback.rs`'s or `manifest.rs`'s
+> own tests. A region declared `list_object` therefore behaves silently as
+> `per_subscriber`. The 2026-06 review recorded this as finding **3D** and
+> closed it the honest way, by removing `ListObject` from the Designate
+> Writeback dialog (roadmap #14) so an author cannot pick an option that lies;
+> full structured multi-column regions were deferred as an L-effort redesign of
+> the region model. The design below is retained because that redesign is still
+> the intended destination — but nothing today implements it, and a
+> hand-written manifest that sets the field gets `per_subscriber` semantics
+> with no warning.
 
 ### Schema
 
@@ -274,6 +307,21 @@ visible aggregates: a sum across regional forecasts, a per-line-item total via
 > `GATHER.AT("region", ROW(B2), COLUMN(B2))` targets B2. They are converted to
 > the 0-based region/registry coordinates internally.
 
+> **CORRECTED 2026-08-16 — all five functions exist, but `GATHER.AT` is
+> UNDISCOVERABLE.** Verified present in the parser
+> (`core/parser/src/ast.rs:1019-1023`), the renderer (`ast.rs:1568-1572`) and
+> the evaluator (`core/engine/src/evaluator.rs:1987`, with dedicated tests. The
+> function catalog, however — `BuiltinFunction::all_catalog_entries()`,
+> documented in its own header as "the **single source of truth** for the
+> function catalog" — lists only four of them (`ast.rs:2412-2415`) and omits
+> `GATHER.AT`. So the one function this section calls out as "the primitive that
+> makes per-line-item / tabular consolidation possible" never appears in
+> autocomplete or the Insert Function dialog, and `get_function_template`
+> falls through to a bare `=GATHER.AT()` with no argument placeholders while its
+> four siblings get generated templates. It works perfectly if you already know
+> to type it. Filed as **BUG-0095** (open); the fix is one catalog entry plus
+> the enum-vs-catalog exhaustiveness test that does not currently exist.
+
 `GATHER` functions are subject to the region's visibility policy: a
 subscriber calling `GATHER` on an `own_only` region sees only their own
 submission.
@@ -287,9 +335,42 @@ these functions specifically.
 - Results are cached per evaluation session; the engine does not refetch on
   every formula recompute within a session.
 - A "refresh writeback aggregates" command invalidates the cache and refetches.
-- Offline: cached values are used; a warning indicator surfaces in the UI.
-- The cache is part of the local `.cala` to allow offline opening with last
-  known aggregates.
+- ~~Offline: cached values are used; a warning indicator surfaces in the UI.~~
+- ~~The cache is part of the local `.cala` to allow offline opening with last
+  known aggregates.~~
+
+> **CORRECTED 2026-08-16 — the last two bullets were NEVER BUILT.** The cache is
+> `AppState.gather_cache`, typed
+> `Mutex<Option<(std::time::Instant, HashMap<String, GatherRegionData>)>>`
+> (`app/src-tauri/src/lib.rs:632`) and initialised to `None` at
+> `create_app_state` (`lib.rs:808`). An `Instant` is not serialisable and
+> nothing writes this map into the archive — it is **in-memory only and starts
+> empty on every launch**. There is no "data as of" or staleness indicator
+> either; the 2026-06 review proposed one and it was explicitly deferred as
+> infra (roadmap #15).
+>
+> **What actually happens, and why this has not bitten yet.** On a cold open
+> `build_gather_data` finds no cache, returns an EMPTY map and queues a
+> background rebuild (`app/src-tauri/src/calp_commands.rs:10709-10718`); when
+> the worker finishes and the fingerprint changed, every sheet is recalculated
+> and repainted. For a **local** registry — a directory on disk, which is the
+> only registry that can receive submissions at all — that round-trip is fast
+> and offline is a non-issue, which is why the missing persistence has stayed
+> invisible. The gap is real for an **HTTP** registry: it is read-only so it
+> never holds submissions today, and an unreachable one is put on a 5-minute
+> backoff (`GATHER_REGISTRY_BACKOFF`, `calp_commands.rs:10563`) rather than
+> paying a 30s connect timeout per artifact per TTL window.
+>
+> The consequence to keep in view if HTTP registries ever accept writeback: for
+> the window before the first rebuild lands, and indefinitely while a registry
+> is unreachable, `SUM(GATHER(...))` evaluates over zero submissions and shows
+> **0 with no error and no indicator** — a wrong number that looks like a right
+> one. Persisting the cache, or surfacing staleness, is what would close that;
+> neither exists today.
+>
+> The first two bullets are accurate: results are cached per session with a
+> 2-second TTL (`GATHER_CACHE_TTL`, `calp_commands.rs:10558`) and local
+> mutations invalidate eagerly via `invalidate_gather_cache`.
 
 This is the first crack in the "formula evaluation is local and synchronous"
 model. Other registry-aware functions may follow (live data feeds, cross-package
@@ -406,6 +487,31 @@ For v1.0 to leave doors open for v1.1 writeback:
    edits on any cell falling within a declared writeback region, even though
    v1.0 has no other writeback behavior. Backend mutation paths that bypass
    frontend guards (find-and-replace at minimum) must consult the same index.
+
+   > **SUPERSEDED 2026-08-16 by v1.1 Phase 14 — deliberately, not by drift.**
+   > The EDIT guard is gone: `app/extensions/Distribution/index.ts:392-394`
+   > carries the marker "writeback cells ARE editable (subscriber fills them).
+   > No edit guard block needed." A commit guard took its place
+   > (`index.ts:415`): it coerces the typed value by the region's DECLARED
+   > `valueType`, runs the publisher's advisory custom validator, saves a draft,
+   > and keeps the user in edit mode on rejection rather than displaying a value
+   > that was never saved. The RANGE guard survives and still refuses range
+   > operations overlapping a writeback region (`index.ts:397`).
+   >
+   > The backend backstop went much further than "find-and-replace at minimum":
+   > seven helpers now exist — `ensure_writeback_draft_before_write`,
+   > `…_on_sheets`, `…_before_grid_install`, `ensure_range_unclaimed`,
+   > `…_on_sheets`, `ensure_cells_unclaimed`, `…_on_sheet`
+   > (`app/src-tauri/src/calp_commands.rs:8694-8964`) — called from **33 sites**
+   > across `commands/data.rs`, `commands/search.rs`, `commands/structure.rs`
+   > and `merge_commands.rs`. The prerequisite's instinct that find-and-replace
+   > was "the known one" and a survey would find others was right by an order of
+   > magnitude.
+   >
+   > One artifact of the reversal is still user-visible: the surviving range
+   > guard's message reads "Some cells in this range are reserved for input in a
+   > future version" (`index.ts:404`) — v1.0 wording that outlived the version
+   > it described, since that future version shipped.
 3. The style interceptor pipeline is the delivery mechanism for any future
    writeback visual treatment. v1.0 registers a writeback-aware interceptor
    with a no-op return for writeback cells; v1.1 fills in the visual.

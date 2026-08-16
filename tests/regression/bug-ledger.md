@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 94 | Open: 0 | Triaged: 0 | Fixed: 94 | Other: 0
+Total: 97 | Open: 3 | Triaged: 0 | Fixed: 94 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1180,4 +1180,28 @@ THE NEW UNDO-EVIDENCE META-ASSERTION TURNED THE INVARIANT PROJECT RED ON A SEED 
 **Oracle:** shrinker
 
 THE SHRINKER SPENT ITS WHOLE BUDGET ON A VIOLATION IT COULD NOT POSSIBLY REPRODUCE. When the rapid-fire walk failed `undo-evidence-missing`, `writeFailureBundle` handed the 50-action trace to ddmin, which ran 16+ candidate replays with EVERY ONE reported `-> pass`. It could not have gone otherwise: all three replay paths (`state-consistency`, `soak-walk`, `replay-trace`) construct their OracleBattery with `requireUndoEvidence: false` -- correctly, so a one-action shrink candidate is not judged on undo evidence -- so the verdict being minimized is one the replay function is structurally incapable of returning. ddmin reduced nothing, would have burned up to 30 replays and a 15-minute budget per failing seed, and writes a bundle whose `could not reduce` reads to the next human like a failed reproduction. It is also the wrong question: `undo-evidence-missing` is a property of the walk's CONFIGURATION (cadence vs history-ender density), not of the trace, so no subset of the actions is a smaller reproducer.
+
+
+## BUG-0095 `[open]`
+
+**Found:** 2026-08-16 (manual)
+**Oracle:** function-catalog-completeness
+
+GATHER.AT IS A WORKING FORMULA FUNCTION THAT NO CATALOG KNOWS ABOUT. `BuiltinFunction::all_catalog_entries()` (core/parser/src/ast.rs:1867) is documented in its own header as "the single source of truth for the function catalog", and it lists four of the five GATHER functions -- GATHER, GATHER.FROM, GATHER.COUNT, GATHER.SUBMITTERS (ast.rs:2412-2415) -- but not GATHER.AT. GATHER.AT is otherwise fully shipped: it lexes/parses (ast.rs:1023), renders back (ast.rs:1572), and evaluates (core/engine/src/evaluator.rs:1987, `fn_gather_at`, with five dedicated evaluator tests). Both consumers of the catalog are therefore wrong about it: `build_full_catalog` (app/src-tauri/src/formula.rs:35) omits it from the function list that drives Insert Function / autocomplete, and `get_function_template` (formula.rs:126) finds no entry and falls through to its `format!("={}()", upper)` fallback, so inserting it yields a bare `=GATHER.AT()` with no argument placeholders while its four siblings get a generated template. Nothing catches this: there is no test asserting the enum and the catalog agree (the only catalog test, `test_get_controlvalue_catalog_entry_and_aliases` in core/parser/src/tests.rs:1684, checks one unrelated function), and the deliberate-hiding mechanism that does exist -- `FunctionMeta::alias()`, ast.rs:2540, which sets `is_alias` so `build_full_catalog` filters the entry out -- was NOT used here, so this is an omission rather than an intentional hide. GATHER.AT is the one GATHER function docs/design/calp-writeback.md singles out as load-bearing ("the primitive that makes per-line-item / tabular consolidation possible"), and it is the only one a user cannot discover.
+
+
+## BUG-0096 `[open]`
+
+**Found:** 2026-08-16 (manual)
+**Oracle:** drill-through-fail-safe
+
+A PIVOT IN script DRILL MODE WHOSE SCRIPT DOES NOT REGISTER onDrillThrough SWALLOWS THE DOUBLE-CLICK ENTIRELY -- no drill, no fallback, no message. The interceptor in app/extensions/Pivot/index.ts (lines 1725-1748) branches on `behavior?.kind === "script" && hasObjectScript("pivot", pivotId)`, emits the app event `pivot:drillThrough`, and RETURNS -- skipping the built-in drillThroughToSheet path. Its own comment states the invariant it is protecting: the hasObjectScript guard exists 'so a double-click is never a silent no-op'. But hasObjectScript (app/src/api/objectScriptBadge.ts:38) only answers 'does this object have a script attached', not 'does that script handle this event'. The handler side is opt-in: the forwarder is installed only when the script calls pivot.onDrillThrough (app/src/api/scriptHost/host.ts:12090, case "pivot.onDrillThrough"), so a pivot script that registers only, say, onRefresh leaves the emitted event with no subscriber. The double-click is consumed by the interceptor (it returns true), so the user gets no drill sheet, no built-in fallback and no toast -- the exact silent no-op the guard was written to prevent, and a violation of requirement 7 of docs/design/pivot-drillthrough-customization.md section 6 ('Consent denied, capability missing, script error, or timeout -> fall back to builtin (or no-op with a toast) ... The drill never breaks the pivot').
+
+
+## BUG-0097 `[open]`
+
+**Found:** 2026-08-16 (manual)
+**Oracle:** script-surface-taxonomy-accuracy
+
+THE SCRIPT-SURFACE TAXONOMY STILL DESCRIBES A RETIRED BEARER-TOKEN AUTHORIZATION MECHANISM THAT NO LONGER EXISTS IN THE CODE. `app/src/api/scriptSurfaces.ts` is the single queryable source of truth backing the Transparency pillar -- it feeds the transparency panel and is the answer to "what can this surface reach and how is it gated". Its `script-library` row is stale in two fields. (1) `gate` (scriptSurfaces.ts:158) ends: "Calls in are authorized by an unguessable host-issued token, which is delegation-transparent but not caller-identifying -- see docs/design/script-package-manager.md §10.4". (2) `containment` (:130) says exported names are routable "through one token-gated entry point". Neither is true any more. The token design was REPLACED by `base.callImport`, which authorizes on caller IDENTITY: the broker row + validator are at allowlist.ts:105 (`vCallImport`), dispatch at host.ts:2645, and the authorization is `authorizeImportCall` (host.ts:2304-2328), which resolves the alias in `scriptImports` (host.ts:2216) -- host state keyed by the CONSUMER's authoritative mount id and written only by trusted linker code -- then caps the call by that caller's own declared capabilities via `requireCallerCoversLibrary` (host.ts:2331). The token machinery is gone, not merely bypassed: `app/src/api/scriptLibraries/linker.ts:38-39` states "There is no bearer token any more. The previous design minted a 128-bit token per (realm, consumer) and baked it into the prelude", and host.ts:2174-2177 records the consequence -- "There is no credential left to leak. Handing a peer the alias string achieves nothing: the peer's own table is consulted, not the sender's." The doc section the row cites, script-package-manager.md §10.3/§10.4, has been marked CLOSED by the 2026-08-16 documentation audit, so the row now points a reader at a section that explicitly says the mechanism it describes was deleted.
 

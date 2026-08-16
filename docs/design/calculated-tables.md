@@ -10,10 +10,28 @@ host table), and `.calp` snapshot carry — publish embeds each materialized
 calculated table's cached batch as an Arrow IPC artifact
 (`models/{ds}/calculated_tables/{i}.arrow`, integrity-checksummed), pull
 restores it via `Engine::store_calculated_table_snapshot` so subscribers
-without source access still see the data. Next: the DAX gap backlog
-(ALLSELECTED, LOOKUPVALUE/RELATED, dynamic format strings, TREATAS, ...).
+without source access still see the data. ~~Next: the DAX gap backlog
+(ALLSELECTED, LOOKUPVALUE/RELATED, dynamic format strings, TREATAS, ...).~~
+**That backlog is DONE** (2026-08-16 audit): `ALLSELECTED` and `TREATAS` parse
+(`engine-core/src/compute/parser/mod.rs:307-308`), and the changelog's version
+history records `LOOKUPVALUE` at v17, dynamic format strings at v18, and
+`PATH`/`DETAILROWS`/perspectives at v19.
 Owners: Model Editor + BI engine
 Supersedes: the "Shared Expressions" / model global variables concept
+
+**Audit note (2026-08-16, code-verified).** Every engine symbol this document
+names still exists and still does what is claimed: `materialize_calculated_table`
+/ `store_calculated_table_snapshot` (`model-engine-lib/crates/engine/src/
+materialize.rs`), `infer_calculated_table_columns`
+(`engine-core/src/model/global_variable.rs`), `CalendarSpec`, and the `.calp`
+artifacts at `models/{ds}/calculated_tables/{i}.arrow`
+(`core/calp/src/publish.rs:588`, manifest note at `core/calp/src/manifest.rs:471`).
+Two clarifications for a later reader: the **v15** below is the ENGINE model
+format (`MODEL_FORMAT_VERSION`), not the `.cala` `format_version`, and the
+engine is now at **v23** — v15 remains correct as the bump this feature made.
+The engine lives in this repo at `model-engine-lib/` (own Cargo workspace) since
+2026-07-24; host-facing engine changes need a
+`model-engine-lib/docs/host-integration-changelog.md` entry.
 
 ## Summary
 
@@ -164,7 +182,8 @@ A materialized calculated table is an `InMemory` table whose source is a
     cached data to snapshot.
   - Then return to the DAX gap list (ALLSELECTED, LOOKUPVALUE/RELATED,
     dynamic format strings, TREATAS, field parameters, ISFILTERED, PATH,
-    DETAILROWS, OLS/perspectives).
+    DETAILROWS, OLS/perspectives). **Done — engine v16 through v20 closed
+    this list; only aggregation-table AUTO-ROUTING remains deferred.**
 
 ## Cross-component touchpoints
 
@@ -175,5 +194,7 @@ A materialized calculated table is an `InMemory` table whose source is a
   tables tab, Tables/Relationships/Lineage sections), `src-tauri/src/bi/
   model_editor.rs` commands, `.cala`/`.calp` write sites for the format
   stamp.
-- Studio is transitional (being folded into the Model Editor) and only needs
-  to keep compiling.
+- ~~Studio is transitional (being folded into the Model Editor) and only needs
+  to keep compiling.~~ **Superseded 2026-07-11: stand-alone Calcula Studio is
+  RETIRED and FROZEN** — it is not built, not fixed, and not to be touched. The
+  Model Editor is the only model-designer surface (`model-editor.md`).

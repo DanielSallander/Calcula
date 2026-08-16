@@ -11,6 +11,17 @@ adversarial verification of every finding against source. 38 findings confirmed,
 1 refuted. Plus hands-on smoke tests + a new multi-user simulation (see
 [Verification](#verification-this-session)).
 
+> **Citation refresh 2026-08-16.** Every `file:line` in this review was
+> re-resolved against the current tree; the app crate has roughly quadrupled in
+> size since June and **every line number here had drifted** (e.g.
+> `apply_gather_governance` 2750 -> 10362, `submit_region_internal` 2397 ->
+> 8084, `calp_set_submission_state` 2588 -> 9657). Numbers below are the
+> verified current ones. The findings themselves re-verified as correct,
+> including the two the June session left open (3C notifications, 3D structured
+> multi-column input) — see the audit note at the end of §5. Nothing in this
+> review was found stale in the "claims a defect that has since been fixed"
+> direction except the one bullet marked in §5.
+
 > **Update 2026-06-22 (same session):** all five P0 items are **implemented** —
 > **#1 (authorize approve/reject)**, **#2 (validate on the authoritative submit
 > path)**, **#3 (read-side integrity: schema + deadline at GATHER time, reject
@@ -42,11 +53,11 @@ trust boundary.
 ## 2. What works well
 
 - **Per-cell registry model.** Submissions are stored keyed by
-  `(submitter_id, region_id, row, col)` (`core/calp/src/registry.rs:330`), with
+  `(submitter_id, region_id, row, col)` (`core/calp/src/registry.rs:352`), with
   slot-replace-on-resubmit semantics (supersedence is structural, not a caller
   concern).
 - **GATHER governance / visibility is real and test-pinned.**
-  `apply_gather_governance` (`app/src-tauri/src/calp_commands.rs:2750`) correctly
+  `apply_gather_governance` (`app/src-tauri/src/calp_commands.rs:10362`) correctly
   implements `OwnOnly` / `OwnPlusAggregate` anonymization, drops `Empty` so
   cleared cells don't skew `AVERAGE`/`COUNT`, and gates `OnApproval` regions on
   approved state. 8 isolated unit tests; the pre-D8 "every gatherer is a
@@ -59,7 +70,7 @@ trust boundary.
   package versions merge forward through a schema-compatibility gate
   (`is_compatible_with`).
 - **Robust submit ordering.** `submit_region_internal` writes to the registry
-  *first*, then advances local drafts (`calp_commands.rs:2428`), so a write
+  *first*, then advances local drafts (`calp_commands.rs:8084`), so a write
   failure leaves drafts resubmittable rather than silently lost.
 
 ## 3. Coverage gaps vs business expectations
@@ -103,23 +114,42 @@ trust boundary.
 
 ### Critical (exploitable today, independent of the D8 authenticated-identity roadmap)
 
-- **Any subscriber can approve/reject any submission.**
-  `calp_set_submission_state` (`calp_commands.rs:2588`) is only
-  MAIN-window-guarded and resolves the target registry by "which of my
-  subscriptions *declares* this region" — every subscriber satisfies that. **No
-  publisher-role or publisher-key check anywhere.** A participant can self-approve
-  their own out-of-policy value into an `OnApproval` aggregate, or reject a
-  rival's. Fix: gate on proof of publisher ownership (the Ed25519 signing key
-  already used for `.calp`).
+- **✅ FIXED — Any subscriber could approve/reject any submission.**
+  *(Fix marker added 2026-08-16: this bullet described a live critical
+  vulnerability with no fix marker, while roadmap row #1 already said P0 DONE.
+  A reader landing in §4 would have believed it still exploitable. Verified
+  fixed in code.)* As found: `calp_set_submission_state` was only
+  MAIN-window-guarded and resolved the target registry by "which of my
+  subscriptions *declares* this region" — every subscriber satisfies that, with
+  **no publisher-role or publisher-key check anywhere**, so a participant could
+  self-approve their own out-of-policy value into an `OnApproval` aggregate, or
+  reject a rival's. **Now gated:** `calp_set_submission_state`
+  (`calp_commands.rs:9657`) calls `require_publisher` (`calp_commands.rs:8551`)
+  before any state change, which proves possession of the Ed25519 secret the
+  signed manifest asserts as `publisher_key` via
+  `calp::signing::profile_holds_publisher_key` (`core/calp/src/signing.rs:200`)
+  — a read-only ownership probe that derives the public key from the on-disk
+  secret, so a forged `publicKey` field is rejected and no keypair is ever
+  created as a side effect. See roadmap #1.
 
 ### High
 
-- **Schema & lifecycle validation are bypassed on the real submit path.**
-  `schema.validate()` + `check_lifecycle_policy()` run *only* in
-  `calp_save_writeback_draft`. `submit_region_internal` (`calp_commands.rs:2397`)
-  — which actually writes to the registry — writes drafts **unvalidated**. A
-  scripted client or tampered `.cala` lands out-of-range/wrong-type/required-
-  violating values in the registry. Fix: re-validate inside the submit path.
+- **✅ FIXED — Schema & lifecycle validation were bypassed on the real submit
+  path.** *(Fix marker added 2026-08-16: same problem as the Critical bullet —
+  roadmap row #2 said P0 DONE while this bullet still read as open. Verified
+  fixed in code.)* As found: `schema.validate()` + `check_lifecycle_policy()`
+  ran *only* in `calp_save_writeback_draft`, so `submit_region_internal` — which
+  actually writes to the registry — wrote drafts **unvalidated**, letting a
+  scripted client or tampered `.cala` land out-of-range / wrong-type /
+  required-violating values in the registry. **Now validated at the boundary:**
+  `submit_region_internal` (`calp_commands.rs:8084`) re-resolves the region
+  declaration from the signature-VERIFIED version manifest
+  (`calp::integrity::load_pinned_manifest_via`) rather than from local state,
+  and validates every draft in the batch against it before any write, atomically
+  — one bad value rejects the whole submit. It also refuses to write any draft
+  whose `submitter.id` differs from the installation identity, closing the
+  crafted-`.cala` impersonation route. Draft-save validation is now UX-only; the
+  enforcement boundary is the submit path. See roadmap #2 and #3.
 - **✅ FIXED — GATHER aggregated submitted values with no read-side
   re-validation.** `apply_gather_governance` now drops any submission that fails
   the region's `ValueSchema` (`schema.validate(...).is_ok()`), so a hand-written
@@ -185,9 +215,38 @@ trust boundary.
   feel live; others' submissions lag until the TTL lapses *and* a recalc fires.
   Intentional tradeoff, but reads as a bug. Suggest a "data as of HH:MM:SS"
   indicator like the BI pivots.
-- **Latent `Empty → 0.0` trap** — governance drops `Empty` first, but the dead
-  `Empty → Number(0.0)` arm (`calp_commands.rs:2970`) would reintroduce phantom
-  zeros if a future path skips governance.
+- **✅ FIXED — Latent `Empty → 0.0` trap.** As found: governance dropped `Empty`
+  first, but a dead `Empty → Number(0.0)` arm in `build_gather_data` would have
+  reintroduced phantom zeros if a future path ever skipped governance. Closed by
+  roadmap #15 and verified gone 2026-08-16 — `build_gather_data`
+  (`calp_commands.rs:10685`) now returns `None` for
+  `SubmissionValue::Empty` at its conversion site (`calp_commands.rs:10921`)
+  instead of coercing, and `apply_gather_governance` still drops `Empty`
+  independently (`calp_commands.rs:10398`). Two layers, neither relying on the
+  other.
+
+> **Audit note 2026-08-16 — the two gaps this section and §3 left open are
+> still open, and still for the reasons given.**
+>
+> - **3C (no notifications / reminders)** — no push or reminder channel exists.
+>   What shipped instead is the in-app deadline surfacing of roadmap #13 (a
+>   "Due in …/Overdue" chip in the WritebackPane), which covers "I didn't know
+>   it was due" only while the app is open. Unchanged.
+> - **3D (no structured / multi-column row input)** — unchanged and worth
+>   restating precisely, because the wording above can read as if the dialog
+>   still offers the broken option: `ListObject` was removed from the Designate
+>   dialog (roadmap #14), so an author can no longer PICK it. The underlying
+>   deadness is what remains — `WritebackMode` exists
+>   (`core/calp/src/writeback.rs:21`) and `mode` round-trips through the signed
+>   manifest, but **no production code reads `decl.mode`**; every reference
+>   outside a serde round-trip test is in `writeback.rs`'s or `manifest.rs`'s
+>   own tests. A hand-written manifest setting `list_object` still silently gets
+>   `per_subscriber`. The region-model redesign that would make a subscriber
+>   filling a *row* buildable was deferred as L-effort and has not happened.
+> - **#11 (write-path tests) remains PARTIAL.** There is still no UI-driven
+>   Playwright round-trip for writeback, and the simulation's governance port is
+>   still a hand-maintained copy of `apply_gather_governance` — see the caveat
+>   at the end of this document, which still applies.
 
 ## 6. Prioritized improvement roadmap
 

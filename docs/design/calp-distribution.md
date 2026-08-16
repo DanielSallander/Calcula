@@ -19,6 +19,17 @@ artifacts instead of base64 inside `controls.json`, and the pull path — the
 last unvalidated binary route into a subscriber's document — was closed. See
 "Binary Media in Packages (2026-08)" below.
 
+**Documentation audit 2026-08-16.** Every substantive claim below was
+re-verified against code. Four were stale and are corrected in place, each
+marked `CORRECTED 2026-08-16`: the list of categories publish still excludes
+(five of the six named items now travel), what happens to an inline image this
+build refuses (the cap-violating class is now DROPPED, not left inline — that
+was the defect, BUG-0086), "packages MAY be signed" (every package is signed,
+and trust is enforced client-side, not by the registry), and the audit log's
+"opt-in, off by default" (writeback egress is now always recorded). The
+identity model, formula-storage and refresh/override sections were spot-checked
+and hold.
+
 Backward compatibility with prior in-development formats is a non-goal.
 When this design conflicts with existing code or data structures, the
 existing code changes. No migration paths, no legacy-format readers,
@@ -288,7 +299,22 @@ A side pane with three views (filterable or tabbed - implementation choice):
 
 ## Security and Trust
 
-- `.calp` packages may be signed; the registry enforces signing policy.
+- ~~`.calp` packages may be signed; the registry enforces signing policy.~~
+  **CORRECTED 2026-08-16:** both halves are wrong now. Signing is **not
+  optional** — `publish()` loads or creates the publisher's Ed25519 keypair and
+  always writes a detached `version-manifest.sig` over the raw manifest bytes
+  (`core/calp/src/publish.rs:1176`), recording the asserted signer as
+  `publisher_key` (`publish.rs:557`). And the policy is enforced by the
+  **client**, not the registry: a registry is often a dumb static file host with
+  no server code at all, so it could not enforce anything. Trust is TOFU against
+  a pin store in the user profile, under `PinPolicy`
+  (`core/calp/src/integrity.rs:439-458`): `PinOnFirstUse` (reporting `FirstUse`,
+  or `FirstUseKnownPublisher` when that key is already trusted from another
+  registry), `PinAcceptingNameConflict` for the case where the user has been
+  shown a cross-registry name conflict and accepted it, `VerifyOnly`, and
+  `RequirePinned`, which can only succeed against an existing pin. The same
+  machinery covers distributed extensions via signed sidecar manifests verified
+  at scan.
 - Packages with executable content (formulas reaching external data,
   extensions/macros when those land) prompt the user on first refresh per
   package, similar to first-run extension trust.
@@ -299,10 +325,27 @@ A side pane with three views (filterable or tabbed - implementation choice):
 ## Telemetry and Audit
 
 - Registry-side: server logs (who pulled what version when). Standard.
-- Workbook-side: opt-in audit log in the `.cala` recording subscription
-  events, refreshes, and override creation. Policy is set per registry: a
-  registry may require audit logging for packages it serves. Off by default
-  for packages from registries that do not require it.
+- Workbook-side: an audit log in the `.cala` recording subscription events,
+  refreshes, and override creation. Policy is set per registry: a registry may
+  require audit logging for packages it serves. Off by default for packages
+  from registries that do not require it.
+
+  > **CORRECTED 2026-08-16 — "opt-in / off by default" is no longer true of the
+  > whole log.** `AuditEvent::is_always_recorded` (`core/calp/src/audit.rs:108`)
+  > carves out two classes that record REGARDLESS of the `enabled` flag: script
+  > activity (`ScriptExecuted`, `CapabilityCall`), and **writeback**
+  > (`WritebackSubmitted`, `WritebackReviewed`, `WritebackInvalidated`). The
+  > reasoning is worth keeping: submitting is the moment a contributor's typed
+  > values LEAVE THE MACHINE for a shared registry, which makes it an egress
+  > event much closer to `net.fetch` than to bookkeeping like subscribe/refresh;
+  > an approve/reject changes whether someone's answer counts; an invalidation
+  > silently discards entered work. Recording those only when a workbook
+  > happened to opt in meant the trail was absent exactly when someone needed to
+  > reconstruct what they had sent. Distribution bookkeeping
+  > (subscribe/refresh/override/publish) does stay opt-in, as written above.
+  > Pinned by `writeback_events_record_even_when_disabled` (`audit.rs:250`), and
+  > the ring's overflow policy drops opt-in entries before always-recorded ones
+  > (`audit.rs:185-207`) so high-volume traffic cannot push the egress trail out.
 
 ## Author Workflow
 
@@ -359,11 +402,34 @@ instances:
   package fidelity automatically tracks file fidelity. Core `publish()`
   writes the subset the format supports.
 - **No silent drops.** Every publish returns a `PublishReport`
-  (included/excluded, each with a count and a reason), and
-  `calp_publish_preview` dry-runs the exact same assembly before anything is
-  written. Categories still excluded (slicers, ribbon filters, saved pivot
-  layouts, document theme, extension data, workbook files, and the
-  not-yet-persisted features) are *reported*, never silently dropped.
+  (included/excluded, each with a count and a reason —
+  `app/src-tauri/src/calp_commands.rs:406`), and `calp_publish_preview`
+  (`calp_commands.rs:969`) dry-runs the exact same assembly before anything is
+  written. Categories still excluded are *reported*, never silently dropped.
+
+  > **CORRECTED 2026-08-16 — the exclusion list below was five-sixths wrong,
+  > in the "says it is missing when it has shipped" direction.** A later round
+  > (the `Wave A` counters on `PublishResult`) brought most of it into the
+  > package: `slicers_published`, `ribbon_filters_published`,
+  > `pivot_layouts_published` and `extension_data_published` all exist on the
+  > publish result (`core/calp/src/publish.rs:159-166`), extension data is
+  > written as its own `extension_data.json` artifact and read back on pull
+  > (`publish.rs:1016`, `core/calp/src/pull.rs:698`, pinned by
+  > `pull_carries_extension_data`), and document theme travels too
+  > (`pull_carries_document_theme`, `pull.rs:2056`). Of the six categories the
+  > original sentence named, only **workbook files** is still excluded.
+  >
+  > The excluded set as actually built (`calp_commands.rs:538-600`) is:
+  > `workbookFiles` (subscriber-local by policy), `floatingRanges` (the objects
+  > do not distribute yet, though their backing cell-store sheets do travel, so
+  > formulas referencing them stay live), `comments` (unless the publisher ticks
+  > "Include comments"), `protection` and `workbookProtection` (governance
+  > features — but per-cell locked/hidden DO travel, as cell formatting),
+  > `gridDefaults` (workbook-wide row height / column width would re-size sheets
+  > the subscriber already had), `biRoleSelections` (a publisher's "view as"
+  > impersonation must not be re-applied under a subscriber's identity), and
+  > `documentProperties`. Each carries its own reason string, which is the
+  > property that matters and which the drift above did not damage.
 - **Materialization parity.** Pull and refresh now materialize tables, sheet
   presentation state (merges, freeze panes, tab color, visibility,
   gridlines, page setup, notes, hyperlinks), and controls; refresh uses
@@ -458,11 +524,48 @@ sites — first pull, refresh, dev pull — call it instead of the old
 way into the subscriber's document, so the package as published is untouched
 and its signature unaffected.
 
-A payload this build refuses (an SVG, or one over a cap) is **left inline, not
+> **CORRECTED 2026-08-16 — the paragraph below stated the exact posture that
+> turned out to be the hole (BUG-0086), and stated it as a virtue.** "Refused
+> for a policy reason" and "refused for exceeding a cap" are not one class, and
+> treating them as one is what left a decompression bomb renderable. The
+> corrected rule is immediately below; the original text follows it, struck
+> through, because its *reasoning about policy refusals* is still right and is
+> still the reason half the rule exists.
+
+A refused payload takes one of **two** paths, decided in one place —
+`judge_inline_image` (`app/src-tauri/src/media.rs:300`), which returns
+`Admit` / `LeaveInline` / `Drop`:
+
+- **Refused on POLICY** (an SVG, a BMP, an unknown format, a malformed header):
+  **left inline, not dropped.** It keeps rendering from its data URL under the
+  existing CSP `data:` allowance while the write door stays shut. Deleting it
+  would silently destroy a picture the subscriber can see, which is a worse
+  outcome than carrying a payload that can no longer spread.
+- **Refused because DECODING IT IS THE HARM** (over the 8 MiB byte cap, over
+  `MAX_MEDIA_DIMENSION`, or over `MAX_MEDIA_PIXELS` — `MediaError::is_decode_hazard`,
+  `core/calcula-format/src/media.rs:188`): **the property is CLEARED.** Leaving
+  one of these inline was the whole defect. `inspect_media` refused it entry to
+  the media store and the payload stayed in the control property regardless, so
+  the WebView — which has no such caps — decoded it anyway. A 30,000 x 30,000
+  single-colour PNG is a few KB of `controls.json` and 3.6 GB of RGBA in the
+  renderer, which is why the size cap alone never closed this: a bomb is SMALL.
+  Cleared, not deleted: the control keeps its identity, geometry and every other
+  property and paints an honest "No Image" placeholder, because removing the
+  control would silently change the sheet's layout.
+
+The two outcomes are counted separately and on purpose — `MediaMigration.refused`
+vs `MediaMigration.dropped` (`media.rs:261-279`) — so "we tolerated this" and "we
+destroyed this" can never be read off one number. The same verdict function
+governs the write door: `is_hazardous_inline_image` (`media.rs:348`) refuses the
+HAZARD class only, so a policy-refused SVG still round-trips through a property
+write unharmed rather than being destroyed by an edit to some unrelated property
+of the same control.
+
+~~A payload this build refuses (an SVG, or one over a cap) is **left inline, not
 dropped**: it keeps rendering from its data URL under the existing CSP `data:`
 allowance while the write door stays shut. Deleting it would silently destroy a
 picture the subscriber can see, which is a worse outcome than carrying a
-payload that can no longer spread.
+payload that can no longer spread.~~
 
 **What a subscriber sees: the same picture.** No consent prompt, no re-pull, no
 "package invalid". What changed is invisible and in their favour — the image is
@@ -494,6 +597,13 @@ at each command.
 - Promote-override-to-upstream mechanism (UI reserved; flow undefined)
 - Public registry discovery and trust model
 - Multi-user concurrent editing of a `.cala` (single-user assumed in v1)
-- **No artifact size cap exists at all.** A legacy inline payload that this
-  build refuses is left inline and is therefore unbounded — but that is a
-  special case of the general gap, not a media-specific one.
+- **No artifact size cap exists at all.** Still true, and still open:
+  `core/calp/src/pull.rs` bounds no artifact by size, so a hostile or merely
+  careless package can carry an arbitrarily large `data.json`. Media is the one
+  exception, capped at 8 MiB per image by `inspect_media`.
+  *(CORRECTED 2026-08-16: the sentence that used to follow — "a legacy inline
+  payload that this build refuses is left inline and is therefore unbounded" —
+  no longer holds. A payload refused for exceeding a cap is now cleared, not
+  left inline; see "The legacy-package contract" above. Only POLICY-refused
+  payloads stay inline, and those already passed the byte cap. The general
+  artifact gap is unaffected by that fix, which is why this item stays open.)*

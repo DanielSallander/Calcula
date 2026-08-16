@@ -4,10 +4,33 @@
 
 **Complete (2026-07-01).** Ships as the `Animation` extension (`app/extensions/Animation/`),
 registered in `app/extensions/manifest.ts`. Builds on three existing foundations rather
-than inventing new ones: the `scenario_show` transient-write precedent
-(`app/src-tauri/src/scenario_manager.rs`), the generic per-extension persistence tier (A5,
+than inventing new ones: the `scenario_show` recalculate-without-undo precedent
+(`app/src-tauri/src/scenario_manager.rs`) — **but see the correction below: `scenario_show`
+is NOT a transient write** — the generic per-extension persistence tier (A5,
 `app/src/api/extensionData.ts`), and the capability-classified backend door (A3,
 `app/src/api/backendCommands.ts`).
+
+### Current as of 2026-08-16
+
+- **SHIPPED and unchanged:** the engine/clock/four-driver architecture, the facades, GIF and
+  WebM export, the persistence + undoable-spec tier.
+- **SUPERSEDED (2026-08-07, by the `DocumentEffect` programme):** this document's original
+  claim that "there is *no flag* that suppresses undo" and that Animation simply mirrors
+  `scenario_show`. Animation's exemption is now **proof-carrying**: `anim_apply_frame` takes a
+  required `token` and must present a registered restore snapshot before it may write
+  (`TransientScope::prove_restore_registered`). See "The transient mechanism" below.
+- **CORRECTED (this document was wrong, and the code says so):** `scenario_show` is **not** a
+  transient write and never was. It applies values **permanently**, has no restore command, and
+  correctly calls `DocumentEffect::mutates` (`app/src-tauri/src/scenario_manager.rs:277`). It is
+  a precedent for *recalculating dependents without recording undo*, and for nothing more.
+  Four places in the Rust source name this file by path as the source of that confusion, two of
+  them regression tests that exist solely to stop someone copying the exemption to
+  `scenario_show`: `document_effect.rs:357`, `scenario_manager.rs:24`,
+  `document_effect_objects_tests.rs:486`
+  (`scenario_show_cannot_claim_the_animation_transient_exemption`), and
+  `document_effect_pilot_tests.rs:191`
+  (`scenario_shows_shape_cannot_claim_the_transient_exemption`).
+- **Nothing in this document is unbuilt.** All surfaces described here exist.
 
 **Related:**
 - `docs/design/scriptable-objects.md` — the composition-over-new-surface pattern this follows.
@@ -67,22 +90,41 @@ keyed by a **caller-owned token** so a restore survives a frontend reload:
 
 - `anim_snapshot(token, sheetIndex, cells)` — clones the listed cells into an `AppState`
   buffer (`AppState.animation_snapshots`) keyed by the token.
-- `anim_apply_frame(writes, sheetIndex) -> AnimationFrameResult` — applies the frame's
-  transient writes and recalculates dependents. It mirrors `scenario_show` step for step
-  (`get_recalculation_order` + `get_column_row_dependents` → `evaluate_formula_multi_sheet`
-  → `build_cell_data`).
+- `anim_apply_frame(token, sheetIndex, writes) -> AnimationFrameResult` — applies the frame's
+  transient writes and recalculates dependents. It mirrors `scenario_show`'s *recalculation*
+  step for step (`get_recalculation_order` + `get_column_row_dependents` →
+  `evaluate_formula_multi_sheet` → `build_cell_data`) but **not** its dirty-flag behaviour.
+  The `token` is **required** and is the whole enforcement mechanism, not a convenience
+  (`app/src-tauri/src/api_types.rs:1943-1953`); an earlier revision of this document documented
+  the signature without it.
 - `anim_restore(token, sheetIndex) -> AnimationFrameResult` — restores the saved cells,
   recalculates, and drops the buffer.
 
 **The key invariant, stated precisely:** `anim_apply_frame` does **not** append to the undo
-stack and does **not** mark the document dirty. There is *no flag* that suppresses undo —
-the command simply never calls any undo-recording path (it is not wrapped in a transaction
-and does not touch `undo.rs`). This is exactly how `scenario_show` mutates + recalculates
-the grid without producing an undo entry. Undo/redo therefore sees only intentional,
+stack and does **not** mark the document dirty. Undo/redo therefore sees only intentional,
 committed user actions — never an intermediate preview frame. On `stop`, `anim_restore`
 puts the model back exactly; a frame is never serialized because playback is force-stopped
 and restored on `SHEET_CHANGED` / `BEFORE_OPEN` / `BEFORE_NEW` / `BEFORE_SAVE` /
 `BEFORE_CLOSE` and in `deactivate()`.
+
+**How that invariant is enforced (revised 2026-08-07 — this replaces "there is no flag").**
+The original design relied on the command simply never calling an undo-recording path. Since
+the `DocumentEffect` programme made `FileState::is_modified` private with a single writer, a
+command that writes the grid must construct an effect, and Animation's is the **transient**
+arm — the one exemption from dirtying the document. It is not asserted, it is proven:
+
+- `frame_effect(state, token)` (`app/src-tauri/src/animation_commands.rs:226-233`) locks the
+  snapshot registry, calls `TransientScope::prove_restore_registered(&snapshots, token)`, and
+  only then returns `DocumentEffect::transient(&scope)`.
+- `TransientScope` (`app/src-tauri/src/document_effect.rs:371-384`) is `#[must_use]` and its
+  **only** constructor requires presenting the registry that the paired restore will read back,
+  containing that exact token.
+- `anim_apply_frame` refuses the write outright when no snapshot is on file
+  (`animation_commands.rs:291-299`), returning an error rather than silently escaping the flag.
+
+The operational definition, quoted from the gate's own doc comment: *"a write that is
+guaranteed to be undone"*. This is precisely why `scenario_show` **cannot** claim the
+exemption — it registers no restore, so it structurally cannot build a `TransientScope`.
 
 ### The four drivers (`app/extensions/Animation/drivers/`)
 
@@ -169,7 +211,9 @@ All backend calls flow through `app/extensions/Animation/lib/animationBackend.ts
 
 ## UI surfaces
 
-- **Timeline panel** (`components/TimelinePanel.tsx`) — a saved-animation list
+- **Timeline panel** (`components/TimelineSections.tsx` — renamed from `TimelinePanel.tsx`
+  when the panel-layout system made every ribbon/panel surface a set of per-group sections;
+  imported at `app/extensions/Animation/index.ts:31`) — a saved-animation list
   (load/edit/delete/new), an ad-hoc driver quick-config, the transport (step-back /
   play-pause / stop / step-forward, scrubber, fps, loop), and an export bar (GIF | WebM).
   Renders the Monte Carlo view when a Monte Carlo run is active.
@@ -187,8 +231,10 @@ All backend calls flow through `app/extensions/Animation/lib/animationBackend.ts
 - **Why transient writes bypass the undo stack.** Undo is a record of *intentional* user
   edits. A 100-frame playback is one gesture ("play"), not 100 edits; recording frames would
   bury real history and let a preview leak into a saved file. Modelling this as
-  snapshot/apply/restore *outside* any undo transaction (the `scenario_show` precedent) keeps
-  the invariant clean without a special "animation mode" the rest of the app must know about.
+  snapshot/apply/restore *outside* any undo transaction keeps the invariant clean without a
+  special "animation mode" the rest of the app must know about. (The original text credited
+  this to "the `scenario_show` precedent"; that borrowing was only ever valid for the
+  *recalculate-without-undo* half. Corrected 2026-08-16 — see the status header.)
 - **Composition over a new execution surface.** Animation adds no new sandbox, capability, or
   script tier. It *consumes* existing what-if data (scenarios), existing chart params, and the
   existing transient-recalc pattern. The only new backend surface is three token-keyed
@@ -234,3 +280,15 @@ All backend calls flow through `app/extensions/Animation/lib/animationBackend.ts
   - *Export controls* — with a driver loaded, both the Export GIF and Export WebM buttons are
     enabled; the WebM button being enabled also confirms `MediaRecorder` +
     `canvas.captureStream` are available in WebView2.
+  - *The play pill claims no cell* (added with the grid-region → viewport-pinned DOM fix) —
+    with a driver loaded, a click at A1 still selects A1. Asserted the way the defect actually
+    presented: it checks **both** that the selection moved **and** that playback did not start,
+    because checking only the selection would pass on a pill that stopped stealing the click
+    while still starting an animation underneath it.
+  - *Pill close control* — stops playback, restores the model, and unloads the driver (the
+    model comes back even when the control is clicked mid-flight).
+  - *Stop is not Unload* — the panel's **Stop** keeps the driver loaded, **Unload** gives it
+    back. The two buttons are deliberately separate (see Implementation notes) and this pins
+    the difference.
+
+  The spec file holds **9** tests as of 2026-08-16; this list previously named only the first 6.

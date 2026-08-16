@@ -1,7 +1,19 @@
 # Query-Object Unification
 
-Status: **consolidation moves 1–3 SHIPPED (2026-07-22).** Related:
+Status: **consolidation moves 1–3 SHIPPED (2026-07-22); re-verified against code
+2026-08-16 — all three still hold as written.** Related:
 `docs/design/paginated-reports.md`, `functions/pivot/design-view-reference.md`.
+
+Evidence for the re-verification: `paramSubstitution.ts` + `controlHints.ts` +
+`paramNames.ts` in `app/extensions/_shared/dsl/pivotLayout/`; the chart path
+substitutes before compiling (`Charts/lib/designQueryChartDataReader.ts:18,51`);
+the single orchestrator `_shared/lib/queryObjectRefresh.ts` holds the one
+`@api/controlValues` subscription with the 150ms debounce (`:14,111-117`); the
+only two `registerQueryObjectProvider` callers are
+`Reports/lib/reportQueryProvider.ts` and `Charts/lib/chartQueryProvider.ts`; the
+pivot legacy push list `connected_pivots` still exists on the Rust side. The
+north star below is **still unbuilt** — the "paginated report" form remains a
+comment in `_shared/dsl/pivotLayout/designQuery.ts:4` and nothing else.
 
 ## Context
 

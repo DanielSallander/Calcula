@@ -2,6 +2,10 @@
 
 ## The problem
 
+**Audited 2026-08-16: this document is accurate and complete; every artifact it names was
+verified present. No corrections were needed** — only the footnote below. It is the model the
+other architecture docs were brought up to.
+
 Calcula has **three** places user code runs, and today each has its *own* object
 model — "three products with rewrite cliffs":
 
@@ -162,3 +166,10 @@ so there is no big-bang cutover:
   own-object read/write aspect) and `namedRange` (whole-range aspects only, no
   per-cell access) keep their bespoke shapes: backing a full `ScriptRange` there
   would require new broker aspects, which the rest of C3 deliberately avoided.
+
+**Footnote on "three runtimes" (2026-08-16).** Three is right for *object models*, but the
+per-workbook audit trail now recognises a **fourth script-activity surface**: MCP/AI tool calls
+(`app/src-tauri/src/mcp/tools.rs`, recorded via `net_commands::record_capability_call`). MCP
+executes through the existing Rust-QuickJS surface rather than introducing a model of its own, so
+C3's scope is unchanged — but a reader counting script surfaces for security or audit purposes
+should count four, not three.

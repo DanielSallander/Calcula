@@ -471,7 +471,25 @@ no capability involved. All five are closed in `extensionWorkerHost.ts`; regress
 | Add-in becomes the CSV importer | `findImporter` takes the highest `priority`, and `priority` came from the sandbox; the manifest declares only the format id, so consent could not warn | an extension already handled by another importer is refused BY NAME; add-in importers register at a fixed negative priority so a later-registering built-in still wins |
 | Add-in claims `Ctrl+S` | `findConflicts` only logged; built-ins won by registration order, which is load-order luck, not policy — and consent shows the binding id, never the keys | a combination already bound (built-in, add-in or user) is a loud refusal |
 | Refusal toasts as a message channel | refusals were loud by design and unbounded by omission; `register` is a message an add-in can post in a loop, each toast echoing its own string | bounded by `MAX_VISIBLE_REFUSALS`; the audit entry is never rate-limited, only the noise |
-| `cellStyle` reads every visible cell | the handler is handed each cell's displayed value (that is the use case), while consent said only "adds cell styling" | disclosed as a reach sentence in consent (`CONTRIBUTION_REACH_NOTE`, so a later kind cannot ship a reach the prompt forgot) and in the transparency label. **Still ungated** — see the note in the review's §8 |
+| `cellStyle` reads every visible cell | the handler is handed each cell's displayed value (that is the use case), while consent said only "adds cell styling" | disclosed as a reach sentence in consent (`CONTRIBUTION_REACH_NOTE`, so a later kind cannot ship a reach the prompt forgot) and in the transparency label. ~~**Still ungated**~~ **GATED since 2026-08 by the `grid.read` capability — verified 2026-08-16** (see the note below the table) |
+
+> **[CORRECTED 2026-08-16] The last row's "Still ungated" has closed.** `grid.read`
+> (`ALL_CAPABILITY_IDS`) now gates this reach, and it is enforced at BOTH points where cells would
+> actually cross the boundary:
+>
+> * **Registration + every batch:** `app/src/api/scriptHost/extensionWorkerHost.ts:1173-1174` refuses
+>   the contribution unless the add-in **both declared and was granted** `grid.read`. Both halves are
+>   asked deliberately — the ceiling can never grow, but the live grant set shrinks when a user
+>   revokes in the transparency panel, and checking only the ceiling would have made the revoke
+>   ineffective for the one answer that can change.
+> * **Cell-change events:** `extensionWorkerHost.ts:777` delivers them with
+>   `redactCellContents: !mw.handle.grants.has("grid.read")`, so an add-in without the grant still
+>   learns that a cell changed but not what it says.
+>
+> Granting is recorded for transparency (`recordCapabilityGrant(..., "grid.read")`, :1196) so the
+> panel shows the reach in use rather than only in a label. The capability is deliberately scoped to
+> exactly this surface: `capabilityIds.ts:131-169` documents it, and
+> `app/src/api/scriptSurfaces.ts:206-208` puts it on the sandboxed-extension row and **no other**.
 
 ### 6.4 Deferred, with reasons (not "not yet")
 

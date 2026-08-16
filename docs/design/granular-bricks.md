@@ -337,10 +337,50 @@ label, fn)` — a publisher names a validator on a writeback region's schema; th
 subscriber's client runs it as an **advisory, as-you-type check**. The name
 rides the schema's forward-compatible `extra` map (no format change), surfaced
 to the subscriber via `WritebackRegionEntry.custom_validator`.
-*Security boundary, by design:* this is a frontend UX check only — the
-**authoritative** built-in `ValueSchema` gate on the Rust submit path is
-unchanged, so a bypassed custom validator can never land invalid data in the
-shared registry. `@api/writebackValidators.ts`.
+`@api/writebackValidators.ts`.
+
+> **[CORRECTED 2026-08-16 — this brick's stated security boundary is no longer
+> true, and the direction of the change matters.]**
+>
+> The original text read: *"Security boundary, by design: this is a frontend UX
+> check only — the authoritative built-in `ValueSchema` gate on the Rust submit
+> path is unchanged, so a bypassed custom validator can never land invalid data
+> in the shared registry."*
+>
+> That was an accurate description of the brick as first shipped, and the
+> reasoning was sound *for that design*: a purely advisory check cannot be a
+> security boundary, so it was deliberately not treated as one.
+>
+> **Publisher-authored validators now run authoritatively, server-side, on the
+> submit path.** `enforce_custom_validator`
+> (`app/src-tauri/src/calp_commands.rs:7730`) is called from the submit path
+> **before any registry write** (:8228-8239) and executes the publisher's
+> JavaScript in the embedded Rust QuickJS realm via `run_validator_batch`
+> (:7523). It returns `Err` — refusing the whole submission, nothing written —
+> in three cases: a rejecting verdict on any cell (:7782-7794), a validator that
+> **cannot be run to a verdict** (:7771-7780), and **missing or stale consent**
+> (:7748-7756, keyed to the exact validator code, so approval does not survive
+> the publisher changing it). It is **fail-closed** in all three.
+>
+> Two consequences a reader must not miss:
+>
+> 1. **This is a real execution surface**, first-class in the taxonomy:
+>    `writeback-validator` in `app/src/api/scriptSurfaces.ts:327-341` and in
+>    `SURFACE_PROFILES` (`core/script-engine/src/manifest.rs:367-374`), which
+>    records `host_globals_deleted: true` and no capabilities. Publisher code
+>    running on a subscriber's machine is exactly the thing the Transparency
+>    pillar exists to make visible, which is why it is consent-gated per
+>    machine and keyed by hash of the body.
+> 2. **A publisher's validator can now block a user's submission** — including
+>    valid data, if the validator is wrong or unrunnable. The old text told the
+>    reader the opposite ("can never land invalid data" implies the worst case
+>    is over-permissiveness). The worst case is now refusal.
+>
+> The built-in `ValueSchema` gate is still there and still authoritative; the
+> custom validator is an additional gate, not a replacement. A script reaching
+> this path directly (via the `distribution.writeback` gateway or
+> `calp_submit_region`) is judged by the same code as a human clicking Submit —
+> there is no verdict parameter to forge (:8227-8232).
 
 **Brick 4 — Distributable object types (SHIPPED, cell-types dogfood).** The
 open channel for object families beyond the built-in set: a new optional,

@@ -27,6 +27,29 @@ dependency graph (ME-7)** — all hosted in the standalone editor window. This
 closes the Calcula Studio sidebar parity gap for every panel except the SVG
 relationship diagram (see Remaining Phases). Remaining phases at the end of
 this document.
+*(That last exception is itself superseded: ME-8 shipped the SVG diagram — see
+the ME-8 section below.)*
+
+### Audit note (2026-08-16) — code-verified, plus what arrived after ME-8
+
+Every command, file and section named in this document was checked against the
+tree on 2026-08-16 and exists. Two standing corrections:
+
+- **The BI/model engine is IN THIS REPO** at `model-engine-lib/` (its own Cargo
+  workspace; package `bi-engine`, lib `bi_engine`), merged 2026-07-24 with
+  history preserved. Every `engine-core/...` path below resolves to
+  `model-engine-lib/crates/engine-core/...`; the old sibling engine repo is
+  ARCHIVED. Host-facing engine changes must also get an entry in
+  `model-engine-lib/docs/host-integration-changelog.md`.
+- **Sections built after ME-8 that this document never listed** (all present
+  under `app/extensions/ModelEditor/components/sections/`, all reachable
+  through the same `MAIN_AND_MODEL_EDITOR`-guarded command surface):
+  `PerspectivesSection` (engine v19), `TranslationsSection` (cultures, engine
+  v20), `WritebackColumnModal` (writeback columns, engine v21),
+  `ConnectionsSection`, `ExpressionWorkspace`, `MeasureInspector` and
+  `FunctionDocsPanel`. The gateway `script_bi_model` and
+  `bi_model_extension_data` (see `model-extensibility.md`) also land on this
+  file's command surface.
 
 ### ME-6/ME-7 additions (the Studio-parity migration)
 
@@ -73,9 +96,11 @@ Power Query. A user who hits a modeling wall fixes the model *in the
 workbook that uses it*, and distributes it as a signed `dataset` package
 (`calp_publish_model`) rather than a file.
 
-Studio remains a standalone power tool during the transition (reference
+~~Studio remains a standalone power tool during the transition (reference
 implementation + advanced workbench) and is retired when the in-app editor
-reaches parity. Phase 0a of that convergence already moved Studio's
+reaches parity.~~ **Superseded 2026-07-11: parity was reached and Studio was
+RETIRED and FROZEN** (see the Status block at the top — never touch that repo).
+Phase 0a of that convergence already moved Studio's
 formatter (`expression_to_formula`) and lineage extraction
 (`extract_dependencies`) down into `engine-core`, where the editor consumes
 them.
@@ -216,18 +241,32 @@ writer path and marking the document dirty:
 
 ## Known Limits (v1)
 
-- Model edits are not undoable (consistent with connection operations).
+*(Kept as the v1 record. Two of these were closed by ME-8 below and are marked
+inline; the reasoning is preserved because it explains why they were limits.)*
+
+- ~~Model edits are not undoable (consistent with connection operations).~~
+  **Superseded by ME-8:** every mutation is undoable —
+  `bi_model_undo` / `bi_model_redo` / `bi_model_undo_state`, recorded in
+  `apply_model_edit`, the single mutation choke point
+  (`app/src-tauri/src/bi/model_editor.rs`).
 - Table/column *rename* is out of scope — no engine-side AST rewriter for
   the reference ripple; `display_name` editing covers the presentation need.
-- Calculation-group and role editing are list-form, not diagrammatic;
-  the relationship diagram (Studio has an SVG one) is future work.
+- Calculation-group and role editing are list-form, not diagrammatic.
+  ~~The relationship diagram (Studio has an SVG one) is future work.~~
+  **Superseded by ME-8:** the diagram shipped
+  (`app/extensions/ModelEditor/components/diagram/RelationshipDiagram.tsx`).
+- Table/column *rename* is still out of scope as of 2026-08-16 — no
+  `bi_model_rename_*` command exists.
 - Edits to a shared model are visible to every consumer of that engine
   immediately — which is also the feature.
 
 ### ME-8 — "nothing left behind" (the deferred-items round)
 
-All items previously deferred were then completed (verified: engine-core 1061
-tests, app 14 tests, tsc + boundaries clean):
+All items previously deferred were then completed (verified **at the time of
+ME-8, July 2026**: engine-core 1061 tests, app 14 tests, tsc + boundaries
+clean. Those counts are a historical receipt, not a current figure — the
+`model-engine-lib` workspace stands at 2,156 tests + 36 doctests as of
+2026-08-16):
 
 - **SVG relationship diagram.** Ported from Studio's `diagram/*` into
   `extensions/ModelEditor/components/diagram/` (adapted to the camelCase `@api`
@@ -276,9 +315,10 @@ tests, app 14 tests, tsc + boundaries clean):
    remain (TRAVERSE is done).
 2. **Editor depth (nice-to-haves):** a diagrammatic calculation-group UX;
    Testing Ground lookups/calc-group/hierarchy-drill; saved test layouts.
-3. **Studio retirement assessment** — sidebar parity is reached (including the
+3. ~~**Studio retirement assessment** — sidebar parity is reached (including the
    SVG diagram); two frontends over one engine is the standing drift tax this
-   migration was built to end.
+   migration was built to end.~~ **DONE 2026-07-11: Studio is retired and
+   frozen.** The rationale is kept because it is the argument that closed it.
 
 ### Deliberately out of scope for the embedded-model editor
 

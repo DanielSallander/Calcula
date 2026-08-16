@@ -16,9 +16,21 @@ extension-sandboxing Phase A **and** Phase B (S8/C7) with signed sidecar
 manifests + worker-extension menus, script-surface unification (C3), the
 `bi.query` and `bi.sql` capabilities, and command return values. The capability
 vocabulary lives in ONE place — `app/src/api/scriptHost/capabilityIds.ts`
-(`ALL_CAPABILITY_IDS`) — and has since grown past Wave 3's set: `net.fetch`,
-`bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`, `bi.model`,
-`bi.connector`, `ui.dialog`. Read the module, not this list.
+(`ALL_CAPABILITY_IDS`) — and has since grown past Wave 3's set. As of
+2026-08-16 it is **16 ids**: `net.fetch`, `bi.query`, `bi.sql`, `storage`,
+`ui.html`, `formula.udf`, `bi.model`, `bi.connector`, `ui.dialog`,
+`distribution.writeback`, `schedule`, `file.picker`, `ui.shortcut`,
+`grid.read`, `distribution.publish`, `distribution.subscribe`.
+**Read the module, not this list** — this enumeration has now been refreshed
+twice and will drift again. (`capabilityIds.ts:216-233`.)
+
+> **[NOTE 2026-08-16]** Adding a capability is not one edit. A capability with
+> backend reach needs THREE: `ALL_CAPABILITY_IDS` here,
+> `RUST_MIRRORED_CAPABILITIES` (`capabilities.ts`), and `GRANTABLE_CAPABILITIES`
+> (`app/src-tauri/src/scripting/capability_store.rs`) — miss the third and the
+> store's own id allowlist REJECTS the mirror call, so the grant looks approved
+> in the UI and is refused by the backend forever after. That is not
+> hypothetical: it already happened to `schedule` (`capabilityIds.ts:29-35`).
 
 > **Post-Wave-3 (2026-06-24):** two features build directly on this substrate and
 > are recorded in `docs/design/cube-formulas-and-custom-functions.md` — the
@@ -75,7 +87,31 @@ test); this is the prose mirror:
 | **One-off scripts** | Rust QuickJS (ephemeral) | Same isolation as notebooks; grid-only over cloned state (no model provider injected) | none | Coarse session approval |
 | **Chart transforms** | Main thread, pure data pipeline | `evalArithmetic` (recursive-descent arithmetic; no `eval`/`new Function`) — NOT an execution surface | n/a | n/a (pure declarative) |
 | **Writeback validators** | Rust QuickJS (ephemeral, publisher-authored) | Empty cloned grid with `Calcula`/`model`/`display`/`console` deleted before the publisher's code is evaluated; the body comes from the Ed25519-verified version manifest | none | Per-package consent keyed by SHA-256 of the exact body; the Rust submit path fails closed |
-| **MCP tools** | Rust (tool bodies first-party) + Rust QuickJS for the `run_script` tool | The `run_script` tool runs AGENT-authored JS in the same isolated interpreter as one-off scripts (cloned state, grid-only — no model provider); other tools are first-party Rust; sensitive commands stay main-window-guarded | none | Window-label guard + AI access ceiling (`check_mcp_access`: read / mutate / script) + session approval for the script tier |
+| **Sandboxed chart transforms** | Worker realm | Hardened worker realm, author-declared R19 ceiling — unlike the built-in `chart-transform` row above, this one DOES execute user code | full broker vocabulary (author-declared ceiling) | Tier broker + consent |
+| **Chart marks** | Worker realm | Hardened worker realm; draws marks | `ui.html` | Tier broker + consent |
+| **Script libraries** | Its OWN worker realm, one per library | A `// @uses` library never runs inside its consumer's realm — separate module state, exceptions and grants. Ceiling = `declared(library) INTERSECT declared(consumer)`, so importing can never grant reach the consumer did not declare. Bytes live in `.calcula/script-libs/<sha256>.js`, re-hashed on read | intersected ceiling | Ed25519 + TOFU at resolve, per-workbook consent `lib:<package>`, then the tier broker |
+| **MCP tools** | Rust QuickJS (`run_script_with_model`) | **[CORRECTED 2026-08-16 — see note below.]** `execute_script` runs AGENT-authored JS in the isolated interpreter **with a `HostModelProvider` injected**; other tools are first-party Rust; sensitive commands stay main-window-guarded | **`bi.query`** (hard-coded host grant, revoked when the run ends; `bi.sql` deliberately withheld) | Window-label guard + AI access ceiling (`check_mcp_access`: read / mutate / script) + session approval for the script tier |
+
+> **[CORRECTED 2026-08-16] The MCP row used to say "grid-only — no model
+> provider", capabilities "none". Both were false.**
+> `execute_script` — the tool that runs AGENT-authored code — injects a
+> `HostModelProvider` and grants `MCP_SCRIPT_CAPABILITIES = ["bi.query"]` for
+> the run's surface id (`app/src-tauri/src/mcp/tools.rs:1085, 1206, 1220`).
+> `core/script-engine/src/manifest.rs:343-352` carries the authoritative
+> `CORRECTED 2026-08-02` note recording that *"every mirror repeated
+> 'grid-only'. Both were false"* — this table was one of those mirrors, and
+> `wave3-scripting-security.md` §5 was another (corrected the same day).
+> `ScriptEngine::run` IS still used on this surface, but only by
+> `run_engine_script` for the app-authored setCellValue/setRange snippets behind
+> `write_cell` / `write_cell_range` — never for agent code, which is why naming
+> it as this surface's entry point misled. `bi.sql` is withheld deliberately:
+> there is no MCP SQL tool, so granting it would make `execute_script` the way
+> to obtain reach the tool surface denies (`manifest.rs:358-363`).
+>
+> The live taxonomy is **11 surfaces** (`app/src/api/scriptSurfaces.ts`); the
+> three added above (script libraries, sandboxed chart transforms, chart marks)
+> post-date Wave 3. A surface's reach is now DERIVED and drift-guarded rather
+> than asserted — see §14.7.
 
 **Why notebooks/one-off stay on Rust QuickJS rather than moving to the worker
 realm:** (1) they are well-contained — an isolated interpreter over a

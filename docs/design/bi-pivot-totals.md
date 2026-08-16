@@ -1,6 +1,14 @@
 # BI Pivot Totals: Engine-Evaluated Subtotals and Grand Totals
 
-Status: v1 shipped (2026-07-17)
+Status: v1 shipped (2026-07-17). **Re-verified against code 2026-08-16 — every
+claim below still holds**: `measure_value_col_idx` (`app/src-tauri/src/pivot/
+totals.rs:39`), `MAX_TOTAL_GRAINS = 24` (`:78`), `query_bi_total_overrides`
+(`:219`) called from `update_bi_pivot_fields` (`pivot/commands.rs:5855`, at
+`:6853`) and installed via `set_total_overrides` (`:6862`); `TotalOverride` +
+`apply_total_overrides` with the filtered-record bail-out and the per-entry
+key-shape guard (`core/pivot-engine/src/cache.rs:662`, `:1206-1222`);
+`find_value_id` (`cache.rs:1009`); calc-group totals forced off
+(`pivot/commands.rs:7185-7187`).
 
 ## The two bugs this fixes
 
@@ -73,7 +81,11 @@ Two layers, meeting at `PivotCache::total_overrides`:
 - `TotalsMode::Rollup` (bi_engine native, single query, per-level
   recomputation) can replace the per-grain point queries — but it fails
   closed on multi-fact models, lookups and calculation groups, so the point
-  queries remain the universal fallback.
+  queries remain the universal fallback. (Still future work for the PIVOT path
+  as of 2026-08-16. Note that `TotalsMode::Rollup` is no longer unused in the
+  app: the Model Editor's Testing Ground runner opts into it —
+  `app/src-tauri/src/bi/model_editor.rs:8213` — so the engine side of this is
+  exercised in production code, just not by pivots.)
 - Pushing page-filter/slicer hidden items as engine-side `filters` (supported
   without group_by membership) would extend exact totals to filtered pivots;
   requires the pivot-engine gate to compare mask state against the filter

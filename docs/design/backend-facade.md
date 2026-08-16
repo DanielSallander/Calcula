@@ -4,18 +4,42 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 **feature-monolith with no extension boundary**, reached through an untyped
 `invokeBackend(cmd, args)` passthrough.
 
-## The reality (verified 2026-06-27)
+## Current as of 2026-08-16
 
-- `app/src-tauri` registers **569** `#[tauri::command]`s in one crate, including
+Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
+resolved-asymmetry paragraph named two symbols that no longer exist.
+
+| Figure | This doc said | Actual (2026-08-16) | How counted |
+|---|---:|---:|---|
+| Commands in `generate_handler!` | 569 | **761** | bracket-matched parse of `lib.rs` (all unique) |
+| `#[tauri::command]` attributes | — | **798** | `rg -c` over `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | **94** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
+| Feature-open commands | "safe 540" | **667** | 761 − 94 |
+| Typed wrappers in `backend.ts` | ~229 | **327** | exported functions/consts |
+| Vitest at the time of the DONE claim | 102k | **~107,155 / 808 files** | current suite |
+
+Also corrected below: the `is_bi_granted` / `grant_script_bi` paragraph (those symbols were
+**deleted** and generalized — the control was strengthened, not dropped), and the "third-party
+extensions cannot call `invokeBackend` at all" finding, which is pre-A3 history that the same
+document then contradicts three paragraphs later. **Nothing described here is unbuilt** except
+the item explicitly marked "Resolved (not built)", which is a deliberate design decision.
+
+## The reality (verified 2026-06-27; counts refreshed 2026-08-16 — see the table above)
+
+- `app/src-tauri` registers **569** (now **761**) `#[tauri::command]`s in one crate, including
   feature-specific modules (`chart_commands`, `conditional_formatting`,
   `data_validation`, `autofilter`, `grouping`, `pivot/`, `bi/`, …). There is no
   Rust-side IoC / plugin surface — a feature that needs backend logic adds a
   command directly. So "even built-in features are extensions / the grid is the
   kernel" is a **frontend-only** reality (now noted in `ARCHITECTURE.md`).
 - The frontend door is `app/src/api/backend.ts` → `invokeBackend<T>(cmd, args) =
-  invoke<T>(...)` — a zero-gating passthrough. ~229 typed wrappers exist, but
-  raw `invokeBackend("string")` is also used: **44 extension files call ~90
-  distinct commands by raw string across ~112 sites.**
+  invoke<T>(...)` — a zero-gating passthrough. ~229 (now **327**) typed wrappers
+  exist, but raw `invokeBackend("string")` is also used: **44 extension files call
+  ~90 distinct commands by raw string across ~112 sites.** *(That last figure is
+  dated 2026-06-27 and describes the problem this document went on to fix. **As of
+  2026-08-16 it is zero** — `invokeBackend(` appears in no extension file outside
+  tests and the dev-only TestRunner harness, and the lint ban in step 3 keeps it
+  there.)*
 
 ### Who can reach the backend
 
@@ -25,8 +49,13 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 | Runtime 3rd-party extension | Blob-ESM `import()`; **no** `@api` global / import map — gets only the injected `ExtensionContext`, which exposes **no** raw backend access | untrusted |
 | Object scripts / notebooks | Tier broker ALLOWLIST (already capability-gated) | per tier |
 
-**Key finding:** third-party extensions are *already* constrained — they cannot
-call `invokeBackend` at all. So the untyped passthrough is, today, a **built-in
+**Key finding (as of 2026-06-27 — superseded by step 2 below, which this same
+document records as DONE):** third-party extensions are *already* constrained —
+they cannot call `invokeBackend` at all. **Today they can**, through the governed
+door: `ExtensionContext.invokeBackend` is injected per-extension and scoped by
+trust, so a distributed extension reaches feature-open commands and is refused the
+94 privileged ones. Read this paragraph as the starting position, not the current
+one. So the untyped passthrough was, at the time, a **built-in
 (trusted) typing/maintainability** concern, not an open third-party hole. But the
 architecture has **no declared capability boundary** for backend commands, so the
 moment the `ExtensionContext` gains backend access (a real product need —
@@ -43,8 +72,11 @@ Mirror the script broker's "ALLOWLIST as data" pattern:
    grouped by capability, with `assertExtensionMayInvoke(cmd, { trusted })`. A
    drift-guard test (`backendCommands.test.ts`) parses `generate_handler!` and
    asserts every privileged name still exists, so the registry can't go stale.
-   Everything not listed is "feature-open" (the danger is concentrated in ~30
-   commands, so a denylist of the dangerous beats an allowlist of the safe 540).
+   Everything not listed is "feature-open" (the danger is concentrated in ~30 —
+   now **94** — commands, so a denylist of the dangerous beats an allowlist of the
+   safe 540 — now **667**). The ratio moved, the argument did not: the privileged
+   set is still an order of magnitude smaller than the open set, which is what
+   makes a denylist the maintainable choice.
 
 2. **Governed `ExtensionContext.invokeBackend` (DONE).** A *scoped* backend
    accessor is now part of the `ExtensionContext` the loader injects
@@ -96,9 +128,12 @@ NOT merged:
   is binary by trust: trusted built-ins pass; non-trusted code may never call a
   privileged command directly.
 - **Broker** (`scriptHost/broker.ts` `checkPolicy`): enforces the per-manifest
-  `CapabilityId` ceiling (net.fetch, bi.query, bi.sql, storage, ui.html,
-  formula.udf) **per call**, plus a runtime **JIT consent grant** — the declared
-  ceiling is the *maximum*, the grant is the *actual* permission.
+  `CapabilityId` ceiling **per call**, plus a runtime **JIT consent grant** — the declared
+  ceiling is the *maximum*, the grant is the *actual* permission. The vocabulary
+  was the six ids `net.fetch` / `bi.query` / `bi.sql` / `storage` / `ui.html` /
+  `formula.udf` when this was written; it is now **16**, single-sourced in
+  `ALL_CAPABILITY_IDS` (`app/src/api/scriptHost/capabilityIds.ts`) and never
+  re-typed elsewhere — so read the id list from there, not from this document.
 
 A reviewer might expect the per-manifest ceiling to be threaded into the backend
 gate. It must NOT be: the ceiling is *declared*, not *granted*, so allowing a
@@ -112,14 +147,61 @@ the last gap: `bi_query`/`bi_get_connections` were feature-open at the backend,
 so a future distributed extension reaching `ctx.invokeBackend` directly could
 have read BI data without the broker's capability+consent gate.
 
-**Asymmetry (RESOLVED, A3.4-S2):** `script_http_fetch` re-checks the granted
-origin in Rust per call; `bi_query` / `script_bi_sql` previously relied on the TS
-broker only. They now also re-check an authoritative per-script BI grant in Rust
-(`CapabilityStore.is_bi_granted`), mirrored on consent-grant via the new
-`grant_script_bi` command + a mount re-sync, with single-cap revoke reconciling
-the store. A broker-routed (sandboxed) call carries a `script_id` and must have
-been granted; a trusted main-window direct call (built-in feature) carries none
-and passes.
+**Asymmetry (RESOLVED, A3.4-S2 — mechanism GENERALIZED 2026-08; symbol names below
+are superseded):** `script_http_fetch` re-checks the granted origin in Rust per
+call; `bi_query` / `script_bi_sql` previously relied on the TS broker only. They
+now also re-check an authoritative per-script grant in Rust. A broker-routed
+(sandboxed) call carries a `script_id` and must have been granted; a trusted
+main-window direct call (built-in feature) carries none and passes.
+
+> **Do not grep for `CapabilityStore.is_bi_granted` or a `grant_script_bi` command
+> — both were deleted, and their absence does NOT mean the re-check was removed.**
+> The BI-only pair was replaced by a generic one, which is strictly stronger:
+> - The store method is now `CapabilityStore::is_granted(script_id, capability)`
+>   (`app/src-tauri/src/.../capability_store.rs:168`).
+> - The grant mirror is now `grant_script_capability`
+>   (`app/src-tauri/src/scripting/writeback_gateway.rs`), validating against ONE
+>   allowlist covering every mirrored id. Its predecessor's id check "hard-rejected
+>   everything outside `bi.*`", which is why it had to go. Quoting
+>   `net_commands.rs:123-128`: *"There is deliberately no second grant door."*
+> - `RUST_MIRRORED_CAPABILITIES` (`app/src/api/scriptHost/capabilities.ts:153-168`)
+>   now covers **8** ids: `bi.query`, `bi.sql`, `bi.model`, `bi.connector`,
+>   `distribution.writeback`, `schedule`, `distribution.publish`,
+>   `distribution.subscribe`.
+>
+> So the asymmetry this section closed for BI is now closed for every mirrored
+> capability, through a single door rather than one door per feature.
+
+## The other backend boundary: `DocumentEffect` (added to this doc 2026-08-16)
+
+This document predates the backend's **strongest** internal boundary and did not mention it.
+Where `assertExtensionMayInvoke` governs *who may call* a command, `DocumentEffect` governs
+*what a command must admit it did*. Both are compiler-enforced rather than review-enforced, for
+the same reason: the census in `document_effect.rs`'s own header found **256 of the then-746**
+Tauri commands mutating saved state without setting the dirty flag.
+
+- `FileState::is_modified` is **private** (`app/src-tauri/src/persistence.rs`) and
+  `app/src-tauri/src/document_effect.rs` is its **sole writer**. That one flag gates both the
+  close-without-saving prompt and AutoRecover, so a command that mutates without setting it
+  loses the user's work twice over, silently.
+- Persisted backend state is `Persisted<T>`, never a bare `Mutex<T>`: `read()` is free,
+  `write(&effect)` demands a `DocumentEffect`. **59** `AppState` fields are converted
+  (of 104 pub fields), `grids` / `grid` among them. Declare any NEW persisted store
+  `Persisted<T>` from the start.
+- Exactly one arm per mutating command: `DocumentEffect::mutates(&FileState)`
+  (`document_effect.rs:437`, dirties **at construction**, so possession is proof);
+  `DocumentEffect::transient(&TransientScope)` (`:444`, the preview/simulation exemption —
+  constructible only by presenting a restore registry that already holds the token, which is why
+  Animation qualifies and `scenario_show` structurally cannot); and
+  `DocumentEffect::deliberately_clean(CleanReason::…)` (`:450`) over a **closed** enum (`:287`),
+  so the whole audit is one `rg deliberately_clean`.
+- Gated commands use `lock_pending()` then `.authorize(&effect)` to keep the gate and the
+  mutation in one critical section — Tauri dispatches on a thread pool, so a `read()`, drop,
+  `write()` sequence is a TOCTOU window in every protection-checked command.
+
+The relationship to this document's model: the capability denylist decides whether a caller may
+reach the backend at all; `DocumentEffect` decides what happens to the document once it does.
+Neither substitutes for the other.
 
 ## Status
 
@@ -132,7 +214,8 @@ and passes.
   channel / typed wrappers + the `eslint.boundaries.js` ban forbidding the raw
   `@api/backend` `invokeBackend` import in extensions (FACADE block, with a
   tests/TestRunner relax-block). Verified: canonical typecheck
-  (`tsc -p tsconfig.check.json`) clean, full vitest green (102k tests),
+  (`tsc -p tsconfig.check.json`) clean, full vitest green (102k tests at the time;
+  **~107,155 across 808 files** as of 2026-08-16),
   `lint:boundaries` clean, and the ban proven to fire on the raw import while
   allowing typed wrappers.
   (4) Closed the model-scoped BI direct-path gap by adding the `biData` group

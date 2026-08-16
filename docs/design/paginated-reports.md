@@ -2,14 +2,25 @@
 
 Status: **Slices 1/1b/1c (create/refresh/delete + persistence + undo), 2 (@param
 interactive filters), 2b (ribbon-filter targeting), 2c (hardening pass: grammar,
-structural ops, error surfacing — see below) and 4 (.calp distribution) are BUILT.
-Slice 3 (pagination) deferred — likely a separate report form.** Decisions locked:
+structural ops, error surfacing — see below), 2d (live-test fixes + report object
+UX) and 4 (.calp distribution) are BUILT. Slice 3 (pagination) deferred — likely
+a separate report form.** Decisions locked:
 committed/pivot-like model (D1), single row-capped block (D4).
+
 User docs: "Using a design query in a grid report" in
 `functions/pivot/design-view-reference.md`.
 Related: `docs/design/model-editor.md`, `functions/pivot/design-view-reference.md`,
 `docs/design/animation-simulation.md` (transient-write precedent),
 `docs/design/calp-distribution.md`.
+
+> **Documentation audit 2026-08-16.** Re-verified against code. Two structural
+> claims were stale and are corrected where they appear (`CORRECTED
+> 2026-08-16`): the report store no longer lives in `AppState.report_definitions`
+> — that field was DELETED — and `paramSubstitution.ts` moved out of the Reports
+> extension into `_shared`. The line numbers in the "Foundations we reuse" table
+> had all drifted and were re-resolved. Slice 2d was built but missing from the
+> status line; added above. Everything else — D1/D3/D4 decisions, the D6
+> refresh-trigger split, Slice 4's distribution shape — verified accurate.
 
 ## Context
 
@@ -43,12 +54,12 @@ time it grows print/pagination semantics (the "paginated" in the name).
 | Need | Reused mechanism | Location |
 |------|------------------|----------|
 | Compute the query | `run_design_query` compute core (compile DSL → `PivotDefinition` + `PivotCache` → `PivotView`) | `app/src-tauri/src/pivot/headless.rs` |
-| Write result to cells | `write_pivot_to_grid(grid, active_grid, view: &PivotView, dest, styles)` — **generic**, not pivot-specific | `app/src-tauri/src/pivot/operations.rs:527` |
-| Update/clear a region | `update_pivot_in_grid` (clear old region + write new) | `operations.rs:733` |
-| Overwrite protection | `count_overwritten_cells` / `save_overwritten_cells` → `overwrittenCellCount` warning | `operations.rs:1108` |
+| Write result to cells | `write_pivot_to_grid(grid, active_grid, view: &PivotView, dest, styles)` — **generic**, not pivot-specific | `app/src-tauri/src/pivot/operations.rs:665` |
+| Update/clear a region | `update_pivot_in_grid` (clear old region + write new) | `operations.rs:942` |
+| Overwrite protection | `count_overwritten_cells` / `save_overwritten_cells` → `overwrittenCellCount` warning | `operations.rs:1366` / `:1430` |
 | Refresh without undo pollution | transient-write: `anim_snapshot`/`anim_apply_frame`/`anim_restore` (token-keyed buffer, scoped recalc, no undo/dirty) | `app/src-tauri/src/animation_commands.rs` |
-| Object persistence | mirror `SavedPivotLayout` (`AppState.pivot_layouts`, included in `build_workbook_for_save`) | `persistence.rs`, `core/persistence` |
-| Undo for object mutations | `record_custom_restore` + handlers (`pivot_create`/`delete`/`definition`) | `undo_commands.rs:644`, `pivot/commands.rs:32` |
+| Object persistence | mirror `SavedPivotLayout` (`AppState.pivot_layouts`, included in `build_workbook_for_save`) | `persistence.rs:598`, `core/persistence` — *note: reports did NOT end up following this pattern; see the correction under D2* |
+| Undo for object mutations | `record_custom_restore` + handlers (`pivot_create`/`delete`/`definition`) | `undo_commands.rs:4318`, `pivot/commands.rs` |
 | Distribution (.calp) | generic `custom_objects` channel `{kind,id,name,sheet_id,payload}` (pane-controls precedent) | `core/calp/src/{manifest,publish,pull}.rs` |
 | Interactive filter values | `GET.CONTROLVALUE("name")` + pane controls; ribbon-filter → pivot targeting | `pane_control/`, `ribbon_filter/` |
 | Refresh events | `GRID_REFRESH`, `MUTATION_REFRESH{domains}`, `BiEvents.REFRESHED`, `pivot:refresh` | `app/src/api/events.ts` |
@@ -86,10 +97,36 @@ via undo history.
 
 *(As designed — superseded in the build, see Slice 1b:)* the shipped shape is
 `SavedReport { id, name, dslText, connectionId, sheetIndex, anchor/end bounds,
-dataSourceId }` in `AppState.report_definitions`, mirrored into
-`extension_data["calcula.reports"]`; there is no separate `ReportState` and no
+dataSourceId }` in ~~`AppState.report_definitions`, mirrored into
+`extension_data["calcula.reports"]`~~; there is no separate `ReportState` and no
 `refreshMode`/`options` field yet (refresh is manual + control-driven auto). A
 `protected_regions` entry (region_type "report") tracks the materialized range.
+
+> **CORRECTED 2026-08-16 — the store-plus-mirror shape is gone, and it was
+> removed because it lost user data.** `AppState.report_definitions` no longer
+> exists. Reports lived in that bare `Mutex<Vec<_>>` **and** in
+> `extension_data["calcula.reports"]`, kept in step by a
+> `sync_reports_to_extension_data` call every mutation site had to REMEMBER —
+> and since the saved bytes came from the mirror, a mutation that forgot the
+> sync was silently dropped at save: no error, no prompt, the report simply
+> absent on reopen. Eleven call sites happened to be correct; nothing made the
+> twelfth correct.
+>
+> `extension_data[REPORTS_EXT_KEY]` is now the ONE representation — the thing
+> that is saved is the thing that is mutated — reached only through
+> `read_reports` (immutable, no effect) and `with_reports_mut` (requires a
+> `DocumentEffect`, writes back before it returns). There is no sync to forget
+> because there is nothing to sync, and a caller reaching for the old field does
+> not compile. The full reasoning is in the module header at
+> `app/src-tauri/src/report.rs:16-36`, and a test at `report.rs:1274` fails the
+> build if the field is ever re-added.
+>
+> The slot is RESERVED against both the generic extension-data tier
+> (`persistence::set_extension_data`) and the `.calp` extension-data merge —
+> `REPORTS_EXT_KEY` is deliberately identical to the Reports extension's
+> manifest id, so without that reservation a `set_extension_data("calcula.reports", …)`
+> call over IPC would have been a legal way to replace every report in the
+> workbook.
 
 ### D3 — Filters — **Recommend: v1 = fixed inline `FILTERS`; interactive filters as a dedicated later slice**
 
@@ -184,11 +221,15 @@ data-change path requires a manual refresh.
 - **Slice 1b — Persistence. ✅ BUILT.** Reports persist via the sanctioned
   **`extension_data`** channel (key `calcula.reports`), NOT a new typed `.cala`
   field (per the `Workbook.extension_data` guidance). `SavedReport` (with region
-  bounds) lives in `AppState.report_definitions`; `create/refresh/delete` mirror it
-  into `extension_data`; the load path hydrates it and re-registers each report's
+  bounds) ~~lives in `AppState.report_definitions`; `create/refresh/delete` mirror it
+  into `extension_data`~~ *(CORRECTED 2026-08-16: the field and the mirroring are
+  gone — `extension_data["calcula.reports"]` is the sole store, reached through
+  `read_reports` / `with_reports_mut`; see the correction under D2 for why)*; the load path hydrates it and re-registers each report's
   protected region (`region_type "report"`) from its saved bounds (the cells
   themselves reload as ordinary grid content); new-file clears it. `ReportState`
-  was dropped in favor of `AppState.report_definitions`.
+  was dropped in favor of `AppState.report_definitions` — which was itself
+  dropped later in favour of `extension_data` alone (CORRECTED 2026-08-16; see
+  D2). Two removals, one direction: toward a single representation.
 - **Slice 1c — Undo. ✅ BUILT.** Undo/redo for create/refresh/delete via a single
   symmetric `"report_restore"` custom-restore (registered in `undo_commands.rs`,
   `change_class: Objects`). It is **cell-based** (mirrors `script_grid_cells`), not
@@ -200,7 +241,7 @@ data-change path requires a manual refresh.
 - **Slice 2 — Interactive filters. ✅ BUILT (control-bound params).** A report's
   DSL `FILTERS` can reference a Controls-pane value with `@ControlName`. Done as
   **pure text substitution before compile** (no DSL grammar change):
-  `Reports/lib/paramSubstitution.ts` replaces `@Name` with the control's current
+  `_shared/dsl/pivotLayout/paramSubstitution.ts` (**CORRECTED 2026-08-16** — moved out of `Reports/lib/` and is now shared with Charts' `chartQueryProvider`/`designQueryChartDataReader`) replaces `@Name` with the control's current
   value as a DSL value-list (`("W")` / `("A","B")`), dropping a `FILTERS` line when
   its control is unset (= show all). `Reports/lib/reportRefresh.ts` substitutes →
   recompiles → `refresh_report` (with a per-connection model cache). The Reports

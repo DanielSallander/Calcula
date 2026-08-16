@@ -1,3 +1,25 @@
+> **ARCHIVE — HISTORICAL RECORD. NOT THE LIVE OPEN LIST.**
+> Restructured 2026-08-16. Nothing below this banner has been moved, edited or deleted; every
+> section and every `§N` citation from elsewhere in the tree still resolves here.
+>
+> **What is open now lives in [`docs/design/open-items.md`](./open-items.md)** — a short, dated,
+> code-cited list. Read that first; it takes under a minute.
+>
+> **Why this file is not that list.** It is 18,385 lines of point-in-time observations written by
+> ~39 separate passes. Its own §35a measured what that does: greping it for "still open" returns a
+> list **roughly one third stale in the already-fixed direction**, because a pass that fixes a
+> defect writes its own section and does not go back to strike the earlier paragraphs that called
+> it open. The failure mode is stale ANCHORS, not false reports — the sections are honest about
+> what they did. So: **this file is the WHY** (what was decided, what was tried and rejected, and
+> the reasoning that is not recoverable from code), and **`open-items.md` is the WHAT.** A "still
+> open" sentence below is evidence that something WAS open on the date of its section, and nothing
+> more. Verify against the code before acting on it — §35c is the last audit that did so, on
+> 2026-08-15.
+>
+> This file also lost an entire section (§33) to two concurrent whole-file appends, undetected
+> until someone went looking. **Anchored edits only. Never a whole-file write.**
+
+---
 # Open decisions — August 2026
 
 Written 2026-08-07 at the close of the VBA-idiom parity program, the hidden-rows fix, the
@@ -17127,6 +17149,12 @@ and the visual corpus was hashed before and after to prove it.
 
 ### 31k. What is still open
 
+> **As of 2026-08-15, and superseded as a live list on 2026-08-16.** Items 1 and 2 have since
+> closed (§32/§33/§34/§37 and §38 respectively). Items 3-6 were re-verified against the code on
+> 2026-08-16 and are still open. The current list is
+> [`docs/design/open-items.md`](./open-items.md); this section is kept for its diagnosis of each
+> item, which that list does not repeat.
+
 1. **BUG-0082** — the empty-`#root` cold start. Diagnosis landed, and a fourth observation moved the
    leading hypothesis from *unknown* to *a ~55 s cold Vite transform against a 60 s ceiling*. Raising
    that ceiling is **open**, deliberately, on one sample; the Vite request log that would separate an
@@ -17558,6 +17586,14 @@ the wiring, not at the file. Core workspace after the change: **1,377 / 0** (bas
 
 Each of these was opened and read. They stay open, and now they stay open with a citation.
 
+> **Re-audited 2026-08-16; this table's successor is
+> [`docs/design/open-items.md`](./open-items.md).** Every item below was opened and read again.
+> All survive, with one refinement worth carrying: `set_active_sheet` accepting a hidden index now
+> *looks* guarded, because `activate_sheet` calls `ensure_user_sheet` (`sheets.rs:917`) — but that
+> guard tests `is_user_sheet` (`sheets.rs:144-149`), which refuses only floating-range backing
+> sheets (`OBJECT_SHEET_VISIBILITY`). A user-hidden sheet still passes. A guard with the right
+> shape added for a different reason is the hardest kind of stale claim to catch.
+
 * **§2aq, all three, and they are correctly filed as projects rather than patches.**
   - *An empty cell reads as the NUMBER zero in every context.* `evaluator.rs:1117` is literally
     `CellValue::Empty => EvalResult::Number(0.0)`, and `EvalResult` has no `Empty` variant to route to
@@ -17611,9 +17647,17 @@ than a stale one here. Three were found:
    `app/src/api/__tests__/interpreterReachDrift.test.ts` reads that Rust file at test time and diffs
    it against every TypeScript consumer. The direction is fixed Rust -> TypeScript, because the
    renderer can be compromised and the interpreter is where the sandbox is.
-3. **"36 `AppState` fields are converted" to `Persisted<T>`.** Counted: **51**, against 43 remaining
-   bare `Mutex`/`RwLock` fields — which on inspection are overwhelmingly derived caches (the
-   dependency maps, the spill maps, `id_registry`, `gather_cache`) rather than persisted state.
+3. **"36 `AppState` fields are converted" to `Persisted<T>`.** ~~Counted: **51**~~, against 43
+   remaining bare `Mutex`/`RwLock` fields — which on inspection are overwhelmingly derived caches
+   (the dependency maps, the spill maps, `id_registry`, `gather_cache`) rather than persisted state.
+   **CORRECTED 2026-08-16: the number is 59, not 51, and the method is the lesson.** `51` is what
+   `rg 'document_effect::Persisted<'` returns; **8 more fields are spelled
+   `crate::document_effect::Persisted<`** and that grep misses them. Counted by splitting the
+   `AppState` body and matching field declarations: **59 `Persisted<T>` + 43 bare `Mutex`/`RwLock`
+   + 2 unlocked (`undo_stack`, `calc_cancel`) = 104 fields**, which reconciles exactly. So this
+   register has now published three different values for one countable number (36, 51, 59), each
+   from a different grep spelling — **count the fields, not one spelling.** CLAUDE.md carries the
+   corrected figure and the method with it.
 
 ### 35e. What this pass did NOT examine
 

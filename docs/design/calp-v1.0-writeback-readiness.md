@@ -2,9 +2,26 @@
 
 ## Status
 
-Active. Modifies the completed v1.0 implementation to reserve space for v1.1
-writeback. No new user-facing functionality. Implementation should be small
-and surgical.
+**HISTORICAL — shipped as Phase 9, then partly superseded by v1.1. Do not read
+this as a description of current behavior.** (Status corrected 2026-08-16; it
+previously read "Active", which it had not been since Phase 9 landed.)
+
+This document is the plan for the readiness work only. Everything in it was
+built, and then v1.1 (`calp-v1.1-writeback-implementation.md`) deliberately
+reversed one of its central decisions. Current state of each section:
+
+| Section | State today |
+|---|---|
+| 1. Manifest `writeback_regions` | **Shipped, then strengthened.** Sub-fields are no longer opaque JSON — v1.1 Phase 10 gave them real types (`core/calp/src/writeback.rs`). The `extra` flatten hatches shipped and multiplied: **27** `pub extra` fields across `core/calp/src` today, not the handful surveyed here. |
+| 2. `WritebackIndex` | **Shipped as designed.** `pub struct WritebackIndex` at `core/calp/src/writeback.rs:570`; `AppState.writeback_index: Mutex<calp::WritebackIndex>` at `app/src-tauri/src/lib.rs:587`, rebuilt via `rebuild_writeback_index` (`calp_commands.rs:6373`). The standalone-module decision held. |
+| 3. Frontend edit + range guards | **SUPERSEDED.** The range guard survives; the EDIT guard was removed on purpose in v1.1 Phase 14 — writeback cells are editable, which is the feature. See the note in that section. |
+| 4. Backend backstop | **Shipped, far wider than planned.** Not two commands but 7 helpers across 33 call sites. See the note in that section. |
+| 5. Style interceptor | **Shipped, and no longer a no-op.** v1.1 Phase 18 filled in the return value: empty/draft/submitted/approved/rejected each paint a distinct tint (`app/extensions/Distribution/index.ts:501-531`). The prediction that this would be "exactly one return value change" was correct. |
+| 6. Cell identity | Shipped; v1.1 added the "cell received a writeback submission" auto-mint trigger as anticipated. |
+
+The **Rationale** section at the end is the part worth preserving: all three
+predicted classes of v1.1 pain were avoided, and the render-pipeline prediction
+in particular proved exactly right.
 
 ## Context
 
@@ -134,6 +151,19 @@ on every edit; a standalone index module is the clean shape.
 
 ### 3. Frontend edit and range guards
 
+> **SUPERSEDED 2026-08-16 (by v1.1 Phase 14, deliberately).** The `editGuard`
+> described below no longer exists. `app/extensions/Distribution/index.ts:392-394`
+> now reads "writeback cells ARE editable (subscriber fills them). No edit guard
+> block needed" — a commit guard (`index.ts:415`) routes the typed value into the
+> writeback draft layer instead of refusing it. The `rangeGuard` DID survive
+> unchanged in shape (`index.ts:397`), still refusing range operations that
+> overlap a region. The plan below was right for v1.0 and is retained for the
+> reasoning in "Refusing the whole operation ... is too heavy", which still
+> governs how partial-range operations behave.
+>
+> One leftover: the surviving range guard still says "reserved for input in a
+> **future version**" (`index.ts:404`) — v1.0 wording that outlived its version.
+
 The Distribution extension registers an `editGuard` and a `rangeGuard` in
 its `activate()`. Both consult the cached writeback index snapshot and
 refuse edits on cells covered by any region.
@@ -181,6 +211,24 @@ others.
 Likely additional candidates to inspect: programmatic API entry points
 exposed to extensions, clipboard paste through certain backend paths,
 undo/redo if it doesn't replay through guards, batch import operations.
+
+> **AS BUILT (verified 2026-08-16) — the survey's instinct was right by an order
+> of magnitude.** Find-and-replace was not "the known one" so much as the first
+> one. The backstop is now seven helpers in
+> `app/src-tauri/src/calp_commands.rs:8694-8964` —
+> `ensure_writeback_draft_before_write`, `…_on_sheets`, `…_before_grid_install`,
+> `ensure_range_unclaimed`, `…_on_sheets`, `ensure_cells_unclaimed`,
+> `…_on_sheet` — called from **33 sites** across `commands/data.rs`,
+> `commands/search.rs`, `commands/structure.rs` and `merge_commands.rs`.
+>
+> Two design details worth keeping: each helper opens with
+> `writeback_index_is_empty(state)?` and returns immediately
+> (`calp_commands.rs:8775`), so a workbook with no writeback subscriptions pays
+> one mutex and a length check per call rather than a scan — the cost objection
+> that would otherwise have argued against putting this on 33 hot paths. And the
+> index those helpers read is built EXCLUSIVELY from the verified signed
+> manifest (`calp_commands.rs:8817`), so a claim on a cell can never originate
+> from an unsigned source.
 
 ### 5. Style interceptor for writeback cells
 

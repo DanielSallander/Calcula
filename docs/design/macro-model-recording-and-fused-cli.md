@@ -5,6 +5,25 @@ Status: Feature 1 BUILT 2026-08-13; Feature 2 BUILT 2026-08-13 (see the two
 first; main-window CLI shortcut is Ctrl+Shift+P; runs mixing model writes and
 grid writes are refused at plan time.
 
+> **RE-VERIFIED AGAINST THE CODE 2026-08-16 — accurate as written, with one note.**
+> Every structural claim in the two "as built" sections was checked by opening the
+> tree, not by re-reading this file. The shared kernel exists at
+> `app/extensions/_shared/cli/` with `engine.ts`, `registry.ts`, `optionSchema.ts`,
+> `lex.ts`, `format.ts`, `glob.ts`, `parse.ts` and `__tests__/kernel.test.ts`, as
+> described. The model CLI is the thin wrapper claimed: `ModelEditor/cli/execute.ts`
+> plus `modelDomain.ts`, which imports `MODEL_VOCABULARY_CONTRIBUTION` from `./parse`
+> (`modelDomain.ts:13,38-39`) — so the "no drift possible" single-source claim holds
+> mechanically. `lex.ts` / `format.ts` / `resolve.ts` survive on the ModelEditor side as
+> the re-export shims described. `modelOptions.ts` and its `modelOptions.test.ts` matrix
+> pin exist. The `CommandLine` extension exists and binds `Ctrl+Shift+P`
+> (`CommandLine/index.ts:41`, `components/AppCliPanel.tsx:206`), with its own header
+> recording WHY it is not Ctrl+` (that is Show Formulas, Excel parity).
+>
+> **The note:** `_shared/cli/` has since grown `domainProviders.ts`, `language.ts` and a
+> `components/` directory, none of which this document describes. That is growth rather
+> than drift — nothing here is contradicted — but the "as built" inventory below is a
+> snapshot of 2026-08-13 and is no longer a complete listing of the module.
+
 ## Feature 2 — as built (deviations from the plan below)
 
 The kernel shipped as planned in `app/extensions/_shared/cli/` (lex + format

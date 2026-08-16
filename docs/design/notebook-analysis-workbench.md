@@ -116,8 +116,17 @@ only the read-only `bi.query`/`bi.sql` family ever reaches a notebook cell.
   Notebook cells now hold exactly the read-only pair:
   - Grants live in the existing in-memory Rust `CapabilityStore`, keyed by
     the surface id `notebook:{id}` — session-scoped, one consent per
-    notebook per capability per session; `grant_script_bi` mirrors grants
-    (main-window-guarded).
+    notebook per capability per session; `grant_script_capability` mirrors
+    grants (main-window-guarded).
+
+    > **[CORRECTED 2026-08-16]** This section named `grant_script_bi` in three
+    > places. **That command no longer exists** — it was generalized to
+    > `grant_script_capability` because its id check rejected everything outside
+    > `bi.*`, which is unusable now that the vocabulary is 16 ids
+    > (`app/src-tauri/src/net_commands.rs:123`,
+    > `app/src/api/scriptHost/capabilities.ts:172-178`,
+    > `app/src/api/notebook/notebookApi.ts`). A reader greping the old name finds
+    > nothing but historical comments. All three occurrences are corrected below.
   - Every provider call re-checks the grant **server-side** and records an
     always-on `CapabilityCall` audit entry (success AND denial) via
     `record_capability_call` — same redaction policy as the worker gates
@@ -125,7 +134,7 @@ only the read-only `bi.query`/`bi.sql` family ever reaches a notebook cell.
   - A consent miss surfaces as a JS error carrying the sentinel
     `BI_CONSENT_REQUIRED capability=… surface=notebook:{id}`; the frontend
     (`useNotebookStore`) prompts (JIT, mirroring the SCRIPT_PROMPT_REQUIRED
-    pattern), grants via `grant_script_bi`, and retries the run once.
+    pattern), grants via `grant_script_capability`, and retries the run once.
     Batch paths (run-all / rewind / run-from) handle the sentinel on the
     last response the same way.
   - `check_script_security` still gates the whole surface, unchanged.
@@ -149,7 +158,7 @@ only the read-only `bi.query`/`bi.sql` family ever reaches a notebook cell.
   copy" for `sourcePackage` notebooks; `InspectedNotebook.requestedCapabilities`
   listed in the subscribe dialog; distributed grants mirrored through
   `@api/distributedConsent` (SHA-256 of joined sources) then
-  `grant_script_bi` on open; "Insert as connected region" on
+  `grant_script_capability` on open; "Insert as connected region" on
   provenance-tagged table outputs via `biInsertResult`.
 
 **Cut (judged):** reactive cell DAG (fights shared-scope replay; stale-cell

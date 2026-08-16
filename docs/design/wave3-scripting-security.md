@@ -1,5 +1,37 @@
 # Calcula Wave 3 — Scripting & Security Completion
 
+> ## Current as of 2026-08-16 — read this before trusting any security claim below
+>
+> This is a **wave record**: it describes what Wave 3 delivered, as of 2026-06-14.
+> The security model has moved since, in ways that make several of the original
+> statements wrong in the *dangerous* direction. A 2026-08-16 documentation audit
+> corrected them in place; each correction is marked `[CORRECTED 2026-08-16]` and
+> cites the code that closed it. What a reader needs up front:
+>
+> - **The capability vocabulary is no longer the six ids §0 calls "final".** It is
+>   **16**, and the module is authoritative:
+>   `ALL_CAPABILITY_IDS` in `app/src/api/scriptHost/capabilityIds.ts:216-233`.
+>   Read the module, never this document.
+> - **The Rust contract in §1 was wrong and the code says so in its own header.**
+>   A capability now needs up to **three** entries, not one. Omitting the Rust one
+>   already broke `schedule` — approved in the UI, refused by the backend forever
+>   after (`capabilityIds.ts:29-35`).
+> - **MCP tools ARE a user-scripting surface with a model provider.** The §5 table
+>   said the opposite. `core/script-engine/src/manifest.rs:343-366` carries a
+>   `CORRECTED 2026-08-02` note recording that "every mirror repeated 'grid-only'.
+>   Both were false." This document was one of those mirrors.
+> - **The §9 residual (unverified `codeInventory` reach) is CLOSED** — see §9.
+> - **Two security defects were found in this model AFTER it was declared
+>   complete**, both now fixed: BUG-0086 and BUG-0092. They are recorded in
+>   §12, which is new. A model described as complete that never mentions the
+>   holes later found in it is the most misleading thing a security document can
+>   do.
+> - Still accurate and load-bearing: the §2 UDF architecture, the §4 extension
+>   sandboxing design, and the §6-§8 rationale. Those are why this file is kept.
+>
+> The **live** open-defect register is `docs/design/open-decisions-2026-08.md`;
+> the **live** surface taxonomy is `app/src/api/scriptSurfaces.ts`.
+
 **Status:** Complete (2026-06-14). Builds directly on Wave 2
 (`docs/design/script-sandbox-architecture.md` — per-script Worker realms, the
 tier broker, the capability/consent model, Ed25519 `.calp` signing). This
@@ -30,10 +62,21 @@ surfaces (see §11).
 | `bi.sql` | Higher-trust **raw read-only SQL** as a separate capability | Engine connector-by-index + Rust read-only re-validation |
 | Command results | `CommandRegistry.execute` returns the handler's value; surfaced through the worker proxy + `executeCommand` | Worker command results reach the caller |
 
-**Capability vocabulary (final):** `net.fetch`, `bi.query`, `bi.sql`, `storage`,
-`ui.html`, `formula.udf`. All have real executors, R19 declared-capability
-ceilings, grant/consent, and audit, across object scripts **and** worker
-extensions.
+**Capability vocabulary as Wave 3 shipped it (2026-06-14):** `net.fetch`,
+`bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`. All have real
+executors, R19 declared-capability ceilings, grant/consent, and audit, across
+object scripts **and** worker extensions.
+
+> **[CORRECTED 2026-08-16]** This list was originally published as
+> "**Capability vocabulary (final)**". It was not final, and re-typing it here at
+> all was the mistake: CLAUDE.md's rule is that the canonical id list is
+> `ALL_CAPABILITY_IDS` and is "never re-typed elsewhere". The vocabulary is now
+> **16 ids** (`app/src/api/scriptHost/capabilityIds.ts:216-233`) — the six above
+> plus `bi.model`, `bi.connector`, `ui.dialog`, `distribution.writeback`,
+> `schedule`, `file.picker`, `ui.shortcut`, `grid.read`, `distribution.publish`
+> and `distribution.subscribe`. The six are kept above only as the historical
+> Wave-3 scope statement. **Read the module, not this paragraph** — the count
+> here will drift again and this sentence will not.
 
 ---
 
@@ -47,10 +90,26 @@ imperative surface."
   `isCapabilityId`). Before Wave 3 the list was duplicated in three places
   (allowlist `CapabilityId` union, capabilities `KNOWN_CAPABILITY_IDS`, broker
   `VALID_CAPABILITY_IDS`); they all import the one set now, so a capability can't
-  be half-added. **Rust contract documented:** a capability with backend reach
-  (e.g. `net.fetch` → `script_http_fetch` origin re-check) needs Rust
-  enforcement; a purely frontend/in-worker one (e.g. `formula.udf`) does not —
-  there is no enumerated Rust capability list, only the `net.fetch` origin store.
+  be half-added.
+  - **[CORRECTED 2026-08-16 — the original text here was wrong and unsafe.]**
+    Wave 3 documented the Rust contract as: *"a capability with backend reach
+    needs Rust enforcement; a purely frontend/in-worker one does not — there is
+    no enumerated Rust capability list, only the `net.fetch` origin store."*
+    That has been false since the capability store gained
+    `GRANTABLE_CAPABILITIES` (`app/src-tauri/src/scripting/capability_store.rs`),
+    and the code now refutes it verbatim in
+    `app/src/api/scriptHost/capabilityIds.ts:29-35`.
+    **The real contract is up to THREE entries, not one:**
+    1. `ALL_CAPABILITY_IDS` — `app/src/api/scriptHost/capabilityIds.ts`
+    2. `RUST_MIRRORED_CAPABILITIES` — `app/src/api/scriptHost/capabilities.ts`
+       (only for ids the backend must know about)
+    3. `GRANTABLE_CAPABILITIES` — `capability_store.rs` — **otherwise the mirror
+       call is REJECTED by the store's own id allowlist.**
+    A frontend-only capability needs (1) alone. Skipping (3) for one that is not
+    frontend-only is not a theoretical risk: it **already broke `schedule`**,
+    which looked approved in the consent UI and was refused by the backend
+    forever after. This document was the last surviving copy of the claim the
+    code had already fixed and annotated as harmful.
 - **`app/src/api/scriptHost/errorMap.ts`** — `brokerErrorToCellError`,
   `brokerErrorReason`, shared by C1 (UDF cell errors) and extensions.
 
@@ -161,7 +220,12 @@ SAME two capability classes — the first capabilities on that surface (the C3
 server-side (there is no broker hop — the notebook executes in Rust):
 `bi/script_provider.rs::HostModelProvider` re-checks the in-memory
 `CapabilityStore` grant per call (key `notebook:{id}`; JIT consent mirrors
-via `grant_script_bi`), funnels through the gate-free cores extracted from
+via `grant_script_capability` — **[CORRECTED 2026-08-16]** this was originally
+written as `grant_script_bi`, a command that no longer exists: it was
+generalized to `grant_script_capability` because its id check rejected
+everything outside `bi.*` (`app/src-tauri/src/net_commands.rs:123`,
+`app/src/api/scriptHost/capabilities.ts:172-178`). A reader greping the old
+name finds nothing), funnels through the gate-free cores extracted from
 the existing commands (`bi_query_core` — RLS inside the engine lock;
 `bi_sql_core` — read-only validation + 100k cap), and records success AND
 denial into the always-on `CapabilityCall` audit trail with the same
@@ -246,6 +310,55 @@ is heterogeneous because the surfaces have different needs. The single queryable
 source of truth is **`app/src/api/scriptSurfaces.ts`** (kept in lockstep by a
 test):
 
+**[CORRECTED 2026-08-16.]** The table below is the **Wave-3-era** taxonomy: six
+surfaces, and two of its rows were wrong even then in the dangerous direction.
+The live taxonomy is **eleven** surfaces. The corrected table is first; the
+original follows, kept because §5's *rationale* (why notebooks stay on QuickJS)
+is still the reason the split exists.
+
+**Live taxonomy (11 surfaces, `app/src/api/scriptSurfaces.ts`, verified
+2026-08-16).** Capability columns are the surface *ceiling* — what an
+author-declared R19 ceiling may contain — not what any given script holds:
+
+| Surface (`id`) | Runtime | Capabilities | Runs user code? |
+|---|---|---|---|
+| `object-script` | Per-script worker realm | full broker vocabulary | yes |
+| `script-library` | Its OWN worker realm, per library | `declared(library) INTERSECT declared(consumer)` | yes |
+| `extension-worker` | Worker realm | 11 ids incl. `grid.read` | yes |
+| `formula-udf` | The owning script's worker realm | full broker vocabulary | yes |
+| `notebook-cell` | Rust QuickJS (persistent) | **`bi.query`, `bi.sql`** | yes |
+| `one-off-script` | Rust QuickJS (ephemeral) | none | yes |
+| `chart-transform` | Main thread, pure pipeline | n/a | **no** (declarative) |
+| `chart-transform-sandbox` | Worker realm | full broker vocabulary | yes |
+| `chart-mark` | Worker realm | `ui.html` | yes |
+| `writeback-validator` | Rust QuickJS (host globals deleted) | none | yes |
+| `mcp-tool` | Rust QuickJS | **`bi.query`** | **yes** |
+
+Two corrections in that table are the whole reason this note exists:
+
+- **`mcp-tool` — the original row below says "Not a user-scripting surface",
+  capabilities "n/a". Both are false.** `execute_script` runs
+  **agent-authored** code with a `HostModelProvider` injected and a hard-coded
+  `MCP_SCRIPT_CAPABILITIES = ["bi.query"]` grant
+  (`app/src-tauri/src/mcp/tools.rs:1085, 1206, 1220`).
+  `core/script-engine/src/manifest.rs:343-352` records this as
+  `CORRECTED 2026-08-02` and says explicitly that *"every mirror repeated
+  'grid-only'. Both were false."* **This document was one of those mirrors and
+  was never corrected until now.** `bi.sql` is deliberately withheld there
+  (`manifest.rs:358-363`).
+- **`notebook-cell` — "none (no ambient surface)" contradicted this document's
+  own §3** ("the notebook surface joins `bi.query`/`bi.sql`", 2026-07). Code:
+  `scriptSurfaces.ts:253` and the `notebook-cell` `SURFACE_PROFILES` row
+  (`manifest.rs:329-337`), `granted: ["bi.query", "bi.sql"]`.
+
+Also new since Wave 3: `script-library`, `chart-transform-sandbox` and
+`chart-mark`. Chart transforms are consequently **no longer only** the
+non-executing declarative pipeline the last row describes — the sandboxed
+variant is a full worker realm with an author-declared ceiling.
+
+<details>
+<summary>Original Wave-3 table (2026-06-14) — superseded, kept for the record</summary>
+
 | Surface | Runtime | Containment | Capabilities | Gate |
 |---|---|---|---|---|
 | Object scripts | Per-script Web Worker | Hardened; no DOM/Tauri; broker-mediated | `net.fetch`, `bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf` | Tier broker + per-package consent |
@@ -254,6 +367,8 @@ test):
 | One-off scripts | Rust QuickJS (ephemeral) | Same isolation, grid-only | none | Coarse session approval |
 | Chart transforms | Main thread, pure pipeline | `evalArithmetic` (recursive-descent; no `eval`/`new Function`) — NOT an execution surface | n/a | n/a (pure declarative) |
 | MCP tools | Rust (first-party tool bodies) | Not a user-scripting surface | n/a | Window-label guard |
+
+</details>
 
 **Why notebooks/one-off stay on Rust QuickJS, not the worker realm:** (1) they
 are already well-contained — an isolated interpreter over a *clone* of grid state
@@ -308,7 +423,9 @@ through the host to the `execute()` caller (or a script calling `executeCommand`
 
 - **Rust:** `cargo check` clean; engine `cargo test udf` (4); app
   `cargo test --lib udf` (13) + `ext_manifest` signing tests (4).
-- **TS:** typecheck clean; **full unit suite 101,855 pass** (incl. new
+- **TS:** typecheck clean; **full unit suite 101,855 pass as of 2026-06-14**
+  (this is a dated wave snapshot, not a current number — the suite stands at
+  ~107,155 across 808 files as of 2026-08-16) (incl. new
   `capabilityIds`, `formulaUdf`, `extensionTrust`, `scriptSurfaces`,
   `extensionProtocol`, `biQuery`, `commands` tests).
 - **e2e (Playwright/WebView2):** `udf-evaluation` (2), `worker-extension` (1),
@@ -334,8 +451,22 @@ through the host to the `execute()` caller (or a script calling `executeCommand`
   the `audit_record_capability` command, deduped so backend-reaching caps aren't
   recorded twice. Surfaced as a "Capabilities" category. The in-memory broker ring
   stays the live panel feed; the persisted log is the system of record across
-  reload. Residual: `codeInventory`'s grid-only "reach=[]" is asserted by surface
-  taxonomy, not verified against the QuickJS host.
+  reload. ~~Residual: `codeInventory`'s grid-only "reach=[]" is asserted by
+  surface taxonomy, not verified against the QuickJS host.~~
+  **[RESOLVED 2026-08-16 — verified closed by this audit.]** The reach is now
+  *derived* and drift-guarded, not asserted. `core/script-engine/src/manifest.rs`
+  provides `enumerate_registered_surface()` (:523) — the live op list from the
+  interpreter itself — plus `OP_MANIFEST` (:130) classifying every path into a
+  `ReachClass`, `SURFACE_PROFILES` (:325) recording how each host surface builds
+  the realm, and `surface_reach()` (:402) / `surface_capability_ids()` (:412)
+  computing reach per surface. The manifest is diffed against the live
+  interpreter **in both directions** by
+  `op_manifest_matches_the_live_interpreter_surface` (:668) — a new op the
+  manifest does not admit fails the build, and so does a stale row the
+  interpreter no longer registers — and mirrored to the TS taxonomy by
+  `interpreterReachDrift.test.ts`. The sibling
+  `script-sandbox-architecture.md` §14.7 had already recorded this as resolved;
+  this document had not, which is the drift this audit was looking for.
 - **Script Security gate over the object-script surface (DONE — B1).** The global
   setting (disabled/prompt/enabled) now governs the object-script surface at its
   single mount chokepoint, `ObjectScriptManager.mountScript` (`@api/scriptableObjects`),
@@ -393,3 +524,83 @@ through the host to the `execute()` caller (or a script calling `executeCommand`
   (today degrade to `#NAME?` until re-entered).
 - **Extension signing pipeline:** the *verification* + sidecar format ship now;
   a first-party tool to *produce* signed extension packages is future.
+
+---
+
+## 10. Defects found in this model AFTER it was declared complete
+
+**Added 2026-08-16.** Wave 3 closed on 2026-06-14 declaring the scripting
+security model complete, and everything above is written in that voice. Two real
+holes were found in it later. Both are fixed, and both are recorded here because
+a security document that describes a model as complete, and never mentions the
+defects subsequently found in it, teaches the next reader to trust the model
+further than the evidence supports. The ledger entries are the primary record
+(`tests/regression/bug-ledger.json`).
+
+### The standing rule this model did not originally state
+
+> **A script may REFERENCE media already in the document; it may never
+> INTRODUCE bytes.**
+
+This is now a property of the code, not a paragraph. `shape.setProperty`'s `src`
+slot accepts a `media:{sha256}` handle or `""` and refuses a `data:` URI, a file
+path and a URL alike (`app/src/api/scriptHost/validators.ts:4072-4086`, with
+`MEDIA_REF_RE` at :3937 deliberately mirroring Rust's `parse_media_ref`).
+`vCreatePicture` (:4116) has **no bytes parameter at all**. Bytes enter only
+through the picker, validated host-side by `inspect_media` behind
+`cap.fileImportMedia` / `file.picker`.
+
+Note the structural trap that made this reachable, because it is still live for
+the next aspect anyone adds: `vSetState` in `validators.ts` ends in
+`return true`, so **a new `object.setState` aspect with no matching row defaults
+to unvalidated at restricted tier with no capability.** That default is exactly
+how `shape.setProperty` became a route for a distributed script to persist a
+multi-megabyte `data:` URI into a signed `.calp`.
+
+### BUG-0086 — a refused image was still delivered to the decoder (fixed)
+
+`MAX_MEDIA_PIXELS`, the decompression-bomb defence and the entire reason the
+image header is parsed, **protected nothing on the inline path.** Both
+migrations (`migrate_legacy_data_urls` for `.cala`, `rewrite_inline_images` for
+`.calp`) decoded each payload, ran `inspect_media`, and on ANY error counted it
+`refused` and **left the string exactly where it was.** That tolerance was
+designed for FORMAT refusals — an SVG the old picker accepted must not be
+destroyed by a later, narrower allowlist — and was wrongly applied to CAP
+refusals too. A 30,000 x 30,000 single-colour PNG (a few KB on the wire,
+3.6 GB of RGBA at decode) was refused entry to the media store, kept its place
+in the control property, materialized into the subscriber's `controls.json`, and
+was handed to the WebView as `<img src="data:...">` — the one component with no
+caps at all.
+
+**The lesson worth more than the fix:** the existing test named this exact case
+and passed. `a_correctly_signed_decompression_bomb_inline_is_refused_not_admitted`
+asserted only `bytes.is_empty()` — the store was clean and the renderer still got
+the bomb. A test that asserts the *guard ran* is not a test that asserts the
+*payload did not arrive*.
+
+### BUG-0092 — an imported file chose the privilege tier of the code it installed (fixed)
+
+`importTemplate` was `JSON.parse(json) as ObjectTemplate` — a **cast, which
+validates nothing** — and the parsed object was persisted verbatim,
+`accessLevel` included. That field is load-bearing: `stampFromTemplate` copies it
+onto the stamped definition and `buildHandleFromDefinition`
+(`app/src/api/scriptHost/broker.ts:85-97`) turns `accessLevel === "unlocked"`
+into `tier: "unlocked"` — in allowlist terms whole-workbook reach
+(`getCellValue`, `setCellValue`, `updateCellsBatch` over 100,000 cells,
+`executeCommand`). Object scripts run on their object's events, so no further
+gesture was needed to execute it. Worse, the import carried no `provenance`, so
+`isDistributed` was false and the script landed in the **most** trusted bucket
+rather than the consent-gated distributed one.
+
+Fixed in `app/extensions/ScriptableObjects/lib/templateManager.ts:209-263`,
+which is now a field-by-field validator: garbage is refused with
+`TemplateImportError`, the id is a fresh `crypto.randomUUID()` *"so an imported
+file cannot choose the identity that a capability grant or a source hash is keyed
+to"*, and `accessLevel` is hard-coded `"restricted"` under the comment
+**"NEVER `raw.accessLevel`."** Pinned by
+`app/extensions/ScriptableObjects/__tests__/templateImportTier.test.ts`.
+
+The user-facing framing is the part to carry forward: the dialog invited the user
+to "import a `.calcula-template` file", so the user believed they were choosing a
+**document** and were in fact choosing **executable code and the privilege level
+it runs at**. See `scriptable-objects.md` §3, which is where that framing lived.

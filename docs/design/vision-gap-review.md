@@ -1,5 +1,42 @@
 # Vision Gap Review — Full Application Audit (2026-06-11)
 
+> **STATUS, AUDITED 2026-08-16: this is a HISTORICAL audit. Do not read the Executive
+> summary below as current — most of what it calls broken has since shipped, and the
+> security half of it is now wrong in the alarming direction.**
+>
+> This document was accurate on 2026-06-11 and its four wave sections record their own
+> completion (Waves 1-3 DONE 2026-06-12/13/14, plus the 2026-07-01 animation follow-on).
+> What rots is the **Executive summary and the per-pillar gap lists**, which were written
+> against the June tree and never restated. Checked against the code today:
+>
+> * **"Enforcement theater ... the script security level gates nothing, the consent dialog
+>   can never fire, 'restricted' scripts hold full webview + Tauri authority, locked cells
+>   are never checked."** All four are false now. Object scripts run in per-script hardened
+>   Worker realms behind a capability broker (`app/src/api/scriptHost/` — `broker.ts`,
+>   `allowlist.ts`, `mountGate.ts`, `worker/`), with a 16-id capability vocabulary
+>   (`capabilityIds.ts:216-233`, `ALL_CAPABILITY_IDS`), a declared-capability ceiling,
+>   consent, and a per-script audit ring. `ScriptConsentDialog.tsx` exists and is pinned
+>   for honesty by `consentTextHonesty.test.ts`. Cell/sheet protection is real backend
+>   state (`AppState.sheet_protection` / `workbook_protection`, both `Persisted<T>`,
+>   `lib.rs:439-442`) and gated commands take it under one lock via
+>   `lock_pending()` + `.authorize(&effect)`. **A reader acting on the June text would
+>   re-open holes that are closed** — which is why this banner leads with it.
+> * **"~17 of 34 `calp_*` commands have zero frontend callers."** There are now **71**
+>   distinct `calp_*` commands, so the ratio is not merely stale, it is uncountable from
+>   this text. Current `.calp` state lives in `docs/design/calp-distribution.md` and its
+>   siblings, all re-audited 2026-08-16.
+> * **"The two headline `.calp` loops are each broken at one critical link"** (overrides
+>   never captured; GATHER sees no data). Both were fixed inside the wave work recorded
+>   further down this same file; see `docs/design/calp-v1.1-writeback-implementation.md`.
+>
+> **What is still worth reading here, and it is most of the file:** the *method* (8 subsystem
+> auditors, adversarial verification of every factual claim, a completeness critic, 55
+> confirmed / 0 refuted), the per-pillar reasoning about WHY each gap mattered to the
+> founding vision, the blind-spot section, and the "Refuted claims" section — which is the
+> rarest and most useful part, because it records what an audit got wrong.
+>
+> **For what is open today, read [`docs/design/open-items.md`](./open-items.md).**
+
 ## How this was produced
 
 A multi-agent review against the founding vision (see `claude.md` Project Vision,

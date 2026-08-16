@@ -122,7 +122,16 @@ shape.render.canvasRenderer((ctx, bounds) => {
 }): CleanupFn;
 ```
 
-The renderer function is called on every frame. The `bounds` parameter provides `{ x, y, width, height }` in canvas coordinates.
+The `bounds` parameter provides `{ x, y, width, height }` in canvas coordinates.
+
+**[CORRECTED 2026-08-16]** This originally read *"The renderer function is called
+on every frame."* It is not, and it must not be assumed to be: **the render loop
+never crosses the worker boundary.** Your renderer runs **on change**, in the
+worker, drawing into an `OffscreenCanvas`; the host caches the resulting
+`ImageBitmap` and blits that every frame
+(`app/src/api/scriptHost/renderCache.ts:3-9`, sandbox design §6.2/§9). Write the
+renderer as a pure function of current state, not as an animation tick — a
+renderer that expects to be invoked per frame will appear frozen between changes.
 
 #### 3. Interactive HTML Rendering
 Replace canvas rendering with a sandboxed iframe overlay:
@@ -136,7 +145,7 @@ shape.render.setHtmlContent(`
 `);
 ```
 
-The HTML is rendered inside an `<iframe>` with `sandbox="allow-scripts allow-same-origin"`. A postMessage bridge is automatically injected.
+The HTML is rendered inside an `<iframe>` with **`sandbox="allow-scripts"` and nothing else**. A postMessage bridge is automatically injected. See the Security Model section for why `allow-same-origin` must never be added back.
 
 ### Two-Way Messaging (HTML <-> Script)
 
@@ -285,10 +294,48 @@ Shape property changes made via `shape.setProperty()` are wrapped in undo transa
 
 ## Security Model
 
-- **Sandboxed iframe**: HTML content renders in an `<iframe>` with `sandbox="allow-scripts allow-same-origin"`. Scripts inside the iframe can execute JavaScript but cannot access the parent window's DOM directly.
-- **postMessage bridge**: Communication between iframe and shape script is mediated through structured `postMessage` calls with instance ID filtering.
+**[CORRECTED 2026-08-16.]** The first and last bullets of this section were both
+wrong. The iframe one was wrong in the dangerous direction: it paired the
+**pre-fix** sandbox configuration with a safety claim that was *false for that
+configuration*, so a reader "restoring the documented design" would re-open
+exactly the hole that was closed. The originals are preserved at the end of this
+section.
+
+- **Sandboxed iframe — `sandbox="allow-scripts"` ONLY.** With `srcdoc`, that
+  single token gives the iframe an **opaque origin**, which is what actually
+  denies it the parent window, app-origin storage and `__TAURI__`. Enforced at
+  both call sites: `app/extensions/Controls/Shape/shapeRenderer.ts:217-220` and
+  `app/extensions/Controls/PropertiesPane/PropertiesPane.tsx:624`
+  (`allow-same-origin` appears nowhere in `app/`, verified 2026-08-16).
+  **`allow-same-origin` must never be added back.** With `allow-scripts` present,
+  the two together return the frame to the app's own origin and the isolation is
+  gone entirely — the frame can then reach the parent DOM, so the original
+  claim below ("cannot access the parent window's DOM directly") was never true
+  of the configuration it described. Recorded as the fix in
+  `script-sandbox-architecture.md` §6.3 and its threat model.
+- **postMessage bridge**: Communication between iframe and shape script is mediated through structured `postMessage` calls with instance ID filtering. It is the ONLY communication path.
+- **`ui.html` is a capability, not a free surface.** `render.setHtml` is gated by
+  the `ui.html` capability for distributed scripts (`app/src/api/scriptHost/allowlist.ts`);
+  it is auto-granted only for LOCAL scripts (`broker.ts:85-100`, where
+  `isDistributed = definition.provenance === "distributed"` drives the ceiling).
+- **Media: reference, never introduce.** `shape.setProperty`'s `src` slot is the
+  exact surface CLAUDE.md names as the historical `data:`-URI smuggling route
+  into a signed `.calp`. It now takes a `media:{sha256}` handle or `""`, and
+  refuses a `data:` URI, a file path and a URL alike —
+  `checkShapeSetProperty` in `app/src/api/scriptHost/validators.ts:4072-4086`.
+  Bytes enter the document only through the picker behind `file.picker` /
+  `cap.fileImportMedia`, which validates and caps them host-side. See
+  `wave3-scripting-security.md` §12 (BUG-0086).
 - **Restricted access**: By default, shape scripts run at the `"restricted"` access level with read-only cell access. The `"unlocked"` level provides full cell read/write, sheet operations, and command execution.
-- **No import/require**: Shape scripts run in a sandboxed function scope — no module system access.
+- **Per-script hardened Worker realm**: Shape scripts do **not** run in a "sandboxed function scope". Each runs in its own hardened Worker realm (blob-ESM import, neutered globals, no ambient DOM/Tauri, all privileged reach broker-mediated) — `app/src/api/scriptSurfaces.ts:87-99`, `script-sandbox-architecture.md` §3.
+
+<details>
+<summary>Original text (superseded 2026-08-16)</summary>
+
+> - **Sandboxed iframe**: HTML content renders in an `<iframe>` with `sandbox="allow-scripts allow-same-origin"`. Scripts inside the iframe can execute JavaScript but cannot access the parent window's DOM directly.
+> - **No import/require**: Shape scripts run in a sandboxed function scope — no module system access.
+
+</details>
 
 ## Event Reference
 

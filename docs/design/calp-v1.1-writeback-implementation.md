@@ -8,9 +8,23 @@ refusal, audit events) also closed.
 
 Remaining future work (not blocking):
 - GATHER pre-fetch wiring at ~12 secondary evaluator helpers (hot paths covered)
-- Remote/networked registry support
+- ~~Remote/networked registry support~~ — **DONE for reads (corrected
+  2026-08-16).** `HttpRegistry` (`app/src-tauri/src/calp_registry.rs:93`)
+  implements `RegistryTransport` against any static file host; routing is by URL
+  scheme through `open_registry_scoped` (`calp_registry.rs:49`). It is
+  **read-only**: publish, `save_submission` and the publish lock all error
+  ("HTTP registries are read-only", `calp_registry.rs:207`), so **writeback
+  collection is still local-registry-only** — that half is genuinely
+  outstanding, and it is the half this document cares about.
 - Approval workflows beyond state tracking
-- Full regex support in ValueSchema pattern validation (currently substring match)
+- ~~Full regex support in ValueSchema pattern validation (currently substring
+  match)~~ — **DONE (corrected 2026-08-16).** `ValueSchema::validate` compiles
+  the publisher's `pattern` with the `regex` crate and matches it anchored
+  (`core/calp/src/writeback.rs:288-297`), falling back to literal-substring
+  matching only if the pattern fails to compile. Pinned by
+  `schema_pattern_is_real_regex` (`writeback.rs:1813`), whose own comment notes
+  "the old substring behavior would WRONGLY accept this". Landed as roadmap #8
+  of `writeback-review-2026-06.md`, which this list contradicted.
 
 ## Starting Point
 
@@ -20,9 +34,16 @@ Phase 9 landed the following prerequisites:
   round-tripped losslessly)
 - `WritebackIndex` in `AppState`, rebuilt on pull/refresh/detach
 - Frontend edit/range guards refusing edits on writeback cells
-- Backend backstops on 7 mutation paths
-- Conditional style interceptor (no-op, registered only when regions exist)
-- Forward-compatibility `extra` hatches on 16 persisted structs
+- Backend backstops on 7 mutation paths — verified 2026-08-16: 7 helper
+  functions (`app/src-tauri/src/calp_commands.rs:8694-8964`) called from **33
+  sites** across `commands/data.rs`, `commands/search.rs`,
+  `commands/structure.rs` and `merge_commands.rs`
+- Conditional style interceptor (no-op, registered only when regions exist) —
+  no longer a no-op since Phase 18; see that phase
+- Forward-compatibility `extra` hatches on ~~16~~ **27** persisted structs
+  (recounted 2026-08-16: `pub extra` appears 14x in `core/calp/src/manifest.rs`,
+  6x in `writeback.rs`, 3x each in `overrides.rs` and `audit.rs`, 1x in
+  `identity_provider.rs`)
 - Manifest validation (overlapping/inverted regions rejected at load time)
 
 ## Infrastructure Gaps Identified
@@ -417,6 +438,21 @@ outside the local workbook.
 - `GATHER.COUNT(region_ref)` — count of submissions
 - `GATHER.FROMS(region_ref)` — list of submitter identities
 
+> **AS BUILT (corrected 2026-08-16) — the plan's names and count are both off.**
+> `GATHER.FROMS` does not exist and never did; it shipped as
+> **`GATHER.SUBMITTERS`**. A fifth function the plan did not anticipate was
+> added later — **`GATHER.AT(region, row, col)`**, returning every submitter's
+> value for ONE input cell, which is what makes per-line-item consolidation
+> possible (`SUM(GATHER.AT(...))` totals one budget line across contributors).
+> It arrived as roadmap #4 of `writeback-review-2026-06.md`, together with
+> optional `(row, col)` cell-scoping forms of `GATHER.FROM` / `.COUNT` /
+> `.SUBMITTERS`. Coordinates are 1-based absolute, converted to 0-based
+> internally. The five are registered at `core/parser/src/ast.rs:1019-1023`.
+>
+> **`GATHER.AT` is missing from the function catalog** (`ast.rs:2412-2415` lists
+> the other four), so it never appears in autocomplete or Insert Function and
+> gets no argument template. Filed as **BUG-0095** (open).
+
 #### Evaluation model
 
 Two-phase approach to avoid refactoring the entire evaluator to async:
@@ -438,8 +474,20 @@ GatherCache {
 
 The cache is:
 - Per evaluation session (not per cell)
-- Persisted in `.cala` for offline opening with last-known values
-- Invalidated by a "Refresh Writeback Aggregates" command
+- ~~Persisted in `.cala` for offline opening with last-known values~~ —
+  **NEVER BUILT (corrected 2026-08-16).** It is in-memory only:
+  `AppState.gather_cache: Mutex<Option<(std::time::Instant, HashMap<String,
+  GatherRegionData>)>>` (`app/src-tauri/src/lib.rs:632`), initialised to `None`
+  (`lib.rs:808`). An `Instant` cannot be serialised and nothing writes the map
+  into the archive, so it starts EMPTY on every launch. A cold open returns an
+  empty map and queues a background rebuild
+  (`app/src-tauri/src/calp_commands.rs:10709`); against a local registry (the
+  only kind that holds submissions today) that is fast enough that the gap has
+  never shown. See `calp-writeback.md` "Evaluation model" for the consequence
+  if HTTP registries ever accept writeback.
+- Invalidated by a "Refresh Writeback Aggregates" command, and eagerly on local
+  mutation via `invalidate_gather_cache`; otherwise served for a 2-second TTL
+  (`GATHER_CACHE_TTL`, `calp_commands.rs:10558`)
 
 #### Visibility enforcement
 
@@ -679,8 +727,14 @@ tests that span multiple phases:
 
 - It is not a timeline. Phase sizes vary enormously — Phase 14 and
   Phase 16 are each larger than all of Phase 9.
-- It does not cover networked/remote registries. All registry operations
-  are local filesystem. Remote registry support is a separate project.
+- ~~It does not cover networked/remote registries. All registry operations
+  are local filesystem. Remote registry support is a separate project.~~
+  **Partly overtaken (corrected 2026-08-16):** that separate project delivered
+  READ support — `HttpRegistry` (`app/src-tauri/src/calp_registry.rs:93`) pulls
+  packages from any static file host, verified through the same signature and
+  per-artifact SHA-256 path as a local one. Registry WRITES remain local-only,
+  and since submissions are writes, everything this plan says about writeback
+  storage is still local-filesystem and still accurate.
 - It does not cover approval workflows beyond simple state transitions.
   The `OnApproval` submission policy stores the state; the approval UI
   and workflow engine are future work.

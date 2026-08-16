@@ -4,13 +4,49 @@
 
 **All 8 phases implemented** (May 2026). Pre-production — no deployed users.
 
+> **Deferred list re-verified against code 2026-08-16.** Three of the four items
+> below had SHIPPED and the list still called them missing. The corrected state
+> is recorded inline; the original wording is kept struck through so the
+> sequencing rationale below still reads against the plan it was written for.
+
 Deferred items:
-- HTTP registry adapter (Phase 2 scope, local-filesystem only for now)
-- Author-facing rename/merge UI (stubs in place, pending full IdRegistry
-  integration into AppState)
-- Full dep graph migration from coordinate keys to (SheetId, CellId) keys
-  (IdentityGraph exists alongside the coordinate graph)
-- Signing infrastructure (manifest supports it, no implementation yet)
+- ~~HTTP registry adapter (Phase 2 scope, local-filesystem only for now)~~
+  **BUILT (read-only).** `HttpRegistry` (`app/src-tauri/src/calp_registry.rs:93`)
+  implements `RegistryTransport` over `reqwest::blocking`, so any static file
+  host (S3, nginx, GitHub Pages) is a registry with no server code. It lives in
+  the app crate deliberately, so `core/calp` stays free of an HTTP client —
+  which is why `core/calp/src/transport.rs` still describes itself as
+  local-only. Routing is by URL scheme through the single choke point
+  `open_registry_scoped` (`calp_registry.rs:49`). **Still genuinely absent:**
+  writes. Publish, submission save and the publish lock all error on an HTTP
+  registry ("HTTP registries are read-only", `calp_registry.rs:207`), so
+  writeback collection remains local-registry-only, and redirects are disabled
+  to keep a hostile registry from turning a GET into an SSRF primitive.
+- ~~Author-facing rename/merge UI (stubs in place, pending full IdRegistry
+  integration into AppState)~~ **The blocker is gone; only the UI is still
+  missing.** `IdRegistry` is in `AppState` (`app/src-tauri/src/lib.rs:616`), and
+  `calp_rename_cell_id` / `calp_merge_cell_ids` are real commands, not stubs
+  (`app/src-tauri/src/calp_commands.rs:6144` and `:6171`), each window-guarded
+  and each dirtying the document only when it actually merged. `renameCellId` /
+  `mergeCellIds` are exposed on the facade (`app/src/api/distribution.ts:776`,
+  `:789`). Nothing in `app/extensions/` calls either one, so the remaining work
+  is exactly the author-facing surface and nothing underneath it.
+- Full dep graph migration from coordinate keys to (SheetId, CellId) keys —
+  **still deferred, and further from done than "alongside" suggests.**
+  `IdentityGraph` (`core/engine/src/identity_graph.rs:45`) has NO production
+  consumer at all: every reference to it outside its own file is one of its own
+  unit tests. The coordinate graph is not merely still present, it is the only
+  one in service.
+- ~~Signing infrastructure (manifest supports it, no implementation yet)~~
+  **BUILT, and it is not optional.** Every publish loads or creates an Ed25519
+  publisher keypair and writes a detached `version-manifest.sig` over the raw
+  manifest bytes (`core/calp/src/publish.rs:1176`), stamping the asserted
+  `publisher_key` into the manifest (`publish.rs:557`). Trust is TOFU and
+  enforced CLIENT-side, not by the registry: `PinPolicy` is
+  `PinOnFirstUse` / `PinAcceptingNameConflict` / `VerifyOnly` / `RequirePinned`
+  (`core/calp/src/integrity.rs:439-458`) against a pin store in the user
+  profile, and cross-registry name conflicts are surfaced rather than
+  silently accepted. See "Security and Trust" in `calp-distribution.md`.
 
 See `docs/guide/distribution.md` for user-facing documentation and
 `docs/spec/calp-format.md` for the on-disk format specification.

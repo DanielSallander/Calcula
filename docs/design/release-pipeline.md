@@ -2,6 +2,27 @@
 
 Status: **installers build; signing and auto-update are follow-ups.**
 
+**Current as of 2026-08-16.** Re-audited against source. Everything below is accurate except one
+line flagged as an open owner question:
+
+- Verified still true: the `bundle` config (`tauri.conf.json:30-32`), the draft-release workflow
+  (`release.yml:41` x64, `:44` arm64, `:99` tag guard, `:103` `draft: true`), `workflow_dispatch`
+  building without releasing (`:27`), all three manifests agreeing at `0.1.0`, and
+  `core/setup-rust-env.ps1 -Target arm64|x64` (default `arm64`, `setup-rust-env.ps1:12-13`).
+- Both follow-ups are genuinely **not built**: there is no Windows signing block in
+  `tauri.conf.json` (the `"windows"` key there is the *window* array, not bundler signing) and no
+  `updater` config or `tauri-plugin-updater` dependency anywhere.
+- **`release.yml` is no longer the only workflow.** Four now exist: `release.yml`, `ci.yml`,
+  `e2e-nightly.yml`, `architecture-boundaries.yml`.
+- **OPEN — owner question:** the claim *"CI cannot run until the repository is pushed to GitHub"*
+  could not be verified in this pass (git access was withheld). `.git/config` does declare
+  `remote "origin" = https://github.com/DanielSallander/Calcula.git`, and three additional
+  workflows have been added since — both consistent with CI being live, but neither proves a push
+  happened. Treat that sentence as unverified until the owner confirms.
+- The 2026-06 build measurement (16 min, 38 MB MSI / 25 MB NSIS) and the Snapdragon `LNK1120`
+  trap are dated, environment-specific observations; not re-measured. The reasoning is the value
+  and is preserved as-is.
+
 ## What already works
 
 `npm run tauri build` in `app/` produces two installers, because
@@ -15,7 +36,8 @@ whatever is in the tree at that moment. No feature freeze is involved, and new
 development flows in automatically. The one thing that does *not* update itself
 is the version number (see below).
 
-First verified release build: 16 min, clean, 38 MB MSI / 25 MB NSIS.
+First verified release build: 16 min, clean, 38 MB MSI / 25 MB NSIS (measured 2026-06; a dated
+observation, not re-measured in the 2026-08-16 audit).
 
 ## The architecture trap (important)
 
@@ -55,8 +77,10 @@ script limitation; it remains useful for pure-Rust cross checks.
    them to a **draft** GitHub Release for review before publishing.
 
 `workflow_dispatch` runs the same build without creating a release, so the
-pipeline can be exercised at any time. **CI cannot run until the repository is
-pushed to GitHub.**
+pipeline can be exercised at any time. ~~**CI cannot run until the repository is
+pushed to GitHub.**~~ *(Unverified as of 2026-08-16 and probably stale — an `origin` remote is
+configured and three further workflows have since been added. See the status header; needs an
+owner answer rather than a guess.)*
 
 ## Follow-up 1: code signing
 

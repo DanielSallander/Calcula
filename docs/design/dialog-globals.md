@@ -4,6 +4,20 @@
 bare forms — are a lint error everywhere in `app/src` and `app/extensions`. The sanctioned
 replacements are `confirmAsync` / `alertAsync` / `promptAsync` from `@api/dialogs`.
 
+**Re-audited 2026-08-16: every claim in this document verified against source and still true** —
+including the counts (171 violations / 63 files, six prior patch-at-the-call-site fixes), the
+`MeasuresSection.tsx` NUL-byte story (that file now uses `"\u0000ungrouped"` and contains zero
+NUL bytes, checked byte-wise), the two ESLint rules, the sole `src/core/lib/dialogs.ts`
+exemption, and all six named consent gates. `npm run lint:boundaries` is clean, and a repo-wide
+grep for the qualified globals in production code returns only comments describing the old
+defect. No corrections were required.
+
+**Sandboxed analogue.** A distributed extension cannot import `@api/dialogs` — its equivalent is
+the `ui.dialog` capability: `capabilities.dialog.{alert,confirm,prompt,form}`
+(`app/src/api/scriptHost/worker/extensionWorkerContext.ts:474-489`), painted by trusted host code
+from a data-only spec and headed by the extension's own name. It fails safe the same way this
+document requires: dismissal resolves (`false` / `null`) and never rejects.
+
 ---
 
 ## The defect
