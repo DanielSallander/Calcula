@@ -99,9 +99,15 @@ function record(event: Event): void {
   fired.push({ name: event.type, detail: (event as CustomEvent).detail });
 }
 
-/** A restore result with the fields under test, and neutral values elsewhere. */
+/** A restore result with the fields under test, and neutral values elsewhere.
+ *
+ *  `restoredRange` DEFAULTS TO THE ONE-CELL RANGE AT `restoredAnchor`, because
+ *  that is the backend's own invariant: both fields come from one derivation
+ *  (`Transaction::restored_range_on`, with the anchor as its top-left corner),
+ *  so a double that let them disagree would be testing a wire shape the product
+ *  cannot produce. Pass `restoredRange` explicitly for the multi-cell cases. */
 function restoreResult(over: Record<string, unknown>): Record<string, unknown> {
-  return {
+  const base = {
     success: true,
     description: "Edit cell",
     updatedCells: [],
@@ -120,7 +126,19 @@ function restoreResult(over: Record<string, unknown>): Record<string, unknown> {
     activeSheetName: "Sheet1",
     restoredAnchor: null,
     ...over,
-  };
+  } as Record<string, unknown>;
+  if (!("restoredRange" in base)) {
+    const anchor = base.restoredAnchor as { row: number; col: number } | null;
+    base.restoredRange = anchor
+      ? {
+          startRow: anchor.row,
+          startCol: anchor.col,
+          endRow: anchor.row,
+          endCol: anchor.col,
+        }
+      : null;
+  }
+  return base;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +148,13 @@ function restoreResult(over: Record<string, unknown>): Record<string, unknown> {
 /** The grid state as the hook last saw it, for assertions after the fact. */
 let observedSheetIndex = -1;
 let observedSelection: { endRow: number; endCol: number } | null = null;
+/** The whole selection rectangle, for the range cases. */
+let observedSelectionBox: {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+} | null = null;
 /** What the hook is feeding the formula bar. */
 let observedFormulaBar = "";
 
@@ -143,6 +168,14 @@ function Harness(): React.ReactElement {
   observedSheetIndex = state.sheetContext.activeSheetIndex;
   observedSelection = state.selection
     ? { endRow: state.selection.endRow, endCol: state.selection.endCol }
+    : null;
+  observedSelectionBox = state.selection
+    ? {
+        startRow: state.selection.startRow,
+        startCol: state.selection.startCol,
+        endRow: state.selection.endRow,
+        endCol: state.selection.endCol,
+      }
     : null;
 
   const hook = useSpreadsheetSelection({
@@ -296,11 +329,15 @@ describe("undo activates the sheet it restored", () => {
     expect(observedSelection).toEqual({ endRow: 0, endCol: 0 });
   });
 
-  it("does nothing at all when the restore was on the sheet already in front of the user", async () => {
+  it("fires no sheet switch when the restore was on the sheet already in front of the user", async () => {
     // THE CONTROL, and it is load-bearing: the common case is a same-sheet
     // undo, and firing a switch for it would save and restore the sheet's own
     // selection, re-read every per-sheet store and re-fetch every cell on
     // every Ctrl+Z.
+    //
+    // The SELECTION half of this test used to assert the cursor stayed at A1,
+    // which is the behaviour open-items 1.4 replaced -- see the test below.
+    // The two halves are separate claims and only one of them changed.
     undoAnswer = restoreResult({
       activeSheetIndex: 0,
       activeSheetName: "Sheet1",
@@ -311,6 +348,66 @@ describe("undo activates the sheet it restored", () => {
 
     expect(fired).toEqual([]);
     expect(observedSheetIndex).toBe(0);
+  });
+
+  it("selects what a SAME-SHEET restore brought back, without switching sheets", async () => {
+    // EXCEL PARITY (open-items 1.4). Excel re-selects the restored range on
+    // every Ctrl+Z, not only when the undo crossed a sheet boundary --
+    // re-selection is how the user sees what came back. This was gated on
+    // `switched` for so long that both the dispatch and the scroll beside it
+    // were dead code on the overwhelmingly common path.
+    undoAnswer = restoreResult({
+      activeSheetIndex: 0,
+      activeSheetName: "Sheet1",
+      restoredAnchor: { row: 5, col: 2 },
+    });
+
+    await pressUndo();
+
+    expect(observedSelection).toEqual({ endRow: 5, endCol: 2 });
+    // ...and it is still the same sheet, so the parity fix did not smuggle in
+    // the switch the test above forbids.
+    expect(fired).toEqual([]);
+    expect(observedSheetIndex).toBe(0);
+  });
+
+  it("selects the whole RANGE a multi-cell restore brought back, not just its corner", async () => {
+    // Undo a four-cell paste and Excel shows all four selected, with the
+    // active cell at the top-left. `restoredAnchor` alone would select one
+    // cell and silently under-report what the undo actually restored.
+    undoAnswer = restoreResult({
+      activeSheetIndex: 0,
+      activeSheetName: "Sheet1",
+      restoredAnchor: { row: 6, col: 4 },
+      restoredRange: { startRow: 6, startCol: 4, endRow: 9, endCol: 7 },
+    });
+
+    await pressUndo();
+
+    expect(observedSelectionBox).toEqual({
+      startRow: 6,
+      startCol: 4,
+      endRow: 9,
+      endCol: 7,
+    });
+  });
+
+  it("leaves a same-sheet cursor alone when the restore names no cells at all", async () => {
+    // The silence is deliberate and it is the whole reason this change is safe
+    // to make unconditionally: a column-width drag, a whole-sheet snapshot
+    // (every insert/delete rows/columns) and the opaque CustomRestore payloads
+    // record no cell coordinates. Excel would select the affected rows for a
+    // structural undo; Calcula cannot, because the transaction never recorded
+    // which they were -- so it does what it has always done and does not move
+    // the user, rather than selecting the wrong thing.
+    undoAnswer = restoreResult({
+      activeSheetIndex: 0,
+      activeSheetName: "Sheet1",
+      restoredAnchor: null,
+    });
+
+    await pressUndo();
+
     expect(observedSelection).toEqual({ endRow: 0, endCol: 0 });
   });
 

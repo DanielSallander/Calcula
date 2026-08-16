@@ -225,9 +225,20 @@ pub fn get_control_metadata(
 /// the Controls extension -> `set_control_property` -> here — therefore let a
 /// restricted, DISTRIBUTED script write an arbitrary multi-megabyte string into
 /// persisted document state. A policy sentence somewhere else does not close
-/// that; a bound at the door does, and this IS the door: every route (UI,
-/// script broker, MCP, `.calp` materialization through `set_control_metadata`)
-/// arrives at one of these two commands.
+/// that; a bound at the door does, and this IS the door for the routes that
+/// come through a COMMAND: the UI, the script broker, and MCP all arrive at one
+/// of these two.
+///
+/// IT IS NOT UNIVERSAL, AND SAYING SO HERE IS THE POINT. This comment used to
+/// end "…every route (UI, script broker, MCP, `.calp` materialization through
+/// `set_control_metadata`) arrives at one of these two commands", and its last
+/// term was false: a package pull calls `materialize_saved_controls` DIRECTLY
+/// (`calp_commands.rs`, three sites) and never passes through either command,
+/// so nothing bounds a distributed property's length. That gap is open-item
+/// 1.6, and it is stated here because a doc comment that lies about where a
+/// bound applies is exactly how it stayed invisible: the test at
+/// `a_control_property_over_the_size_cap_is_refused` already carried the
+/// correction while these two doc comments went on asserting the opposite.
 ///
 /// WHY 64 KiB. The largest legitimate value is inline `onSelect` script source;
 /// 64 KiB is roughly 1,500 lines, far past anything a button handler needs. A
@@ -360,9 +371,13 @@ pub fn set_control_property(
 ///
 /// This is control CREATION (and wholesale replacement), so it is the one door
 /// that legitimately decides a type. The same per-property size bound applies:
-/// it is the route `.calp` materialization and the floating-control builders
-/// use, so leaving it unbounded would leave the megabyte case open under a
-/// different name.
+/// it is the route the floating-control builders use, so leaving it unbounded
+/// would leave the megabyte case open under a different name.
+///
+/// `.calp` MATERIALIZATION DOES NOT COME THROUGH HERE — this comment used to
+/// say it did. A package pull calls `materialize_saved_controls` directly, so
+/// the bound below never sees a distributed property. See
+/// `MAX_CONTROL_PROPERTY_CHARS` and open-item 1.6.
 #[tauri::command]
 pub fn set_control_metadata(
     state: State<AppState>,

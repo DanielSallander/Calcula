@@ -56,6 +56,11 @@ pub enum NumberFormat {
         decimal_places: u8,
         symbol: String,
         symbol_position: CurrencyPosition,
+        /// Which of Excel's four "Negative numbers" entries this format is.
+        /// Defaults to `Minus`, which is what a single-section `$#,##0.00`
+        /// means -- see `NegativeStyle`.
+        #[serde(default)]
+        negative_style: NegativeStyle,
     },
     Accounting {
         decimal_places: u8,
@@ -91,6 +96,87 @@ pub enum CurrencyPosition {
     #[default]
     Before, // $100
     After,  // 100$
+}
+
+/// Excel's four "Negative numbers:" entries in Format Cells > Currency.
+///
+/// WHY THIS EXISTS. `format_currency` used to wrap EVERY negative in
+/// parentheses unconditionally, which is not a thing Excel does by default in
+/// any locale: Excel's Currency preset writes the SINGLE-SECTION code
+/// `$#,##0.00`, and a single-section code renders a negative with a leading
+/// minus. Parentheses are what the third and fourth entries of Excel's list
+/// mean, and they are separate codes. The old behaviour was also a round-trip
+/// LIE: `xlsx_writer` already emitted `$#,##0.00`, so a workbook that showed
+/// `($1,234.56)` in Calcula reopened in Excel as `-$1,234.56`.
+///
+/// Excel's model is a format-code string; this enum is the four codes its list
+/// box writes, named rather than spelled out, so that `Currency` stays a
+/// structured format instead of degrading into `Custom` the moment a user picks
+/// anything but the default. The codes, for a `$` symbol with 2 decimals:
+///
+/// | variant           | Excel format code                 | renders `-1234.5` as |
+/// |-------------------|-----------------------------------|----------------------|
+/// | `Minus`           | `$#,##0.00`                       | `-$1,234.50`         |
+/// | `Red`             | `$#,##0.00;[Red]$#,##0.00`        | `$1,234.50` in red   |
+/// | `Parentheses`     | `$#,##0.00;($#,##0.00)`           | `($1,234.50)`        |
+/// | `RedParentheses`  | `$#,##0.00;[Red]($#,##0.00)`      | `($1,234.50)` in red |
+///
+/// Note that `Red` drops the sign entirely -- that is Excel's behaviour, not an
+/// omission: the negative section supplies the whole rendering, and its section
+/// carries no minus.
+///
+/// ACCOUNTING IS NOT THIS. `NumberFormat::Accounting` keeps its parentheses
+/// unconditionally and correctly: Excel's accounting code
+/// `_($* #,##0.00_);_($* (#,##0.00);...` has a parenthesised negative section
+/// built in, and offers no choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum NegativeStyle {
+    /// `-$1,234.50` in the cell's own colour. Excel's first entry and the
+    /// meaning of a single-section currency code.
+    #[default]
+    Minus,
+    /// `$1,234.50` in red, with NO minus sign. Excel's second entry.
+    Red,
+    /// `($1,234.50)` in the cell's own colour. Excel's third entry.
+    Parentheses,
+    /// `($1,234.50)` in red. Excel's fourth entry.
+    RedParentheses,
+}
+
+impl NegativeStyle {
+    /// Whether a negative rendered in this style is wrapped in parentheses.
+    pub fn uses_parentheses(self) -> bool {
+        matches!(self, NegativeStyle::Parentheses | NegativeStyle::RedParentheses)
+    }
+
+    /// Whether a negative rendered in this style is painted red.
+    pub fn is_red(self) -> bool {
+        matches!(self, NegativeStyle::Red | NegativeStyle::RedParentheses)
+    }
+
+    /// The suffix Calcula's number-format DISPLAY NAME carries for this style.
+    /// Empty for the default, so an ordinary currency format keeps the name it
+    /// has always had (`Currency ($, 2 decimals)`) and only a deliberate choice
+    /// widens it. `try_parse_display_name` is the inverse.
+    pub fn display_suffix(self) -> &'static str {
+        match self {
+            NegativeStyle::Minus => "",
+            NegativeStyle::Red => ", red negatives",
+            NegativeStyle::Parentheses => ", parenthesised negatives",
+            NegativeStyle::RedParentheses => ", red parenthesised negatives",
+        }
+    }
+
+    /// Parse the suffix `display_suffix` emits. `None` when it is not one.
+    pub fn from_display_suffix(suffix: &str) -> Option<Self> {
+        match suffix {
+            "" => Some(NegativeStyle::Minus),
+            ", red negatives" => Some(NegativeStyle::Red),
+            ", parenthesised negatives" => Some(NegativeStyle::Parentheses),
+            ", red parenthesised negatives" => Some(NegativeStyle::RedParentheses),
+            _ => None,
+        }
+    }
 }
 
 /// RGB color representation.

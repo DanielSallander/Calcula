@@ -4,6 +4,13 @@
 
 pub mod ast_alignment;
 pub mod ast_render;
+/// Excel's three-way blank rule, asserted end to end (open-items 1.5). Its own
+/// file rather than a module inside `evaluator.rs`: the rule is a property of
+/// the whole evaluator — materialisers, collectors, comparisons, criteria and
+/// the storage boundary — and burying it in a 20,000-line file is how the
+/// contradiction between `A1:A3` and `A:A` survived unnoticed.
+#[cfg(test)]
+mod blank_semantics_tests;
 pub mod budget;
 pub mod cell;
 pub mod control_values;
@@ -60,8 +67,8 @@ pub use row_visibility::{
 };
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
-    FontStyle, GradientDirection, NumberFormat, PatternType, StyleRegistry, TextAlign,
-    TextRotation, UnderlineStyle, VerticalAlign,
+    FontStyle, GradientDirection, NegativeStyle, NumberFormat, PatternType, StyleRegistry,
+    TextAlign, TextRotation, UnderlineStyle, VerticalAlign,
 };
 pub use theme::{
     ThemeColor, ThemeColorSlot, ThemeColors, ThemeDefinition, ThemeFonts, Tint,
@@ -252,6 +259,7 @@ mod tests {
             decimal_places: 2,
             symbol: "$".to_string(),
             symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::default(),
         });
 
         let idx = registry.get_or_create(style);

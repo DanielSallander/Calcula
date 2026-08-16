@@ -854,6 +854,67 @@ mod tests {
         })
     }
 
+    /// D9 STANDS: CALCULA HAS ONE DATE SYSTEM (open-items 1.2).
+    ///
+    /// The decision is to offer no 1904-date-system setting. The 1904 system
+    /// exists to paper over Lotus 1-2-3's fictitious 1900-02-29, which Calcula
+    /// deliberately reproduces for Excel serial parity; a 1904 workbook is
+    /// CONVERTED AT IMPORT (`xlsx_reader::converts_from_1904`) and written back
+    /// as 1900 with the attribute omitted. Excel's own documentation warns that
+    /// toggling the setting changes what every date in a workbook means without
+    /// moving a single stored value — precisely the silent-corruption shape
+    /// this crate spends its time removing.
+    ///
+    /// WHY A CENSUS AND NOT A TYPE. The absence of a concept cannot be enforced
+    /// by the compiler: there is no private field to protect, because the
+    /// correct implementation is that no field exists. Until now the claim was
+    /// true by grep only, and a grep is not a guard — someone adding a
+    /// `date_system` to `AppState` or a `File ▸ Options` toggle would turn
+    /// nothing red. Same reasoning as `is_modified_has_no_writer_outside_
+    /// document_effect` below: pin the shape of the remedy.
+    ///
+    /// It lives in this module, off-theme, because the source-walking machinery
+    /// it needs (`crate_sources`, whose own `out.len() > 50` assertion stops a
+    /// broken walk from passing vacuously, and `code_lines`, which keeps prose
+    /// discussion legal) is here. Re-implementing it elsewhere would be a
+    /// second source of truth about what "every file in the crate" means.
+    /// THE NEEDLES ARE ASSEMBLED, NOT WRITTEN OUT, and the failure message
+    /// spells none of them either. A census that names what it forbids matches
+    /// ITSELF, and the obvious repair — exempting the file it lives in — would
+    /// blind it to a setting genuinely added to this module. Building the
+    /// strings at runtime keeps the census total: every file in the crate is
+    /// searched, including this one.
+    #[test]
+    fn no_calendar_epoch_setting_exists_outside_the_xlsx_importer() {
+        let needles = [
+            format!("date{}", 1904),
+            format!("date{}system", '_'),
+            format!("Date{}", "System"),
+        ];
+        let mut offenders: Vec<String> = Vec::new();
+        for (path, text) in crate_sources() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (i, line) in code_lines(&text) {
+                for needle in &needles {
+                    if line.contains(needle.as_str()) {
+                        offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "D9 stands — Calcula has ONE calendar epoch (Excel's 1900 system). A \
+             flag naming a second one in the app crate means a setting was \
+             half-added. Convert a foreign epoch AT IMPORT \
+             (`core/persistence/src/xlsx_reader.rs::converts_from_1904`); never \
+             store an epoch. If a Mac-authored process really needs the OOXML \
+             workbook-level flag written back, that is an EXPORT option, not a \
+             setting.\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// THE GUARANTEE THIS WHOLE MODULE EXISTS FOR.
     ///
     /// `FileState::is_modified` is private, so the compiler already rejects an

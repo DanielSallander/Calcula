@@ -200,6 +200,13 @@ enum CriteriaMatch {
     TextNotEqual(String),
     Compare(CriteriaOp, f64),
     Wildcard(String),
+    /// `""` — a blank cell OR a cell holding the empty string. Excel's
+    /// `COUNTIF(rng,"")`.
+    BlankOrEmpty,
+    /// `"="` — a blank cell ONLY, not a cell holding `""`.
+    OnlyBlank,
+    /// `"<>"` — anything that is not a blank cell.
+    NonBlank,
 }
 
 /// The result of evaluating an expression.
@@ -211,6 +218,33 @@ pub enum EvalResult {
     Text(String),
     Boolean(bool),
     Error(CellError),
+    /// A BLANK CELL — one that holds nothing, as distinct from one that holds
+    /// the number zero or the empty string.
+    ///
+    /// WHY IT HAS TO BE A VARIANT. Excel's rule for a blank is three-way and no
+    /// single value can stand in for all three: it is `0` in arithmetic, `""`
+    /// in concatenation, and **not in the population at all** for the counting
+    /// and statistical functions. That third meaning is the one a stand-in
+    /// cannot express — ignoring a value is not the same as contributing a
+    /// value, because it changes the denominator. `AVERAGE` over `{1, blank, 3}`
+    /// is 2 in Excel and was 1.333 here.
+    ///
+    /// BLANKNESS IS A PROPERTY OF A CELL, NOT OF A VALUE, and it COLLAPSES at
+    /// the first consumer that is not blank-aware. `to_cell_value` turns it into
+    /// `Number(0.0)`, so `=A1` over a blank cell still DISPLAYS 0 (which is
+    /// Excel's behaviour), a blank can never be stored, and it can never spill.
+    /// Calcula deliberately does not implement Excel's reference propagation
+    /// (where `ISBLANK(IF(TRUE,A1,0))` is TRUE because `IF` passed a reference
+    /// rather than a value) — that is a separate decision, recorded as deferred
+    /// rather than half-built.
+    ///
+    /// BOTH REPRESENTATIONS OF BLANK MAP HERE. A cell absent from `grid.cells`
+    /// and a cell present with `CellValue::Empty` are the same thing to a user,
+    /// and the second is produced in quantity — by `Cell::new()`, by
+    /// un-evaluated formula cells, by spill vacating, by styled-empty cells from
+    /// `.xlsx` import, and by `.calp` overrides. Treating only the first as
+    /// blank is how `ISBLANK` came to answer FALSE for an empty cell.
+    Blank,
     /// A list of values, used internally for range expansion.
     /// Functions like SUM receive this when given a range argument.
     /// Arrays are transient — they spill onto the grid.
@@ -233,6 +267,13 @@ impl EvalResult {
     /// Converts the evaluation result to a CellValue for storage.
     pub fn to_cell_value(&self) -> CellValue {
         match self {
+            // THE COLLAPSE, and it is Excel's answer rather than a compromise:
+            // `=A1` over a blank cell displays 0, and a spilled array of blanks
+            // shows zeros. Storing `CellValue::Empty` here would make a formula
+            // cell that LOOKS empty, which is a different thing from a cell that
+            // IS empty — `ISBLANK` would start answering TRUE for a cell that
+            // holds a formula.
+            EvalResult::Blank => CellValue::Number(0.0),
             EvalResult::Number(n) => CellValue::Number(*n),
             EvalResult::Text(s) => CellValue::Text(s.clone()),
             EvalResult::Boolean(b) => CellValue::Boolean(*b),
@@ -262,13 +303,80 @@ impl EvalResult {
 
     /// Attempts to coerce the result to a number.
     /// Returns None if coercion is not possible.
+    /// # Blank coerces to 0 HERE, and that is the load-bearing choice
+    ///
+    /// Every arithmetic operator and roughly 250 scalar math, date, financial
+    /// and engineering functions reach their operands through this method, and
+    /// Excel's answer for all of them is that a blank is 0. Making `Blank`
+    /// coerce keeps every one of those correct WITHOUT being touched — which
+    /// matters because `evaluator.rs` carries ~194 catch-all match arms that
+    /// would have swallowed a new variant silently rather than failing to
+    /// compile.
+    ///
+    /// The price is that the COLLECTORS — the ones building a population for a
+    /// counting or statistical function — cannot use this method to decide
+    /// membership. They must test `EvalResult::Blank` explicitly before asking
+    /// for a number, and that handful of sites is the whole of the risk in this
+    /// change. `collect_numbers_recursive` is the canonical example.
     pub fn as_number(&self) -> Option<f64> {
         match self {
             EvalResult::Number(n) => Some(*n),
             EvalResult::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
             EvalResult::Text(s) => s.trim().parse::<f64>().ok(),
+            EvalResult::Blank => Some(0.0),
             // List/Dict are not coercible to number (Python convention)
             _ => None,
+        }
+    }
+
+    /// Whether this result is a blank cell — the test a collector must make
+    /// before `as_number`, which deliberately answers `Some(0.0)` for a blank.
+    ///
+    /// Exists as a named method rather than an inline `matches!` because it is
+    /// the single most repeated decision in this change and the one whose
+    /// omission is silent: forget it in an aggregate and the function keeps
+    /// compiling and keeps returning a plausible, wrong number.
+    pub fn is_blank(&self) -> bool {
+        matches!(self, EvalResult::Blank)
+    }
+
+    /// The number this value contributes to a statistical SAMPLE, or `None` if
+    /// it is not in the sample at all.
+    ///
+    /// The difference from `as_number` is the blank, and it is the whole point:
+    /// `as_number` answers `Some(0.0)` for a blank so that arithmetic stays
+    /// correct, while a blank is simply **not a member** of the population a
+    /// counting or statistical function is computing over. Using the wrong one
+    /// of these two methods is silent — the function keeps compiling and keeps
+    /// returning a plausible, wrong number — so they are named to be told apart
+    /// at a glance rather than distinguished by a nearby comment.
+    pub fn as_sample_number(&self) -> Option<f64> {
+        if self.is_blank() {
+            return None;
+        }
+        self.as_number()
+    }
+
+    /// Turn a blank into the number zero, for a function that returns a VALUE
+    /// rather than a reference.
+    ///
+    /// EXCEL DRAWS THIS LINE AND SO DOES CALCULA. A handful of functions return
+    /// a *reference* — `INDEX`, `OFFSET`, `INDIRECT`, and an implicit
+    /// intersection — and a blank survives them, which is why
+    /// `=COUNT(INDEX(A1:A12,6))` over a blank cell is 0 in Excel and
+    /// `=ISBLANK(INDEX(…))` is TRUE. Everything else returns a value, and a
+    /// blank collapses at the boundary: `VLOOKUP` landing on an empty cell
+    /// returns the NUMBER 0, which is why `=ISBLANK(VLOOKUP(…))` is FALSE even
+    /// when the cell it found is empty. That asymmetry is real Excel behaviour
+    /// and the source of the `IF(VLOOKUP(…)="","",…)` idiom users write.
+    ///
+    /// Calcula stops there: it does NOT implement full reference propagation
+    /// through `IF`/`CHOOSE`. That is a separate, owner-visible decision,
+    /// recorded as deferred rather than half-built.
+    pub fn collapse_blank(self) -> EvalResult {
+        match self {
+            EvalResult::Blank => EvalResult::Number(0.0),
+            other => other,
         }
     }
 
@@ -277,6 +385,8 @@ impl EvalResult {
         match self {
             EvalResult::Boolean(b) => Some(*b),
             EvalResult::Number(n) => Some(*n != 0.0),
+            // `IF(A1, …)` over a blank takes the FALSE branch, as in Excel.
+            EvalResult::Blank => Some(false),
             EvalResult::Text(s) => {
                 let upper = s.to_uppercase();
                 if upper == "TRUE" {
@@ -293,8 +403,15 @@ impl EvalResult {
     }
 
     /// Converts the result to a string representation.
+    ///
+    /// A BLANK IS THE EMPTY STRING HERE. This one line is the whole of Excel's
+    /// concatenation rule, and it fixes the entire text group at once: `&`,
+    /// CONCATENATE, LEN, UPPER, TRIM, LEFT, TEXT and every other text function
+    /// reach their argument through this method. Before it, `=A1&"x"` over a
+    /// blank produced `"0x"` and `=LEN(A1)` answered 1.
     pub fn as_text(&self) -> String {
         match self {
+            EvalResult::Blank => String::new(),
             EvalResult::Number(n) => {
                 // Format without unnecessary decimal places
                 if n.fract() == 0.0 && n.abs() < 1e15 {
@@ -1048,20 +1165,20 @@ impl<'a> Evaluator<'a> {
                     // Vertical range: return cell at formula's row
                     match grid.get_cell(current_row, min_col) {
                         Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Number(0.0),
+                        None => EvalResult::Blank,
                     }
                 } else if is_single_row && current_col >= min_col && current_col <= max_col {
                     // Horizontal range: return cell at formula's column
                     match grid.get_cell(min_row, current_col) {
                         Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Number(0.0),
+                        None => EvalResult::Blank,
                     }
                 } else if current_row >= min_row && current_row <= max_row
                        && current_col >= min_col && current_col <= max_col {
                     // 2D range but formula is inside it: return the intersecting cell
                     match grid.get_cell(current_row, current_col) {
                         Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Number(0.0),
+                        None => EvalResult::Blank,
                     }
                 } else {
                     // Formula is outside the range - no intersection
@@ -1107,14 +1224,18 @@ impl<'a> Evaluator<'a> {
 
         match grid.get_cell(row_idx, col_idx) {
             Some(cell) => self.cell_value_to_result(&cell.value),
-            None => EvalResult::Number(0.0), // Empty cells are treated as 0
+            // A cell that is absent from the map and a cell present with
+            // `CellValue::Empty` are the same thing to a user, so they answer
+            // the same way here. `Blank` still DISPLAYS as 0 (`to_cell_value`),
+            // so `=A1` over an empty cell is unchanged.
+            None => EvalResult::Blank,
         }
     }
 
     /// Converts a CellValue to an EvalResult.
     fn cell_value_to_result(&self, value: &CellValue) -> EvalResult {
         match value {
-            CellValue::Empty => EvalResult::Number(0.0),
+            CellValue::Empty => EvalResult::Blank,
             CellValue::Number(n) => EvalResult::Number(*n),
             CellValue::Text(s) => EvalResult::Text(s.clone()),
             CellValue::Boolean(b) => EvalResult::Boolean(*b),
@@ -1171,7 +1292,16 @@ impl<'a> Evaluator<'a> {
         // Adaptive extraction: for rects larger than the populated-cell count,
         // one pass over the sparse cell map beats a hash probe per coordinate.
         // Output is positionally identical either way: row-major, absent cells
-        // materialize as Number(0.0), same conversions.
+        // materialize as `Blank`, same conversions.
+        //
+        // `Blank`, NOT `Number(0.0)` — THIS WAS THE REAL DEFECT. A rectangular
+        // range injected a zero for every absent cell, so `COUNT(A1:A1000)` over
+        // a column holding two numbers answered 1000, `AVERAGE` divided by the
+        // whole rectangle, `MIN` was always 0 and `PRODUCT` was always 0. Worse,
+        // the whole-column path (`eval_column_ref`) SKIPPED absent cells, so the
+        // same workbook gave two different answers depending on whether the user
+        // wrote `A1:A3` or `A:A`. `Blank` makes both spellings agree, and it
+        // keeps the positional length a rectangle must have.
         let area = (num_rows as u64).saturating_mul(num_cols as u64);
         // BULK PRE-CHARGE, BEFORE the allocation. `A1:XFD1048576` is 1.7e10
         // cells; the dense branch below would try to reserve that many
@@ -1185,13 +1315,13 @@ impl<'a> Evaluator<'a> {
                 for c in min_col..=max_col {
                     flat.push(match grid.get_cell(r, c) {
                         Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Number(0.0),
+                        None => EvalResult::Blank,
                     });
                 }
             }
             flat
         } else {
-            let mut flat = vec![EvalResult::Number(0.0); area as usize];
+            let mut flat = vec![EvalResult::Blank; area as usize];
             for (&(r, c), cell) in grid.cells.iter() {
                 if r >= min_row && r <= max_row && c >= min_col && c <= max_col {
                     let idx = (r - min_row) as u64 * num_cols as u64 + (c - min_col) as u64;
@@ -1669,7 +1799,46 @@ impl<'a> Evaluator<'a> {
         EvalResult::Text(out)
     }
 
+    /// Coerce a BLANK operand to the type-appropriate zero of what it is being
+    /// compared with, and leave everything else alone.
+    ///
+    /// EXCEL'S RULE, AND ITS FAMOUS ASYMMETRY. A blank is compared as `0`
+    /// against a number, as `""` against text and as `FALSE` against a boolean
+    /// — so `=A1=0` and `=A1=""` are BOTH true for the same empty A1, while
+    /// `=""=0` is false. The empty string is only text; a blank is whichever it
+    /// is asked to be. Two blanks compare equal.
+    ///
+    /// Without this, `=A1=""` answered FALSE (the blank arrived as the number
+    /// 0, which is not the empty string) and `=A1<"a"` answered `#VALUE!` (the
+    /// ordering operators fall back to a text-vs-text branch that a number
+    /// cannot enter).
+    fn coerce_blank_for_comparison(value: &EvalResult, against: &EvalResult) -> EvalResult {
+        if !value.is_blank() {
+            return value.clone();
+        }
+        match against {
+            EvalResult::Text(_) => EvalResult::Text(String::new()),
+            EvalResult::Boolean(_) => EvalResult::Boolean(false),
+            // Includes the blank-vs-blank case, which must compare EQUAL.
+            EvalResult::Blank => EvalResult::Number(0.0),
+            _ => EvalResult::Number(0.0),
+        }
+    }
+
+    /// Both operands with any blank resolved against the other side.
+    fn comparison_operands(
+        left: &EvalResult,
+        right: &EvalResult,
+    ) -> (EvalResult, EvalResult) {
+        (
+            Self::coerce_blank_for_comparison(left, right),
+            Self::coerce_blank_for_comparison(right, left),
+        )
+    }
+
     fn eval_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        let (left, right) = Self::comparison_operands(left, right);
+        let (left, right) = (&left, &right);
         let result = match (left, right) {
             (EvalResult::Number(l), EvalResult::Number(r)) => (l - r).abs() < f64::EPSILON,
             (EvalResult::Text(l), EvalResult::Text(r)) => crate::text_cmp::eq_ci(l, r),
@@ -1696,6 +1865,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_less_than(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        // A blank resolves against the other operand first — see
+        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
+        let (left, right) = Self::comparison_operands(left, right);
+        let (left, right) = (&left, &right);
         match (left.as_number(), right.as_number()) {
             (Some(l), Some(r)) => EvalResult::Boolean(l < r),
             _ => {
@@ -1711,6 +1884,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_greater_than(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        // A blank resolves against the other operand first — see
+        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
+        let (left, right) = Self::comparison_operands(left, right);
+        let (left, right) = (&left, &right);
         match (left.as_number(), right.as_number()) {
             (Some(l), Some(r)) => EvalResult::Boolean(l > r),
             _ => match (left, right) {
@@ -1723,6 +1900,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_less_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        // A blank resolves against the other operand first — see
+        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
+        let (left, right) = Self::comparison_operands(left, right);
+        let (left, right) = (&left, &right);
         match (left.as_number(), right.as_number()) {
             (Some(l), Some(r)) => EvalResult::Boolean(l <= r),
             _ => match (left, right) {
@@ -1735,6 +1916,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_greater_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        // A blank resolves against the other operand first — see
+        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
+        let (left, right) = Self::comparison_operands(left, right);
+        let (left, right) = (&left, &right);
         match (left.as_number(), right.as_number()) {
             (Some(l), Some(r)) => EvalResult::Boolean(l >= r),
             _ => match (left, right) {
@@ -2427,10 +2612,48 @@ impl<'a> Evaluator<'a> {
         Ok(numbers)
     }
 
+    /// Two parallel arrays reduced to the positions where BOTH sides carry a
+    /// number, keeping them aligned.
+    ///
+    /// WHY THIS HAS TO EXIST. The paired statistics — CORREL, SLOPE, INTERCEPT,
+    /// RSQ, STEYX, COVARIANCE, FORECAST, PROB, SUMX2MY2 and their relatives —
+    /// filtered each array INDEPENDENTLY, so a non-numeric cell on one side
+    /// shortened that side and every later pair was silently matched against
+    /// the wrong partner. Excel's rule is the opposite: if either member of a
+    /// pair is not a number, the PAIR is dropped.
+    ///
+    /// The defect predates blank-awareness (it fired on text and on error
+    /// cells), but blank-awareness is what makes it common — every empty cell
+    /// in a data column used to arrive as a number and hold its position.
+    /// Fixing it in the same pass is not scope creep; shipping the blank change
+    /// without it would turn a rare misalignment into an ordinary one.
+    fn paired_sample_numbers(a: &[EvalResult], b: &[EvalResult]) -> (Vec<f64>, Vec<f64>) {
+        let n = a.len().min(b.len());
+        let mut xs = Vec::with_capacity(n);
+        let mut ys = Vec::with_capacity(n);
+        for i in 0..n {
+            if let (Some(x), Some(y)) = (a[i].as_sample_number(), b[i].as_sample_number()) {
+                xs.push(x);
+                ys.push(y);
+            }
+        }
+        (xs, ys)
+    }
+
     /// Recursively collects numbers from an EvalResult, unpacking Arrays, Lists, and Dict values.
+    ///
+    /// BLANKS ARE NOT COLLECTED, and this is the single most consequential
+    /// line in the blank work. Everything downstream of it — SUM, PRODUCT,
+    /// AVERAGE, MIN, MAX, COUNT and the ~30 statistical functions that share
+    /// this collector — gets Excel's "a blank is not in the population" rule
+    /// from here. Note that `as_number()` deliberately answers `Some(0.0)` for
+    /// a blank (so every arithmetic operator keeps working untouched), which is
+    /// exactly why the test has to be made BEFORE asking for the number: the
+    /// `other` arm below would otherwise push a zero and change the denominator.
     fn collect_numbers_recursive(result: EvalResult, numbers: &mut Vec<f64>) -> Result<(), CellError> {
         match result {
             EvalResult::Error(e) => return Err(e),
+            EvalResult::Blank => {}
             EvalResult::Array(arr) => {
                 for item in arr {
                     Self::collect_numbers_recursive(item, numbers)?;
@@ -2468,6 +2691,12 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Recursively collects values from an EvalResult, unpacking Arrays, Lists, and Dict values.
+    ///
+    /// KEEPS BLANKS. Unlike `collect_numbers_recursive` this is the general
+    /// value collector, and its consumers disagree about blanks — `COUNTA`
+    /// must skip them while `COUNTBLANK` exists to count them. Dropping them
+    /// here would also shorten the vector, which silently misaligns every
+    /// consumer that pairs two ranges positionally. Each consumer filters.
     fn collect_values_recursive(result: EvalResult, values: &mut Vec<EvalResult>) -> Result<(), CellError> {
         match result {
             EvalResult::Error(e) => return Err(e),
@@ -2559,13 +2788,17 @@ impl<'a> Evaluator<'a> {
     }
 
     fn fn_counta(&self, args: &[Expression]) -> EvalResult {
-        // COUNTA counts all non-empty values
+        // COUNTA counts every value that is not a BLANK CELL.
+        //
+        // A formula's `""` IS counted — it is a value, and that is Excel's
+        // documented behaviour and the reason COUNTA and COUNTBLANK can both
+        // be non-zero over the same range. The old filter had it exactly
+        // backwards: it excluded `""` (which Excel counts) and had no way to
+        // exclude a blank (which Excel does not), because a blank arrived here
+        // as the number 0.
         match self.collect_values(args) {
             Ok(values) => {
-                let count = values
-                    .iter()
-                    .filter(|v| !matches!(v, EvalResult::Text(s) if s.is_empty()))
-                    .count();
+                let count = values.iter().filter(|v| !v.is_blank()).count();
                 EvalResult::Number(count as f64)
             }
             Err(e) => EvalResult::Error(e),
@@ -2647,8 +2880,10 @@ impl<'a> Evaluator<'a> {
     ///
     /// Value conversion is byte-for-byte the same as `eval_range` /
     /// `eval_column_ref` / `eval_row_ref`: `cell_value_to_result` per cell,
-    /// and a rectangle's absent cells materialize as `Number(0.0)` while a
-    /// whole-column/row reference contributes only populated cells. Changing
+    /// and a rectangle's absent cells materialize as `Blank` while a
+    /// whole-column/row reference contributes only populated cells. (Both now
+    /// AGREE about blanks -- they used to differ, so the same SUBTOTAL over the
+    /// same data answered differently for `A1:A3` and `A:A`.) Changing
     /// that here would silently change every SUBTOTAL result, hidden rows or
     /// not.
     ///
@@ -2707,7 +2942,7 @@ impl<'a> Evaluator<'a> {
                                         }
                                         self.cell_value_to_result(&cell.value)
                                     }
-                                    None => EvalResult::Number(0.0),
+                                    None => EvalResult::Blank,
                                 };
                                 values.push(result);
                             }
@@ -2729,7 +2964,12 @@ impl<'a> Evaluator<'a> {
                                     values.push(self.cell_value_to_result(&cell.value));
                                 }
                             }
-                            None => values.push(EvalResult::Number(0.0)),
+                            // A BARE CELL REFERENCE IS A CELL READ, like the
+                            // Range branch above. SUBTOTAL always takes this
+                            // path for the `=SUBTOTAL(9,B5,B10,B15)` grand-total
+                            // idiom, so a zero here made that spelling disagree
+                            // with `=SUBTOTAL(9,B5:B15)` over the same data.
+                            None => values.push(EvalResult::Blank),
                         }
                     }
                 }
@@ -2896,9 +3136,20 @@ impl<'a> Evaluator<'a> {
 
     /// Applies the appropriate aggregate function based on the SUBTOTAL function code.
     fn apply_subtotal_aggregate(&self, base_func: i32, values: Vec<EvalResult>) -> EvalResult {
-        // Extract numbers from values (for numeric aggregates)
+        // Extract numbers from values (for numeric aggregates).
+        //
+        // BLANKS ARE NOT IN THE POPULATION. `as_number()` answers `Some(0.0)`
+        // for a blank on purpose — that is what keeps every arithmetic operator
+        // correct without being touched — so the test has to be made here,
+        // before the number is asked for. Without it, SUBTOTAL(1, …) and
+        // AGGREGATE(1, …) divide by the whole rectangle instead of by the
+        // values in it.
         let extract_numbers = || -> Vec<f64> {
-            values.iter().filter_map(|v| v.as_number()).collect()
+            values
+                .iter()
+                .filter(|v| !v.is_blank())
+                .filter_map(|v| v.as_sample_number())
+                .collect()
         };
 
         match base_func {
@@ -2918,10 +3169,9 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Number(numbers.len() as f64)
             }
             3 => {
-                // COUNTA (non-empty values)
-                let count = values.iter()
-                    .filter(|v| !matches!(v, EvalResult::Text(s) if s.is_empty()))
-                    .count();
+                // COUNTA — every value that is not a BLANK CELL. A formula's
+                // `""` is counted; see `fn_counta`, whose rule this mirrors.
+                let count = values.iter().filter(|v| !v.is_blank()).count();
                 EvalResult::Number(count as f64)
             }
             4 => {
@@ -3470,28 +3720,32 @@ impl<'a> Evaluator<'a> {
         EvalResult::Boolean(matches!(result, EvalResult::Text(_)))
     }
 
+    /// ISBLANK(value) — TRUE only for a genuinely empty cell.
+    ///
+    /// THREE THINGS WERE WRONG HERE, and each was visible to a user:
+    ///
+    ///  1. It tested `get_cell(...).is_none()`, so a cell PRESENT in the grid
+    ///     holding `CellValue::Empty` answered FALSE. Those are produced in
+    ///     quantity — `Cell::new()`, un-evaluated formula cells, spill vacating,
+    ///     styled-empty cells from `.xlsx` import, `.calp` overrides — and to a
+    ///     user they are simply empty cells.
+    ///  2. For anything that was not a bare cell reference it answered TRUE for
+    ///     `""`. Excel says FALSE: a formula that returns the empty string has
+    ///     returned a value. `=ISBLANK("")` is FALSE.
+    ///  3. It could not answer for a reference-returning expression at all.
+    ///     `EvalResult::Blank` now carries the answer through `INDEX`, `OFFSET`
+    ///     and `INDIRECT`, exactly as a reference does in Excel.
     fn fn_isblank(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-
-        // Check if the cell reference points to an empty cell
-        match &args[0] {
-            Expression::CellRef { sheet, col, row, .. } => {
-                let grid = match self.resolve_grid_for_sheet(sheet) {
-                    Ok(grid) => grid,
-                    Err(err) => return EvalResult::Error(err),
-                };
-                let col_idx = col_to_index(col);
-                let row_idx = row - 1;
-                let is_blank = grid.get_cell(row_idx, col_idx).is_none();
-                EvalResult::Boolean(is_blank)
-            }
-            _ => {
-                let result = self.evaluate(&args[0]);
-                let is_blank = matches!(result, EvalResult::Text(ref s) if s.is_empty());
-                EvalResult::Boolean(is_blank)
-            }
+        // ERRORS PROPAGATE. `=ISBLANK(NoSuchSheet!A1)` is `#REF!`, not FALSE:
+        // a reference that cannot be resolved has not been found to be
+        // non-blank, and answering FALSE would launder a broken reference into
+        // an ordinary result.
+        match self.evaluate(&args[0]) {
+            EvalResult::Error(e) => EvalResult::Error(e),
+            other => EvalResult::Boolean(other.is_blank()),
         }
     }
 
@@ -3596,10 +3850,15 @@ impl<'a> Evaluator<'a> {
                                 lc::Axis::RectRow(row) => (row, ret_rect.min_col + idx),
                                 _ => unreachable!(),
                             };
+                            // XLOOKUP returns a VALUE, so a blank result cell
+                            // collapses to 0 here — see `collapse_blank`. It
+                            // must stay bit-identical to the scan path or the
+                            // cached/scan differential battery fails.
                             match grid.get_cell(r, c) {
                                 Some(cell) => self.cell_value_to_result(&cell.value),
-                                None => EvalResult::Number(0.0),
+                                None => EvalResult::Blank,
                             }
+                            .collapse_blank()
                         }
                         Some(_) => EvalResult::Error(CellError::NA),
                         None => {
@@ -3635,7 +3894,13 @@ impl<'a> Evaluator<'a> {
         match found_index {
             Some(idx) => {
                 if idx < return_array.len() {
-                    return_array[idx].clone()
+                    // XLOOKUP returns a VALUE, so a blank result cell is the
+                    // number 0 -- and this MUST match the cached path, which
+                    // already collapsed. Without it the same formula answered
+                    // differently depending on whether a lookup-cache pass was
+                    // active, and `search_mode=-1` always scans, so both
+                    // spellings could coexist in one workbook.
+                    return_array[idx].clone().collapse_blank()
                 } else {
                     EvalResult::Error(CellError::NA)
                 }
@@ -4307,8 +4572,27 @@ impl<'a> Evaluator<'a> {
         match criteria {
             EvalResult::Number(n) => CriteriaMatch::ExactNumber(*n),
             EvalResult::Boolean(b) => CriteriaMatch::ExactBool(*b),
+            // A blank CRITERIA cell is Excel's documented quirk: it is read as
+            // the number 0, so `COUNTIF(rng, A1)` with an empty A1 counts
+            // zeros. (The D-functions treat an empty criteria cell as "no
+            // condition" instead; that is decided at their own gate, not here.)
+            EvalResult::Blank => CriteriaMatch::ExactNumber(0.0),
             EvalResult::Text(s) => {
                 let trimmed = s.trim();
+                // THE THREE BLANK CRITERIA, tested before the operator prefixes
+                // they would otherwise be swallowed by. `""` means "blank or
+                // empty string", `"="` means "blank only", `"<>"` means "not
+                // blank" — and all three answered wrongly while a blank cell
+                // arrived at the matcher as the number 0.
+                if trimmed.is_empty() {
+                    return CriteriaMatch::BlankOrEmpty;
+                }
+                if trimmed == "=" {
+                    return CriteriaMatch::OnlyBlank;
+                }
+                if trimmed == "<>" {
+                    return CriteriaMatch::NonBlank;
+                }
                 // Check for comparison operators
                 if let Some(rest) = trimmed.strip_prefix("<>") {
                     if let Ok(n) = rest.trim().parse::<f64>() {
@@ -4358,7 +4642,26 @@ impl<'a> Evaluator<'a> {
 
     /// Tests whether a value matches a criteria.
     fn matches_criteria(&self, value: &EvalResult, criteria: &CriteriaMatch) -> bool {
+        // A BLANK CELL MATCHES ONLY THE BLANK CRITERIA. Excel is unambiguous
+        // here and Calcula disagreed with it in both directions:
+        // `COUNTIF(rng,0)` counted every empty cell in the range (a blank
+        // arrived as the number 0), and `COUNTIF(rng,"")` counted none of them.
+        // The guard is a single early return because every other matcher below
+        // reaches `as_number()` or `as_text()`, both of which give a blank a
+        // value on purpose.
+        if value.is_blank() {
+            return matches!(
+                criteria,
+                CriteriaMatch::BlankOrEmpty | CriteriaMatch::OnlyBlank
+            );
+        }
         match criteria {
+            // ...and conversely, a non-blank never matches a blank criteria,
+            // except `""`, which Excel extends to cells holding the empty
+            // string, and `"<>"`, which is satisfied by anything non-blank.
+            CriteriaMatch::BlankOrEmpty => matches!(value, EvalResult::Text(s) if s.is_empty()),
+            CriteriaMatch::OnlyBlank => false,
+            CriteriaMatch::NonBlank => true,
             CriteriaMatch::ExactNumber(n) => value.as_number().map_or(false, |v| (v - n).abs() < 1e-10),
             CriteriaMatch::ExactBool(b) => {
                 matches!(value, EvalResult::Boolean(v) if v == b)
@@ -4521,7 +4824,7 @@ impl<'a> Evaluator<'a> {
         let mut count = 0usize;
         for (i, val) in range_vals.iter().enumerate() {
             if self.matches_criteria(val, &criteria) {
-                if let Some(n) = avg_vals.get(i).and_then(|v| v.as_number()) {
+                if let Some(n) = avg_vals.get(i).and_then(|v| v.as_sample_number()) {
                     total += n;
                     count += 1;
                 }
@@ -4549,7 +4852,7 @@ impl<'a> Evaluator<'a> {
                 range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
             });
             if all_match {
-                if let Some(n) = avg_vals[i].as_number() {
+                if let Some(n) = avg_vals[i].as_sample_number() {
                     total += n;
                     count += 1;
                 }
@@ -4558,16 +4861,30 @@ impl<'a> Evaluator<'a> {
         if count == 0 { EvalResult::Error(CellError::Div0) } else { EvalResult::Number(total / count as f64) }
     }
 
+    /// COUNTBLANK(range) — blank cells, PLUS cells holding `""`.
+    ///
+    /// The `""` inclusion is not sloppiness: it is Excel's documented
+    /// exception, and it is why COUNTA and COUNTBLANK can both count the same
+    /// cell. A formula returning `""` is a value (COUNTA counts it) and it
+    /// looks empty (COUNTBLANK counts it too).
+    ///
+    /// This function never worked. Its own removed comment claimed absent cells
+    /// "return empty text" and that the `""` test therefore handled them; they
+    /// did not — they arrived as the number 0 — so `COUNTBLANK` over a range
+    /// with blanks in it answered 0 where Excel answers the count.
     fn fn_countblank(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
         let vals = self.eval_flat(&args[0]);
-        let count = vals.iter().filter(|v| {
-            matches!(v, EvalResult::Text(s) if s.is_empty()) || matches!(v, EvalResult::Array(a) if a.is_empty())
-        }).count();
-        // Also count truly empty cells: eval_flat doesn't produce them, but cells not in grid
-        // return empty text. The above check handles it.
+        let count = vals
+            .iter()
+            .filter(|v| {
+                v.is_blank()
+                    || matches!(v, EvalResult::Text(s) if s.is_empty())
+                    || matches!(v, EvalResult::Array(a) if a.is_empty())
+            })
+            .count();
         EvalResult::Number(count as f64)
     }
 
@@ -4590,7 +4907,7 @@ impl<'a> Evaluator<'a> {
                 range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
             });
             if all_match {
-                if let Some(n) = min_vals[i].as_number() {
+                if let Some(n) = min_vals[i].as_sample_number() {
                     result = result.min(n);
                     found = true;
                 }
@@ -4618,7 +4935,7 @@ impl<'a> Evaluator<'a> {
                 range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
             });
             if all_match {
-                if let Some(n) = max_vals[i].as_number() {
+                if let Some(n) = max_vals[i].as_sample_number() {
                     result = result.max(n);
                     found = true;
                 }
@@ -5431,7 +5748,7 @@ impl<'a> Evaluator<'a> {
         }
 
         let extract_numbers = || -> Vec<f64> {
-            values.iter().filter_map(|v| v.as_number()).collect()
+            values.iter().filter_map(|v| v.as_sample_number()).collect()
         };
 
         match func_num {
@@ -5448,10 +5765,12 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Number(numbers.len() as f64)
             }
             3 => {
-                // COUNTA
-                let count = values.iter()
-                    .filter(|v| !matches!(v, EvalResult::Text(s) if s.is_empty()))
-                    .count();
+                // COUNTA — every value that is not a BLANK CELL. This kept the
+                // old, backwards filter (excluding `""`, which Excel COUNTS,
+                // and counting a blank, which Excel does not), so
+                // `AGGREGATE(3,…)` disagreed with both `SUBTOTAL(3,…)` and
+                // `COUNTA` over the same range.
+                let count = values.iter().filter(|v| !v.is_blank()).count();
                 EvalResult::Number(count as f64)
             }
             4 => {
@@ -6107,6 +6426,10 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let val = self.evaluate(&args[0]);
         EvalResult::Number(match val {
+            // Excel's TYPE has no code for "blank": the blank collapses to a
+            // number before TYPE sees it, and `=TYPE(A1)` over an empty cell
+            // answers 1.
+            EvalResult::Blank => 1.0,
             EvalResult::Number(_) => 1.0,
             EvalResult::Text(_) => 2.0,
             EvalResult::Boolean(_) => 4.0,
@@ -6205,7 +6528,7 @@ impl<'a> Evaluator<'a> {
             let grid = self.get_grid_for_sheet(&None);
             return match grid.get_cell(r, c) {
                 Some(cell) => self.cell_value_to_result(&cell.value),
-                None => EvalResult::Number(0.0),
+                None => EvalResult::Blank,
             };
         }
 
@@ -6361,7 +6684,7 @@ impl<'a> Evaluator<'a> {
         };
         match self.grid.get_cell(row_idx, col_idx) {
             Some(cell) => self.cell_value_to_result(&cell.value),
-            None => EvalResult::Number(0.0),
+            None => EvalResult::Blank,
         }
     }
 
@@ -6391,7 +6714,7 @@ impl<'a> Evaluator<'a> {
         if height == 1 && width == 1 {
             match self.grid.get_cell(new_row as u32, new_col as u32) {
                 Some(cell) => self.cell_value_to_result(&cell.value),
-                None => EvalResult::Number(0.0),
+                None => EvalResult::Blank,
             }
         } else {
             // Return array of values
@@ -6402,7 +6725,11 @@ impl<'a> Evaluator<'a> {
                     let cell_col = (new_col + c as i64) as u32;
                     match self.grid.get_cell(cell_row, cell_col) {
                         Some(cell) => values.push(self.cell_value_to_result(&cell.value)),
-                        None => values.push(EvalResult::Number(0.0)),
+                        // The single-cell branch above already answers `Blank`;
+                        // only half of OFFSET was converted, so
+                        // `COUNT(OFFSET(A1,0,0,3,1))` disagreed with
+                        // `COUNT(A1:A3)` over the same three cells.
+                        None => values.push(EvalResult::Blank),
                     }
                 }
             }
@@ -6694,7 +7021,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_irr(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let cashflows: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_number()).collect();
+        let cashflows: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_sample_number()).collect();
         if cashflows.len() < 2 { return EvalResult::Error(CellError::Value); }
         let mut guess = if args.len() == 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.1) } else { 0.1 };
         // Newton's method
@@ -7278,7 +7605,9 @@ impl<'a> Evaluator<'a> {
         };
 
         // Collect text values from remaining arguments, iterating over range cells
-        // directly so we can detect truly empty cells (which eval_flat maps to 0.0).
+        // directly. This bypass predates `EvalResult::Blank` and was the ONLY
+        // place in the file that told an absent cell from a zero; it is kept
+        // because it also avoids materialising a whole range to join it.
         let mut parts: Vec<String> = Vec::new();
         for arg in &args[2..] {
             self.textjoin_collect(arg, ignore_empty, &mut parts);
@@ -7522,6 +7851,20 @@ impl<'a> Evaluator<'a> {
     fn compare_eval_results(a: &EvalResult, b: &EvalResult) -> std::cmp::Ordering {
         fn sort_key(v: &EvalResult) -> (u8, f64, String) {
             match v {
+                // A BLANK SORTS AS THE NUMBER ZERO, because that is what
+                // `SORT()` RETURNS for it: the spilled result of sorting a
+                // range with an empty cell in it contains a 0, not a blank
+                // (`to_cell_value`). Sorting by a key the output cannot express
+                // is how `=SORT(A1:A3)` came to spill `[3, 5, 0]` ascending and
+                // `[0, 5, 3]` descending — the zero jumping end to end while
+                // every other value merely reversed.
+                //
+                // (An earlier draft of this arm gave blanks the HIGHEST key on
+                // the theory that Excel sorts them last in both directions.
+                // That is the rule for Excel's *sort dialog*, which sorts cells
+                // in place and can leave a blank blank; the `SORT()` FUNCTION
+                // materialises a value, and the value is 0.)
+                EvalResult::Blank => (0, 0.0, String::new()),
                 EvalResult::Number(n) => (0, *n, String::new()),
                 EvalResult::Text(s) => (1, 0.0, s.to_uppercase()),
                 EvalResult::Boolean(b) => (2, if *b { 1.0 } else { 0.0 }, String::new()),
@@ -7696,8 +8039,16 @@ impl<'a> Evaluator<'a> {
     /// Helper for UNIQUE: returns unique (or exactly-once) vectors.
     fn unique_vectors(vecs: &[Vec<EvalResult>], exactly_once: bool) -> Vec<Vec<EvalResult>> {
         // Build a string key for comparison
+        // KEYED ON WHAT WILL BE SPILLED, not on the internal variant. A blank
+        // and a real zero are different `EvalResult`s and the SAME cell value
+        // (`to_cell_value`), so keying on the variant made UNIQUE emit two rows
+        // that both render 0 -- duplicates from the function whose entire job is
+        // to remove them.
         fn vec_key(v: &[EvalResult]) -> String {
-            v.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("|")
+            v.iter()
+                .map(|e| format!("{:?}", e.clone().collapse_blank()))
+                .collect::<Vec<_>>()
+                .join("|")
         }
 
         if exactly_once {
@@ -7982,7 +8333,9 @@ impl<'a> Evaluator<'a> {
             let key_parts: Vec<String> = (0..rf_cols)
                 .map(|c| {
                     let val = &rf_data[r * rf_cols + c];
-                    format!("{:?}", val)
+                    // Collapsed for the same reason UNIQUE keys are: a blank
+                    // group and a zero group both label themselves 0.
+                    format!("{:?}", val.clone().collapse_blank())
                 })
                 .collect();
             let key = key_parts.join("|");
@@ -8103,7 +8456,7 @@ impl<'a> Evaluator<'a> {
             None => return EvalResult::Error(CellError::Value),
         };
 
-        let nums: Vec<f64> = vals.iter().filter_map(|v| v.as_number()).collect();
+        let nums: Vec<f64> = vals.iter().filter_map(|v| v.as_sample_number()).collect();
 
         match code {
             0 | 101 => {
@@ -9111,6 +9464,12 @@ impl<'a> Evaluator<'a> {
                             parts.push(s);
                         }
                     }
+                    // A blank contributes the empty string, and `ignore_empty`
+                    // decides whether that string survives — the same rule the
+                    // range branch above already applied to `CellValue::Empty`.
+                    EvalResult::Blank => {
+                        if !ignore_empty { parts.push(String::new()); }
+                    }
                     EvalResult::Number(n) => parts.push(format!("{}", n)),
                     EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
                     EvalResult::Error(_) => {} // skip errors in TEXTJOIN
@@ -9127,6 +9486,13 @@ impl<'a> Evaluator<'a> {
                                 }
                                 EvalResult::Number(n) => parts.push(format!("{}", n)),
                                 EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
+                                // Same rule as the scalar and Range branches: a
+                                // blank contributes "" and `ignore_empty`
+                                // decides whether it survives. Without this arm
+                                // any ARRAY-shaped argument (a whole-column ref,
+                                // OFFSET, TRANSPOSE) silently dropped blanks
+                                // that `A1:A3` kept.
+                                EvalResult::Blank => { if !ignore_empty { parts.push(String::new()); } }
                                 _ => {}
                             }
                         }
@@ -9742,8 +10108,12 @@ impl<'a> Evaluator<'a> {
         let arr2 = self.eval_flat(&args[1]);
         let tails = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let test_type = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
-        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        // TWO INDEPENDENT SAMPLES, NOT PAIRS. They may legitimately be
+        // different lengths, and a non-numeric cell in one must not remove an
+        // observation from the other. (T.TEST type 1 IS paired, and enforces
+        // equal length itself in its own arm below.)
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_sample_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_sample_number()).collect();
         let n1 = nums1.len() as f64;
         let n2 = nums2.len() as f64;
         if n1 < 2.0 || n2 < 2.0 { return EvalResult::Error(CellError::Value); }
@@ -9859,8 +10229,12 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr1 = self.eval_flat(&args[0]);
         let arr2 = self.eval_flat(&args[1]);
-        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
-        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        // TWO INDEPENDENT SAMPLES, NOT PAIRS. They may legitimately be
+        // different lengths, and a non-numeric cell in one must not remove an
+        // observation from the other. (T.TEST type 1 IS paired, and enforces
+        // equal length itself in its own arm below.)
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_sample_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_sample_number()).collect();
         let n1 = nums1.len() as f64;
         let n2 = nums2.len() as f64;
         if n1 < 2.0 || n2 < 2.0 { return EvalResult::Error(CellError::Value); }
@@ -10092,8 +10466,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr1 = self.eval_flat(&args[0]);
         let arr2 = self.eval_flat(&args[1]);
-        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
-        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (nums1, nums2): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&arr1, &arr2);
         let n = nums1.len().min(nums2.len());
         if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
@@ -10125,8 +10500,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let ys = self.eval_flat(&args[0]);
         let xs = self.eval_flat(&args[1]);
-        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
-        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (y_nums, x_nums): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&ys, &xs);
         let n = y_nums.len().min(x_nums.len());
         if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
@@ -10147,8 +10523,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let ys = self.eval_flat(&args[0]);
         let xs = self.eval_flat(&args[1]);
-        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
-        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (y_nums, x_nums): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&ys, &xs);
         let n = y_nums.len().min(x_nums.len());
         if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
@@ -10170,8 +10547,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let ys = self.eval_flat(&args[0]);
         let xs = self.eval_flat(&args[1]);
-        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
-        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (y_nums, x_nums): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&ys, &xs);
         let n = y_nums.len().min(x_nums.len());
         if n < 3 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
@@ -10195,8 +10573,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr1 = self.eval_flat(&args[0]);
         let arr2 = self.eval_flat(&args[1]);
-        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
-        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (nums1, nums2): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&arr1, &arr2);
         let n = nums1.len().min(nums2.len());
         if n < 1 { return EvalResult::Error(CellError::Div0); }
         let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
@@ -10209,8 +10588,9 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr1 = self.eval_flat(&args[0]);
         let arr2 = self.eval_flat(&args[1]);
-        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
-        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (nums1, nums2): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&arr1, &arr2);
         let n = nums1.len().min(nums2.len());
         if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
@@ -10293,7 +10673,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr = self.eval_flat(&args[0]);
         let percent = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_sample_number()).collect();
         if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = numbers.len();
@@ -10318,7 +10698,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let arr = self.eval_flat(&args[0]);
         let k = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_sample_number()).collect();
         let n = numbers.len();
         if n == 0 { return EvalResult::Error(CellError::Num); }
         if k <= 1.0 / (n as f64 + 1.0) || k >= n as f64 / (n as f64 + 1.0) { return EvalResult::Error(CellError::Value); }
@@ -10336,7 +10716,7 @@ impl<'a> Evaluator<'a> {
         let arr = self.eval_flat(&args[0]);
         let x = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let sig = if args.len() == 3 { self.evaluate(&args[2]).as_number().unwrap_or(3.0) as i32 } else { 3 };
-        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_sample_number()).collect();
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = numbers.len();
         if n == 0 { return EvalResult::Error(CellError::Num); }
@@ -10355,7 +10735,7 @@ impl<'a> Evaluator<'a> {
         let k = quart as f64 / 4.0;
         // Reuse PERCENTILE.EXC logic
         let arr = self.eval_flat(&args[0]);
-        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_sample_number()).collect();
         let n = numbers.len();
         if n < 2 { return EvalResult::Error(CellError::Num); }
         numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -10373,8 +10753,9 @@ impl<'a> Evaluator<'a> {
         let probs = self.eval_flat(&args[1]);
         let lower = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let upper = if args.len() == 4 { match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) } } else { lower };
-        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
-        let p_nums: Vec<f64> = probs.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (x_nums, p_nums): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&xs, &probs);
         if x_nums.len() != p_nums.len() || x_nums.is_empty() { return EvalResult::Error(CellError::Value); }
         let mut sum = 0.0;
         for i in 0..x_nums.len() {
@@ -10436,8 +10817,9 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let ys = self.eval_flat(&args[1]);
         let xs = self.eval_flat(&args[2]);
-        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
-        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (y_nums, x_nums): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&ys, &xs);
         let n = y_nums.len().min(x_nums.len());
         if n < 2 { return EvalResult::Error(CellError::Div0); }
         let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
@@ -10462,8 +10844,9 @@ impl<'a> Evaluator<'a> {
         let target = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let vals = self.eval_flat(&args[1]);
         let timeline = self.eval_flat(&args[2]);
-        let v_nums: Vec<f64> = vals.iter().filter_map(|v| v.as_number()).collect();
-        let t_nums: Vec<f64> = timeline.iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (v_nums, t_nums): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&vals, &timeline);
         let n = v_nums.len().min(t_nums.len());
         if n < 3 { return EvalResult::Error(CellError::Value); }
         // Simple Holt double exponential smoothing
@@ -10487,7 +10870,7 @@ impl<'a> Evaluator<'a> {
         // Returns detected seasonality period (simplified: returns 1 for no seasonality)
         if args.len() < 2 { return EvalResult::Error(CellError::Value); }
         let vals = self.eval_flat(&args[0]);
-        let v_nums: Vec<f64> = vals.iter().filter_map(|v| v.as_number()).collect();
+        let v_nums: Vec<f64> = vals.iter().filter_map(|v| v.as_sample_number()).collect();
         if v_nums.len() < 4 { return EvalResult::Number(1.0); }
         // Simple autocorrelation-based seasonality detection
         let n = v_nums.len();
@@ -10702,8 +11085,9 @@ impl<'a> Evaluator<'a> {
     fn fn_xirr(&self, args: &[Expression]) -> EvalResult {
         // XIRR(values, dates, [guess])
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let values: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_number()).collect();
-        let dates: Vec<f64> = self.eval_flat(&args[1]).iter().filter_map(|v| v.as_number()).collect();
+        // Excel drops the PAIR when either side is not a number; filtering the
+        // two arrays independently would slide every later pair one position.
+        let (values, dates): (Vec<f64>, Vec<f64>) = Self::paired_sample_numbers(&self.eval_flat(&args[0]), &self.eval_flat(&args[1]));
         if values.len() != dates.len() || values.is_empty() { return EvalResult::Error(CellError::Value); }
         let mut rate = if args.len() == 3 { self.evaluate(&args[2]).as_number().unwrap_or(0.1) } else { 0.1 };
         let d0 = dates[0];
@@ -10729,7 +11113,7 @@ impl<'a> Evaluator<'a> {
     fn fn_mirr(&self, args: &[Expression]) -> EvalResult {
         // MIRR(values, finance_rate, reinvest_rate)
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
-        let values: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_number()).collect();
+        let values: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_sample_number()).collect();
         let finance_rate = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let reinvest_rate = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         if values.is_empty() { return EvalResult::Error(CellError::Value); }
@@ -12876,7 +13260,7 @@ impl<'a> Evaluator<'a> {
     //     (literal ranges are pure reads, so skipping their materialization is
     //     unobservable and the relative order of effectful args is preserved);
     //   - mirrors the legacy path bug-for-bug (absent cells materialize as
-    //     Number(0.0), first-match-wins, error cells never match, whole-column
+    //     `Blank`, first-match-wins, error cells never match, whole-column
     //     refs use the populated-only compacted ordering);
     //   - returns None to fall back to the UNCHANGED linear scan whenever the
     //     situation is not provably identical (no active pass, mixed-type or
@@ -12992,7 +13376,7 @@ impl<'a> Evaluator<'a> {
         let _ = self.budget.charge(fuel_units(bound));
         let fetch = |r: u32, c: u32| match grid.get_cell(r, c) {
             Some(cell) => self.cell_value_to_result(&cell.value),
-            None => EvalResult::Number(0.0),
+            None => EvalResult::Blank,
         };
         match axis {
             lookup_cache::Axis::RectCol(col) => {
@@ -13128,10 +13512,15 @@ impl<'a> Evaluator<'a> {
                 } else {
                     (rect.min_row + i as u32, rect.min_col + index_num as u32 - 1)
                 };
+                // VLOOKUP/HLOOKUP return a VALUE: a blank result cell is the
+                // number 0, which is why `ISBLANK(VLOOKUP(…))` is FALSE in
+                // Excel even when the cell it found is empty. Must stay
+                // bit-identical to the scan path.
                 match grid.get_cell(r, c) {
                     Some(cell) => self.cell_value_to_result(&cell.value),
-                    None => EvalResult::Number(0.0),
+                    None => EvalResult::Blank,
                 }
+                .collapse_blank()
             }
             None => EvalResult::Error(CellError::NA),
         })
@@ -13267,7 +13656,19 @@ impl<'a> Evaluator<'a> {
         criteria: &CriteriaMatch,
     ) -> Option<u32> {
         use crate::lookup_cache as lc;
-        if matches!(criteria, CriteriaMatch::Wildcard(_)) {
+        // THE BLANK CRITERIA KEEP THE SCAN. `CriteriaIndex` buckets a vector by
+        // numeric/text/bool value and has no notion of a blank cell, so it
+        // cannot answer `""`, `"="` or `"<>"` — and answering them approximately
+        // would break the invariant the whole cache rests on, that a cached
+        // result is bit-identical to the scanned one. Wildcards bail here for
+        // the same reason.
+        if matches!(
+            criteria,
+            CriteriaMatch::Wildcard(_)
+                | CriteriaMatch::BlankOrEmpty
+                | CriteriaMatch::OnlyBlank
+                | CriteriaMatch::NonBlank
+        ) {
             return None;
         }
         let grid = self.get_grid_for_sheet(&None);
@@ -13294,7 +13695,11 @@ impl<'a> Evaluator<'a> {
                         CriteriaOp::LessEqual => ci.count_less_equal(*n),
                         CriteriaOp::NotEqual => ci.count_not_equal(*n),
                     },
-                    CriteriaMatch::Wildcard(_) => unreachable!(),
+                    // Refused above, so this arm cannot be reached.
+                    CriteriaMatch::Wildcard(_)
+                    | CriteriaMatch::BlankOrEmpty
+                    | CriteriaMatch::OnlyBlank
+                    | CriteriaMatch::NonBlank => unreachable!(),
                 })
         });
         match served {
@@ -13431,14 +13836,15 @@ impl<'a> Evaluator<'a> {
                 }
             }
             match best_idx {
-                Some(i) => rows[i][col_index - 1].clone(),
+                // A VALUE-returning lookup: a blank result cell is the number 0.
+                Some(i) => rows[i][col_index - 1].clone().collapse_blank(),
                 None => EvalResult::Error(CellError::NA),
             }
         } else {
             // Exact match
             for row in &rows {
                 if !row.is_empty() && self.values_equal(&row[0], &lookup_val) {
-                    return row[col_index - 1].clone();
+                    return row[col_index - 1].clone().collapse_blank();
                 }
             }
             EvalResult::Error(CellError::NA)
@@ -13516,13 +13922,13 @@ impl<'a> Evaluator<'a> {
                 }
             }
             match best_col {
-                Some(j) => rows[row_index - 1].get(j).cloned().unwrap_or(EvalResult::Error(CellError::NA)),
+                Some(j) => rows[row_index - 1].get(j).cloned().map(EvalResult::collapse_blank).unwrap_or(EvalResult::Error(CellError::NA)),
                 None => EvalResult::Error(CellError::NA),
             }
         } else {
             for (j, val) in first_row.iter().enumerate() {
                 if self.values_equal(val, &lookup_val) {
-                    return rows[row_index - 1].get(j).cloned().unwrap_or(EvalResult::Error(CellError::NA));
+                    return rows[row_index - 1].get(j).cloned().map(EvalResult::collapse_blank).unwrap_or(EvalResult::Error(CellError::NA));
                 }
             }
             EvalResult::Error(CellError::NA)
@@ -13561,7 +13967,13 @@ impl<'a> Evaluator<'a> {
         }
 
         match best_idx {
-            Some(i) => result_vector.get(i).cloned().unwrap_or(EvalResult::Error(CellError::NA)),
+            // LOOKUP is value-returning like VLOOKUP: a blank result cell is
+            // the number 0, so `ISBLANK(LOOKUP(…))` is FALSE.
+            Some(i) => result_vector
+                .get(i)
+                .cloned()
+                .map(EvalResult::collapse_blank)
+                .unwrap_or(EvalResult::Error(CellError::NA)),
             None => EvalResult::Error(CellError::NA),
         }
     }
@@ -13631,6 +14043,28 @@ impl<'a> Evaluator<'a> {
                     std::cmp::Ordering::Equal => 0,
                 }
             }
+            // A BLANK SORTS AS ZERO HERE, NOT ABOVE EVERYTHING.
+            //
+            // This is an ORDERING used by the approximate (sorted) branch of
+            // VLOOKUP/HLOOKUP/LOOKUP, which walks the key column and BREAKS at
+            // the first key greater than the needle. Without this arm a blank
+            // fell into `(_, EvalResult::Number(_)) => 1` — "greater than every
+            // number" — so a single empty cell anywhere in a sorted key column
+            // stopped the walk dead and the lookup returned the row before it.
+            // With A1=1, A2 empty, A3=3, `=VLOOKUP(3,A1:B3,2,TRUE)` answered
+            // row 1 instead of row 3, silently, while `=MATCH(3,A1:A3,1)` —
+            // which orders through `as_number` — still answered 3. Two
+            // functions, same data, different rows.
+            (EvalResult::Blank, EvalResult::Blank) => 0,
+            (EvalResult::Blank, EvalResult::Number(n)) => {
+                if 0.0 < *n { -1 } else if 0.0 > *n { 1 } else { 0 }
+            }
+            (EvalResult::Number(n), EvalResult::Blank) => {
+                if *n < 0.0 { -1 } else if *n > 0.0 { 1 } else { 0 }
+            }
+            // Against text a blank is the empty string, which sorts first.
+            (EvalResult::Blank, EvalResult::Text(_)) => -1,
+            (EvalResult::Text(_), EvalResult::Blank) => 1,
             (EvalResult::Number(_), _) => -1,
             (_, EvalResult::Number(_)) => 1,
             _ => 0,
@@ -14194,8 +14628,18 @@ impl<'a> Evaluator<'a> {
                     for cr_col in 0..cr_cols {
                         let cr_val = &cr_flat[cr_row_offset + cr_col];
 
-                        // Skip blank criteria cells
+                        // Skip blank criteria cells.
+                        //
+                        // AN EMPTY CRITERIA CELL MEANS "NO CONDITION", not
+                        // "equal to zero". Every empty cell in a criteria
+                        // rectangle used to arrive here as `Number(0.0)`, so
+                        // `is_blank` was false and the cell was applied as the
+                        // live criterion `= 0` — which matches nothing. Every
+                        // D-function with a partially-filled criteria rectangle
+                        // therefore filtered its whole database out and
+                        // returned an empty result in silence.
                         let is_blank = match cr_val {
+                            EvalResult::Blank => true,
                             EvalResult::Text(s) => s.is_empty(),
                             EvalResult::Number(_) => false,
                             EvalResult::Boolean(_) => false,
@@ -14271,7 +14715,7 @@ impl<'a> Evaluator<'a> {
                 let mut total = 0.0;
                 let mut count = 0usize;
                 for v in &values {
-                    if let Some(n) = v.as_number() {
+                    if let Some(n) = v.as_sample_number() {
                         total += n;
                         count += 1;
                     }
@@ -14290,7 +14734,8 @@ impl<'a> Evaluator<'a> {
         match self.resolve_database_args(args) {
             Err(e) => EvalResult::Error(e),
             Ok(values) => {
-                let count = values.iter().filter(|v| v.as_number().is_some()).count();
+                // DCOUNT counts NUMBERS, and a blank is not one.
+                let count = values.iter().filter(|v| v.as_sample_number().is_some()).count();
                 EvalResult::Number(count as f64)
             }
         }
@@ -14301,9 +14746,13 @@ impl<'a> Evaluator<'a> {
         match self.resolve_database_args(args) {
             Err(e) => EvalResult::Error(e),
             Ok(values) => {
+                // DCOUNTA counts NON-BLANK values. The old `_ => true` arm
+                // counted a blank and the Text arm excluded `""`, which is
+                // backwards on both halves -- Excel counts a formula's `""`
+                // (it is a value) and does not count an empty cell.
                 let count = values.iter().filter(|v| {
                     match v {
-                        EvalResult::Text(s) => !s.is_empty(),
+                        EvalResult::Blank => false,
                         EvalResult::Error(_) => false,
                         _ => true,
                     }
@@ -14337,7 +14786,7 @@ impl<'a> Evaluator<'a> {
             Ok(values) => {
                 let mut max_val: Option<f64> = None;
                 for v in &values {
-                    if let Some(n) = v.as_number() {
+                    if let Some(n) = v.as_sample_number() {
                         max_val = Some(match max_val {
                             Some(current) => if n > current { n } else { current },
                             None => n,
@@ -14359,7 +14808,7 @@ impl<'a> Evaluator<'a> {
             Ok(values) => {
                 let mut min_val: Option<f64> = None;
                 for v in &values {
-                    if let Some(n) = v.as_number() {
+                    if let Some(n) = v.as_sample_number() {
                         min_val = Some(match min_val {
                             Some(current) => if n < current { n } else { current },
                             None => n,
@@ -14382,7 +14831,7 @@ impl<'a> Evaluator<'a> {
                 let mut product = 1.0;
                 let mut has_number = false;
                 for v in &values {
-                    if let Some(n) = v.as_number() {
+                    if let Some(n) = v.as_sample_number() {
                         product *= n;
                         has_number = true;
                     }
@@ -14401,7 +14850,7 @@ impl<'a> Evaluator<'a> {
         match self.resolve_database_args(args) {
             Err(e) => EvalResult::Error(e),
             Ok(values) => {
-                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_sample_number()).collect();
                 if nums.len() < 2 {
                     return EvalResult::Error(CellError::Div0);
                 }
@@ -14417,7 +14866,7 @@ impl<'a> Evaluator<'a> {
         match self.resolve_database_args(args) {
             Err(e) => EvalResult::Error(e),
             Ok(values) => {
-                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_sample_number()).collect();
                 if nums.is_empty() {
                     return EvalResult::Error(CellError::Div0);
                 }
@@ -14433,7 +14882,7 @@ impl<'a> Evaluator<'a> {
         match self.resolve_database_args(args) {
             Err(e) => EvalResult::Error(e),
             Ok(values) => {
-                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_sample_number()).collect();
                 if nums.len() < 2 {
                     return EvalResult::Error(CellError::Div0);
                 }
@@ -14449,7 +14898,7 @@ impl<'a> Evaluator<'a> {
         match self.resolve_database_args(args) {
             Err(e) => EvalResult::Error(e),
             Ok(values) => {
-                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_sample_number()).collect();
                 if nums.is_empty() {
                     return EvalResult::Error(CellError::Div0);
                 }
@@ -14514,7 +14963,7 @@ mod tests {
         let mut eval = Evaluator::new(&grid);
         let udf = |name: &str, args: &[EvalResult]| -> Option<EvalResult> {
             if name == "MYSUM" {
-                Some(EvalResult::Number(args.iter().filter_map(|a| a.as_number()).sum()))
+                Some(EvalResult::Number(args.iter().filter_map(|a| a.as_sample_number()).sum()))
             } else {
                 None
             }
@@ -15153,12 +15602,19 @@ mod tests {
         assert_eq!(result, EvalResult::Number(10.0));
     }
 
+    /// THE COLLAPSE RULE, and this test is its only guard.
+    ///
+    /// A reference to an empty cell evaluates to `Blank` — that is what lets
+    /// COUNT skip it and ISBLANK see it — but it DISPLAYS as 0, because that is
+    /// what Excel shows for `=Z99`. Both halves are asserted here: assert only
+    /// the first and a future change could start storing a blank into cells;
+    /// assert only the second and the whole three-way rule could be lost.
     #[test]
     fn test_empty_cell_ref() {
         let grid = make_grid();
         let eval = Evaluator::new(&grid);
 
-        // =Z99 (empty cell, should be 0)
+        // =Z99 (empty cell)
         let expr = Expression::CellRef {
             sheet: None,
             col: "Z".to_string(),
@@ -15169,7 +15625,8 @@ mod tests {
         };
         let result = eval.evaluate(&expr);
 
-        assert_eq!(result, EvalResult::Number(0.0));
+        assert_eq!(result, EvalResult::Blank);
+        assert_eq!(result.to_cell_value(), CellValue::Number(0.0));
     }
 
     #[test]
@@ -18597,7 +19054,8 @@ mod cube_serve_tests {
 mod lookup_cache_differential_tests {
     //! Differential battery: every cache-served lookup/criteria result must be
     //! IDENTICAL to the legacy scan's result — including quirks (empty cells
-    //! materializing as 0.0, first-match-wins across epsilon-near duplicates,
+    //! materializing as `Blank` and matching no ordinary criteria,
+    //! first-match-wins across epsilon-near duplicates,
     //! ASCII-vs-Unicode case folds, cross-typing, whole-column compaction).
 
     use super::*;
@@ -18627,7 +19085,8 @@ mod lookup_cache_differential_tests {
         g.set_cell(2, 0, Cell::new_text("apple".to_string())); // case dup
         g.set_cell(3, 0, Cell::new_number(5.0 + 0.5e-10)); // epsilon-near dup
         g.set_cell(4, 0, Cell::new_boolean(true));
-        // row 5 col 0 EMPTY -> materializes as Number(0.0)
+        // row 5 col 0 EMPTY -> materializes as `Blank`: matches no ordinary
+        // criteria and no exact lookup, and is skipped by the aggregates
         g.set_cell(6, 0, Cell::new_text("STRASSE".to_string()));
         g.set_cell(7, 0, Cell::new_text("Stra\u{df}e".to_string())); // unicode fold
         g.set_cell(8, 0, Cell::new_text("5".to_string())); // parseable text
@@ -18664,7 +19123,7 @@ mod lookup_cache_differential_tests {
         "=VLOOKUP(\"apple\",A1:C12,3,FALSE)",
         "=VLOOKUP(5,A1:C12,2,FALSE)",
         "=VLOOKUP(5.00000000004,A1:C12,2,FALSE)", // inside 1e-10 of rows 2 AND 4
-        "=VLOOKUP(0,A1:C12,2,FALSE)",             // empty row 6 (as 0.0) beats row 11
+        "=VLOOKUP(0,A1:C12,2,FALSE)",             // empty row 6 no longer matches 0; row 11 wins
         "=VLOOKUP(TRUE,A1:C12,2,FALSE)",
         "=VLOOKUP(\"stra\u{df}e\",A1:C12,2,FALSE)", // ASCII fold: matches row 8 only
         "=VLOOKUP(\"strasse\",A1:C12,2,FALSE)",
@@ -18718,7 +19177,7 @@ mod lookup_cache_differential_tests {
         "=COUNTIF(A1:A12,\"<>apple\")",
         "=COUNTIF(A1:A12,TRUE)",
         "=COUNTIF(A1:A12,\"z*\")",                // wildcard -> scan
-        "=COUNTIF(A1:A12,0)",                        // counts the EMPTY cell too
+        "=COUNTIF(A1:A12,0)",                        // the EMPTY cell is NOT a zero
         "=COUNTIF(H:H,\"x\")",
         // ---- SUMIF ----
         "=SUMIF(A1:A12,\"apple\",B1:B12)",
@@ -18794,8 +19253,18 @@ mod lookup_cache_differential_tests {
             eval_formula(&grid, "=INDEX(B1:B12,3,5)"),
             EvalResult::Number(102.0)
         );
-        // Empty cell inside the range -> 0.0.
-        assert_eq!(eval_formula(&grid, "=INDEX(A1:A12,6)"), EvalResult::Number(0.0));
+        // AN EMPTY CELL INSIDE THE RANGE STAYS BLANK, because INDEX returns a
+        // REFERENCE. That is Excel: `=COUNT(INDEX(A1:A12,6))` is 0 and
+        // `=ISBLANK(INDEX(A1:A12,6))` is TRUE, while the cell still DISPLAYS 0
+        // (`to_cell_value`). The value-returning lookups — VLOOKUP, HLOOKUP,
+        // XLOOKUP — collapse it to the number instead, which is why
+        // `=ISBLANK(VLOOKUP(…))` is FALSE in Excel even when the cell it found
+        // is empty.
+        assert_eq!(eval_formula(&grid, "=INDEX(A1:A12,6)"), EvalResult::Blank);
+        assert_eq!(
+            eval_formula(&grid, "=INDEX(A1:A12,6)").to_cell_value(),
+            CellValue::Number(0.0)
+        );
     }
 }
 #[cfg(test)]

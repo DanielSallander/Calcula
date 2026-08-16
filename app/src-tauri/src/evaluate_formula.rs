@@ -439,6 +439,9 @@ pub(crate) fn evaluate_single_node(
 
 pub(crate) fn eval_result_to_value(result: &engine::EvalResult) -> Value {
     match result {
+        // A blank collapses to the number it displays as, matching
+        // `EvalResult::to_cell_value` — this is the same boundary, one layer up.
+        engine::EvalResult::Blank => Value::Number(0.0),
         engine::EvalResult::Number(n) => Value::Number(*n),
         engine::EvalResult::Text(s) => Value::String(s.clone()),
         engine::EvalResult::Boolean(b) => Value::Boolean(*b),

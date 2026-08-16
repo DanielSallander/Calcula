@@ -31,8 +31,8 @@ import {
 const SV_SE_RIBBON: RibbonResolvedFormat[] = [
   { preset: "general", displayName: "General", sample: "1234,5678" },
   { preset: "number", displayName: "Number (2 decimals)", sample: "1234,57" },
-  { preset: "currency", displayName: "Currency ( kr, 2 decimals)", sample: "1 234,57 kr" },
-  { preset: "accounting", displayName: "Accounting (kr, 2 decimals)", sample: "1 234,57  kr" },
+  { preset: "currency", displayName: "Currency ( kr, 2 decimals, symbol after)", sample: "1 234,57 kr" },
+  { preset: "accounting", displayName: "Accounting (kr, 2 decimals, symbol after)", sample: "1 234,57  kr" },
   { preset: "date_short", displayName: "Date (YYYY-MM-DD)", sample: "2024-01-15" },
   { preset: "date_long", displayName: 'Date ("den "d mmmm yyyy)', sample: "den 15 januari 2024" },
   { preset: "time", displayName: "Time (hh:mm:ss)", sample: "13:30:00" },
@@ -99,11 +99,14 @@ describe("the dialog can report every format the ribbon can apply", () => {
     // The measured regression, named individually so a partial revert is loud.
     expect(normalizeToPresetValue("Date (YYYY-MM-DD)", SV_SE_RIBBON)).toBe("date_short");
     expect(normalizeToPresetValue('Date ("den "d mmmm yyyy)', SV_SE_RIBBON)).toBe("date_long");
-    expect(normalizeToPresetValue("Currency ( kr, 2 decimals)", SV_SE_RIBBON)).toBe("currency");
+    // ", symbol after" is the backend's explicit position clause. It used to be
+    // inferred from the symbol text (only "kr" meant suffix), which stopped being
+    // reliable once the app read the user's Windows regional settings.
+    expect(normalizeToPresetValue("Currency ( kr, 2 decimals, symbol after)", SV_SE_RIBBON)).toBe("currency");
 
     expect(categoryForFormat("Date (YYYY-MM-DD)", SV_SE_RIBBON)).toBe("date");
     expect(categoryForFormat('Date ("den "d mmmm yyyy)', SV_SE_RIBBON)).toBe("date");
-    expect(categoryForFormat("Currency ( kr, 2 decimals)", SV_SE_RIBBON)).toBe("currency");
+    expect(categoryForFormat("Currency ( kr, 2 decimals, symbol after)", SV_SE_RIBBON)).toBe("currency");
   });
 
   it("the regional rows sit at the TOP of their list, as Excel puts them", () => {
@@ -141,7 +144,7 @@ describe("what must NOT change", () => {
     // The offline fallback is intact: a dialog opened before the backend
     // answers behaves exactly as it did.
     expect(normalizeToPresetValue("Number (2 decimals, with separators)")).toBe("number_sep");
-    expect(normalizeToPresetValue("Accounting (kr, 2 decimals)")).toBe("accounting_sek");
+    expect(normalizeToPresetValue("Accounting (kr, 2 decimals, symbol after)")).toBe("accounting_sek");
     expect(normalizeToPresetValue("Percentage (2 decimals)")).toBe("percentage");
     expect(categoryForFormat("Number (5 decimals)")).toBe("number");
   });

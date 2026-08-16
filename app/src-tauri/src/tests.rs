@@ -52,10 +52,18 @@ fn test_format_cell_value_with_style() {
         decimal_places: 2,
         symbol: "$".to_string(),
         symbol_position: engine::CurrencyPosition::Before,
+        negative_style: engine::NegativeStyle::Minus,
     });
     assert_eq!(
         format_cell_value(&CellValue::Number(1234.56), &currency_style, &locale),
         "$1,234.56"
+    );
+    // Excel's Currency preset renders a negative with a LEADING MINUS; the
+    // parentheses this used to paint are the third and fourth entries of its
+    // "Negative numbers:" list, not the default (open-items 1.1).
+    assert_eq!(
+        format_cell_value(&CellValue::Number(-1234.56), &currency_style, &locale),
+        "-$1,234.56"
     );
 
     // Test percentage formatting

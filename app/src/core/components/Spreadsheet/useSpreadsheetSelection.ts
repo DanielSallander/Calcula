@@ -723,8 +723,9 @@ export function useSpreadsheetSelection({
   // hydration, cell fetch) are the SAME ones a tab click defers, so this can be
   // no less atomic than the gesture it imitates.
   //
-  // Returns whether it actually switched, so the caller can aim the selection
-  // at what was restored.
+  // Returned whether it actually switched. NOTHING READS IT NOW: the selection
+  // is aimed at `restoredRange` on every restore, not only on the ones that
+  // crossed a sheet boundary.
   const followBackendSheetActivation = useCallback(
     (index: number, name: string): boolean => {
       if (index === sheetContext.activeSheetIndex) return false;
@@ -785,36 +786,64 @@ export function useSpreadsheetSelection({
       if (result.activeSheetIndex !== sheetContext.activeSheetIndex) {
         await primeSheetSwitch(result.activeSheetIndex);
       }
-      const switched = followBackendSheetActivation(
+      // The return value said whether the sheet actually moved. Nothing reads
+      // it any more: the selection below is aimed at the restored range on
+      // EVERY restore, not only on the ones that crossed a sheet boundary.
+      followBackendSheetActivation(
         result.activeSheetIndex,
         result.activeSheetName,
       );
 
-      // AIM THE VIEW AT WHAT CHANGED — only when the sheet moved, and in the
-      // SAME synchronous batch as the switch.
+      // AIM THE VIEW AT WHAT CHANGED — on EVERY restore, and in the SAME
+      // synchronous batch as the switch.
       //
-      // Switching sheets is only half of "so the user can see what changed":
-      // the restored cells can be anywhere on a sheet that was left scrolled
-      // somewhere else, and landing on that sheet's saved selection would show
-      // a sheet with no visible evidence of the undo. Excel selects the range
-      // an undo restored; this does the same for the switch case.
+      // Excel selects the range an undo restored, whether or not the undo
+      // crossed sheets: re-selection is how the user SEES what came back. Undo
+      // a four-cell paste and Excel shows those four cells selected with the
+      // active cell at their top-left; undo a single edit and it selects that
+      // cell. This does the same. (open-items 1.4; it was previously gated on
+      // `switched`, so on the common path — a same-sheet Ctrl+Z — both this
+      // dispatch and the scroll below were dead code.)
       //
-      // It has to be dispatched HERE rather than after the awaits below: the
-      // switch itself restores the target sheet's saved selection, so a later
-      // dispatch would render that selection first and replace it a frame
-      // later — a visible jump. The SCROLL is deferred (see below) because a
-      // structural restore changes the dimensions it has to measure against.
+      // THE RANGE, NOT THE ANCHOR. `restoredRange` is the bounding box of the
+      // cells the transaction rewrote on this sheet; `restoredAnchor` is that
+      // box's top-left corner, derived from it in the backend so the two cannot
+      // disagree about which cells the restore touched.
       //
-      // Deliberately NOT done when the sheet did not move: a same-sheet undo
-      // has never moved the selection, several E2E journeys depend on where the
-      // cursor is after Ctrl+Z, and widening that is a separate decision.
-      const anchor = switched ? result.restoredAnchor : null;
-      if (anchor) {
+      // ONE NAMED DIVERGENCE FROM EXCEL. Excel leaves the ACTIVE cell at the
+      // restored range's top-left. This app's selection model pins the active
+      // cell to `endRow`/`endCol` (`core/types/types.ts`) and its own
+      // `selection-in-bounds` oracle rejects `endRow < startRow`, so a
+      // well-formed selection necessarily leaves the active cell at the
+      // BOTTOM-RIGHT: the formula bar shows that cell and the next keystroke
+      // lands there. Matching Excel means giving the selection an active cell
+      // independent of its corners, which is a change to the model rather than
+      // to this restore — so it is named here rather than half-built by
+      // dispatching an inverted selection the oracle calls corruption.
+      //
+      // IT IS STILL NULL FOR SOME RESTORES, and that silence is deliberate
+      // rather than forgotten: a column-width drag, a whole-sheet snapshot
+      // (every insert/delete rows/columns) and the opaque `CustomRestore`
+      // payloads record no cell coordinates, so there is nothing to select.
+      // Excel would select the affected rows for a structural undo; Calcula
+      // cannot, because the transaction never recorded which they were. A null
+      // therefore leaves the cursor exactly where it was — the behaviour every
+      // restore had before this change — never selecting the wrong thing.
+      //
+      // It has to be dispatched HERE rather than after the awaits below: when
+      // the sheet moved, the switch itself restores the target sheet's saved
+      // selection, so a later dispatch would render that selection first and
+      // replace it a frame later — a visible jump. The SCROLL is deferred (see
+      // below) because a structural restore changes the dimensions it has to
+      // measure against.
+      const range = result.restoredRange;
+      const anchor = result.restoredAnchor;
+      if (range) {
         dispatch(setSelectionAction({
-          startRow: anchor.row,
-          startCol: anchor.col,
-          endRow: anchor.row,
-          endCol: anchor.col,
+          startRow: range.startRow,
+          startCol: range.startCol,
+          endRow: range.endRow,
+          endCol: range.endCol,
           type: "cells",
         }));
       }
@@ -869,6 +898,13 @@ export function useSpreadsheetSelection({
       // `scrollToSelection` — the latter reads the selection out of state,
       // which React has not necessarily committed yet, so it would scroll to
       // where the cursor used to be.
+      //
+      // THE RANGE'S TOP-LEFT, and `center: false`. Excel brings the restored
+      // range's corner just inside the viewport rather than centring on it or
+      // trying to fit the whole range, and `scrollToMakeVisible` NO-OPS when
+      // the target is already visible — which is why the now-unguarded
+      // same-sheet case costs one reducer pass and zero visible movement for
+      // the overwhelmingly common undo of a cell you are already sitting on.
       if (anchor) {
         scrollToCell(anchor.row, anchor.col, false);
       }
@@ -903,26 +939,36 @@ export function useSpreadsheetSelection({
   );
 
   // Handle Undo (Ctrl+Z)
-  const handleUndo = useCallback(async () => {
+  //
+  // RETURNS the restore result, so a caller that reached undo through the
+  // command registry rather than the keyboard can tell success from failure.
+  // Ctrl+Z itself ignores it; the fused app CLI does not, and a `void` return
+  // is what let its `undo` verb print "Undone." after a refusal.
+  const handleUndo = useCallback(async (): Promise<UndoResult | undefined> => {
     console.log("[useSpreadsheetSelection] Undo requested");
     try {
       const result = await undoApi();
       console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
       await applyRestoreToTheView(result, "undo");
+      return result;
     } catch (error) {
       console.error("[useSpreadsheetSelection] Undo failed:", error);
+      return undefined;
     }
   }, [applyRestoreToTheView]);
 
-  // Handle Redo (Ctrl+Y or Ctrl+Shift+Z)
-  const handleRedo = useCallback(async () => {
+  // Handle Redo (Ctrl+Y or Ctrl+Shift+Z) — returns its result for the same
+  // reason `handleUndo` does.
+  const handleRedo = useCallback(async (): Promise<UndoResult | undefined> => {
     console.log("[useSpreadsheetSelection] Redo requested");
     try {
       const result = await redoApi();
       console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
       await applyRestoreToTheView(result, "redo");
+      return result;
     } catch (error) {
       console.error("[useSpreadsheetSelection] Redo failed:", error);
+      return undefined;
     }
   }, [applyRestoreToTheView]);
 

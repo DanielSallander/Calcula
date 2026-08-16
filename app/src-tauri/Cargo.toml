@@ -55,10 +55,9 @@ schemars = "1.0"
 tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["stream", "multipart", "json", "blocking"] }
 tempfile = "3.10"
-sys-locale = "0.3"
 zeroize = "1.8"
 rustc-hash = "2"
-windows = { version = "0.61", features = ["Win32_Security_Credentials"] }
+windows = { version = "0.61", features = ["Win32_Security_Credentials", "Win32_Globalization"] }
 
 [features]
 default = ["custom-protocol"]

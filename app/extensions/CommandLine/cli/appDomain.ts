@@ -132,13 +132,26 @@ export function createAppDomain(): CliDomain<AppCliSession> {
       },
     },
 
+    // A REFUSAL IS NOT A SUCCESS. `undo`/`redo` are `-> UndoResult`, not
+    // `-> Result`: an empty stack RETURNS `{ success: false }` rather than
+    // rejecting, so awaiting the call and printing unconditionally told the
+    // user "Undone." when nothing had been undone. The result is read here
+    // because this is the only layer that knows how to say so.
     undoRedo: {
       async undo(s: AppCliSession, io: CliIo): Promise<void> {
-        await s.gateway.undo();
+        const result = await s.gateway.undo();
+        if (result?.success === false) {
+          io.print("Nothing to undo.", "info");
+          return;
+        }
         io.print("Undone.", "info");
       },
       async redo(s: AppCliSession, io: CliIo): Promise<void> {
-        await s.gateway.redo();
+        const result = await s.gateway.redo();
+        if (result?.success === false) {
+          io.print("Nothing to redo.", "info");
+          return;
+        }
         io.print("Redone.", "info");
       },
     },

@@ -1175,8 +1175,16 @@ fn clearing_a_cell_recalculates_the_whole_chain() {
     assert_eq!(wb.value(0, 0, 2), CellValue::Number(1.0), "C1 = 0+1");
     assert_eq!(
         wb.value(0, 1, 0),
-        CellValue::Text("0!".to_string()),
-        "a non-arithmetic dependent follows the clear too. NOTE the `0`: this          engine reads an empty cell as the NUMBER zero in every context, so          `=A1&\"!\"` over a blank is \"0!\" where Excel gives \"!\". That is a          separate parity gap (filed), and it is pinned here so that fixing it          has to come past this test rather than silently changing what this          one proves -- which is only that the dependent RE-EVALUATED"
+        CellValue::Text("!".to_string()),
+        "a non-arithmetic dependent follows the clear too. THE `0` IS GONE, and \
+         its absence is the point: this assertion used to read \"0!\" and carried \
+         a note saying the engine read an empty cell as the NUMBER zero in every \
+         context, that Excel gives \"!\", and that the gap was filed and pinned \
+         here so a fix would have to come past this test rather than silently \
+         change what it proves. That is exactly what happened -- open-items 1.5 \
+         gave blanks their own evaluation result, so a blank is now \"\" in a \
+         concatenation. What this test proves is unchanged: the dependent \
+         RE-EVALUATED"
     );
 }
 

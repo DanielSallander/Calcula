@@ -10,6 +10,9 @@ import {
   normalizeToPresetValue,
   categoryForFormat,
   withRibbonPresets,
+  NEGATIVE_STYLE_OPTIONS,
+  negativeSample,
+  splitNegativeSuffix,
 } from "../utils/numberFormats";
 import type { NumberFormatCategory, RibbonResolvedFormat } from "../utils/numberFormats";
 import {
@@ -156,13 +159,56 @@ export function NumberTab(): React.ReactElement {
     }
   };
 
+  // ---- Excel's "Negative numbers:" list (Currency only) -------------------
+  //
+  // Excel shows it for the Number and Currency categories; Calcula's Number
+  // preset carries no negative axis yet, so it is offered where the format can
+  // actually express it. `currentPresetValue` is the COMPOSED value, so the
+  // symbol rows must be highlighted by its base and this list by its suffix --
+  // comparing the whole string would light neither.
+  const split = splitNegativeSuffix(currentPresetValue ?? "");
+
+  // ...AND THE BASE ONLY COUNTS WHEN IT IS A CURRENCY.
+  //
+  // `currentPresetValue` is whatever the CELL already carries, which on a fresh
+  // cell is `"general"` and on a formatted one might be `"number_sep"` or
+  // `"accounting_usd"`. Composing a negative suffix onto that produced
+  // `"general_neg_paren"` — a string the backend parses as plain General
+  // (the suffix only applies to a Currency) and the dialog re-categorises as
+  // General, so clicking a negative entry on any non-currency cell yanked the
+  // dialog back to that cell's own category and silently discarded the choice.
+  const currencyRows = selectedCategory === "currency" ? currentCategory?.formats : undefined;
+  const baseIsACurrencyRow = currencyRows?.some((f) => f.value === split.base) ?? false;
+  const currentSymbolValue = baseIsACurrencyRow ? split.base : "";
+  const negativeSuffix = baseIsACurrencyRow ? split.suffix : "";
+
+  const currencyPositiveSample =
+    currencyRows?.find((f) => f.value === currentSymbolValue)?.example ??
+    currencyRows?.[0]?.example ??
+    "1,234.00";
+
   const handlePresetClick = (value: string) => {
     if (selectedCategory === "custom") {
       setCustomInput(value);
       setNumberFormat(value);
-    } else {
-      setNumberFormat(value);
+      return;
     }
+    // Choosing a SYMBOL keeps the negative choice that is already made, exactly
+    // as Excel's two list boxes behave: they are independent axes of one
+    // format, not a single list of twelve.
+    setNumberFormat(
+      selectedCategory === "currency" ? `${value}${negativeSuffix}` : value
+    );
+  };
+
+  const handleNegativeClick = (suffix: string) => {
+    // A negative entry is meaningless without a symbol, so clicking one while
+    // the cell carries no currency yet adopts the first symbol row -- which is
+    // the row the list is already showing a sample of. `currentSymbolValue` is
+    // empty in exactly that case (see above), so the fallback is reachable
+    // rather than dead.
+    const symbol = currentSymbolValue || currencyRows?.[0]?.value;
+    if (symbol) setNumberFormat(`${symbol}${suffix}`);
   };
 
   return (
@@ -227,12 +273,18 @@ export function NumberTab(): React.ReactElement {
                 </>
               ) : (
                 <>
-                  <SectionLabel>Format:</SectionLabel>
+                  <SectionLabel>
+                    {selectedCategory === "currency" ? "Symbol:" : "Format:"}
+                  </SectionLabel>
                   <FormatList>
                     {currentCategory.formats.map((fmt) => (
                       <FormatItem
                         key={fmt.value}
-                        $selected={currentPresetValue === fmt.value}
+                        $selected={
+                          (selectedCategory === "currency"
+                            ? currentSymbolValue
+                            : currentPresetValue) === fmt.value
+                        }
                         onClick={() => handlePresetClick(fmt.value)}
                       >
                         <FormatLabel>{fmt.label}</FormatLabel>
@@ -243,11 +295,37 @@ export function NumberTab(): React.ReactElement {
                     ))}
                   </FormatList>
 
+                  {selectedCategory === "currency" && (
+                    <>
+                      <SectionLabel>Negative numbers:</SectionLabel>
+                      <FormatList>
+                        {NEGATIVE_STYLE_OPTIONS.map((option) => (
+                          <FormatItem
+                            key={option.suffix || "default"}
+                            $selected={negativeSuffix === option.suffix}
+                            onClick={() => handleNegativeClick(option.suffix)}
+                          >
+                            <FormatLabel
+                              style={option.red ? { color: "#ff0000" } : undefined}
+                            >
+                              {negativeSample(currencyPositiveSample, option)}
+                            </FormatLabel>
+                            {option.red && <FormatExample>red</FormatExample>}
+                          </FormatItem>
+                        ))}
+                      </FormatList>
+                    </>
+                  )}
+
                   <PreviewSection>
                     <SectionLabel>Preview:</SectionLabel>
                     <PreviewBox>
                       {currentCategory.formats.find(
-                        (f) => f.value === currentPresetValue
+                        (f) =>
+                          f.value ===
+                          (selectedCategory === "currency"
+                            ? currentSymbolValue
+                            : currentPresetValue)
                       )?.example || "Sample"}
                     </PreviewBox>
                   </PreviewSection>

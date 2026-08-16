@@ -34,7 +34,13 @@ const SHEETS_RESULT = {
 };
 
 const NAMED_RANGE_OK = { success: true, namedRange: null, error: null };
-const UNDO_RESULT = { updatedCells: [], canUndo: false, canRedo: false, restoredAnchor: null };
+const UNDO_RESULT = {
+  updatedCells: [],
+  canUndo: false,
+  canRedo: false,
+  restoredAnchor: null,
+  restoredRange: null,
+};
 
 /** Async default results per method; methods absent here resolve undefined. */
 const ASYNC_RESULTS: Record<string, unknown> = {

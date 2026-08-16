@@ -180,13 +180,48 @@ impl Transaction {
     /// worth pointing at; `CustomRestore` is opaque here for the reason
     /// `target_sheet` gives.
     pub fn restored_anchor_on(&self, sheet: usize) -> Option<(u32, u32)> {
+        self.restored_range_on(sheet).map(|(row, col, _, _)| (row, col))
+    }
+
+    /// The bounding BOX this transaction restores on `sheet`, as
+    /// `(min_row, min_col, max_row, max_col)`.
+    ///
+    /// Excel selects the range an undo restored, not merely its corner: undo a
+    /// four-cell paste and all four cells come back selected. `restored_anchor_on`
+    /// is now the top-left corner of this box rather than a second walk of the
+    /// same changes, so the two can never disagree about which cells the restore
+    /// touched.
+    ///
+    /// SAME `SetCell`-ONLY SCOPE, and it is a real limit rather than an
+    /// oversight: the geometry variants describe a whole row or column,
+    /// `RestoreSnapshot` describes the whole sheet, and `CustomRestore` is opaque
+    /// (see `target_sheet`). Excel selects the affected rows for an insert/delete
+    /// undo; Calcula cannot, because the transaction does not record which they
+    /// were. A `None` here means "do not move the user", which is the same
+    /// answer the view took for every restore before Excel parity was decided --
+    /// so the gap is a narrower silence, never a wrong selection.
+    ///
+    /// The box is a BOUNDING box: a transaction touching (9,4) and (6,7) yields
+    /// rows 6..=9 and columns 4..=7, including the two corners nobody wrote.
+    /// That is Excel's rectangle too -- a selection is a rectangle -- and it is
+    /// why the per-axis `min`/`max` must stay independent.
+    pub fn restored_range_on(&self, sheet: usize) -> Option<(u32, u32, u32, u32)> {
         self.changes
             .iter()
             .filter_map(|change| match change {
-                CellChange::SetCell { sheet: s, row, col, .. } if *s == sheet => Some((*row, *col)),
+                CellChange::SetCell { sheet: s, row, col, .. } if *s == sheet => {
+                    Some((*row, *col, *row, *col))
+                }
                 _ => None,
             })
-            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+            .reduce(|a, b| {
+                (
+                    a.0.min(b.0),
+                    a.1.min(b.1),
+                    a.2.max(b.2),
+                    a.3.max(b.3),
+                )
+            })
     }
 }
 
@@ -1012,5 +1047,42 @@ mod history_horizon_tests {
         t.add_change(CellChange::RestoreSnapshot(snapshot_on(1)));
         assert_eq!(t.target_sheet(), Some(1));
         assert_eq!(t.restored_anchor_on(1), None);
+        assert_eq!(t.restored_range_on(1), None);
+    }
+
+    /// Excel selects the RANGE an undo restored, not its corner: undo a
+    /// four-cell paste and all four come back selected (open-items 1.4).
+    #[test]
+    fn the_range_is_the_bounding_box_of_the_cells_restored_on_that_sheet() {
+        let mut t = Transaction::new("paste");
+        t.add_change(CellChange::SetCell { sheet: 1, row: 9, col: 4, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 1, row: 6, col: 7, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 2, row: 0, col: 0, previous: None });
+        // Per-axis min and max, INDEPENDENTLY: the box spans rows 6..=9 and
+        // columns 4..=7 even though no change sits at (6,4) or (9,7). A
+        // selection is a rectangle, so that is Excel's rectangle too.
+        assert_eq!(t.restored_range_on(1), Some((6, 4, 9, 7)));
+        // A single restored cell is a one-cell range, not a null one.
+        assert_eq!(t.restored_range_on(2), Some((0, 0, 0, 0)));
+        assert_eq!(t.restored_range_on(3), None);
+    }
+
+    /// The anchor is now DERIVED from the range rather than walked separately,
+    /// so the two cannot drift into disagreeing about the same transaction --
+    /// which would put the active cell outside its own selection.
+    #[test]
+    fn the_anchor_is_always_the_top_left_corner_of_the_range() {
+        let mut t = Transaction::new("fill");
+        t.add_change(CellChange::SetCell { sheet: 1, row: 9, col: 4, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 1, row: 6, col: 7, previous: None });
+        t.add_change(CellChange::SetCell { sheet: 1, row: 7, col: 5, previous: None });
+        for sheet in 0..4 {
+            assert_eq!(
+                t.restored_anchor_on(sheet),
+                t.restored_range_on(sheet).map(|(r, c, _, _)| (r, c)),
+                "sheet {}",
+                sheet
+            );
+        }
     }
 }

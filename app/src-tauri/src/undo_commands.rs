@@ -95,6 +95,27 @@ pub struct UndoResult {
     /// at. This is what the view is aimed at. `None` for a restore that names no
     /// cell (a column width, a whole-sheet snapshot, an opaque custom payload).
     pub restored_anchor: Option<RestoredAnchor>,
+    /// The whole RANGE this restore rewrote on the now-active sheet, if any.
+    ///
+    /// Excel selects the range an undo restored, not merely its corner: undo a
+    /// four-cell paste and all four come back selected. `restored_anchor` is
+    /// this range's top-left corner, so the two are one derivation and cannot
+    /// disagree about which cells the restore touched.
+    ///
+    /// WHERE THE ACTIVE CELL ENDS UP IS A FRONTEND QUESTION, and Calcula's
+    /// answer differs from Excel's. Excel leaves the active cell at the range's
+    /// TOP-LEFT; Calcula's selection model pins the active cell to
+    /// `endRow`/`endCol` (`app/src/core/types/types.ts`) and its own
+    /// `selection-in-bounds` invariant rejects `endRow < startRow`, so a
+    /// well-formed selection puts the active cell at the BOTTOM-RIGHT. Naming
+    /// the divergence rather than asserting the Excel behaviour this struct
+    /// does not produce; changing it means giving the selection model an active
+    /// cell independent of its corners, which is a separate piece of work.
+    ///
+    /// `None` on exactly the restores `restored_anchor` is `None` on -- a
+    /// geometry change, a whole-sheet snapshot, an opaque custom payload -- and
+    /// there it means "do not move the user", never "select nothing".
+    pub restored_range: Option<RestoredRange>,
 }
 
 /// A single cell coordinate on the active sheet. A struct rather than a tuple
@@ -105,6 +126,19 @@ pub struct UndoResult {
 pub struct RestoredAnchor {
     pub row: u32,
     pub col: u32,
+}
+
+/// A rectangle of cells on the active sheet, inclusive at both ends. A struct
+/// for the same reason `RestoredAnchor` is one, and with named ROW/COL edges
+/// rather than two `RestoredAnchor`s so that a caller cannot read the far
+/// corner as the near one.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredRange {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
 }
 
 /// ONE VOCABULARY OF DOMAINS, and this is the alias to it (§3cd).
@@ -1407,9 +1441,20 @@ pub(crate) fn apply_changes(
     // and move the active sheet under us, and reporting the pre-restore index
     // would tell the frontend to follow a switch that has already been undone.
     let (active_sheet_index, active_sheet_name) = active_sheet_identity(state);
-    let restored_anchor = transaction
-        .restored_anchor_on(active_sheet_index)
-        .map(|(row, col)| RestoredAnchor { row, col });
+    // ONE derivation, two shapes: the anchor is the range's top-left corner, so
+    // the active cell can never fall outside the selection reported beside it.
+    let restored_range = transaction
+        .restored_range_on(active_sheet_index)
+        .map(|(start_row, start_col, end_row, end_col)| RestoredRange {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        });
+    let restored_anchor = restored_range.map(|r| RestoredAnchor {
+        row: r.start_row,
+        col: r.start_col,
+    });
 
     UndoResult {
         success: true,
@@ -1431,6 +1476,7 @@ pub(crate) fn apply_changes(
         active_sheet_index,
         active_sheet_name,
         restored_anchor,
+        restored_range,
     }
 }
 
@@ -2523,6 +2569,7 @@ pub fn undo(
                     active_sheet_index,
                     active_sheet_name,
                     restored_anchor: None,
+                    restored_range: None,
                 };
             }
         }
@@ -2570,6 +2617,7 @@ pub fn redo(
                     active_sheet_index,
                     active_sheet_name,
                     restored_anchor: None,
+                    restored_range: None,
                 };
             }
         }

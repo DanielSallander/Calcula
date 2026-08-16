@@ -1819,6 +1819,25 @@ export interface UndoResult {
    *  changed" — the restored cells can be far outside the viewport that sheet
    *  was left at, and this is what the selection is aimed at. */
   restoredAnchor: { row: number; col: number } | null;
+  /** The whole RANGE the restore rewrote on `activeSheetIndex`, or null on the
+   *  same restores `restoredAnchor` is null on.
+   *
+   *  Excel selects the range an undo restored, not merely its corner: undo a
+   *  four-cell paste and all four come back selected. `restoredAnchor` is this
+   *  range's top-left corner, and both come from one derivation in the backend,
+   *  so they cannot disagree about which cells the restore touched. Inclusive at
+   *  both ends.
+   *
+   *  NOTE Excel leaves the ACTIVE cell at the top-left; Calcula's selection
+   *  model pins the active cell to `endRow`/`endCol`, so a well-formed
+   *  selection leaves it at the bottom-right. Named divergence, not an
+   *  oversight — see `UndoResult.restored_range` in undo_commands.rs. */
+  restoredRange: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  } | null;
 }
 
 /**

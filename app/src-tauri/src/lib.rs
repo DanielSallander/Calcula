@@ -123,6 +123,8 @@ pub mod row_visibility;
 pub mod timeline_slicer;
 pub mod mcp;
 pub mod locale_commands;
+/// Windows regional settings -> `engine::LocaleSettings` (open-items 1.3).
+pub mod os_locale;
 pub mod error_checking;
 pub mod named_styles_cmd;
 pub mod chart_commands;
@@ -766,10 +768,17 @@ pub fn create_app_state() -> AppState {
         animation_snapshots: Mutex::new(HashMap::new()),
         // linked_sheets removed
         locale: Mutex::new({
-            let system_locale = sys_locale::get_locale()
-                .unwrap_or_else(|| "en-US".to_string());
-            log_info!("SYS", "Detected system locale: {}", system_locale);
-            engine::LocaleSettings::from_locale_id(&system_locale)
+            // THE REGIONAL FORMAT, NOT THE DISPLAY LANGUAGE. This used to be
+            // `sys_locale::get_locale()`, which is `GetUserPreferredUILanguages`
+            // -- the language Windows shows its own menus in. The separators,
+            // date patterns and currency symbol Excel uses come from the
+            // REGIONAL FORMAT, a different setting entirely, so an
+            // English-display machine with a Swedish region got `.` decimals
+            // and `,` formula separators while Excel beside it used `,` and
+            // `;`. See os_locale.rs (open-items 1.3).
+            let locale = crate::os_locale::system_locale_settings();
+            log_info!("SYS", "Detected system regional format: {}", locale.locale_id);
+            locale
         }),
         auto_recover_enabled: Mutex::new(true),
         auto_recover_interval_ms: Mutex::new(300_000), // 5 minutes

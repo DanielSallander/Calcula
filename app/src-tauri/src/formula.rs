@@ -219,6 +219,9 @@ pub fn evaluate_expressions(
 /// Convert an EvalResult to a display string for template resolution.
 fn eval_result_to_display(result: &EvalResult) -> String {
     match result {
+        // A blank DISPLAYS as 0, exactly as `=A1` over an empty cell does in
+        // the grid — see `EvalResult::to_cell_value`.
+        EvalResult::Blank => "0".to_string(),
         EvalResult::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 1e15 {
                 format!("{}", *n as i64)
@@ -277,6 +280,12 @@ fn eval_result_to_typed(
         EvalResult::Text(_) => "text",
         EvalResult::Boolean(_) => "boolean",
         EvalResult::Error(_) => "error",
+        // A BLANK REPORTS AS A NUMBER, because that is what its `value` and
+        // `display` are: both collapse it to 0 (`eval_result_to_json` and
+        // `eval_result_to_display` below). Left in the `_` arm it reported
+        // `type: "text"` beside `value: 0`, so a script switching on `type`
+        // took the string branch and was handed a JSON number.
+        EvalResult::Blank => "number",
         // An array/list/dict/lambda has no scalar type; it reports as "text"
         // with its rendered form, exactly as a List/Dict CELL does in
         // `typed_cell_value` (commands/data.rs).
@@ -434,6 +443,10 @@ fn scope_value_to_eval(value: &serde_json::Value) -> EvalResult {
 /// Convert an engine result into a JSON value for the frontend.
 fn eval_result_to_json(result: &EvalResult) -> serde_json::Value {
     match result {
+        // The wire carries VALUES, and a blank collapses to the number a cell
+        // would show. Sending null would make the frontend invent its own
+        // second answer for what an empty cell is worth.
+        EvalResult::Blank => serde_json::Value::Number(0.into()),
         EvalResult::Number(n) => serde_json::Number::from_f64(*n)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),

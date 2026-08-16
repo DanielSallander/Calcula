@@ -7,7 +7,8 @@
 
 use engine::style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
-    NumberFormat, PatternType, TextAlign, TextRotation, UnderlineStyle, VerticalAlign,
+    NegativeStyle, NumberFormat, PatternType, TextAlign, TextRotation, UnderlineStyle,
+    VerticalAlign,
 };
 use engine::theme::ThemeColor;
 use quick_xml::events::Event;
@@ -1889,10 +1890,21 @@ fn convert_number_format(num_fmt_id: u32, custom_formats: &HashMap<u32, String>)
             decimal_places: 2,
             use_thousands_separator: true,
         },
+        // OOXML's four builtin currency ids are exactly Excel's parenthesised
+        // Currency entries, and the odd/even pair is the red one:
+        //   5 `$#,##0_);($#,##0)`            6 `$#,##0_);[Red]($#,##0)`
+        //   7 `$#,##0.00_);($#,##0.00)`      8 `$#,##0.00_);[Red]($#,##0.00)`
+        // All four were previously flattened to a plain Currency, which was
+        // harmless only while every currency negative was parenthesised anyway.
         5 | 6 | 7 | 8 => NumberFormat::Currency {
             decimal_places: if num_fmt_id <= 6 { 0 } else { 2 },
             symbol: "$".to_string(),
             symbol_position: CurrencyPosition::Before,
+            negative_style: if num_fmt_id % 2 == 0 {
+                NegativeStyle::RedParentheses
+            } else {
+                NegativeStyle::Parentheses
+            },
         },
         9 => NumberFormat::Percentage { decimal_places: 0 },
         10 => NumberFormat::Percentage { decimal_places: 2 },
@@ -1936,9 +1948,20 @@ fn convert_number_format(num_fmt_id: u32, custom_formats: &HashMap<u32, String>)
             decimal_places: if num_fmt_id >= 39 { 2 } else { 0 },
             use_thousands_separator: true,
         },
+        // OOXML's four builtin accounting ids, in the order the spec gives
+        // them -- decimals come in PAIRS and the symbol alternates, which is
+        // not the same axis:
+        //   41 `_(* #,##0_);…`          0 dec, NO symbol
+        //   42 `_("$"* #,##0_);…`       0 dec, `$`
+        //   43 `_(* #,##0.00_);…`       2 dec, NO symbol
+        //   44 `_("$"* #,##0.00_);…`    2 dec, `$`
+        // Both axes were previously read off `% 2`, which is right for the
+        // SYMBOL and wrong for the decimals: 42 imported with 2 decimals and 43
+        // with 0, i.e. the two middle ids each came back as the other one's
+        // precision, and 41/43 were given a `$` the code does not contain.
         41 | 42 | 43 | 44 => NumberFormat::Accounting {
-            decimal_places: if num_fmt_id % 2 == 0 { 2 } else { 0 },
-            symbol: "$".to_string(),
+            decimal_places: if num_fmt_id >= 43 { 2 } else { 0 },
+            symbol: if num_fmt_id % 2 == 0 { "$".to_string() } else { String::new() },
             symbol_position: CurrencyPosition::Before,
         },
         45 => NumberFormat::Time {
@@ -1963,6 +1986,14 @@ fn convert_number_format(num_fmt_id: u32, custom_formats: &HashMap<u32, String>)
             }
         }
     }
+}
+
+/// `parse_format_code` for the WRITER's round-trip test, which lives in the
+/// sibling module and must exercise the real reader rather than a copy of it:
+/// the export and the import are only "fidelity" if the same pair is tested.
+#[cfg(test)]
+pub(crate) fn parse_format_code_for_test(code: &str) -> NumberFormat {
+    parse_format_code(code)
 }
 
 /// Attempt to classify a custom format code string into a Calcula NumberFormat.
@@ -2045,6 +2076,19 @@ fn parse_format_code(full_code: &str) -> NumberFormat {
             decimal_places: decimals,
             symbol: symbol.to_string(),
             symbol_position: pos,
+            // Which of Excel's four "Negative numbers:" entries this code is.
+            // Read from the NEGATIVE SECTION rather than from the code as a
+            // whole: `$#,##0.00` is the leading-minus default, and the three
+            // other entries are distinguished by whether that section brackets
+            // its number and whether it is coloured. Without this, importing a
+            // workbook whose currency cells are parenthesised silently
+            // re-rendered them with a minus.
+            //
+            // NOTE `full_code`, NOT `code`: `code` is the POSITIVE section
+            // (`extract_positive_section`, :1983), so asking it about the
+            // negative section always answers "there isn't one" and every
+            // import would come back `Minus`.
+            negative_style: negative_style_of_code(full_code),
         };
     }
 
@@ -2098,6 +2142,56 @@ fn extract_positive_section(code: &str) -> String {
         }
     }
     code.to_string()
+}
+
+/// Which of Excel's four "Negative numbers:" entries a currency format code is.
+///
+/// The answer lives entirely in the code's SECOND section. A one-section code
+/// (`$#,##0.00`) is Excel's default and renders a leading minus; a second
+/// section replaces that rendering wholesale, so parentheses and `[Red]` are
+/// read from it and from nowhere else. Reading them from the whole code would
+/// misclassify `[Red]$#,##0.00` (a red POSITIVE with a default negative) and
+/// `_($#,##0.00_)` (accounting-style padding parentheses on the positive
+/// section, which are alignment, not a sign).
+fn negative_style_of_code(code: &str) -> NegativeStyle {
+    // Sections are split on semicolons that are not inside quotes; a currency
+    // code's symbol never contains one, so a plain split is enough here.
+    let mut in_quotes = false;
+    let mut sections: Vec<String> = vec![String::new()];
+    for ch in code.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                sections.last_mut().unwrap().push(ch);
+            }
+            ';' if !in_quotes => sections.push(String::new()),
+            _ => sections.last_mut().unwrap().push(ch),
+        }
+    }
+    let Some(negative) = sections.get(1) else {
+        return NegativeStyle::Minus;
+    };
+    let red = negative.to_ascii_lowercase().contains("[red]");
+    let parens = negative.contains('(') && negative.contains(')');
+    // A MINUS IN THE NEGATIVE SECTION MEANS THE SIGN IS SHOWN, and Excel's
+    // `Red` entry shows NO sign -- its code is `$#,##0.00;[Red]$#,##0.00`, with
+    // the sign deliberately absent. So `…;[Red]-$#,##0.00` is a red MINUS, not
+    // Excel's red entry, and classifying it as `Red` would render -1234.5 as
+    // `$1,234.50` -- indistinguishable from the positive in copy, CSV and print,
+    // which carry no colour. Structured formats cannot express "red and signed",
+    // so it stays `Custom` (returning `Minus` here is what the caller reads as
+    // "one-section default", and the caller only reaches this for a code that
+    // HAS a second section).
+    let signed = negative.contains('-');
+    match (red, parens, signed) {
+        (true, true, _) => NegativeStyle::RedParentheses,
+        (true, false, false) => NegativeStyle::Red,
+        (false, true, _) => NegativeStyle::Parentheses,
+        // A second section that neither brackets nor colours (`$#,##0.00;
+        // -$#,##0.00`) is spelling out the default by hand -- and so is a red
+        // one that keeps its minus, which no structured style can express.
+        _ => NegativeStyle::Minus,
+    }
 }
 
 /// Count decimal places from a format code by looking at digits after '.'.
@@ -2199,5 +2293,126 @@ mod tests {
         assert_eq!(extract_sheet_number("xl/worksheets/sheet12.xml"), Some(12));
         assert_eq!(extract_sheet_number("xl/worksheets/sheetabc.xml"), None);
         assert_eq!(extract_sheet_number("xl/workbook.xml"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Excel's "Negative numbers:" entries survive the import (open-items 1.1)
+    // ------------------------------------------------------------------
+
+    /// The whole point of reading the NEGATIVE section: `negative_style_of_code`
+    /// was once wired to the POSITIVE section, and every one of these came back
+    /// `Minus` while the function looked correct in isolation.
+    #[test]
+    fn a_currency_codes_negative_section_decides_its_negative_style() {
+        assert_eq!(negative_style_of_code("$#,##0.00"), NegativeStyle::Minus);
+        assert_eq!(
+            negative_style_of_code("$#,##0.00;-$#,##0.00"),
+            NegativeStyle::Minus
+        );
+        assert_eq!(
+            negative_style_of_code("$#,##0.00;[Red]$#,##0.00"),
+            NegativeStyle::Red
+        );
+        assert_eq!(
+            negative_style_of_code("$#,##0.00;($#,##0.00)"),
+            NegativeStyle::Parentheses
+        );
+        assert_eq!(
+            negative_style_of_code("$#,##0.00;[Red]($#,##0.00)"),
+            NegativeStyle::RedParentheses
+        );
+        // `[Red]` on the POSITIVE section is a red positive, not a red
+        // negative -- reading the code as a whole would confuse the two.
+        assert_eq!(
+            negative_style_of_code("[Red]$#,##0.00"),
+            NegativeStyle::Minus
+        );
+        // A RED NEGATIVE THAT KEEPS ITS MINUS IS NOT EXCEL'S `Red` ENTRY, whose
+        // code carries no sign at all. Classified as `Red`, this rendered
+        // -1234.5 as `$1,234.50` -- identical to the positive everywhere colour
+        // does not travel (copy, CSV, print) -- and the writer then deleted the
+        // user's minus from the exported file.
+        assert_eq!(
+            negative_style_of_code("$#,##0.00;[Red]-$#,##0.00"),
+            NegativeStyle::Minus
+        );
+        // A quoted semicolon is a literal, not a section break.
+        assert_eq!(
+            negative_style_of_code("$#,##0.00\";\"; ($#,##0.00)"),
+            NegativeStyle::Parentheses
+        );
+    }
+
+    #[test]
+    fn a_parenthesised_currency_code_imports_as_a_parenthesised_currency() {
+        assert_eq!(
+            parse_format_code("$#,##0.00;[Red]($#,##0.00)"),
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::RedParentheses,
+            }
+        );
+        assert_eq!(
+            parse_format_code("$#,##0.00"),
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
+            }
+        );
+    }
+
+    /// OOXML's four builtin currency ids ARE Excel's two parenthesised entries,
+    /// odd = plain, even = red. Flattening them to a bare Currency was harmless
+    /// only while every currency negative was parenthesised anyway.
+    #[test]
+    fn builtin_currency_ids_5_to_8_keep_their_parentheses() {
+        let style_of = |id: u32| convert_number_format(id, &HashMap::new());
+        for (id, decimals, expected) in [
+            (5u32, 0u8, NegativeStyle::Parentheses),
+            (6, 0, NegativeStyle::RedParentheses),
+            (7, 2, NegativeStyle::Parentheses),
+            (8, 2, NegativeStyle::RedParentheses),
+        ] {
+            assert_eq!(
+                style_of(id),
+                NumberFormat::Currency {
+                    decimal_places: decimals,
+                    symbol: "$".to_string(),
+                    symbol_position: CurrencyPosition::Before,
+                    negative_style: expected,
+                },
+                "numFmtId {}",
+                id
+            );
+        }
+    }
+
+    /// The accounting builtins vary decimals in PAIRS and the symbol
+    /// alternately; both used to be read off `% 2`, so 42 arrived with two
+    /// decimals and 43 with none, and the two symbol-less ids were given a `$`.
+    #[test]
+    fn builtin_accounting_ids_41_to_44_carry_the_right_decimals_and_symbol() {
+        let style_of = |id: u32| convert_number_format(id, &HashMap::new());
+        for (id, decimals, symbol) in [
+            (41u32, 0u8, ""),
+            (42, 0, "$"),
+            (43, 2, ""),
+            (44, 2, "$"),
+        ] {
+            assert_eq!(
+                style_of(id),
+                NumberFormat::Accounting {
+                    decimal_places: decimals,
+                    symbol: symbol.to_string(),
+                    symbol_position: CurrencyPosition::Before,
+                },
+                "numFmtId {}",
+                id
+            );
+        }
     }
 }

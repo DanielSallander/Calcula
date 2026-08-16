@@ -47,7 +47,7 @@ import { getAllPivotTables, getAllTables } from "@api/backend";
 import type { ClearApplyTo, Table } from "@api/backend";
 import type { CellData, UsedRangeResult } from "@api/types";
 import { navigateToRange } from "@api/grid";
-import { CommandRegistry } from "@api/commands";
+import { CommandRegistry, CoreCommands } from "@api/commands";
 import { listWorkbookScripts } from "@api/workbookScripts";
 import type { ScriptSummary } from "@api/workbookScripts";
 import { hasMacroRunProvider, requireMacroRunProvider } from "@api/macroRunService";
@@ -134,6 +134,45 @@ export interface AppCliGateway {
   runMacroByRef(macroId: string): Promise<MacroRunOutcome>;
 }
 
+/**
+ * Run a restore through the COMMAND the rest of the app reaches it by, falling
+ * back to the raw IPC call only when no grid has registered that command (a
+ * headless harness).
+ *
+ * WHY THE INDIRECTION IS THE POINT. The `@api/lib` `undo`/`redo` are the IPC leg
+ * alone: they restore the data and return. Everything the user sees afterwards
+ * -- following the backend's sheet switch, selecting the restored range,
+ * scrolling it into view, re-reading dimensions after a structural restore --
+ * lives in the command's handler. A second caller that skips it is a second
+ * implementation of undo that silently drifts from the first; that is what
+ * §18a closed for TestRunner's `ctx.undo()`, and this was the last one left.
+ *
+ * TWO DISTINCT FAILURES, AND THEY NEED DIFFERENT ANSWERS.
+ *
+ * A REFUSAL is an ordinary outcome: the undo stack is empty, so the backend
+ * returns `UndoResult { success: false }` and nothing is wrong. It must not
+ * throw — but it must not print "Undone." either, which is what happened while
+ * nothing inspected `.success`.
+ *
+ * A CRASH is not: the handler swallows its own exceptions (Ctrl+Z must never
+ * throw at the user) and returns `undefined`. That is surfaced as a rejection
+ * rather than retried — a retry would pop a SECOND step off the stack on any
+ * error that left the first one applied.
+ *
+ * The caller distinguishes them by reading `success`, which is why this returns
+ * the whole result rather than a boolean.
+ */
+async function throughCommand(
+  commandId: string,
+  fallback: () => Promise<UndoResult>,
+  label: string
+): Promise<UndoResult> {
+  if (!CommandRegistry.has(commandId)) return fallback();
+  const result = (await CommandRegistry.execute(commandId)) as UndoResult | undefined;
+  if (!result) throw new Error(`${label} failed`);
+  return result;
+}
+
 /** The live gateway: each method delegates to exactly one @api function. */
 export function createLiveAppGateway(): AppCliGateway {
   return {
@@ -183,8 +222,19 @@ export function createLiveAppGateway(): AppCliGateway {
     getAllTables: () => getAllTables(),
     getAllPivotTables: () => getAllPivotTables<PivotTableInfo[]>(),
 
-    undo: () => undo(),
-    redo: () => redo(),
+    // THROUGH THE COMMAND, not the raw backend call. `undo`/`redo` from
+    // `@api/lib` are the IPC leg only: they restore the data and return, so a
+    // CLI undo left the grid on the wrong sheet (the backend switches, the view
+    // does not follow) and, since open-items 1.4, would also leave the cursor
+    // off the range it just restored. `CoreCommands.UNDO` is what Ctrl+Z, the
+    // ribbon and Edit > Undo all reach, and routing here means the CLI's undo
+    // is the user's undo rather than a second implementation of it -- the same
+    // divergence §18a closed for TestRunner's `ctx.undo()`.
+    //
+    // Falls back to the raw call when the command is not registered, because
+    // the CLI must still work in a harness that mounted no grid.
+    undo: () => throughCommand(CoreCommands.UNDO, undo, "Undo"),
+    redo: () => throughCommand(CoreCommands.REDO, redo, "Redo"),
     beginUndoTransaction: (description: string) => beginUndoTransaction(description),
     commitUndoTransaction: () => commitUndoTransaction(),
 

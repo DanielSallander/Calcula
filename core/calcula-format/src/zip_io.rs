@@ -1259,6 +1259,7 @@ mod tests {
                     decimal_places: 2,
                     symbol: "$".to_string(),
                     symbol_position: engine::style::CurrencyPosition::Before,
+                    negative_style: engine::style::NegativeStyle::default(),
                 }),
         ];
 

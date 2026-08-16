@@ -176,6 +176,60 @@ export function getNumberFormatCategories(dec = ".", thou = ","): NumberFormatCa
 export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = getNumberFormatCategories();
 
 // ============================================================================
+// Excel's "Negative numbers:" list (open-items 1.1)
+// ============================================================================
+// Excel's Currency tab is TWO choices, not one: a Symbol list and a four-row
+// "Negative numbers:" list. Calcula's Currency category rows ARE the symbol
+// choice, so the second choice is a second list beside them, and the two
+// compose into the single preset string this dialog can carry:
+//
+//     currency_usd + _neg_paren  ->  "currency_usd_neg_paren"
+//
+// The suffixes are the backend's (`NEGATIVE_STYLE_SUFFIXES` in
+// commands/styles.rs) and the DEFAULT entry deliberately has none, so every
+// preset id that existed before this list did keeps its exact spelling.
+
+/** The four entries of Excel's "Negative numbers:" list, in Excel's order. */
+export interface NegativeStyleOption {
+  /** Suffix appended to a currency preset value. Empty for Excel's default. */
+  suffix: string;
+  /** Whether the negative is wrapped in parentheses. */
+  parentheses: boolean;
+  /** Whether the negative is painted red. */
+  red: boolean;
+}
+
+export const NEGATIVE_STYLE_OPTIONS: readonly NegativeStyleOption[] = [
+  { suffix: "", parentheses: false, red: false },
+  { suffix: "_neg_red", parentheses: false, red: true },
+  { suffix: "_neg_paren", parentheses: true, red: false },
+  { suffix: "_neg_red_paren", parentheses: true, red: true },
+];
+
+/**
+ * Render the sample Excel shows for one negative entry, from the symbol row's
+ * POSITIVE sample. Excel's second entry carries no sign at all -- the colour is
+ * the whole marker -- which is why this is a table and not a `"-" + sample`.
+ */
+export function negativeSample(positiveSample: string, option: NegativeStyleOption): string {
+  if (option.parentheses) return `(${positiveSample})`;
+  return option.red ? positiveSample : `-${positiveSample}`;
+}
+
+/**
+ * Split a composed currency preset value into its symbol half and its negative
+ * half. Longest suffix first: `_neg_red` is a prefix of `_neg_red_paren`.
+ */
+export function splitNegativeSuffix(value: string): { base: string; suffix: string } {
+  for (const suffix of ["_neg_red_paren", "_neg_paren", "_neg_red"]) {
+    if (value.endsWith(suffix)) {
+      return { base: value.slice(0, -suffix.length), suffix };
+    }
+  }
+  return { base: value, suffix: "" };
+}
+
+// ============================================================================
 // Backend display-name mapping (BUG-0065)
 // ============================================================================
 // get_style returns DISPLAY NAMES ("Number (2 decimals, with separators)",
@@ -192,11 +246,15 @@ const DISPLAY_NAME_TO_PRESET: Record<string, string> = {
   "Number (2 decimals, with separators)": "number_sep",
   "Currency ($, 2 decimals)": "currency_usd",
   "Currency (EUR, 2 decimals)": "currency_eur",
-  "Currency (kr, 2 decimals)": "currency_sek",
+  // ", symbol after" is the backend's explicit position clause. It used to be
+  // inferred from the symbol text (`kr` meant suffix), which stopped being
+  // reliable when the app began reading the user's Windows regional settings —
+  // `zl`, `Ft` and `Kc` are suffix currencies too.
+  "Currency (kr, 2 decimals, symbol after)": "currency_sek",
   "Accounting ($, 2 decimals)": "accounting_usd",
   "Accounting ($, 0 decimals)": "accounting_usd_0",
   "Accounting (EUR, 2 decimals)": "accounting_eur",
-  "Accounting (kr, 2 decimals)": "accounting_sek",
+  "Accounting (kr, 2 decimals, symbol after)": "accounting_sek",
   "Percentage (2 decimals)": "percentage",
   "Scientific (2 decimals)": "scientific",
   "Fraction (up to 1 digits)": "fraction_1",
@@ -231,11 +289,49 @@ const DISPLAY_PREFIX_TO_CATEGORY: Array<[string, string]> = [
   ["Time (", "time"],
 ];
 
+/**
+ * The negative clause `format_number_format_name` appends, per option. This
+ * side must agree with `NegativeStyle::display_suffix` in core/engine/src/
+ * style.rs; the pin is `currencyNegativeStyles.test.ts`, which asserts the two
+ * tables have the same length and the same spellings rather than trusting that
+ * a reader noticed.
+ */
+const NEGATIVE_DISPLAY_SUFFIX: Record<string, string> = {
+  "": "",
+  _neg_red: ", red negatives",
+  _neg_paren: ", parenthesised negatives",
+  _neg_red_paren: ", red parenthesised negatives",
+};
+
 const PRESET_VALUE_TO_CATEGORY: Record<string, string> = Object.fromEntries(
   NUMBER_FORMAT_CATEGORIES.flatMap((cat) =>
     cat.id !== "custom" ? cat.formats.map((f) => [f.value, cat.id] as [string, string]) : []
   )
 );
+
+/**
+ * Split the negative clause off a Currency DISPLAY NAME, returning the name as
+ * it would read for Excel's default entry plus the preset suffix that clause
+ * stands for.
+ *
+ * Done by stripping rather than by generating twelve names, because the twelve
+ * are not the whole population: the REGIONAL currency row's display name is
+ * resolved by the backend for the live locale (`Currency ( kr, 2 decimals)`),
+ * so no static table can hold it. Stripping handles the static rows and the
+ * regional row with the same three lines. Longest clause first -- ", red
+ * parenthesised negatives" ends with ", parenthesised negatives"' letters.
+ */
+function splitNegativeDisplayClause(name: string): { base: string; suffix: string } {
+  if (!name.endsWith(")")) return { base: name, suffix: "" };
+  const inner = name.slice(0, -1);
+  for (const suffix of ["_neg_red_paren", "_neg_paren", "_neg_red"]) {
+    const clause = NEGATIVE_DISPLAY_SUFFIX[suffix];
+    if (inner.endsWith(clause)) {
+      return { base: `${inner.slice(0, -clause.length)})`, suffix };
+    }
+  }
+  return { base: name, suffix: "" };
+}
 
 /** Case-folded index of the static map, built once. */
 const DISPLAY_NAME_TO_PRESET_CI: Record<string, string> = Object.fromEntries(
@@ -342,6 +438,32 @@ export function normalizeToPresetValue(
   ribbon: ReadonlyArray<RibbonResolvedFormat> = []
 ): string | null {
   if (!format) return null;
+
+  // A CURRENCY'S NEGATIVE CHOICE IS RESOLVED SEPARATELY FROM ITS SYMBOL, in
+  // both spellings the dialog can receive: a composed preset value
+  // (`currency_usd_neg_paren`) and a backend display name (`Currency ($, 2
+  // decimals, parenthesised negatives)`). Resolving the symbol half through the
+  // existing machinery and re-attaching the suffix means the regional row -- a
+  // name no static table can hold, because the backend resolves it per locale
+  // -- gets the four entries for free.
+  // The RIBBON map is consulted as well as the static one: the regional
+  // currency row's base is `"currency"`, which lives only in
+  // `RIBBON_PRESET_TO_CATEGORY`. Without it `"currency_neg_paren"` — the value
+  // the dialog itself writes when the regional row is the selected symbol —
+  // resolved to null and the dialog jumped to the Custom category.
+  const asValue = splitNegativeSuffix(format);
+  if (
+    asValue.suffix &&
+    (PRESET_VALUE_TO_CATEGORY[asValue.base] || RIBBON_PRESET_TO_CATEGORY[asValue.base])
+  ) {
+    return format;
+  }
+  const asName = splitNegativeDisplayClause(format);
+  if (asName.suffix) {
+    const base = normalizeToPresetValue(asName.base, ribbon);
+    return base === null ? null : `${base}${asName.suffix}`;
+  }
+
   if (PRESET_VALUE_TO_CATEGORY[format]) return format;
   const lower = format.toLowerCase();
   if (PRESET_VALUE_TO_CATEGORY[lower]) return lower;
@@ -366,7 +488,18 @@ export function categoryForFormat(
 ): string {
   const preset = normalizeToPresetValue(format, ribbon);
   if (preset) {
-    return PRESET_VALUE_TO_CATEGORY[preset] ?? RIBBON_PRESET_TO_CATEGORY[preset] ?? "general";
+    // Strip the negative suffix before looking the category up: a currency's
+    // negative choice never moves it out of the Currency category, and every
+    // one of the twelve composed values would otherwise fall through to
+    // "general" and reopen the dialog on the wrong list.
+    const { base } = splitNegativeSuffix(preset);
+    return (
+      PRESET_VALUE_TO_CATEGORY[preset] ??
+      RIBBON_PRESET_TO_CATEGORY[preset] ??
+      PRESET_VALUE_TO_CATEGORY[base] ??
+      RIBBON_PRESET_TO_CATEGORY[base] ??
+      "general"
+    );
   }
   if (!format || format.toLowerCase().includes("general")) return "general";
   for (const [prefix, category] of DISPLAY_PREFIX_TO_CATEGORY) {

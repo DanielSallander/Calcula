@@ -1176,6 +1176,25 @@ pub struct FormulaShiftResult {
 /// inverse there silently corrupts the cell's format on an untouched OK.
 /// Pinned by `every_display_name_the_serializer_emits_round_trips` in
 /// commands/styles.rs.
+/// The clause a Currency/Accounting display name carries when the symbol sits
+/// AFTER the number. Empty for `Before`, which is the overwhelmingly common
+/// shape and the one every pre-existing name was written for.
+///
+/// WHY IT IS NOW SPELLED OUT. `try_parse_display_name` used to reconstruct the
+/// position from the symbol text — `symbol.trim() == "kr"` meant After and
+/// everything else meant Before — and its own doc comment justified that by
+/// noting `kr` was the only suffix currency the app could emit. Reading the
+/// user's Windows regional settings (open-items 1.3) breaks that premise the
+/// first time somebody's `LOCALE_SCURRENCY` is `zł`, `Ft` or `Kč` with
+/// `LOCALE_ICURRENCY = 3`: the name round-tripped back as a PREFIX currency and
+/// the symbol jumped to the wrong side of the number on an untouched OK.
+fn symbol_position_suffix(position: engine::CurrencyPosition) -> &'static str {
+    match position {
+        engine::CurrencyPosition::Before => "",
+        engine::CurrencyPosition::After => ", symbol after",
+    }
+}
+
 pub(crate) fn format_number_format_name(format: &NumberFormat) -> String {
     match format {
         NumberFormat::General => "General".to_string(),
@@ -1192,16 +1211,33 @@ pub(crate) fn format_number_format_name(format: &NumberFormat) -> String {
         NumberFormat::Currency {
             symbol,
             decimal_places,
-            ..
+            symbol_position,
+            negative_style,
         } => {
-            format!("Currency ({}, {} decimals)", symbol, decimal_places)
+            // Both optional clauses are EMPTY for the common shape, so an
+            // ordinary `$` currency keeps the name it has always had and only a
+            // deliberate choice widens it. `try_parse_display_name` is the
+            // inverse and the round trip is pinned by
+            // `every_display_name_the_serializer_emits_round_trips`.
+            format!(
+                "Currency ({}, {} decimals{}{})",
+                symbol,
+                decimal_places,
+                symbol_position_suffix(*symbol_position),
+                negative_style.display_suffix()
+            )
         }
         NumberFormat::Accounting {
             symbol,
             decimal_places,
-            ..
+            symbol_position,
         } => {
-            format!("Accounting ({}, {} decimals)", symbol, decimal_places)
+            format!(
+                "Accounting ({}, {} decimals{})",
+                symbol,
+                decimal_places,
+                symbol_position_suffix(*symbol_position)
+            )
         }
         NumberFormat::Fraction {
             denominator,

@@ -123,11 +123,11 @@ pub enum CmpFamily {
 /// Which vector of a range an index is built over, and how it is materialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Axis {
-    /// One full column of a rect, absent cells materialized as Number(0.0).
+    /// One full column of a rect, absent cells materialized as `Blank`.
     RectCol(u32),
-    /// One full row of a rect, absent cells materialized as Number(0.0).
+    /// One full row of a rect, absent cells materialized as `Blank`.
     RectRow(u32),
-    /// The whole rect flattened row-major (absent -> Number(0.0)).
+    /// The whole rect flattened row-major (absent -> `Blank`).
     RectFlat,
     /// A whole-column reference: populated cells only, ascending row order.
     WholeCol(u32),
@@ -427,12 +427,23 @@ pub struct CriteriaIndex {
     /// as_number()-coercible values, sorted (NaNs excluded — they match no
     /// numeric criteria).
     numbers: Vec<f64>,
-    /// Count of coercible values INCLUDING NaN coercions (NotEqual semantics:
-    /// (v-n).abs() >= 1e-10 is false for NaN, so NaN never matches — but it IS
-    /// coercible; keep both counts to mirror exactly).
+    /// Per-boolean counts, indexed by `false`/`true`. (The comment that used
+    /// to sit here described NaN coercion counts and a field that does not
+    /// exist; NaNs are excluded from `numbers` above, which is where that rule
+    /// actually lives.)
     bools: [u32; 2],
     bool_sums: [f64; 2],
     len: u32,
+    /// BLANK CELLS, counted but never bucketed.
+    ///
+    /// A blank matches no ordinary criteria — not `0`, not `""`, not
+    /// `"<>apple"` — so it must not appear in `numbers` (where it would be a
+    /// zero) nor in `text_counts` (where it would be an empty-string bucket).
+    /// But `count_text_not_equal` is computed as a COMPLEMENT of `len`, so the
+    /// blanks have to be subtracted back out there, and that needs their count.
+    /// The three criteria that DO match a blank (`""`, `"="`, `"<>"`) are
+    /// refused by `criteria_count_cached` and served by the scan instead.
+    blanks: u32,
 }
 
 impl CriteriaIndex {
@@ -443,12 +454,24 @@ impl CriteriaIndex {
         let mut bools = [0u32; 2];
         let mut bool_sums = [0f64; 2];
 
+        let mut blanks = 0u32;
+
         for (i, v) in values.iter().enumerate() {
+            // A BLANK IS BUCKETED NOWHERE. It is not the number 0 and not the
+            // empty string, and both of those coercions would be applied to it
+            // below — `as_text()` gives it `""` and `as_number()` gives it
+            // `0.0`, each on purpose for a different caller. Counting it here
+            // is what made the cached `COUNTIF(rng,"<=1")` answer one more than
+            // the scan.
+            if v.is_blank() {
+                blanks += 1;
+                continue;
+            }
             // Text form exists for every variant (mirrors as_text()).
             let folded = v.as_text().to_uppercase().into_boxed_str();
             let paired_num = paired
                 .and_then(|p| p.get(i))
-                .and_then(|pv| pv.as_number());
+                .and_then(|pv| pv.as_sample_number());
             if let Some(n) = paired_num {
                 *text_sums.entry(folded.clone()).or_insert(0.0) += n;
             }
@@ -474,6 +497,7 @@ impl CriteriaIndex {
             bools,
             bool_sums,
             len: values.len() as u32,
+            blanks,
         }
     }
 
@@ -490,8 +514,11 @@ impl CriteriaIndex {
         self.text_counts.get(folded).copied().unwrap_or(0)
     }
 
+    /// `"<>text"` — everything that is not that text AND is not blank. The
+    /// blanks are subtracted because they are not in `text_counts` at all, and
+    /// a complement of `len` alone would hand every one of them back.
     pub fn count_text_not_equal(&self, folded: &str) -> u32 {
-        self.len - self.count_exact_text(folded)
+        self.len - self.blanks - self.count_exact_text(folded)
     }
 
     pub fn count_exact_bool(&self, b: bool) -> u32 {

@@ -3827,7 +3827,7 @@ enumerates a copy of the thing rather than the thing is not a census.**
 
 ---
 
-### 2ao. S10 — the 1904 date system was read off the file and thrown away (2026-08-11) — **IMPORT FIXED; the SETTING is filed as D9**
+### 2ao. S10 — the 1904 date system was read off the file and thrown away (2026-08-11) — **IMPORT FIXED; the SETTING was D9, DECIDED 2026-08-16: add none**
 
 Excel has shipped two date systems since 1985. The 1904 one (epoch 1904-01-01) is the Macintosh
 default and is still written by Excel for Mac and by anything exporting through it. A serial number
@@ -3917,13 +3917,22 @@ Recommendation stands: **do not.** If it is ever wanted, it is a one-purpose ref
 
 None of these is an error-value question, and each is a wider change than the sweep that found it.
 
-- **An empty cell reads as the NUMBER zero in every context.** `=A1&"!"` over a blank is `"0!"`
-  where Excel gives `"!"`, and `=COUNT(A1:A1)` over a blank is 1 where Excel gives 0. Excel treats a
-  blank as 0 in ARITHMETIC only; in concatenation it is the empty string, and the counting functions
-  ignore it. **Reproduction:** both are asserted, at today's values, in
-  `clearing_a_cell_recalculates_the_whole_chain`, whose message says the assertion is pinning the gap
-  rather than endorsing it. This is empty-cell semantics across the whole evaluator — a project, not
-  a patch.
+- **An empty cell reads as the NUMBER zero in every context.** ~~a project, not a patch.~~ —
+  **CLOSED 2026-08-16, open-items 1.5.** `=A1&"!"` over a blank is `"0!"` where Excel gives `"!"`,
+  and `=COUNT(A1:A1)` over a blank is 1 where Excel gives 0. Excel treats a blank as 0 in
+  ARITHMETIC only; in concatenation it is the empty string, and the counting functions ignore it.
+  **Reproduction:** both were asserted, at the wrong values, in
+  `clearing_a_cell_recalculates_the_whole_chain`, whose message said the assertion was pinning the
+  gap rather than endorsing it — and the fix duly came past it, which is exactly what that message
+  was for.
+
+  **Two things this entry got wrong, both understating it.** The defect was not confined to the
+  single-cell path: `eval_range` materialised ABSENT cells as zeros, so `=COUNT(A1:A1000)` over a
+  column holding two numbers returned **1000**. And there were **two contradictory blank policies
+  in the same evaluator** — a rectangle injected zeros while a whole-column reference skipped
+  absent cells, so the same workbook answered differently for `A1:A3` and `A:A`. Fixed by
+  `EvalResult::Blank`, contained to ~40 edit sites by leaving the OPERAND coercions unchanged and
+  adding `as_sample_number` for the collectors that build a population.
 - **Excel's array literal `{1;2;3}` does not parse.** `{…}` in this parser is a Python-style LIST
   literal: comma-separated, no row separator, and `;` is `Illegal`. So every Excel formula
   containing an inline array — `=SUM({1;2;3})`, `=MATCH(x,{1,2,3},0)`, the whole documented idiom —
@@ -11524,7 +11533,14 @@ this rather than claiming they need no recalculation — the census's job is to 
 written decision, and this is one.
 
 
-### D9. Should Calcula offer the 1904 date system as a setting of its own? — **OPEN, product call**
+### D9. Should Calcula offer the 1904 date system as a setting of its own? — ~~**OPEN, product call**~~ **DECIDED 2026-08-16: ADD NONE**
+
+> **Closed 2026-08-16.** The owner accepted the recommendation below verbatim. Three
+> regression guards now hold it (a source census that assembles its own needles so it can
+> search its own file and is sabotage-checked; an export round-trip pinning that the flag is
+> omitted and the date normalised exactly once; and a cross-crate pin tying
+> `DATE_SYSTEM_OFFSET` to the engine calendar that produces it). As-built record:
+> `docs/design/open-items-1-owner-calls-2026-08-16.md` §1.2.
 
 S10's import half is fixed (§2ao): a 1904 workbook now imports correctly. What Calcula does NOT have
 is a date system of its own — every workbook is 1900, and `File ▸ Options` has no switch.
@@ -13814,10 +13830,17 @@ one identifier, and it repairs the tab click as much as undo's switch.
   fallback is possible. It was not taken: `sheets_rewritten` is a SET with no rule for choosing among
   its members, and a second source of truth for "which sheet" is a second answer that can disagree
   with the first. Undoing a report refresh from another sheet therefore stays silent.
-* **A same-sheet undo still does not move the selection.** Excel selects the restored range in that
-  case too. Changing it is a one-line widening of the `switched &&` guard and a real Excel-parity
-  gap, but it moves the cursor on every Ctrl+Z and several E2E journeys assert where the cursor is.
-  Owner call, not a passing change.
+* **A same-sheet undo still does not move the selection.** ~~Owner call, not a passing change.~~ —
+  **CLOSED 2026-08-16, open-items 1.4.** Excel selects the restored range in that case too.
+  **It was NOT a one-line widening of the `switched &&` guard**, and the estimate is worth keeping
+  visible: widening the guard selects a single CELL, and Excel selects the RANGE — undo a four-cell
+  paste and all four come back selected. The backend now reports one
+  (`Transaction::restored_range_on`, with `restored_anchor` derived from it so the two cannot
+  disagree). The blast radius was also smaller than feared: exactly ONE hard test failure across
+  the whole suite, the case that existed to pin this behaviour, because the E2E specs that undo
+  either invoke the backend directly or re-select before asserting. The range is `None` for
+  geometry, whole-sheet snapshots and every `CustomRestore`, so those restores still do not move
+  the user — a narrower silence, never a wrong selection.
 * **`TestRunner`'s `ctx.undo()` bypasses the whole frontend path.** ~~Reported rather than
   changed~~ — **CLOSED 2026-08-14, §18a** (routed through `CommandRegistry.execute(CoreCommands
   .UNDO)`, with `ctx.redo()` joining it; proved live via the fused CLI). It calls the `undo` command
@@ -15864,12 +15887,21 @@ and leaves the box where it was.
   fixed default. "As similar to Excel as possible" argues for reading the OS on the `"system"`
   path, with the table as the fallback for explicit overrides — a larger change, and the field
   names added here (`longDateFormat` / `timeFormat`) are the same either way, so it is not
-  prejudged. **Owner call, still open.**
+  prejudged. ~~**Owner call, still open.**~~ — **CLOSED 2026-08-16** (open-items 1.3). Built as
+  described, in `app/src-tauri/src/os_locale.rs`. Two defects nobody had filed came out with it:
+  `sys_locale` was reading the DISPLAY LANGUAGE rather than the regional format, and
+  `set_locale("system")` silently returned en-US. The field names were indeed the same either way;
+  what was NOT foreseen is that Windows pictures need translating in three places, one of which
+  (`'den '`, this machine's own long date) renders as `'15en '15 januari 2024` untranslated.
 - **Currency negatives.** Excel's single-section `$#,##0.00` renders a negative with a leading
   minus; Calcula's `format_currency` wraps it in parentheses. Not changed here: it is engine
   behaviour shared with the Format Cells currency presets, outside this item, and worth deciding
   with the rest of the negative-number section work rather than in passing. Recorded so it is not
-  lost.
+  lost. — **CLOSED 2026-08-16** (open-items 1.1). Done as Excel does, with all four of its
+  "Negative numbers:" entries modelled as `NegativeStyle`. The framing above was too cautious in
+  one respect: it was not only a parity gap but a **round-trip lie** — `xlsx_writer` already
+  emitted `$#,##0.00`, so the file and the screen disagreed, and the Format Cells *preview*
+  disagreed with the preset for the same reason.
 
 ### 25h. Suites (this change only)
 

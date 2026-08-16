@@ -86,8 +86,14 @@ export async function getLocaleSettings(): Promise<LocaleSettings> {
 export async function setLocale(localeId: string): Promise<LocaleSettings> {
   if (localeId === "system") {
     localStorage.removeItem(LOCALE_OVERRIDE_KEY);
-    // Re-read the system locale from Rust
-    cachedLocale = await invoke<LocaleSettings>("get_locale_settings");
+    // RE-READ THE OS, not the cached value. `get_locale_settings` is a pure
+    // read of what was captured at launch, so "System default" used to be a
+    // no-op for anyone who had changed Windows Region since — they saw a stale
+    // locale with no way to refresh short of restarting the app. `set_locale`
+    // understands `"system"` as "ask Windows now" (open-items 1.3).
+    cachedLocale = await invoke<LocaleSettings>("set_locale", {
+      localeId: "system",
+    });
   } else {
     localStorage.setItem(LOCALE_OVERRIDE_KEY, localeId);
     cachedLocale = await invoke<LocaleSettings>("set_locale", { localeId });

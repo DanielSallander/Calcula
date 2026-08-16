@@ -1108,13 +1108,30 @@ fn convert_number_format(format: &NumberFormat) -> String {
                 format!("0{}", decimal_part)
             }
         }
-        NumberFormat::Currency { decimal_places, symbol, symbol_position: _ } => {
+        NumberFormat::Currency { decimal_places, symbol, symbol_position: _, negative_style } => {
             let decimal_part = if *decimal_places > 0 {
                 format!(".{}", "0".repeat(*decimal_places as usize))
             } else {
                 String::new()
             };
-            format!("{}#,##0{}", symbol, decimal_part)
+            let positive = format!("{}#,##0{}", symbol, decimal_part);
+            // ONE SECTION IS THE DEFAULT, and it is not an omission: Excel's
+            // first "Negative numbers:" entry IS a single-section code, which
+            // renders a negative with a leading minus. The other three entries
+            // are codes with a negative section, and writing them is what makes
+            // the round trip honest -- this writer emitted the bare code for
+            // every currency cell while the app painted parentheses, so a
+            // workbook changed its own appearance on the way to Excel.
+            match negative_style {
+                engine::style::NegativeStyle::Minus => positive,
+                engine::style::NegativeStyle::Red => format!("{p};[Red]{p}", p = positive),
+                engine::style::NegativeStyle::Parentheses => {
+                    format!("{p};({p})", p = positive)
+                }
+                engine::style::NegativeStyle::RedParentheses => {
+                    format!("{p};[Red]({p})", p = positive)
+                }
+            }
         }
         NumberFormat::Accounting { decimal_places, symbol, symbol_position } => {
             let decimal_part = if *decimal_places > 0 {
@@ -1984,6 +2001,77 @@ mod tests {
         }
     }
 
+    /// D9's THIRD ARGUMENT, made checkable (open-items 1.2).
+    ///
+    /// The decision not to offer the 1904 date system as a user setting rests
+    /// partly on the claim that "a 1904 file is read correctly and written back
+    /// as 1900 with the attribute omitted, and the only thing lost is the FLAG,
+    /// which carries no user intent". That was prose. This asserts it.
+    ///
+    /// Two failure modes it catches, both silent: an export that re-emits
+    /// `date1904` (the workbook would be read back and shifted a SECOND time
+    /// by anything honouring it), and a normalisation applied twice or undone.
+    /// A 1462-day error is still a perfectly valid date, which is why nothing
+    /// on screen would say so.
+    #[test]
+    fn a_1904_workbook_is_exported_as_1900_with_no_date1904_attribute() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mac1904.xlsx");
+        write_dated_xlsx(&source, r#"<workbookPr date1904="1"/>"#);
+
+        let loaded = crate::xlsx_reader::load_xlsx(&source).unwrap();
+        let exported = dir.path().join("exported.xlsx");
+        save_xlsx(&loaded, &exported).unwrap();
+
+        // (i) The flag is not written. OOXML's default for an absent
+        // `date1904` is false, i.e. the 1900 system Calcula actually stores.
+        let file = std::fs::File::open(&exported).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut workbook_xml = String::new();
+        {
+            use std::io::Read;
+            zip.by_name("xl/workbook.xml")
+                .unwrap()
+                .read_to_string(&mut workbook_xml)
+                .unwrap();
+        }
+        assert!(
+            !workbook_xml.contains("date1904"),
+            "the export must not carry a date-system flag; xl/workbook.xml was:\n{}",
+            workbook_xml
+        );
+
+        // (ii) The date was normalised ONCE. Not re-shifted, not shifted back.
+        let round_tripped = crate::xlsx_reader::load_xlsx(&exported).unwrap();
+        let s = &round_tripped.sheets[0];
+        assert_eq!(
+            number_at(s, 0, 1),
+            36892.0 + 1462.0,
+            "the date must survive the round trip on Calcula's 1900 epoch"
+        );
+        // (iii) ...and the plain number still never moved.
+        assert_eq!(number_at(s, 0, 2), 36892.0);
+    }
+
+    /// `DATE_SYSTEM_OFFSET` is 1462 ONLY BECAUSE the engine's calendar
+    /// deliberately reproduces Lotus 1-2-3's fictitious 1900-02-29
+    /// (`is_leap_year_excel`, core/engine/src/date_serial.rs). The constant
+    /// lives in this crate and the bug that produces it lives in another, so
+    /// nothing today connects them: somebody "fixing" the phantom leap day
+    /// would make this importer off by one, and every S10 test above would
+    /// still pass because they hard-code 1462 too.
+    #[test]
+    fn the_date_system_offset_is_the_engine_calendars_1904_epoch() {
+        assert_eq!(
+            engine::date_serial::date_to_serial(1904, 1, 1),
+            crate::xlsx_reader::DATE_SYSTEM_OFFSET,
+            "the 1904 epoch as the ENGINE computes it must equal the offset the \
+             importer adds -- 4x365 days, +1 because the 1900 system numbers its \
+             epoch day 1 rather than 0, and +1 for the phantom 1900-02-29 that \
+             the 1904 system never had"
+        );
+    }
+
     /// S8: the writer emitted document properties and the reader threw them
     /// away, so `save_xlsx` -> `load_xlsx` -- the app's own round trip through
     /// its own export -- lost the title, author, subject, description,
@@ -2051,5 +2139,66 @@ mod tests {
             36892.0,
             "the cells must still load -- a missing docProps part is not an error"
         );
+    }
+    // ------------------------------------------------------------------
+    // Excel's "Negative numbers:" entries survive the export (open-items 1.1)
+    // ------------------------------------------------------------------
+
+    /// The writer emitted the bare one-section code for every currency cell
+    /// while the app painted parentheses, so a workbook CHANGED ITS OWN
+    /// APPEARANCE on the way to Excel. One section now means exactly what
+    /// Excel means by it -- a leading minus -- and the other three entries
+    /// write their own codes.
+    #[test]
+    fn each_currency_negative_entry_exports_the_code_excel_writes_for_it() {
+        let usd = |negative_style| NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: engine::style::CurrencyPosition::Before,
+            negative_style,
+        };
+        assert_eq!(
+            convert_number_format(&usd(engine::style::NegativeStyle::Minus)),
+            "$#,##0.00"
+        );
+        assert_eq!(
+            convert_number_format(&usd(engine::style::NegativeStyle::Red)),
+            "$#,##0.00;[Red]$#,##0.00"
+        );
+        assert_eq!(
+            convert_number_format(&usd(engine::style::NegativeStyle::Parentheses)),
+            "$#,##0.00;($#,##0.00)"
+        );
+        assert_eq!(
+            convert_number_format(&usd(engine::style::NegativeStyle::RedParentheses)),
+            "$#,##0.00;[Red]($#,##0.00)"
+        );
+    }
+
+    /// The two halves of the fidelity claim have to meet: what this writer
+    /// emits must read back as the format it came from.
+    #[test]
+    fn every_currency_negative_entry_round_trips_through_the_reader() {
+        for negative_style in [
+            engine::style::NegativeStyle::Minus,
+            engine::style::NegativeStyle::Red,
+            engine::style::NegativeStyle::Parentheses,
+            engine::style::NegativeStyle::RedParentheses,
+        ] {
+            let original = NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: engine::style::CurrencyPosition::Before,
+                negative_style,
+            };
+            let code = convert_number_format(&original);
+            assert_eq!(
+                crate::xlsx_style_reader::parse_format_code_for_test(&code),
+                original,
+                "{:?} did not survive the code {}",
+                negative_style,
+                code
+            );
+        }
     }
 }

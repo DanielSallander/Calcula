@@ -22,55 +22,119 @@ severity low). Nothing in this file duplicates a ledger entry.
 
 ## 1. Owner calls — decisions, not work
 
-These need a product judgement before anyone writes code. Each is small to implement and
-consequential to get wrong, which is why none of them has been decided under cover of another fix.
+These needed a product judgement before anyone wrote code. Each was small to implement and
+consequential to get wrong, which is why none of them had been decided under cover of another fix.
 
-### 1.1 Currency negatives: parentheses or a leading minus
+**ONLY 1.6 IS STILL OPEN**, and the owner's instruction on it was explicit: leave it, analyse it,
+recommend. That analysis is in place below and nothing was implemented for it.
 
-`format_currency` wraps every negative in parentheses unconditionally —
-`core/engine/src/number_format.rs:137` is `format!("({})", with_symbol)` with no format-section
-test. Excel's single-section `$#,##0.00` renders a negative with a **leading minus**; parentheses
-are what Excel's *fourth* preset means.
+**1.1-1.5 were DECIDED AND BUILT on 2026-08-16**, under the standing rule "Excel parity takes
+priority always". The as-built record — what each turned out to be, what else it found, and what
+was deliberately left — is `docs/design/open-items-1-owner-calls-2026-08-16.md`. The rows are kept
+here, struck, for one release: three of the five were **materially different from how they were
+filed**, and a reader who only sees them vanish learns nothing from that.
 
-Why it is an owner call and not a patch: the function is shared with the **Format Cells currency
-presets**, so changing it changes the dialog's presets too, and it moves visual goldens. Recorded
-in §25g and confirmed still open by §35c.
+### ~~1.1 Currency negatives: parentheses or a leading minus~~ — **CLOSED 2026-08-16**
 
-### 1.2 The 1904 date system as a user setting (D9)
+Done exactly as Excel does: a negative currency renders with a **leading minus**
+(`$#,##0.00` is a single-section code), and Excel's four "Negative numbers:" entries exist as
+`NegativeStyle` — reachable from a new list in Format Cells, round-tripped through the display
+name, and read and written by the `.xlsx` importer and writer.
 
-**Standing recommendation: add none.** Import already handles it — `xlsx_reader.rs:147`
-(`converts_from_1904`) moves a 1904-epoch serial onto Calcula's 1900 epoch at read, per
-`<workbookPr date1904="1">` (`xlsx_reader.rs:192-194`). There is no `date1904` symbol anywhere in
-`app/src-tauri/src`, so the app has no setting and stores no such flag. The question is whether to
-offer one as a document setting for parity with Excel's Mac lineage. Full argument in §4 D9.
+**It was a round-trip lie, not a preference.** `xlsx_writer` has always emitted `$#,##0.00`, so a
+workbook that showed `($1,234.56)` in Calcula reopened in Excel as `-$1,234.56`. The Format Cells
+*preview* already disagreed with the preset for the same reason.
 
-### 1.3 OS regional settings on the `"system"` locale path
+**No visual golden moved.** All 72 were examined; none contains a negative currency. Two adjacent
+defects were fixed in the same files: OOXML builtin accounting ids 41-44 imported with the wrong
+decimals and an invented `$`, and the new negative-section reader was initially wired to the
+POSITIVE section (caught by adversarial verification, not by the author).
 
-Excel reads Windows' actual regional settings (`GetLocaleInfoEx`: `LOCALE_SSHORTDATE`,
-`SLONGDATE`, `STIMEFORMAT`, `SCURRENCY`), so a user who customises their short date to
-`dd-MMM-yy` sees that in Excel. Calcula uses a **fixed per-locale-id table**. "As similar to Excel
-as possible" argues for reading the OS on the `"system"` path with the table as the fallback for
-explicit overrides. Not prejudged: the field names already added (`longDateFormat`, `timeFormat`)
-are the same either way. §25g.
+### ~~1.2 The 1904 date system as a user setting (D9)~~ — **DECIDED 2026-08-16: add none**
 
-### 1.4 Same-sheet undo does not move the selection
+The recommendation was accepted. Import already handles it; the flag carries no user intent
+(nobody chooses 1904, they inherit it); and toggling such a setting changes what every date in a
+workbook means without moving a stored value, which is the silent-corruption shape this programme
+exists to remove. A write-side need would be an **export option**, not a document setting.
 
-A cross-sheet undo switches sheets and selects the restored range; a **same-sheet** undo leaves
-the cursor where it was. Excel selects the restored range in both cases. The change is a one-line
-widening of the `switched &&` guard — but it moves the cursor on **every Ctrl+Z**, and several E2E
-journeys assert cursor position. Owner call precisely because the implementation is trivial and
-the blast radius is not. §13f.
+Three guards now hold the decision, because prose decays into rumour:
+`no_calendar_epoch_setting_exists_outside_the_xlsx_importer` (a source census that assembles its
+own needles so it can search its own file, sabotage-checked),
+`a_1904_workbook_is_exported_as_1900_with_no_date1904_attribute`, and
+`the_date_system_offset_is_the_engine_calendars_1904_epoch`.
 
-### 1.5 An empty cell reads as the number zero in every context
+### ~~1.3 OS regional settings on the `"system"` locale path~~ — **CLOSED 2026-08-16**
 
-`core/engine/src/evaluator.rs:1117` is literally `CellValue::Empty => EvalResult::Number(0.0)`,
-and `EvalResult` (`evaluator.rs:209-223`) has **no `Empty` variant** to route to —
-`Number`/`Text`/`Boolean`/`Error`/`Array`/`List`/`Dict`/`Lambda`. Excel's rule is three-way: blank
-is `0` in arithmetic, `""` in concatenation, and **ignored** by the counting functions.
+`app/src-tauri/src/os_locale.rs` reads `GetLocaleInfoEx` over a null locale name; the table is the
+base it overwrites onto, the per-field fallback, and the whole answer for an explicit override.
 
-This is engineering rather than a product judgement — the target behaviour is not in doubt — but
-it needs a **go-ahead on scope**, because expressing it means a new variant threaded through every
-arm of the evaluator. Filed as a project, correctly. §2aq, re-confirmed §35c.
+**It closed two defects nobody had filed.** `sys_locale` returns
+`GetUserPreferredUILanguages` — the *display language*, not the regional format — so an
+English-display machine with a Swedish region got `.` decimals and `,` formula separators while
+Excel beside it used `,` and `;`. And `set_locale("system")` silently returned en-US, because
+`"system".split('-').next()` is `"system"` and even the language fallback could not fire.
+"System default" is now a live re-read rather than a replay of what was captured at launch.
+
+Windows pictures need translating in exactly three places (`'text'` → `"text"`, `t`/`tt` →
+`AM/PM`, era dropped) — the live Swedish long date `'den 'd MMMM yyyy` renders as
+`'15en '15 januari 2024` without it. Named gaps: `LOCALE_SGROUPING`, `LOCALE_INEGCURR`, and
+English month names under an unlisted locale.
+
+### ~~1.4 Same-sheet undo does not move the selection~~ — **CLOSED 2026-08-16**
+
+Not the one-line guard widening it was filed as. Excel selects the restored **range**, so the
+backend now reports one (`Transaction::restored_range_on`, with `restored_anchor` derived from it
+so the two cannot disagree about which cells were touched). The old guard also meant the selection
+dispatch *and the scroll beside it* were dead code on the common path.
+
+**One named divergence stays open:** Excel leaves the ACTIVE cell at the range's top-left;
+Calcula's selection model pins the active cell to `endRow`/`endCol` and its own
+`selection-in-bounds` oracle rejects an inverted selection, so it lands at the bottom-right.
+Matching Excel means giving the selection an active cell independent of its corners — a change to
+the model, recorded rather than half-built.
+
+`restored_range` is `None` for geometry, whole-sheet snapshots (all insert/delete rows/columns)
+and every `CustomRestore` — those transactions record no coordinates, so the cursor stays put
+rather than guessing. Closing that needs `GridSnapshot` to carry the affected band; two E2E specs
+pass **only while it stays `None`** and are the tripwires. Blast radius, measured: exactly one
+hard test failure, the case that existed to pin the old behaviour. The fused app CLI's undo was
+routed through `CoreCommands.UNDO` in the same pass — the last caller still bypassing the view.
+
+### ~~1.5 An empty cell reads as the number zero in every context~~ — **CLOSED 2026-08-16**
+
+`EvalResult::Blank` now exists and Excel's three-way rule holds. The item understated the defect
+twice over: the named line was one of fourteen zero-injection sites and not the important one
+(`eval_range` materialised absent cells as zeros, so `COUNT(A1:A1000)` over two numbers returned
+**1000**), and there were **two contradictory blank policies in the same evaluator** — `A1:A3`
+injected zeros while `A:A` skipped them, so the same workbook answered differently depending on
+how the range was spelled.
+
+The feared "new variant threaded through every arm" was contained by keeping the OPERAND
+coercions unchanged (`as_number` → `Some(0.0)`, `as_text` → `""`, `as_boolean` → `Some(false)`,
+`to_cell_value` → `Number(0.0)`) so ~250 scalar functions and all six operators needed no edit,
+and adding `as_sample_number` for the collectors that build a population. ~40 sites, not 460.
+
+Fixed as consequences: `PRODUCT` returned 0 for any range containing a blank; `COUNTBLANK` never
+worked at all; **every D-function with a partially-filled criteria rectangle silently filtered its
+whole database out**; `COUNTIF(rng,0)` counted empty cells and `COUNTIF(rng,"")` counted none;
+`=A1<"a"` was `#VALUE!`; and the paired statistics (CORREL, SLOPE, COVARIANCE, SUMX2MY2 …)
+filtered their two arrays independently and slid one against the other.
+
+**A second, adversarial review found fifteen more defects of the same shape** — a materialiser,
+collector or comparator converted in ONE of its branches — and all fifteen are fixed. The worst:
+`compare_values` had no blank arm, so a single empty cell in a sorted key column STOPPED an
+approximate `VLOOKUP` and it returned the row before the gap; `SUBTOTAL` disagreed with itself
+between `(9,B5:B15)` and `(9,B5,B10,B15)`; `OFFSET` and `TEXTJOIN` were each converted in one
+branch of two; four D-functions and the `AVERAGEIF`/`MINIFS`/`MAXIFS` family still built the old
+population; and a mechanical sweep gave `T.TEST`/`F.TEST` the PAIRED collector, silently
+truncating two independent samples to the shorter one and making T.TEST's own length guard
+unreachable. The eleven new tests each assert **two spellings of one question against each other**,
+which is the shape that catches a half-conversion.
+
+**Deferred, deliberately:** Excel's full reference propagation through `IF`/`CHOOSE`. The
+value-versus-reference line IS implemented for the functions that matter (`INDEX`/`OFFSET`/
+`INDIRECT` keep a blank; `VLOOKUP` and friends collapse it to 0, which is why
+`ISBLANK(VLOOKUP(…))` is FALSE in Excel).
 
 ### 1.6 Policy-refused inline payloads still reach the decoder on the `.calp` pull path
 
@@ -83,10 +147,39 @@ worse failure.
 
 The residual is that on the **pull** path the policy payload has no size bound at all.
 `materialize_saved_controls` (`app/src-tauri/src/controls.rs:175-202`) is a plain
-`controls.insert` loop: no length check, no media judgement, no `MAX_CONTROL_PROPERTY_CHARS`. The
+`controls.insert` loop: no length check, no `MAX_CONTROL_PROPERTY_CHARS` — and no media
+judgement OF ITS OWN, though one does run on the pull immediately before it (see the 2026-08-16
+analysis below, which corrects this sentence). The
 64 KiB property bound applies to the two property commands, not to a pull. An `<img>` will not run
 an SVG's script, which is why this was judged tolerable rather than closed — but it is a judgement,
 so it is flagged rather than silently accepted. §36d.
+
+**ANALYSED 2026-08-16 at the owner's request; still open, nothing implemented.** Full write-up in
+`docs/design/open-items-1-owner-calls-2026-08-16.md` §1.6. Four things it changes about the row
+above:
+
+1. **The pull DOES run a media judgement** — `admit_distributed_controls` at three `.calp` sites —
+   so a decompression bomb is cleared and `onSelect` is stripped. The sentence above is true of
+   `materialize_saved_controls` in isolation and misleading about the path. What the pull lacks is
+   a **size bound**.
+2. **Three unbounded shapes**, not one: a non-base64 `data:image/svg+xml,<svg …>` of any length; a
+   `data:image/…` string with no comma at all (which bails out of the decoder AND the byte-cap
+   check before either can measure it); and **any non-image property** — `text`, `tooltip`, an
+   invented key — which the image judgement never examines.
+3. **The axis to weight is persistence, not script.** The script question is structurally closed
+   (secure static mode + CSP + no DOM-injection path reaches a control property). But the payload
+   is written verbatim into the SUBSCRIBER'S OWN `.cala` on their next save, and the media GC
+   prunes the media store — an inline string is not in the store, it *is* the document, so nothing
+   ever reclaims it. Durable, silent, inside a correctly-signed artifact.
+4. **Recommendation: bound the DISTRIBUTED payload in `migrate_distributed_inline_images`**
+   (~40 lines, pulls only, `.cala` open untouched) — not in `materialize_saved_controls`, which
+   also runs on the user's own file and would silently delete a legal 90 KiB inline logo on the
+   next open, and has no error channel to report anything.
+
+Also done in that pass, because they were **false statements in the codebase**: two doc comments in
+`controls.rs` claimed `.calp` materialization arrives through `set_control_metadata` and is
+therefore bounded. It does not and is not. The test `a_control_property_over_the_size_cap_is_refused`
+already carried the correction while both doc comments asserted the opposite.
 
 ---
 
@@ -99,9 +192,9 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 | item | verified at |
 |---|---|
 | **Excel's array literal `{1;2;3}` does not parse.** The lexer has no `;` arm at all — `;` falls through to `Token::Illegal(ch)` (`core/parser/src/lexer.rs:76`), and `parser.rs:526/566` treats `{…}` as a Python-style `ListLiteral`. `{1,2,3}` parses, but as a list, not a 1x3 array. | `lexer.rs:76`, `parser.rs:526,566` |
-| **`#NULL!` is never produced.** `rg CellError::Null core` returns exactly three hits, all in `cell.rs`: the variant (`:78`), `as_literal` (`:164`), `from_literal` (`:189`). It round-trips an imported `#NULL!` faithfully and the evaluator never raises one. Its sibling `Num` carries a doc comment saying "the evaluator PRODUCES this now" (`cell.rs:82`) — `Null` has no such line, which is the difference. | `core/engine/src/cell.rs:78,164,189` |
+| **`#NULL!` is never produced.** `rg CellError::Null core` returns exactly three hits, all in `cell.rs`: a doc-comment cross-reference inside `Num`'s docs (`:82`), `as_literal` (`:164`), `from_literal` (`:189`). The declaration itself is `:78`, spelled `Null,`, which the pattern does not match. It round-trips an imported `#NULL!` faithfully and the evaluator never raises one. Its sibling `Num` carries a doc comment saying "the evaluator PRODUCES this now" (`cell.rs:82`) — `Null` has no such line, which is the difference. | `core/engine/src/cell.rs:78,82,164,189` |
 | **`set_active_sheet` accepts a hidden sheet index.** Worth stating carefully, because it now *looks* guarded: `activate_sheet` does call `ensure_user_sheet` (`sheets.rs:917`), but that guard tests `is_user_sheet` (`sheets.rs:144-149`), which refuses **only** `OBJECT_SHEET_VISIBILITY` — floating-range backing sheets. A user-hidden sheet (`"hidden"`) passes straight through. Excel's `Activate` errors on a hidden sheet. Not tightened because scripts and E2E specs use it to reach hidden sheets. | `sheets.rs:144-168,917` |
-| **`default_row_height` / `default_column_width` announce no undo domain.** Both registered with `domains: NONE` (`undo_commands.rs:1579-1580`) and the registry test pins it (`:4530-4531`), so undoing either notifies nothing that needs to repaint. | `app/src-tauri/src/undo_commands.rs:1579,1580,4530` |
+| **`default_row_height` / `default_column_width` announce no undo domain.** Both registered with `domains: NONE` (`undo_commands.rs:1625-1626`) and the registry test pins it (`:4578-4579`), so undoing either notifies nothing that needs to repaint. | `app/src-tauri/src/undo_commands.rs:1625,1626,4578` |
 
 ### 2.2 The `Persisted<T>` migration is not finished
 

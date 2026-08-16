@@ -75,6 +75,9 @@ fn parse_cell_error(s: &str) -> CellError {
 /// - Lambda -> Empty (a callable cannot cross the IPC boundary).
 pub fn eval_to_udf(r: &EvalResult) -> UdfValue {
     match r {
+        // A blank crosses to a script as the number it displays as, so a UDF
+        // sees what the user sees rather than a shape it has no case for.
+        EvalResult::Blank => UdfValue::Number { value: 0.0 },
         EvalResult::Number(n) => UdfValue::Number { value: *n },
         EvalResult::Text(s) => UdfValue::Text { value: s.clone() },
         EvalResult::Boolean(b) => UdfValue::Boolean { value: *b },

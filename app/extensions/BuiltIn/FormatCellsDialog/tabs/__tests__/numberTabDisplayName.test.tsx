@@ -68,7 +68,7 @@ describe("normalizeToPresetValue / categoryForFormat (BUG-0065)", () => {
     expect(normalizeToPresetValue("Number (2 decimals, with separators)")).toBe("number_sep");
     expect(normalizeToPresetValue("Number (2 decimals)")).toBe("number");
     expect(normalizeToPresetValue("Currency ($, 2 decimals)")).toBe("currency_usd");
-    expect(normalizeToPresetValue("Accounting (kr, 2 decimals)")).toBe("accounting_sek");
+    expect(normalizeToPresetValue("Accounting (kr, 2 decimals, symbol after)")).toBe("accounting_sek");
     expect(normalizeToPresetValue("Percentage (2 decimals)")).toBe("percentage");
     expect(normalizeToPresetValue("Date (yyyy-mm-dd)")).toBe("date_iso");
     expect(normalizeToPresetValue("Time (hh:mm:ss AM/PM)")).toBe("time_12h");

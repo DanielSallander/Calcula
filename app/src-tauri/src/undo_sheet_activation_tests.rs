@@ -408,6 +408,17 @@ fn the_anchor_is_the_cell_the_restore_landed_on() {
         (6, 4),
         "the anchor must be the CORNER of the restored box, not its first change"
     );
+
+    // ...and the box itself, which is what Excel actually selects (open-items
+    // 1.4). The anchor is its top-left corner by construction, so the active
+    // cell can never fall outside the selection reported beside it.
+    let range = result.restored_range.expect("no range for a cell restore");
+    assert_eq!(
+        (range.start_row, range.start_col, range.end_row, range.end_col),
+        (6, 4, 9, 7),
+        "the range must span both changes on both axes"
+    );
+    assert_eq!((range.start_row, range.start_col), (anchor.row, anchor.col));
 }
 
 #[test]
@@ -477,6 +488,10 @@ fn a_geometry_only_restore_reports_no_anchor() {
 
     assert_eq!(f.active(), 1, "it still switches — the change IS on Sheet2");
     assert!(result.restored_anchor.is_none());
+    // The range is silent on exactly the restores the anchor is silent on. That
+    // silence is what makes selecting-on-every-undo safe: a restore with no
+    // recorded coordinates leaves the cursor where it was rather than guessing.
+    assert!(result.restored_range.is_none());
 }
 
 // ---------------------------------------------------------------------------

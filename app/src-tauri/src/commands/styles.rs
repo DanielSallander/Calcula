@@ -7,7 +7,8 @@ use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
     BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, Fill,
-    GradientDirection, NumberFormat, PatternType, TextAlign, TextRotation, ThemeColor, VerticalAlign,
+    GradientDirection, NegativeStyle, NumberFormat, PatternType, TextAlign, TextRotation, ThemeColor,
+    VerticalAlign,
 };
 use tauri::State;
 
@@ -791,10 +792,67 @@ pub(crate) fn parse_number_format_with_locale(
     format: &str,
     locale: &engine::LocaleSettings,
 ) -> NumberFormat {
+    // Excel's Currency category is TWO choices -- a symbol and a "Negative
+    // numbers:" entry -- and the dialog composes them into one preset id
+    // (`currency_usd` + `_neg_paren`). Splitting the suffix here rather than
+    // writing four arms per symbol keeps the count at one arm per symbol and
+    // means a currency preset added later inherits all four entries for free.
+    let (format, negative_style) = split_negative_suffix(format);
     let locale_currency_position = match locale.currency_position {
         engine::LocaleCurrencyPosition::Before => CurrencyPosition::Before,
         engine::LocaleCurrencyPosition::After => CurrencyPosition::After,
     };
+    let parsed = parse_number_format_base(format, locale, locale_currency_position);
+    // ONLY A REAL SUFFIX OVERWRITES. `split_negative_suffix` answers `Minus`
+    // both for "the user picked Excel's first entry" and for "this string
+    // carries no suffix at all", and the second case includes every DISPLAY
+    // NAME -- `Currency ($, 2 decimals, red negatives)` has no `_neg_red` on
+    // it. Applying the answer unconditionally therefore threw away the style
+    // `try_parse_display_name` had just read correctly, and a red-negative cell
+    // reset itself to the default on an untouched OK. The suffix also only
+    // means anything on a Currency; Accounting has no choice to make.
+    match (parsed, negative_style) {
+        (NumberFormat::Currency { decimal_places, symbol, symbol_position, .. }, style)
+            if style != NegativeStyle::Minus =>
+        {
+            NumberFormat::Currency {
+                decimal_places,
+                symbol,
+                symbol_position,
+                negative_style: style,
+            }
+        }
+        (other, _) => other,
+    }
+}
+
+/// The suffix the Format Cells dialog appends to a currency preset id to name
+/// one of Excel's four "Negative numbers:" entries. `NegativeStyle::Minus` --
+/// Excel's default and the meaning of a bare `$#,##0.00` -- has no suffix, so
+/// every existing preset id keeps its exact spelling and its exact meaning.
+pub(crate) const NEGATIVE_STYLE_SUFFIXES: [(&str, NegativeStyle); 3] = [
+    // Longest first: `_neg_red_paren` also ends with `_neg_paren`'s letters
+    // only if tested loosely, and `_neg_red` is a prefix of it. Ordering the
+    // table by length makes the first match the right one.
+    ("_neg_red_paren", NegativeStyle::RedParentheses),
+    ("_neg_paren", NegativeStyle::Parentheses),
+    ("_neg_red", NegativeStyle::Red),
+];
+
+fn split_negative_suffix(format: &str) -> (&str, NegativeStyle) {
+    for (suffix, style) in NEGATIVE_STYLE_SUFFIXES {
+        if let Some(base) = format.strip_suffix(suffix) {
+            return (base, style);
+        }
+    }
+    (format, NegativeStyle::Minus)
+}
+
+fn parse_number_format_base(
+    format: &str,
+    locale: &engine::LocaleSettings,
+    locale_currency_position: CurrencyPosition,
+) -> NumberFormat {
     match format.to_lowercase().as_str() {
         "general" => NumberFormat::General,
         // ---- Excel's Home > Number dropdown, the regional half ----
@@ -802,6 +860,7 @@ pub(crate) fn parse_number_format_with_locale(
             decimal_places: 2,
             symbol: locale.currency_symbol.clone(),
             symbol_position: locale_currency_position,
+            negative_style: NegativeStyle::Minus,
         },
         "accounting" => NumberFormat::Accounting {
             decimal_places: 2,
@@ -834,16 +893,19 @@ pub(crate) fn parse_number_format_with_locale(
             decimal_places: 2,
             symbol: "$".to_string(),
             symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::Minus,
         },
         "currency_eur" => NumberFormat::Currency {
             decimal_places: 2,
             symbol: "EUR".to_string(),
             symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::Minus,
         },
         "currency_sek" => NumberFormat::Currency {
             decimal_places: 2,
             symbol: "kr".to_string(),
             symbol_position: CurrencyPosition::After,
+            negative_style: NegativeStyle::Minus,
         },
         "accounting_usd" => NumberFormat::Accounting {
             decimal_places: 2,
@@ -933,6 +995,70 @@ pub(crate) fn parse_number_format_with_locale(
 /// - Fixed-fraction `max_digits`: reconstructed from the preset table
 ///   (2/4/8/10 -> 1, 16/100 -> 2), falling back to the denominator's digit
 ///   count; the engine ignores it when the denominator is fixed.
+/// Split a format code into its positive and negative sections, on the first
+/// semicolon that is not inside quotes. `None` when the code has no negative
+/// section (the overwhelmingly common case) or has THREE or more, which is a
+/// zero/text-section code no preset writes and that belongs in `Custom`.
+fn split_first_format_section(code: &str) -> Option<(&str, &str)> {
+    let mut in_quotes = false;
+    let mut first: Option<usize> = None;
+    for (i, ch) in code.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ';' if !in_quotes => {
+                if first.is_some() {
+                    return None; // three sections or more
+                }
+                first = Some(i);
+            }
+            _ => {}
+        }
+    }
+    first.map(|i| (&code[..i], &code[i + 1..]))
+}
+
+/// Which of Excel's "Negative numbers:" entries a NEGATIVE SECTION spells.
+/// Deliberately reads only the section it is handed: `[Red]` on the POSITIVE
+/// section means a red positive, which is a different format entirely.
+fn negative_style_of_section(section: &str) -> NegativeStyle {
+    let red = section.to_ascii_lowercase().contains("[red]");
+    let parens = section.contains('(') && section.contains(')');
+    // A MINUS IN THE NEGATIVE SECTION MEANS THE SIGN IS SHOWN, and Excel's
+    // `Red` entry shows NO sign -- its code is `$#,##0.00;[Red]$#,##0.00`, the
+    // sign deliberately absent. `…;[Red]-$#,##0.00` is therefore a red MINUS,
+    // which no structured style can express; classifying it as `Red` would
+    // render -1234.5 as `$1,234.50`, indistinguishable from the positive in
+    // copy, CSV and print, none of which carry colour -- and the writer would
+    // then delete the user's minus from the exported file. Kept as the
+    // leading-minus style, which renders the sign; the caller falls back to
+    // `Custom` for anything it cannot classify.
+    let signed = section.contains('-');
+    match (red, parens, signed) {
+        (true, true, _) => NegativeStyle::RedParentheses,
+        (true, false, false) => NegativeStyle::Red,
+        (false, true, _) => NegativeStyle::Parentheses,
+        _ => NegativeStyle::Minus,
+    }
+}
+
+/// Split `NegativeStyle::display_suffix` off the tail of a Currency display
+/// name's inner text. The inverse of what `format_number_format_name` appends.
+fn split_negative_display_suffix(rest: &str) -> (&str, NegativeStyle) {
+    // Longest first: ", red parenthesised negatives" also ends with
+    // ", parenthesised negatives"'s letters, so a shorter probe would win and
+    // lose the colour.
+    for style in [
+        NegativeStyle::RedParentheses,
+        NegativeStyle::Parentheses,
+        NegativeStyle::Red,
+    ] {
+        if let Some(head) = rest.strip_suffix(style.display_suffix()) {
+            return (head, style);
+        }
+    }
+    (rest, NegativeStyle::Minus)
+}
+
 pub(crate) fn try_parse_display_name(format: &str) -> Option<NumberFormat> {
     let s = format.trim();
     let inner = |prefix: &str| -> Option<&str> {
@@ -954,22 +1080,42 @@ pub(crate) fn try_parse_display_name(format: &str) -> Option<NumberFormat> {
         });
     }
 
-    // "Currency ($, 2 decimals)" / "Accounting (kr, 2 decimals)" -- the
-    // decimals clause never contains ", ", so split at the LAST occurrence
-    // and the symbol keeps any commas of its own.
+    // "Currency ($, 2 decimals)" / "Accounting (kr, 2 decimals, symbol after)"
+    // -- the decimals clause never contains ", ", so split at the LAST
+    // occurrence and the symbol keeps any commas of its own.
+    //
+    // THE POSITION IS READ, NOT GUESSED. This used to reconstruct it from the
+    // symbol TEXT -- `symbol.trim() == "kr"` meant After and everything else
+    // meant Before -- and the comment above justified that by observing `kr`
+    // was the only suffix currency the app could emit. Reading the user's
+    // Windows regional settings (open-items 1.3) ends that premise: a Polish
+    // `zl`, a Hungarian `Ft` or a Czech `Kc` with `LOCALE_ICURRENCY = 3` is a
+    // suffix currency too, and under the old rule the symbol jumped to the
+    // wrong side of the number the first time the user pressed OK on a dialog
+    // they had not touched.
     let parse_money = |rest: &str| -> Option<(String, u8, CurrencyPosition)> {
+        let (rest, position) = match rest.strip_suffix(", symbol after") {
+            Some(head) => (head, CurrencyPosition::After),
+            None => (rest, CurrencyPosition::Before),
+        };
         let (symbol, dec_part) = rest.rsplit_once(", ")?;
         let decimals = parse_decimals(dec_part)?;
-        let position = if symbol.trim() == "kr" {
-            CurrencyPosition::After
-        } else {
-            CurrencyPosition::Before
-        };
         Some((symbol.to_string(), decimals, position))
     };
     if let Some(rest) = inner("Currency (") {
+        // Strip the negative clause FIRST: it is the only part of a currency
+        // name that may follow the decimals clause, and `parse_money` splits on
+        // the LAST ", " -- left in place, ", parenthesised negatives" would be
+        // taken for the decimals clause and the whole name would fail to parse,
+        // silently corrupting the cell's format on an untouched OK.
+        let (rest, negative_style) = split_negative_display_suffix(rest);
         let (symbol, decimal_places, symbol_position) = parse_money(rest)?;
-        return Some(NumberFormat::Currency { decimal_places, symbol, symbol_position });
+        return Some(NumberFormat::Currency {
+            decimal_places,
+            symbol,
+            symbol_position,
+            negative_style,
+        });
     }
     if let Some(rest) = inner("Accounting (") {
         let (symbol, decimal_places, symbol_position) = parse_money(rest)?;
@@ -1018,6 +1164,28 @@ pub(crate) fn try_parse_display_name(format: &str) -> Option<NumberFormat> {
 fn try_parse_format_code(format: &str) -> Option<NumberFormat> {
     let trimmed = format.trim();
 
+    // A CURRENCY CODE WITH A NEGATIVE SECTION IS STILL A CURRENCY.
+    // Excel's three non-default "Negative numbers:" entries write two-section
+    // codes (`$#,##0.00;($#,##0.00)`), and before this arm the semicolon made
+    // the whole thing unparseable, so the dialog reopened the user's own
+    // Currency choice as `Custom` with a raw code in a text box. Recognised
+    // here rather than in each shape below because the positive section is the
+    // ONLY part that carries symbol and decimals -- the negative section is a
+    // rendering, and `negative_style_of_section` is the whole of what it means.
+    if let Some((positive, negative)) = split_first_format_section(trimmed) {
+        if let Some(NumberFormat::Currency { decimal_places, symbol, symbol_position, .. }) =
+            try_parse_format_code(positive)
+        {
+            return Some(NumberFormat::Currency {
+                decimal_places,
+                symbol,
+                symbol_position,
+                negative_style: negative_style_of_section(negative),
+            });
+        }
+        return None;
+    }
+
     // Percentage formats: "0%", "0.0%", "0.00%", etc.
     if trimmed.ends_with('%') {
         let before_pct = &trimmed[..trimmed.len() - 1];
@@ -1036,6 +1204,8 @@ fn try_parse_format_code(format: &str) -> Option<NumberFormat> {
                 decimal_places: decimals,
                 symbol: "$".to_string(),
                 symbol_position: CurrencyPosition::Before,
+                // A one-section code IS Excel's default entry.
+                negative_style: NegativeStyle::Minus,
             });
         }
     }
@@ -1050,6 +1220,7 @@ fn try_parse_format_code(format: &str) -> Option<NumberFormat> {
                     decimal_places: decimals,
                     symbol: format!("{} ", symbol),
                     symbol_position: CurrencyPosition::Before,
+                    negative_style: NegativeStyle::Minus,
                 });
             }
         }
@@ -1680,7 +1851,7 @@ mod tests {
     // ------------------------------------------------------------------
     use super::parse_number_format;
     use crate::api_types::format_number_format_name;
-    use engine::{CurrencyPosition, NumberFormat};
+    use engine::{CurrencyPosition, NegativeStyle, NumberFormat};
 
     #[test]
     fn every_display_name_the_serializer_emits_round_trips() {
@@ -1694,16 +1865,40 @@ mod tests {
                 decimal_places: 2,
                 symbol: "$".to_string(),
                 symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
             },
             NumberFormat::Currency {
                 decimal_places: 2,
                 symbol: "EUR".to_string(),
                 symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
             },
             NumberFormat::Currency {
                 decimal_places: 2,
                 symbol: "kr".to_string(),
                 symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Minus,
+            },
+            // All four of Excel's "Negative numbers:" entries must survive the
+            // loop, not just the default -- the negative clause is the newest
+            // part of the name and the one a `rsplit_once(", ")` would eat.
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Red,
+            },
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Parentheses,
+            },
+            NumberFormat::Currency {
+                decimal_places: 0,
+                symbol: "kr".to_string(),
+                symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::RedParentheses,
             },
             NumberFormat::Accounting {
                 decimal_places: 2,
@@ -1719,6 +1914,36 @@ mod tests {
                 decimal_places: 2,
                 symbol: "kr".to_string(),
                 symbol_position: CurrencyPosition::After,
+            },
+            // SUFFIX CURRENCIES THAT ARE NOT `kr`. The position used to be
+            // reconstructed from the symbol text, so every one of these parsed
+            // back as a PREFIX currency and moved the symbol to the other side
+            // of the number on an untouched OK. Reading the user's Windows
+            // regional settings (open-items 1.3) is what makes them reachable.
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: " z\u{0142}".to_string(),
+                symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Minus,
+            },
+            NumberFormat::Currency {
+                decimal_places: 0,
+                symbol: " Ft".to_string(),
+                symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Parentheses,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "K\u{010D}".to_string(),
+                symbol_position: CurrencyPosition::After,
+            },
+            // ...and the same symbols BEFORE the number, so the clause is
+            // proved to carry information rather than to be always present.
+            NumberFormat::Currency {
+                decimal_places: 2,
+                symbol: "z\u{0142} ".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
             },
             NumberFormat::Percentage { decimal_places: 0 },
             NumberFormat::Percentage { decimal_places: 2 },
@@ -1863,6 +2088,7 @@ mod tests {
                 decimal_places: 2,
                 symbol: " kr".to_string(),
                 symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Minus,
             }
         );
         // Accounting draws the symbol as its own column, so it takes the bare
@@ -1887,6 +2113,7 @@ mod tests {
                 decimal_places: 2,
                 symbol: "$".to_string(),
                 symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
             }
         );
         assert_eq!(

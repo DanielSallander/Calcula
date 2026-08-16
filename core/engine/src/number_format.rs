@@ -5,7 +5,7 @@
 
 use crate::custom_format::{self, FormatResult};
 use crate::locale::LocaleSettings;
-use crate::style::{CurrencyPosition, NumberFormat};
+use crate::style::{CurrencyPosition, NegativeStyle, NumberFormat};
 
 /// Format a number according to the specified format and locale.
 pub fn format_number(value: f64, format: &NumberFormat, locale: &LocaleSettings) -> String {
@@ -19,7 +19,8 @@ pub fn format_number(value: f64, format: &NumberFormat, locale: &LocaleSettings)
             decimal_places,
             symbol,
             symbol_position,
-        } => format_currency(value, *decimal_places, symbol, *symbol_position, locale),
+            negative_style,
+        } => format_currency(value, *decimal_places, symbol, *symbol_position, *negative_style, locale),
         NumberFormat::Accounting {
             decimal_places,
             symbol,
@@ -119,11 +120,18 @@ fn add_thousands_separator(s: &str, locale: &LocaleSettings) -> String {
 }
 
 /// Format a number as currency.
+///
+/// NEGATIVES FOLLOW `negative_style`, WHICH DEFAULTS TO A LEADING MINUS.
+/// This function used to wrap every negative in parentheses with no test of
+/// the format at all, which no Excel currency preset does by default -- see
+/// `NegativeStyle` for the four codes Excel's list box writes and why the old
+/// behaviour also disagreed with Calcula's own `.xlsx` writer.
 fn format_currency(
     value: f64,
     decimal_places: u8,
     symbol: &str,
     position: CurrencyPosition,
+    negative_style: NegativeStyle,
     locale: &LocaleSettings,
 ) -> String {
     let formatted = add_thousands_separator(&format!("{:.prec$}", value.abs(), prec = decimal_places as usize), locale);
@@ -133,10 +141,22 @@ fn format_currency(
         CurrencyPosition::After => format!("{}{}", formatted, symbol),
     };
 
-    if value < 0.0 {
-        format!("({})", with_symbol)
-    } else {
-        with_symbol
+    // `value.abs()` was formatted above, so a value that ROUNDS to zero at this
+    // precision (-0.001 at 2 decimals) has already lost its sign and must not
+    // be given a minus or a pair of brackets back: Excel prints `$0.00`, not
+    // `-$0.00`. Testing `value < 0.0` alone would reintroduce exactly that.
+    let is_negative = value < 0.0 && formatted.chars().any(|c| c.is_ascii_digit() && c != '0');
+
+    if !is_negative {
+        return with_symbol;
+    }
+
+    match negative_style {
+        NegativeStyle::Minus => format!("-{}", with_symbol),
+        // Excel's red entries carry no sign: the negative section supplies the
+        // whole rendering and colour is the only marker.
+        NegativeStyle::Red => with_symbol,
+        NegativeStyle::Parentheses | NegativeStyle::RedParentheses => format!("({})", with_symbol),
     }
 }
 
@@ -440,6 +460,34 @@ pub fn format_number_with_color(value: f64, format: &NumberFormat, locale: &Loca
                 accounting: Some(parts),
             }
         }
+        // Excel's second and fourth Currency negative entries are RED, and red
+        // is not something `format_number` can say: it returns a String. The
+        // colour channel already exists for `[Red]` in custom formats, so the
+        // two structured red styles ride the same wire rather than forcing the
+        // dialog to write a custom code the Currency category could no longer
+        // recognise as its own.
+        NumberFormat::Currency { decimal_places, negative_style, .. }
+            if negative_style.is_red() && value < 0.0 =>
+        {
+            let text = format_number(value, format, locale);
+            // A value that ROUNDS to zero prints as `$0.00` and is not a
+            // negative on screen; painting it red would be a lie about a
+            // rendering the user cannot see a sign on.
+            //
+            // TESTED AGAINST THE DIGITS, NOT AGAINST THE FINISHED STRING. The
+            // symbol is free text — `[$1UAH] #,##0.00` and any script-set
+            // symbol can carry a digit — so scanning `text` found the `1` in
+            // the SYMBOL and painted `$0.00` red. This recomputes the same
+            // digit string `format_currency` tests, so the two guards cannot
+            // disagree.
+            let digits = format!("{:.prec$}", value.abs(), prec = *decimal_places as usize);
+            let color = if digits.chars().any(|c| c.is_ascii_digit() && c != '0') {
+                Some(custom_format::FormatColor::Red)
+            } else {
+                None
+            };
+            FormatResult { text, color, accounting: None }
+        }
         other => FormatResult {
             text: format_number(value, other, locale),
             color: None,
@@ -490,6 +538,7 @@ pub mod presets {
             decimal_places,
             symbol: "$".to_string(),
             symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::default(),
         }
     }
 
@@ -498,6 +547,7 @@ pub mod presets {
             decimal_places,
             symbol: "EUR ".to_string(),
             symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::default(),
         }
     }
 
@@ -506,6 +556,7 @@ pub mod presets {
             decimal_places,
             symbol: " kr".to_string(),
             symbol_position: CurrencyPosition::After,
+            negative_style: NegativeStyle::default(),
         }
     }
 
@@ -588,18 +639,154 @@ mod tests {
     #[test]
     fn test_format_currency() {
         let l = us();
+        let minus = NegativeStyle::Minus;
         assert_eq!(
-            format_currency(1234.56, 2, "$", CurrencyPosition::Before, &l),
+            format_currency(1234.56, 2, "$", CurrencyPosition::Before, minus, &l),
             "$1,234.56"
         );
         assert_eq!(
-            format_currency(-1234.56, 2, "$", CurrencyPosition::Before, &l),
+            format_currency(-1234.56, 2, "$", CurrencyPosition::Before, minus, &l),
+            "-$1,234.56"
+        );
+        assert_eq!(
+            format_currency(1234.56, 2, " kr", CurrencyPosition::After, minus, &l),
+            "1,234.56 kr"
+        );
+    }
+
+    /// Excel's Currency preset writes the SINGLE-SECTION code `$#,##0.00`, and
+    /// a single-section code renders a negative with a LEADING MINUS. This is
+    /// the regression guard for the behaviour open-items 1.1 changed: the old
+    /// code was `format!("({})", with_symbol)` with no test of the format at
+    /// all, so every currency cell in the product disagreed with Excel AND with
+    /// Calcula's own `.xlsx` writer, which has always emitted `$#,##0.00`.
+    #[test]
+    fn currency_negatives_default_to_a_leading_minus_like_excel() {
+        let l = us();
+        assert_eq!(
+            format_number(-1234.56, &presets::currency_usd(2), &l),
+            "-$1,234.56"
+        );
+        // A suffix currency puts the minus in front of the whole rendering,
+        // exactly as Excel's sv-SE `#,##0.00 kr` does.
+        assert_eq!(
+            format_number(-1234.56, &presets::currency_sek(2), &se()),
+            "-1\u{00A0}234,56 kr"
+        );
+    }
+
+    /// The other three entries of Excel's "Negative numbers:" list, which is
+    /// where parentheses legitimately live. `Red` deliberately carries NO sign:
+    /// its Excel code is `$#,##0.00;[Red]$#,##0.00` and the negative section
+    /// spells the whole rendering.
+    #[test]
+    fn the_other_three_excel_negative_entries_render_their_own_codes() {
+        let l = us();
+        let with = |style| NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: style,
+        };
+        assert_eq!(format_number(-1234.56, &with(NegativeStyle::Red), &l), "$1,234.56");
+        assert_eq!(
+            format_number(-1234.56, &with(NegativeStyle::Parentheses), &l),
             "($1,234.56)"
         );
         assert_eq!(
-            format_currency(1234.56, 2, " kr", CurrencyPosition::After, &l),
-            "1,234.56 kr"
+            format_number(-1234.56, &with(NegativeStyle::RedParentheses), &l),
+            "($1,234.56)"
         );
+        // Positives are identical under all four -- only the negative section
+        // differs, which is the whole meaning of the list.
+        for style in [
+            NegativeStyle::Minus,
+            NegativeStyle::Red,
+            NegativeStyle::Parentheses,
+            NegativeStyle::RedParentheses,
+        ] {
+            assert_eq!(format_number(1234.56, &with(style), &l), "$1,234.56");
+        }
+    }
+
+    /// Red is a COLOUR, and `format_number` returns a String, so the two red
+    /// entries are only honest if they ride the colour channel that already
+    /// exists for `[Red]` in custom formats.
+    #[test]
+    fn red_negative_entries_report_red_through_the_colour_channel() {
+        let l = us();
+        let with = |style| NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: style,
+        };
+        for style in [NegativeStyle::Red, NegativeStyle::RedParentheses] {
+            let neg = format_number_with_color(-1234.56, &with(style), &l);
+            assert!(matches!(neg.color, Some(custom_format::FormatColor::Red)), "{:?}", style);
+            // A POSITIVE under a red-negative format is never red.
+            let pos = format_number_with_color(1234.56, &with(style), &l);
+            assert!(pos.color.is_none(), "{:?}", style);
+        }
+        // The two non-red entries never colour anything.
+        for style in [NegativeStyle::Minus, NegativeStyle::Parentheses] {
+            assert!(format_number_with_color(-1234.56, &with(style), &l).color.is_none());
+        }
+    }
+
+    /// A value that ROUNDS to zero has already lost its sign in the digits, so
+    /// it must not be handed one back. Excel prints `$0.00`, never `-$0.00` and
+    /// never `($0.00)`, and it does not paint it red.
+    #[test]
+    fn a_negative_that_rounds_to_zero_is_not_signed_bracketed_or_reddened() {
+        let l = us();
+        let with = |style| NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: style,
+        };
+        for style in [
+            NegativeStyle::Minus,
+            NegativeStyle::Red,
+            NegativeStyle::Parentheses,
+            NegativeStyle::RedParentheses,
+        ] {
+            let r = format_number_with_color(-0.001, &with(style), &l);
+            assert_eq!(r.text, "$0.00", "{:?}", style);
+            assert!(r.color.is_none(), "{:?}", style);
+        }
+    }
+
+    /// The two rounds-to-zero guards — the one in `format_currency` and the one
+    /// on the colour channel — must agree, and they cannot agree if they test
+    /// DIFFERENT strings. The colour guard scanned the finished text, which
+    /// includes the SYMBOL, so a symbol carrying a digit made `$0.00` red.
+    #[test]
+    fn a_digit_in_the_currency_symbol_does_not_make_a_rounded_zero_red() {
+        let l = us();
+        let odd = NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "1UAH ".to_string(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::Red,
+        };
+        let r = format_number_with_color(-0.001, &odd, &l);
+        assert_eq!(r.text, "1UAH 0.00");
+        assert!(r.color.is_none(), "a value that rounds to zero is not a red negative");
+        // The positive control: a real negative under the same symbol IS red.
+        assert!(format_number_with_color(-1234.56, &odd, &l).color.is_some());
+    }
+
+    /// ACCOUNTING KEEPS ITS PARENTHESES. Excel's accounting code
+    /// `_($* #,##0.00_);_($* (#,##0.00);...` carries a parenthesised negative
+    /// section and offers no choice, so the currency change must not leak here.
+    #[test]
+    fn accounting_negatives_stay_parenthesised() {
+        let l = us();
+        let parts = format_accounting_parts(-1234.56, 2, "$", CurrencyPosition::Before, &l);
+        assert_eq!(parts.value, "(1,234.56)");
+        assert_eq!(format_accounting_parts(0.0, 2, "$", CurrencyPosition::Before, &l).value, "-");
     }
 
     #[test]
