@@ -298,6 +298,99 @@ export interface UndoRoundTripOutcome {
 }
 
 /**
+ * Why `baseline` can no longer be wound back to — or null when it still can.
+ *
+ * THE SAME QUESTION `checkUndoRoundTrip` ASKS, ASKED CHEAPLY AND EARLY. The
+ * round-trip only ever asked it at a checkpoint, i.e. once every 25 actions, and
+ * by then a single action anywhere in the window had already decided the answer
+ * for all 25. That is the whole of why the oracle decided NOTHING: measured over
+ * the shipped catalog (40 seeds x 75 actions at cadence 25, the `invariant`
+ * project's own shape) only **6 of 120 windows** contained no history-ender at
+ * all. The register attributed that to the five structural sheet commands; the
+ * census says otherwise — of 370 window-killers in that sample, 276 (75%) were
+ * `fr.create` / `fr.delete` / `fr.rename`, which landed on 2026-08-13, AFTER the
+ * observation the register recorded. Sheet structure was the minority cause.
+ *
+ * Asked after EVERY action, the answer is actionable instead of terminal: the
+ * walker re-captures the baseline the moment the old one dies, and the actions
+ * that follow form a genuinely replayable window. Nothing about the verdict is
+ * relaxed to get there — the digest compared is the one captured at the rebase
+ * point, and the ids on the stack above it are exactly the transactions wound
+ * back. A window is decided only when it really can be.
+ *
+ * PURE: two readings in, one sentence out, so the decision has a unit tier.
+ * The precedence matches `checkUndoRoundTrip` exactly — an unreachable history
+ * outranks a created floating range, because the counters name a mechanism and
+ * the FR list only names an object.
+ */
+export function undoBaselineUnreachableReason(
+  baseline: Pick<
+    OracleBaseline,
+    "undoTopSeq" | "evictedTotal" | "clearedTotal" | "clearsTotal" | "floatingRangeIds"
+  >,
+  now: Pick<
+    UndoStateJson,
+    "undoSeqs" | "evictedTotal" | "clearedTotal" | "clearsTotal"
+  >,
+  floatingRangeIdsNow: readonly string[]
+): string | null {
+  const distance = stepsBackToBaseline(baseline, now);
+  if ("unreachable" in distance) return distance.unreachable;
+  const frCreated = frCreatedSinceBaseline(
+    baseline.floatingRangeIds,
+    floatingRangeIdsNow
+  );
+  if (frCreated.length > 0) {
+    return (
+      `${frCreated.length} floating range(s) were created since the checkpoint ` +
+      `(${frCreated.join(", ")}). Creating a floating range is not undoable ` +
+      `(add_sheet parity) and deliberately does not end the undo history, so ` +
+      `the created object survives every undo`
+    );
+  }
+  return null;
+}
+
+/**
+ * Walker actions the product is ENTITLED to make a baseline unreachable with,
+ * and the mechanism each one uses.
+ *
+ * This is not decoration. Once the walker re-baselines on every unreachable
+ * reading it stops caring WHY the history ended — and "the undo history was
+ * ended by something that has no business ending it" is precisely the defect
+ * class this programme keeps finding (a cell edit that clears the stack would
+ * be silently absorbed by the rebase and never reported). So the walker asks
+ * the question the rebase no longer has to: was the action that killed this
+ * baseline one of the ones allowed to?
+ *
+ *   * the five structural sheet commands END the history outright — adding,
+ *     deleting, renaming, moving or copying a sheet is not undoable in Excel
+ *     (`invalidate_undo_history_for_sheet_structure`, BUG-0005);
+ *   * `fr.rename` / `fr.delete` end it for the same reason: an FR's backing
+ *     store IS a sheet, so they are a sheet rename and a sheet delete;
+ *   * `fr.create` ends nothing and pushes nothing (§16 doctrine, add_sheet
+ *     parity) — the object simply survives every undo;
+ *   * `undo` is the walk winding back past its own baseline, which removes the
+ *     remembered id from the stack without any counter moving.
+ *
+ * `sheet.hide` / `sheet.unhide` / `sheet.tabColor` are deliberately ABSENT:
+ * BUG-0050 made them ordinary undoable transactions (`sheet_tab_state`), so one
+ * of them ending the history would be a regression, and this list is what would
+ * report it.
+ */
+export const ACTIONS_THAT_MAY_END_UNDO_HISTORY: ReadonlySet<string> = new Set([
+  "sheet.add",
+  "sheet.delete",
+  "sheet.rename",
+  "sheet.move",
+  "sheet.copy",
+  "fr.create",
+  "fr.rename",
+  "fr.delete",
+  "undo",
+]);
+
+/**
  * Run the undo round-trip against a baseline captured before the actions of
  * this checkpoint window.
  *

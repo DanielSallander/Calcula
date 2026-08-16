@@ -570,7 +570,20 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         // land on the same grid the app launches with and File > New produces.
         default_row_height: crate::DEFAULT_ROW_HEIGHT_PX,
         default_column_width: crate::DEFAULT_COLUMN_WIDTH_PX,
-        properties: crate::WorkbookProperties::default(),
+        // Document properties come off `docProps/core.xml` (S8). This was
+        // `WorkbookProperties::default()` while the WRITER emitted title,
+        // author, subject, description, keywords and category on every export
+        // -- a one-way loss that made a Calcula .xlsx round trip drop the
+        // metadata the same Calcula had just written.
+        // Document properties come off `docProps/core.xml` (S8). This was
+        // `WorkbookProperties::default()` while the WRITER emitted title,
+        // author, subject, description, keywords and category on every export
+        // -- a one-way loss that made a Calcula .xlsx round trip drop the
+        // metadata the same Calcula had just written.
+        properties: style_data
+            .as_ref()
+            .map(|sd| sd.properties.clone())
+            .unwrap_or_default(),
         charts: Vec::new(),
         sparklines: Vec::new(),
         floating_ranges: Vec::new(),

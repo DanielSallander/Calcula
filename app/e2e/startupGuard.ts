@@ -55,6 +55,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { RawPageState } from "./pageState";
+import { collectDuplicateDepVersions } from "./depOptimizer";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
@@ -120,59 +123,31 @@ export function readStartupFailure(): string | null {
  * One reading of the page under test. Every field is a FACT the page reported,
  * or the explicit "could not be read" value -- never an inference. `null` in
  * place of a whole probe means there was no page/target to read at all.
+ *
+ * THE FIELDS AND THE READING ITSELF LIVE IN `pageState.ts`, because the barrier
+ * and `fixtures.ts` must agree on them exactly and used to keep separate,
+ * drifted copies. `networkResponses` is added here because it is the BARRIER's
+ * measurement (its own CDP session), not something the page can report about
+ * itself.
+ *
+ * `bootErrorText` is the seam between the two fixes that landed together.
+ * `#root` having children was the ONLY mount signal, and it meant "React ran and
+ * rendered the app". Since BUG-0083 added a `RootErrorBoundary` above all five
+ * React roots, a boot-time throw ALSO puts a child under `#root` -- the failure
+ * panel. So the old signal reported a crashed app as a healthy mount, the
+ * barrier waved the run through, and every spec failed on
+ * `[data-focus-container='spreadsheet']`: N product-looking timeouts for one
+ * systemic fact, which is BUG-0082's misreporting reappearing through the other
+ * fix's front door. `bootErrorSignal` records WHICH marker identified the panel,
+ * so a build that has quietly lost the `data-testid` says so out loud.
  */
-export interface StartupProbe {
-  /** `#root`'s child element count. -1 when the page could not be evaluated. */
-  rootChildCount: number;
-  /** The spreadsheet container the fixtures wait for. */
-  spreadsheetPresent: boolean;
-  /** `window.__TAURI__` -- the bridge `tauri.e2e.conf.json` re-enables. */
-  tauriBridgePresent: boolean;
-  /** `window.__calcImport` -- installed early in main.tsx, so it DATES the failure. */
-  calcImportPresent: boolean;
-  /** `document.location.href`, or "(unreadable)". */
-  url: string;
-  /**
-   * `document.readyState`, or "(unreadable)". THE DISCRIMINATOR: "complete"
-   * means nothing is pending, so an empty `#root` is final; anything else means
-   * the page is still waiting for the dev server.
-   */
-  readyState: string;
-  /** `document.title`. */
-  title: string;
-  /**
-   * `performance.getEntriesByType("resource").length` -- the page's OWN count of
-   * completed subresources. Monotonic, and RETROACTIVE, which the CDP counter is
-   * not: the barrier attaches after the navigation has begun, so anything that
-   * loaded before it would otherwise be invisible. This is the primary progress
-   * signal. -1 when the page could not be evaluated.
-   */
-  resourceCount: number;
+export interface StartupProbe extends RawPageState {
   /**
    * Responses seen by the barrier's CDP Network domain since it attached.
    * Secondary progress signal, and the one that keeps counting when a page is
    * fetching things `performance` does not enumerate. -1 when not instrumented.
    */
   networkResponses: number;
-  /**
-   * The text of the root error boundary's panel when it is on screen, else
-   * `null`.
-   *
-   * WHY THIS FIELD EXISTS, and it is the seam between the two fixes that landed
-   * together. `#root` having children was the ONLY mount signal, and it meant
-   * "React ran and rendered the app". Since BUG-0083 added a `RootErrorBoundary`
-   * above all five React roots, a boot-time throw ALSO puts a child under
-   * `#root` -- the failure panel. So the old signal now reports a crashed app as
-   * a healthy mount, the barrier waves the run through, and every spec fails on
-   * `[data-focus-container='spreadsheet']`: N product-looking timeouts for one
-   * systemic fact, which is BUG-0082's misreporting reappearing through the
-   * other fix's front door.
-   *
-   * The boundary marks itself with `data-testid="root-error-boundary"`, so the
-   * two states are distinguishable -- and the panel already contains the error
-   * and both stacks, which is a far better failure than a blank screenshot.
-   */
-  bootErrorText: string | null;
 }
 
 /** How many pages the barrier saw, and which one it read. Evidence only. */
@@ -201,6 +176,23 @@ export function probeIsMounted(probe: StartupProbe): boolean {
  */
 export function probeShowsBootError(probe: StartupProbe): boolean {
   return probe.bootErrorText !== null;
+}
+
+/**
+ * The page fetched the same pre-bundled dependency under more than one Vite
+ * optimiser hash -- i.e. it is holding more than one copy of it.
+ *
+ * THIS IS AN ATTRIBUTION, NOT A SYMPTOM, and it is the one §32 was missing. When
+ * the dep is `react.js` the consequence is exact and not a guess: hooks are
+ * registered against one dispatcher module and read through another, which is
+ * `Warning: Invalid hook call` followed by `Cannot read properties of null
+ * (reading 'useReducer')` -- the console lines §32 recorded in <GridProvider>
+ * and could not explain. It is checked FIRST among the failure kinds because it
+ * explains BOTH shapes the failure takes: a page that never mounts at all, and
+ * one that mounts the root error boundary instead of the app.
+ */
+export function probeShowsDuplicateDeps(probe: StartupProbe): string[] {
+  return collectDuplicateDepVersions(probe.depUrls);
 }
 
 /**
@@ -282,7 +274,15 @@ export type MountFailureKind =
    * still fail on the spreadsheet selector, so it is reported here, once, with
    * the error the boundary caught.
    */
-  | "boot-error";
+  | "boot-error"
+  /**
+   * The page loaded the same pre-bundled dependency under more than one Vite
+   * optimiser hash: it holds two Reacts. Named separately from every other kind
+   * because it is neither a product failure nor a slow start -- it is the dev
+   * server having served an incoherent module graph, and the remedy is a
+   * command, not a debugging session.
+   */
+  | "duplicate-deps";
 
 export interface MountSuccess {
   ok: true;
@@ -304,6 +304,8 @@ export interface MountFailure {
   cause?: unknown;
   /** Console/pageerror lines the barrier heard while it waited. */
   consoleTail?: string[];
+  /** Deps the page loaded under more than one optimiser hash (`duplicate-deps`). */
+  duplicateDeps?: string[];
 }
 
 export type MountOutcome = MountSuccess | MountFailure;
@@ -395,6 +397,29 @@ export async function waitForMount(opts: MountBarrierOptions): Promise<MountOutc
       lastProgressAt = now();
     }
 
+    // DUPLICATED DEPENDENCIES ARE TERMINAL AND SELF-EVIDENT, so they are decided
+    // before anything else and WITHOUT waiting out a stall window. The page is
+    // holding two copies of a module; nothing it does from here can undo that,
+    // and Vite's own repair (a `full-reload` over HMR) is switched off for E2E.
+    // Waiting 45 more seconds to say so would only delay the answer -- and if
+    // the app DID mount despite it, the state is still incoherent and every
+    // spec after it would be running against a page with two Reacts.
+    if (probe) {
+      const duplicates = probeShowsDuplicateDeps(probe);
+      if (duplicates.length > 0) {
+        return {
+          ok: false,
+          kind: "duplicate-deps",
+          elapsedMs,
+          quietMs: now() - lastProgressAt,
+          samples,
+          probe,
+          survey,
+          duplicateDeps: duplicates,
+        };
+      }
+    }
+
     if (probe && probeIsMounted(probe)) {
       // ORDER MATTERS. The boot-error check comes FIRST because the root error
       // boundary's panel is itself a child of `#root`: accepting the mount and
@@ -483,8 +508,27 @@ function evidenceBlock(f: MountFailure): string {
     // every ordinary startup failure would train the reader to skip the line
     // that matters most on the one occasion it is present.
     if (p.bootErrorText !== null) {
-      lines.push("  ROOT ERROR BOUNDARY IS ON SCREEN. It reported:");
+      lines.push(`  ROOT ERROR BOUNDARY IS ON SCREEN (found by ${p.bootErrorSignal}).`);
+      // A fallback hit is ITSELF a finding: the panel was identified without its
+      // `data-testid`, which means a build step has removed the attribute the
+      // guard used to depend on exclusively. Said here, once, at the moment it
+      // is observable -- silent degradation is what this whole file is about.
+      if (p.bootErrorSignal === "role+text") {
+        lines.push(
+          "  NOTE: the `data-testid` was ABSENT and the panel was recognised by its",
+          "  role+text fallback. That is a build/tooling change worth chasing --",
+          "  see e2e/pageState.ts and bootErrorMarkerSurvivesBuild.test.ts.",
+        );
+      }
+      lines.push("  It reported:");
       for (const l of p.bootErrorText.split("\n")) lines.push(`    ${l}`);
+    }
+    // Printed only when there ARE duplicates, for the same reason the boundary
+    // line is: a "duplicated dependencies: none" on every ordinary failure
+    // trains the reader past the line that matters.
+    if (f.duplicateDeps && f.duplicateDeps.length > 0) {
+      lines.push("  THE PAGE HOLDS MORE THAN ONE COPY OF THESE DEPENDENCIES:");
+      for (const d of f.duplicateDeps) lines.push(`    ${d}`);
     }
   } else {
     lines.push("  (no page/target could be read at all)");
@@ -652,6 +696,40 @@ export function describeStartupFailure(f: MountFailure): string {
         "     logic (`Invalid hook call`, a null `useReducer`), suspect a duplicated React",
         "     from a mid-flight Vite dep re-optimisation and delete `app/node_modules/.vite`",
         "     before blaming the code (§32).",
+      ];
+      break;
+    case "duplicate-deps":
+      headline =
+        "THE DEV SERVER SERVED TWO COPIES OF THE SAME DEPENDENCY -- the page has two Reacts.";
+      causes = [
+        "The page fetched `/node_modules/.vite/deps/<dep>.js?v=<hash>` under MORE THAN ONE",
+        "hash (listed above). The `?v=` identifies Vite's optimiser run, so two hashes are",
+        "two URLs, two module instances, two React dispatchers -- hooks registered against",
+        "one and read through the other. That is `Warning: Invalid hook call` followed by",
+        "`Cannot read properties of null (reading 'useReducer')`, and nothing renders.",
+        "",
+        "THIS IS NOT A PRODUCT FAILURE and it is not random. Vite pre-bundles dependencies",
+        "into `node_modules/.vite/deps_temp_<hash>/` and RENAMES that directory onto",
+        "`deps/`. When something holds a handle inside it the rename fails with EBUSY, the",
+        "server has no usable cache, and it discovers dependencies request-by-request while",
+        "the page is ALREADY LOADING. Measured on this tree: 3 of 10 optimiser runs failed",
+        "that way, and 4 of 11 cold-cache launches served react.js under FOUR hashes.",
+        "",
+        "Vite's own repair is a `full-reload` over the HMR channel, and E2E runs set",
+        "CALCULA_E2E=1 which disables HMR on purpose (a stray fast-refresh resets the grid",
+        "mid-capture). So under test the page NEVER recovers: BUG-0082, open-decisions §32.",
+        "",
+        "What to do, in order:",
+        "  1. `cd app && node scripts/ensure-dep-cache.mjs` -- rebuilds the cache to",
+        "     completion, retrying the EBUSY, then relaunch. This normally runs by itself",
+        "     as npm's `predev`; reaching this banner means it was skipped or it gave up.",
+        "  2. `cd app && npm run dropbox:check`. This repository lives inside a Dropbox",
+        "     tree, and `app/node_modules` was being synced -- Dropbox opening the freshly",
+        "     written bundles is what made the rename fail. `npm run dropbox:ignore` marks",
+        "     the build trees so it stops. (An antivirus or the Windows indexer can hold",
+        "     the same handle; the retry in step 1 covers those.)",
+        "  3. If it persists, look for `deps_temp_*` directories left in",
+        "     `app/node_modules/.vite/` -- each one is a rename that failed.",
       ];
       break;
     case "no-tauri-bridge":

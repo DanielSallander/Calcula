@@ -15,6 +15,11 @@ import { APP_DIED_MARKER } from "./appDiedMarker";
 import { assertCollectionGuardPresent } from "./collectionGuard";
 import { clearStartupFailure } from "./startupGuard";
 import { assertAppMounted } from "./startupBarrier";
+import {
+  resolveBuildTarget,
+  describeBinary,
+  formatBuildTargetBanner,
+} from "./buildTarget";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
@@ -82,6 +87,18 @@ export default async function globalSetup(config: FullConfig) {
   // clears; `startupBarrier.ts`/`fixtures.ts` write; `collectionGuard.ts` reads.
   clearStartupFailure();
 
+  // NOTE ON THE DEPENDENCY CACHE (BUG-0082's second mechanism, §32). Nothing is
+  // done about it HERE, and that is deliberate. The repair --
+  // `app/scripts/ensure-dep-cache.mjs` -- runs from npm's `predev`, which
+  // Tauri's `beforeDevCommand` invokes, so it covers the auto-launch below AND
+  // the manual launcher, always BEFORE a dev server exists. Running the
+  // optimiser from here would be worse than useless: in manual mode the server
+  // is already up and serving, and re-optimising underneath a live server is how
+  // a page ends up holding two generations of React in the first place. What
+  // this file contributes instead is DETECTION: `assertAppMounted` reads the
+  // page's own resource timings and fails the run by name if it finds a
+  // dependency loaded under more than one optimiser hash.
+
   // Manual mode — caller manages the app lifecycle.
   if (process.env.E2E_MANUAL === "1") {
     console.log("[e2e] Manual mode — expecting Calcula already running with CDP on port", CDP_PORT);
@@ -122,6 +139,25 @@ export default async function globalSetup(config: FullConfig) {
       } catch { /* already gone */ }
     }
   } catch { /* no process on port — good */ }
+
+  // SAY WHICH BINARY THIS RUN IS ABOUT TO EXERCISE.
+  //
+  // Everything above carefully constructs the MSVC environment; nothing
+  // anywhere sets CARGO_TARGET_DIR. There is no .cargo/config.toml and no
+  // persistent user value, so the target directory is whatever the invoking
+  // shell exports -- in-repo when it exports nothing. Two terminals therefore
+  // build and run two DIFFERENT binaries and no run output ever said which.
+  // Measured 2026-08-16: the in-repo tree failed to link app_lib.dll (~40
+  // LNK2001 out of libcalp) while the same source linked cleanly out-of-repo,
+  // and the run read as "E2E is broken". See open-decisions 2026-08 section 39d.
+  {
+    const workspace = path.resolve(__dirname, "..", "src-tauri");
+    const repoRoot = path.resolve(__dirname, "..", "..");
+    const info = resolveBuildTarget(process.env, workspace, repoRoot);
+    for (const line of formatBuildTargetBanner(info, describeBinary(info.targetDir))) {
+      console.log(line);
+    }
+  }
 
   console.log("[e2e] Launching cargo tauri dev with CDP on port", CDP_PORT, "...");
 

@@ -32,47 +32,20 @@ import {
   type StartupProbe,
   type StartupSurvey,
 } from "./startupGuard";
+import { BOOT_ERROR_SIGNALS, readPageState, UNREADABLE_PAGE_STATE } from "./pageState";
 
-/** What one page reports about itself, read in ONE round trip. */
-const PAGE_STATE = () => {
-  const w = window as unknown as { __TAURI__?: unknown; __calcImport?: unknown };
-  const root = document.getElementById("root");
-  // The root error boundary (BUG-0083) renders INTO `#root`, so without this the
-  // barrier reads a crashed app as a healthy mount. Trimmed and capped because
-  // the panel carries both stacks and this string is printed in full.
-  const bootError = document.querySelector("[data-testid='root-error-boundary']");
-  return {
-    rootChildCount: root ? root.childElementCount : -1,
-    bootErrorText: bootError
-      ? (bootError.textContent ?? "").replace(/\s+\n/g, "\n").trim().slice(0, 4000)
-      : null,
-    spreadsheetPresent:
-      document.querySelector("[data-focus-container='spreadsheet']") !== null,
-    tauriBridgePresent: typeof w.__TAURI__ !== "undefined",
-    calcImportPresent: typeof w.__calcImport !== "undefined",
-    url: document.location.href,
-    readyState: document.readyState,
-    title: document.title,
-    // The page's OWN count of completed subresources. Unlike the CDP counter it
-    // is retroactive, so it sees everything that loaded before the barrier
-    // attached -- which on a fast launch is everything.
-    resourceCount: performance.getEntriesByType("resource").length,
-  };
-};
+/**
+ * What one page reports about itself, read in ONE round trip.
+ *
+ * The reading -- and in particular HOW a rendered root error boundary is
+ * recognised -- lives in `pageState.ts`, shared with `fixtures.ts`. It used to
+ * be inlined here and separately (differently) in the fixture, which is two
+ * sources of truth for the one question the guard turns on. See that file for
+ * why the boundary is no longer identified by `data-testid` alone.
+ */
+const PAGE_STATE = readPageState;
 
-const UNREADABLE = {
-  rootChildCount: -1,
-  // Not `""`: an unreadable page has NOT been shown to carry a boot error, and
-  // an empty string would read as one that reported nothing.
-  bootErrorText: null as string | null,
-  spreadsheetPresent: false,
-  tauriBridgePresent: false,
-  calcImportPresent: false,
-  url: "(unreadable)",
-  readyState: "(unreadable)",
-  title: "(unreadable)",
-  resourceCount: -1,
-};
+const UNREADABLE = UNREADABLE_PAGE_STATE;
 
 /**
  * Count responses per page, attaching one CDP session per page the first time
@@ -214,7 +187,7 @@ export async function assertAppMounted(opts: BarrierOptions): Promise<void> {
       const states = await Promise.all(
         pages.map(async (p) => ({
           page: p,
-          state: await p.evaluate(PAGE_STATE).catch(() => UNREADABLE),
+          state: await p.evaluate(PAGE_STATE, BOOT_ERROR_SIGNALS).catch(() => UNREADABLE),
         })),
       );
       const chosen = pickAppPage(states, (s) => s.state, opts.vitePort);

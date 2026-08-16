@@ -119,7 +119,15 @@ calls `record_cell_change`). That is the honest state, not a claim that it is fi
 `api.listObjects("shape")`) and **no writer anywhere**, so the object list showed a permanently-empty
 name. A `PropertyDefinition` for it is in `SHAPE_PROPERTIES` in the same change.
 
-**Still open, honestly.** Create and delete are not undoable, and closing that means giving control
+**Still open, honestly.** ~~Create and delete are not undoable~~ — **CLOSED, verified against the code
+2026-08-15 (§35).** `create_control_metadata` and `remove_control_metadata` both snapshot the store
+under a READ guard and call `crate::undo_commands::record_controls_undo`
+(`app/src-tauri/src/controls.rs:381` and `:418`), the removal refusing FIRST so a no-op neither dirties
+the document nor pushes a step that undoes to itself. Pinned by `a_control_creation_undoes_and_redoes`
+and `a_control_deletion_undoes_and_redoes` (`undo_sheet_domain_tests.rs`), both of which also assert the
+`controls` refresh domain. It was closed by the undo-domain work (§2e), not by a pass reading this
+paragraph — which is why the paragraph outlived it.
+Closing that meant giving control
 mutations a real undo transaction in Rust — out of scope for a frontend-only pass, and stated in the
 consent text meanwhile. `deleteControl` refuses an IN-CELL (embedded) button rather than removing it:
 that one is a cell-FORMATTING operation, and pretending otherwise would delete metadata while leaving
@@ -702,6 +710,20 @@ the accidental **99** awaiting a product call (55 is the candidate), and the Hom
 right-click affordance is still shell work. One smaller residue, pre-existing and deliberately left:
 `saveLayout` swallows a `localStorage` failure into a `console.warn`, so a quota-exceeded save closes
 the dialog looking successful. Fixing it means giving a pure config module a way to talk to the user.
+
+> **RE-VERIFIED AGAINST THE CODE 2026-08-15 (§35): two of these three are CLOSED and this paragraph
+> was the only thing still saying otherwise.**
+> * `cells: collapsePriority` is **55**, not 99 — `homeTabConfig.ts` reads `collapsePriority: 55` in
+>   the `cells` group, among `10/20/30/40/50/55/60`. Closed as **D6** (§ "D6. `cells: collapsePriority`
+>   is an accidental 99"), decided and shipped 2026-08-09. (The 99 that still exists is a DIFFERENT
+>   one: `HomeTabCustomizeDialog.tsx` mints new USER groups at 99 so they demote last, which is a
+>   deliberate default and not this item.)
+> * `saveLayout` no longer swallows the failure — it **returns `boolean`** (`homeTabConfig.ts:414`)
+>   and the dialog refuses to close on `false` (`HomeTabCustomizeDialog.tsx:456`). Closed by §3aj,
+>   whose own note records that this paragraph's verdict ("means giving a pure config module a way to
+>   talk to the user") was wrong: the module stayed pure and the dialog spoke.
+> * **The Home-tab-header right-click affordance is genuinely still open** — `rg onContextMenu
+>   app/src/shell/components` returns nothing.
 
 ### 2b. Pivot progress overlay never clears — FIXED 2026-08-07
 
@@ -1715,7 +1737,18 @@ failed** (baseline 1,042; +15 here, the rest from concurrent undo work), `test_p
 `cargo check` clean on both workspaces, `check-types` clean, `check:line-endings` 0 mixed.
 (Superseded at integration by §3ad — the two extra siblings above add 2 more app-lib tests.)
 
-### 2n. The grid paints `#CIRCULAR`, not `#CIRCULAR!` — RECORDED 2026-08-08, deliberately not fixed
+### 2n. The grid paints `#CIRCULAR`, not `#CIRCULAR!` — RECORDED 2026-08-08, deliberately not fixed — **FIXED as D7, and this header stayed stale for a week (corrected 2026-08-15, §35)**
+
+> **CLOSED. `cell_error_display` is now the single line `e.as_literal().to_string()`**
+> (`app/src-tauri/src/lib.rs:929`) — there is no `#{Debug}` arm left anywhere in the product, so the
+> grid paints `#CIRCULAR!`, `#DIV/0!`, `#NAME?` and `#VALUE!`. Closed by **D7** (see §4 D7 and the
+> §3ap contract-(d) sweep), which also found a SIXTH divergence this section's four-variant table had
+> never included: `Parse` → `#PARSE`, an internal enum name leaking to the grid, and deleted the
+> variant. `remaining-correctness.spec.ts` asserts `#CIRCULAR!` (`const CIRCULAR = "#CIRCULAR!"`), and
+> `owner-decisions.spec.ts` carries the counterweight — no painted cell may match
+> `/^#(PARSE|DIV0|REF|NAME|VALUE|CIRCULAR|CONFLICT)$/`, i.e. none of the old Debug spellings.
+> Everything below is the 2026-08-08 measurement and is kept as the record of what was measured, not
+> as a description of the product.
 
 Found by an assertion written from these notes rather than from the app. Every section of this
 register, every Rust test and `CellError::as_literal` all say `#CIRCULAR!`. The running app renders
@@ -7110,9 +7143,15 @@ compiling it, not running a filtered subset — is what found this.
   only for a single-row or single-column `ref`; a 2-D `ref="B2:D10"` yields an empty map and every
   follower gets no formula. **Reproduction needed:** a crafted .xlsx with a rectangular shared-formula
   `ref`. Not reproduced here, and not fixable inside Calcula — it is a dependency limitation.
-- **S8 — `WorkbookProperties` are written on .xlsx export and ignored on import.** One-way loss:
-  title/author/subject survive a save and vanish on the next open. `xlsx_reader.rs` never populates
-  them. Recorded in `XLSX_LOSS_COVERAGE` as part of the `properties` verdict.
+- ~~**S8 — `WorkbookProperties` are written on .xlsx export and ignored on import.**~~ **FIXED
+  2026-08-15 (§35), filed as BUG-0085.** The claim was verified exactly as written — the writer filled
+  `rust_xlsxwriter`'s `DocProperties` on every save and `xlsx_reader.rs` built its `Workbook` with
+  `properties: crate::WorkbookProperties::default()`, never opening `docProps/core.xml` at all, so a
+  workbook saved as .xlsx and reopened by the SAME app came back with every document property blank.
+  `parse_doc_properties` (`xlsx_style_reader.rs`) now reads that part in the archive pass that already
+  existed for `workbookPr/@date1904`, matching by LOCAL NAME rather than namespace prefix. Pinned by
+  `document_properties_survive_the_xlsx_round_trip` (fails `left: ""` / `right: "Quarterly Report"`
+  under sabotage) and `a_workbook_without_document_properties_still_imports`.
 - **S9 — the soak walker cannot generate a formula that trips any renderer defect.** Its alphabet is
   `=SUM(A1:A10)`, `=A1&B2`, `=IF(A1>0;1;0)`, `=AVERAGE(B1:B10)`, `=COUNT(A1:A30)`, `=MAX(A1:E5)`.
   Adding ~8 formulas to `walker/actionCatalog.ts:107` is the single highest-leverage change available
@@ -7573,7 +7612,10 @@ runs green at its baseline.
   root cause: **§3bn**, a slicer left behind by the deletion of its table.
 - ~~**S12's own closure is still reasoned, not observed.**~~ **OBSERVED — §3bm re-ran
   `SOAK_SEED=20260810 SOAK_ACTIONS=150 SOAK_ORACLE_EVERY=25` twice, cold, and it passes.**
-- **§3bf** (`A1#` resolved at entry) remains deliberately open.
+- ~~**§3bf** (`A1#` resolved at entry) remains deliberately open.~~ **FIXED 2026-08-11 (§3bs)** — the
+  stored formula keeps the `#` and resolves at EVALUATION with a dependency edge; pinned by
+  `spill_persistence_tests::a_spill_reference_follows_its_array_3bf`. §3bf's own header has said so
+  since; this line did not (corrected 2026-08-15, §35).
 - The `dialogGlobalsBan.test.ts` ESLint-timeout flake did **not** reproduce in either full vitest run
   here (both 747/747), but it was only ever seen with Rust compiling concurrently.
 
@@ -9266,7 +9308,18 @@ The order for whoever holds the machine next:
 They are recorded here rather than diagnosed — they are outside this pass's ownership — but "every
 failure a screenshot" should not be carried forward as if it were still true.
 
-### 3bz. `macro-link-model` test 1 — STILL OPEN, but the search space is now small and the experiment is written down (2026-08-11)
+### 3bz. `macro-link-model` test 1 — STILL OPEN, but the search space is now small and the experiment is written down (2026-08-11) — **CLOSED the same week; header corrected 2026-08-15 (§35)**
+
+> **NOT OPEN.** The experiment was run and test 1 **passes in 5.0 s** on a cold app in the ordered
+> functional suite — see "3. `macro-link-model` test 1 — PASSES, and the register's leading hypothesis
+> is now excluded" further down this document. Candidate 1 (Save drops the description, so the route
+> flips to QuickJS) is EXCLUDED by evidence: the spec now asserts the store holds `runtime=objectScript`
+> after the dialog Save and before the second click. The original failure is recorded as not reproduced
+> on a quiet machine (§3bq: another agent's `tauri dev` watcher was restarting the app under the run).
+> The spec's diagnostic half was also built — `diagnoseSilentButton` in
+> `app/e2e/tests/macro-link-model.spec.ts` reports the runtime marker, the stored description, design
+> mode and any toasts, which is the "assert on the outcome the product voices" change this entry said
+> was owed regardless.
 
 §3bv §10 left this undiagnosed: the button runs the ORIGINAL macro, and after the macro is edited in
 place through Developer ▸ Macros… and saved, the same button writes nothing within 45 s. **This pass
@@ -9763,10 +9816,15 @@ written and nothing reads it"); reverted, 7/7 green.
 
 #### 7. Left open, deliberately
 
-* **BUG-0023** — the 27 visual goldens must be re-recorded at dpr 2. Not done here: it requires an
-  E2E run, which this pass was scoped out of. The quarantine will fail the moment they are.
-* **BUG-0021 / BUG-0022** — `update_bi_pivot_fields` and `change_pivot_data_source` still record no
-  undo entry; both need a definition+cache snapshot.
+* ~~**BUG-0023** — the 27 visual goldens must be re-recorded at dpr 2.~~ **CLOSED** — re-recorded
+  2026-08-11 at dpr 2 (18/18); all 72 committed goldens decode dpr 2, `MIS_RECORDED_CORPORA` is empty
+  and the self-expiring quarantine is deleted. (Ledger, verified 2026-08-15.)
+* ~~**BUG-0021 / BUG-0022** — `update_bi_pivot_fields` and `change_pivot_data_source` still record no
+  undo entry; both need a definition+cache snapshot.~~ **BOTH CLOSED** — the pivot-definition undo
+  snapshot grew an optional `cache`, `update_bi_pivot_fields` records at all five exits, and
+  `change_pivot_data_source` snapshots definition + cache and SAVES the cells the new pivot overwrites.
+  Pinned by `pivot_undo_cache_tests.rs`. They still have no live E2E, which is the part that is
+  actually still open. (Ledger, verified 2026-08-15.)
 * `model-engine-lib` carries **18 pre-existing `cargo check --all-targets` warnings** (unused imports
   and variables, all in test targets). Untouched: they predate this pass, and the brief's
   "0 warnings both" covers core and app, both of which are clean.
@@ -17073,14 +17131,20 @@ and the visual corpus was hashed before and after to prove it.
    leading hypothesis from *unknown* to *a ~55 s cold Vite transform against a 60 s ceiling*. Raising
    that ceiling is **open**, deliberately, on one sample; the Vite request log that would separate an
    overrun from a stall is open; a retry stays last.
-2. **The undo round-trip oracle decides nothing.** Measured across **every walk run today** — 10
-   walks, 32 checkpoints, **0 decided**, on both projects and on four seeds. §22b recorded this as
-   thin evidence; it is now uniformly zero. Walks reach workbook-structure actions that clear the undo
-   stack (Excel parity, correct), so the oracle is never decidable over a 25-action window. A green
-   invariant run currently carries NO undo evidence, and the walker says so per run. Closing it needs
-   the checkpoint window shortened, or structure actions down-weighted for a dedicated undo walk —
-   deliberately not done here, because it changes what the seeds mean and belongs to a pass that can
-   re-baseline them.
+2. ~~**The undo round-trip oracle decides nothing.**~~ **CLOSED 2026-08-16 — see §38** (BUG-0089).
+   Measured across **every walk run today** — 10 walks, 32 checkpoints, **0 decided**, on both
+   projects and on four seeds. §22b recorded this as thin evidence; it is now uniformly zero. Walks
+   reach workbook-structure actions that clear the undo stack (Excel parity, correct), so the oracle
+   is never decidable over a 25-action window. A green invariant run currently carries NO undo
+   evidence, and the walker says so per run. Closing it needs the checkpoint window shortened, or
+   structure actions down-weighted for a dedicated undo walk — deliberately not done here, because
+   it changes what the seeds mean and belongs to a pass that can re-baseline them.
+   *Closed by neither of those two remedies, and the diagnosis above is only 25% right: the walker
+   now re-bases its undo baseline the moment it dies rather than 25 actions later, no seed changed
+   meaning, and the census says three quarters of the window-killers were the FLOATING-RANGE actions
+   added on 2026-08-13, not sheet structure. Live A/B, same seeds: 5 of 28 checkpoints decided → 27
+   of 30, 174 → 546 transactions wound back, and a run that decides zero now FAILS. It found two
+   defects on sight (BUG-0090, BUG-0091).*
 3. **A journey run left the Animation side panel open** (grid canvas 1218 → 898 px), failing
    `remaining-correctness` and skipping 10 tests behind it. It appeared only in the run where the
    parity spec was failing and did NOT reproduce once that spec was fixed (151/1/0). Not filed — not
@@ -17413,3 +17477,909 @@ watcher fix removed the cause rather than moving it.
    --list for this filter (exit 3221225794)` -> fail, not green), and the app-died fixture named the
    collapse outright (`NO app.exe IS RUNNING -- the application is gone. Nothing reported after this
    point is a test result`). Both are arms nobody planned to exercise in this pass.
+
+
+## 35. The register audited against the code — eight claims were stale in the SAFE direction, one lied the other way in CLAUDE.md, and one filed gap was real (2026-08-15)
+
+Not a bug hunt. This pass took every surviving open / deferred / residual / owner-call claim in this
+document (and CLAUDE.md's own residuals) and checked it against the TREE — opening the file, reading
+the symbol, running the test — rather than against the register's own prose. The reason is stated in
+§31's brief and was earned twice in one week: §2ab was carried as open after being fixed days earlier
+by the OPPOSITE fix it recommended, and BUG-0082 was recorded not-reproducible and then reproduced
+5 of 5. A claim in this file is a point-in-time observation, not live state.
+
+### 35a. The ratio, which is the number worth keeping
+
+**25 claims verified against the tree. 15 were accurate as written. 8 were stale in the "recorded
+OPEN, actually FIXED" direction. 1 was stale in the OTHER direction — a CLAUDE.md instruction telling
+every future agent that `clear_range` still recalculates nothing, when it does. 1 more was a numeric
+drift (CLAUDE.md's `Persisted<T>` field count).** So the document is roughly a third wrong on its open
+list, and every error but one is the harmless kind — which is exactly why the one that is not matters
+more than the other eight put together: a stale "open" wastes a reader's afternoon, while a stale
+instruction sends them to re-fix working code or to distrust a path that is sound.
+
+Every stale-open had been closed by a LATER section of this same
+document or by a ledger entry — no claim was closed by an unrecorded change. That is worth saying
+plainly: **the sections are honest about what they did; what rots is the cross-reference.** A pass
+fixes a defect, writes its own section, and does not go back to strike the three earlier paragraphs
+that named the defect as open. The failure mode is entirely one of stale ANCHORS, not of false
+reports, and it means a reader who greps this file for "still open" gets a list that is, today, about
+a third wrong in the direction of wasted work.
+
+**The corrected claims, each struck in place where it was written rather than only listed here:**
+
+| claim, as the register carried it | verdict | evidence |
+|---|---|---|
+| §1: control create/delete "are not undoable" | **ALREADY FIXED** (§2e's undo-domain work) | `controls.rs:381`/`:418` both call `record_controls_undo`; `a_control_creation_undoes_and_redoes` / `a_control_deletion_undoes_and_redoes` |
+| §2g: `cells: collapsePriority` "is still the accidental 99" | **ALREADY FIXED** (D6, 2026-08-09) | `homeTabConfig.ts` reads `55` in the `cells` group |
+| §2g: `saveLayout` swallows a `localStorage` failure | **ALREADY FIXED** (§3aj) | it returns `boolean`; `HomeTabCustomizeDialog.tsx:456` keeps the dialog OPEN on `false` |
+| §2n: the grid paints `#CIRCULAR`, not `#CIRCULAR!` | **ALREADY FIXED** (D7 / §3ap contract (d)) | `cell_error_display` is `e.as_literal().to_string()`; no `#{Debug}` arm survives |
+| §3bz: `macro-link-model` test 1 "STILL OPEN" | **ALREADY FIXED** | passes in 5.0 s cold; candidate 1 excluded by an assertion, not by argument |
+| §3cb "left open": BUG-0021 / BUG-0022 / BUG-0023 | **ALREADY FIXED** | all three `fixed` in the ledger with `validatedBy` populated |
+| §3bl "still open": §3bf (`A1#` frozen at entry) | **ALREADY FIXED** (§3bs) | `a_spill_reference_follows_its_array_3bf` |
+| CLAUDE.md: the codeInventory "reach" for grid-only surfaces "is asserted, not verified against the interpreter" | **ALREADY FIXED** | `manifest.rs::op_manifest_matches_the_live_interpreter_surface` boots a real QuickJS runtime and diffs both directions; `interpreterReachDrift.test.ts` diffs that file against the TS mirrors |
+| CLAUDE.md: "`sort_range` shipped recalculating nothing at all, and `clear_range` still does" | **STALE THE OTHER WAY — the instruction was wrong about the product** | `clear_range` has a PHASE B that seeds `recalc_after_active_sheet_bulk_rewrite` from the cells that actually held content; `sort_range` has the same second-lock-phase shape |
+| CLAUDE.md: "36 `AppState` fields are converted" to `Persisted<T>` | **NUMERIC DRIFT** | counted 51 converted against 43 bare `Mutex`/`RwLock`, and the remainder is mostly derived caches |
+
+### 35b. The one real gap this found, and it was a data loss — BUG-0085
+
+**S8 was filed on 2026-08-11 as "filed, not fixed" and was accurate to the letter.** The `.xlsx`
+writer has always emitted document properties (`xlsx_writer.rs` fills `rust_xlsxwriter`'s
+`DocProperties` with title, author, subject, description, keywords, category and a `dcterms:created`
+stamp). The reader built its `Workbook` with `properties: crate::WorkbookProperties::default()` and
+never opened `docProps/core.xml` at all. So the round trip that lost the data was **the app's own**:
+save as `.xlsx`, reopen the file Calcula itself just wrote, and every document property is blank with
+nothing saying it was dropped. That is not a fidelity preference against a foreign producer — the
+bytes are in the file, written by this code, and thrown away by this code.
+
+`parse_doc_properties` now reads the part inside the archive pass that already existed for
+`workbookPr/@date1904`. Three decisions in it are not mechanical:
+
+1. **Matched by LOCAL NAME, never by namespace prefix.** A producer may bind the same namespaces to
+   different prefixes (`dcterms:` vs `dt:`); matching the prefix would silently drop every property in
+   such a file — the exact silent-wrong-answer shape this register spends its length cataloguing. The
+   local names are unique within the part, so nothing needs disambiguating.
+2. **The element names come from the WRITER, read backwards**, not from the Calcula field names,
+   because the two disagree in two places: `author` is `dc:creator`, and `description` is
+   `dc:description` (the writer sets it through `set_comment`). A reader written from the Calcula
+   struct would have mapped `description` to `dc:subject` and looked right on any fixture where the
+   two happen to agree — so the test sets all six fields to DIFFERENT values.
+3. **A missing or unreadable part is not an error.** Document metadata is advisory and no import may
+   fail over it; every field stays the `Default` empty string, which is exactly what the reader
+   produced before this existed. The counterweight test builds an archive with no `docProps` part at
+   all and requires the CELLS to load.
+
+**Teeth, because a test that cannot fail is not evidence.** Reverting the single reader line fails
+`document_properties_survive_the_xlsx_round_trip` by name (`left: ""` / `right: "Quarterly Report"`)
+and leaves `a_workbook_without_document_properties_still_imports` green — i.e. the red is targeted at
+the wiring, not at the file. Core workspace after the change: **1,377 / 0** (baseline 1,375, +2 here).
+
+### 35c. Confirmed STILL OPEN — verified against the code, not restated from the file
+
+Each of these was opened and read. They stay open, and now they stay open with a citation.
+
+* **§2aq, all three, and they are correctly filed as projects rather than patches.**
+  - *An empty cell reads as the NUMBER zero in every context.* `evaluator.rs:1117` is literally
+    `CellValue::Empty => EvalResult::Number(0.0)`, and `EvalResult` has no `Empty` variant to route to
+    (`Number`/`Text`/`Boolean`/`Error`/`Array`/`List`/`Dict`/`Lambda`). Excel's rule — blank is 0 in
+    arithmetic, `""` in concatenation, ignored by the counting functions — cannot be expressed without
+    a new variant threaded through every arm. Project, confirmed.
+  - *Excel's array literal `{1;2;3}` does not parse.* `lexer.rs` has no `;` arm at all, so `;` is
+    `Token::Illegal`, and `parser.rs:520` treats `{…}` as a Python-style LIST (or dict) literal.
+    `{1,2,3}` parses as a `ListLiteral`, which is not a 1x3 array.
+  - *`#NULL!` is still never produced.* `rg "CellError::Null" core` returns exactly three hits, all in
+    `cell.rs`: the variant, `as_literal`, `from_literal`. It round-trips and is never raised.
+* **`default_row_height` / `default_column_width` announce no domain.** `undo_commands.rs:1579-1580`
+  register both with `domains: NONE`, and the registry test at :4530 pins it. Accurate.
+* **The Home-tab-header right-click affordance.** No `onContextMenu` anywhere in
+  `app/src/shell/components`.
+* **S7 (calamine expands only 1-D shared formulas)** — unchanged, and still a dependency limitation
+  with no reproduction fixture. **S9 (the soak walker's six-formula alphabet)** — `FORMULAS` in
+  `walker/actionCatalog.ts` is still exactly the six listed. Deliberately not widened here: it changes
+  what the committed seeds mean, and that belongs to a pass that can re-baseline them.
+* **§25g's two owner calls.** Reading the OS regional settings on the `"system"` locale path is
+  untouched. Currency negatives is real and verified: `format_currency`
+  (`core/engine/src/number_format.rs:136`) is `if value < 0.0 { format!("({})", …) }` unconditionally,
+  where Excel's single-section `$#,##0.00` uses a leading minus. Left as the owner call it was filed
+  as — it is shared with the Format Cells presets and moves visual goldens.
+* **§29's residual** — `walker/reset.ts` has `resyncChartStoreToBackend` and nothing else; sparklines,
+  slicers and pane controls sit on the same fan-out with no equivalent. **§30's residual** — unchanged.
+* **§31k item 3** — confirmed asymmetric: `zz-workbook-residue.spec.ts` exists under `e2e/tests`
+  (functional) and there is no counterpart under `e2e/journeys`, so an open side panel left by a
+  journey spec is still invisible to that project.
+* **§13f's two** — a same-sheet undo still does not move the selection (owner call), and
+  `set_active_sheet` still accepts a hidden sheet index.
+* **D9** (offer the 1904 date system as a setting) — import is fixed, no setting exists, the
+  recommendation to add none stands. Open product call, accurately recorded.
+
+### 35d. CLAUDE.md was corrected too, and one of its errors was the dangerous direction
+
+CLAUDE.md is read by every agent before it touches anything, so a stale sentence there costs more
+than a stale one here. Three were found:
+
+1. **"`sort_range` shipped recalculating nothing at all, and `clear_range` still does."** The second
+   half is false — `clear_range` ends with a PHASE B that drops every guard and calls
+   `recalc_after_active_sheet_bulk_rewrite` over the cells that actually held content. This is the
+   only claim found in the "recorded FIXED/harmless, actually…" direction, inverted: an instruction
+   telling every future agent that a working path is broken. Corrected to name the shape both paths
+   now share, which is the part still worth teaching.
+2. **The Wave-3 residual "the codeInventory `reach` for grid-only surfaces is asserted, not verified
+   against the interpreter."** No longer true. `core/script-engine/src/manifest.rs` carries
+   `op_manifest_matches_the_live_interpreter_surface`, which BOOTS a real QuickJS runtime through
+   `enumerate_registered_surface()` and diffs the manifest against what the realm actually registers
+   (both directions: ops registered but not admitted, and ops declared but no longer registered), and
+   `app/src/api/__tests__/interpreterReachDrift.test.ts` reads that Rust file at test time and diffs
+   it against every TypeScript consumer. The direction is fixed Rust -> TypeScript, because the
+   renderer can be compromised and the interpreter is where the sandbox is.
+3. **"36 `AppState` fields are converted" to `Persisted<T>`.** Counted: **51**, against 43 remaining
+   bare `Mutex`/`RwLock` fields — which on inspection are overwhelmingly derived caches (the
+   dependency maps, the spill maps, `id_registry`, `gather_cache`) rather than persisted state.
+
+### 35e. What this pass did NOT examine
+
+* **`model-engine-lib` was not built or run**, so its "18 pre-existing `cargo check --all-targets`
+  warnings" claim is unverified here — it is also the one claim in this file whose staleness costs
+  nothing.
+* **No E2E project was run.** Every E2E-shaped verdict above is a source-level check of the spec or
+  the harness file, not a run; where a claim could only be settled by running (§31k's BUG-0082 items,
+  the undo round-trip oracle's zero decisions) it was left to the owners named in §31k, along with the
+  oracle, the security surface and the startup guard, none of which this pass touched.
+* **The `.calp` / BI / pivot claims were checked by reading only.** No package was published, no model
+  connected.
+* The register's OWN prose was not trusted anywhere it could be checked — but the sections that record
+  measurements this pass could not repeat (live timings, pixel counts, wedge reproductions) are carried
+  forward unverified, and are the obvious place for the next audit of this kind to start.
+
+
+## 36. The image-ingress question settled: the UI path was closed a week ago, and the refusal it relies on was only bookkeeping (BUG-0086, 2026-08-15)
+
+Two records disagreed about Insert > Image and the disagreement was the assignment. `CLAUDE.md` said
+the ingress was closed ("a script may REFERENCE media already in the document, never INTRODUCE
+bytes"); a standing project note said the opposite ("Insert > Image ALREADY ships an uncapped,
+unvalidated arbitrary-binary path ... CSP is the undocumented load-bearing control"). Both were
+checked against the code rather than against each other.
+
+### 36a. The verdict on the four questions asked
+
+**The UI path is CLOSED, and the project note is STALE.** Insert > Image is
+`pickValidatedImage` -> `importImageViaPicker` -> the Rust command `read_media_file`. The user picks
+through the NATIVE dialog, so what crosses is a PATH; the host reads the bytes, refuses on
+`std::fs::metadata` before allocating, and puts them through
+`calcula_format::media::inspect_media` -- magic bytes (PNG/JPEG/GIF/WebP only; SVG and BMP refused by
+name), an 8 MiB byte cap, a 12,000 px dimension cap and a 40 MP pixel cap, all parsed from the header
+with nothing decoded. Bytes are filed under their own SHA-256 and **never cross IPC**: what comes
+back is `media:{sha256}` plus four integers. There is no `FileReader`, no `readAsDataURL` and no file
+input left in the extension, and a test asserts their absence by reading the source. The note
+describes the path this replaced.
+
+**What travels into a signed `.calp`:** `media/{sha256}` artifacts, content-addressed, and
+`admit_foreign_media` re-validates every blob at pull and re-derives the key from the BYTES, so a
+package cannot file a blob under a hash that is not its own. Adjacent routes were checked and are not
+gaps: there is no image paste path and no file drag-and-drop path in the product at all, and the xlsx
+reader imports no media whatsoever (`media: HashMap::new()`), so it carries none in either direction.
+
+**CSP is written down and enforced, not load-bearing by accident** -- `img-src 'self' data: blob:`
+in both `csp` and `devCsp`, with `imageIngress.test.ts` asserting the exact string in both. That
+half of the note is stale too. But see below for what it is load-bearing *for*.
+
+### 36b. The part that was real, and that neither record described
+
+Refusal was **bookkeeping rather than an outcome**, and `MAX_MEDIA_PIXELS` -- the decompression-bomb
+defence, and the sole reason the header is parsed at all -- therefore protected nothing on the inline
+path.
+
+Legacy and distributed control payloads carry pictures as inline `data:image/*;base64,...`. Both
+migrations decoded each payload, ran `inspect_media`, and on ANY error counted `refused` and **left
+the string exactly where it was**. That tolerance is correct and deliberate for a FORMAT refusal: an
+SVG the old picker accepted is a real picture, and destroying it because a later build narrowed the
+allowlist would be the worse failure. It was applied to the CAP refusals too. So a 30,000 x 30,000
+single-colour PNG -- a few KB on the wire, 3.6 GB of RGBA at decode -- was refused entry to the media
+store, kept its place in the control property, materialized into the subscriber's own
+`controls.json`, and was handed to the WebView as `<img src="data:...">`: the one component in the
+chain with no caps at all. *That* is what `img-src ... data:` is load-bearing for, and it is the
+CSP allowance the tolerance depends on.
+
+**The existing test named this exact case and passed.**
+`a_correctly_signed_decompression_bomb_inline_is_refused_not_admitted` asserted only
+`bytes.is_empty()`. The media store was clean and the renderer still got the bomb; the test verified
+the store and its name claimed the outcome.
+
+Three facts compounded it:
+
+* **An inverted control.** `decode_image_data_url` returns `None` for a payload over the byte cap,
+  and `None` was read as "leave it alone" -- so the BIGGER the payload, the more certainly it
+  survived, unbounded and unvalidated, into the subscriber's saved document. The cap meant to stop
+  large payloads was the thing that waved them through.
+* **The 64 KiB property bound does not apply to a pull.** `MAX_CONTROL_PROPERTY_CHARS`' own docstring
+  claimed "every route (UI, script broker, MCP, `.calp` materialization) arrives at one of these two
+  commands". A pull calls `materialize_saved_controls` **directly**. The docstring has been corrected
+  in place, because that sentence is what made the gap invisible.
+* **The write door was open as well.** A bomb is SMALL, so `set_control_property` /
+  `set_control_metadata` admitted one well inside 64 KiB, and nothing there ever consulted
+  `inspect_media`.
+
+The signature is not a defence here and never claimed to be: it proves the publisher sent those
+bytes, never that they are a picture.
+
+### 36c. The fix, and the half of it that is about NOT over-fixing
+
+The conflation was treating "this build will not re-admit it" as one outcome when it is two.
+`MediaError::is_decode_hazard` now splits them, with an **exhaustive** match so a new variant is a
+compile error rather than a silent default:
+
+* **hazard** (`TooLarge`, `DimensionOutOfRange`, `TooManyPixels`) -- decoding it is the harm.
+* **policy** (`SvgRefused`, `BmpRefused`, `UnknownFormat`, `MalformedHeader`, `Empty`) -- refused
+  entry to the store, still safe on screen.
+
+`judge_inline_image` is the ONE place the rule is applied, so the `.cala` corpus and the `.calp`
+corpus cannot drift on what tolerance means, and the same judgement now also guards the two property
+commands. A hazard payload is **cleared to `""`**, not deleted: the control keeps its identity,
+geometry and every other property and paints the honest "No Image" placeholder, because removing the
+control would silently change the sheet's layout. A policy payload is still left inline and still
+renders -- `a_format_refusal_is_still_tolerated_because_it_is_safe_to_render` pins that, so the fix
+cannot drift into the data loss the original tolerance existed to prevent.
+
+**Verified by sabotage, twice, because the tests being added were tests the previous ones had
+failed to be.** Forcing `is_decode_hazard` to `false` (the pre-fix behaviour) produced exactly four
+reds -- the bomb, the dimension case, the local `.cala` case and the classification pin. Forcing
+`exceeds_byte_cap_encoded` to `false` produced exactly one, the oversize case, confirming the two
+mechanisms are independently load-bearing rather than one masking the other. app-lib 1662/0 (from
+1656), core workspace green, `cargo check --all-targets` clean, `imageIngress.test.ts` 22/22.
+
+### 36d. What is left, honestly
+
+* The residual is **policy-refused payloads still reaching the decoder** -- an SVG or BMP in a legacy
+  document, bounded by 64 KiB on the command path but NOT bounded on the pull path, since
+  `materialize_saved_controls` still applies no size bound of its own. An `<img>` will not run an
+  SVG's script, which is why this was judged tolerable rather than closed; the alternative is
+  dropping pictures out of documents that display them today. Flagged as an owner call, not silently
+  accepted.
+* `CLAUDE.md` was accurate on the script path and is unchanged. The standing project note
+  (`project_image_ingress.md`) was stale in BOTH directions -- it described a closed path as open,
+  and missed the one that was actually open -- and has been rewritten rather than merely marked
+  fixed, since a security note that cries wolf is its own liability.
+
+## 37. The fragility the last pass named, closed -- and the SECOND BUG-0082 mechanism reproduced, explained and fixed (BUG-0087, BUG-0088, 2026-08-15)
+
+Three items were handed over as "recorded, not closed". All three are now closed, and two of them
+turned out to be the same event.
+
+### 37a. The `boot-error` arm no longer rests on one strippable attribute
+
+Verbatim from the pass that shipped it: *"The `boot-error` arm keys on `data-testid` -- nothing
+verifies it survives a production `vite build`. A future strip step would silently return the guard
+to reading a crashed boot as healthy, with no test failing."*
+
+**Measured first, then fixed.** A production build of the tree as it stands DOES keep the attribute
+(`dist/assets/RootErrorBoundary-*.js` contains `root-error-boundary`), so nothing was broken -- the
+exposure was entirely future. Closed on both axes rather than either:
+
+* **The guard no longer depends on the attribute.** `app/e2e/pageState.ts` recognises the panel by
+  `data-testid` OR by `role="alert"` carrying the failure report's own opening line. `role` is an
+  accessibility contract and text is content; neither is what an attribute stripper removes. The
+  probe REPORTS WHICH SIGNAL FIRED, and a `role+text` hit prints its own notice in the banner --
+  so a build that has quietly lost the attribute says so out loud instead of degrading in silence.
+* **A test runs a real production build and looks for them.** `bootErrorMarkerSurvivesBuild.test.ts`
+  builds the boundary through the real `vite.config.ts` in production mode with minification on
+  (~140 ms; only the entry is swapped) and asserts all three markers survive.
+* **A test runs the real component through the real probe.** `bootErrorSignals.test.ts` renders the
+  actual `RootErrorBoundary` in jsdom and runs `readPageState` over the actual DOM -- including the
+  case where the attribute is removed at runtime (the fallback must fire) and the case where BOTH
+  signals are removed (it must NOT fire, or the previous case proves nothing), and the case of an
+  ordinary in-app `role="alert"` toast, which must never abort a healthy run.
+
+**Proved by sabotage, and the first sabotage was a no-op.** A strip plugin added to `vite.config.ts`
+without `enforce: "pre"` ran AFTER `@vitejs/plugin-react` had already turned the JSX into
+`jsx("div", { "data-testid": ... })`, so its regex matched nothing and the test passed. That
+sabotage was discarded and redone until it actually changed the output: the minified chunk went
+2,653 -> 2,617 bytes, the attribute assertion failed, and the role+text assertions stayed green --
+which is simultaneously the proof the test has teeth and the proof the fallback is independent.
+Removing `role` and rewording the panel fails the other assertion. Deleting the attribute from the
+component fails four cases in the semantic test.
+
+A side effect worth naming: `startupBarrier.ts` and `fixtures.ts` had each kept their OWN inline
+copy of the page reading, and the copies had already drifted -- the fixture read four fields to the
+barrier's ten, and only one of the two trimmed the boundary text. There is now one `pageState.ts`.
+
+### 37b. The E2E harness was outside the type gate entirely (BUG-0088)
+
+Found while doing the above: `npm run check-types` compiled `src/`, `extensions/` and `scripts/`,
+and **not one of the 212 TypeScript files under `app/e2e/`**. Playwright and vitest both transpile
+with esbuild, which strips types without checking them, so a type error anywhere in the harness --
+fixtures, helpers, the collection guard, the app-died marker, the startup barrier -- was invisible
+until it threw at runtime, inside a run whose entire job is to say whether the PRODUCT is broken.
+
+`tsconfig.e2e.json` is a SEPARATE project, not an addition to the existing one, because the two need
+different `types`: merging them puts Node globals into the app's program, which is how a
+`process.env` read type-checks its way into the WebView bundle. The whole harness was already clean
+(197 files, zero errors), so the gate costs nothing to keep -- and it immediately caught a type error
+in the test file this same pass was writing.
+
+### 37c. The second BUG-0082 mechanism: reproduced at 4 of 11, then explained (BUG-0087)
+
+§32 recorded it and could not reproduce it: deleting `app/node_modules/.vite` produced a launch that
+sat at `readyState complete` for ten minutes, and a reload caught `Warning: Invalid hook call` +
+`TypeError: Cannot read properties of null (reading 'useReducer')` in `<GridProvider>` -- filed as
+"a second React instance from a mid-flight Vite dependency re-optimisation".
+
+**It reproduces, and it needs no browser to see.** Vite rewrites every bare import to
+`/node_modules/.vite/deps/<dep>.js?v=<hash>`, and that hash identifies the OPTIMISER RUN. Two hashes
+for `react.js` in one page load are two URLs, therefore two module instances, therefore two
+dispatchers -- which IS "Invalid hook call". So: clear the cache, start the dev server the way the
+E2E launcher does (`CALCULA_E2E=1`, HMR off), crawl the 1,422-module graph over HTTP exactly as the
+browser does, and count hashes.
+
+```
+ELEVEN cold-cache launches
+  7 clean   1,422 modules, 0 failures, ONE hash per dep, ~4.3 s
+  4 BROKEN  1,510 modules, 18 refused requests, and react.js served under FOUR
+            hashes in one load (04c34edb / df213f5f / 0b7a08f1 / 81dda651);
+            react-dom under three, @monaco-editor/react under four
+```
+
+The server said what it was doing, every broken time -- `new dependencies optimized: ... react ...`
+then `optimized dependencies changed. reloading`, twice. That "reloading" is a `full-reload` on the
+HMR channel, and `CALCULA_E2E=1` sets `server.hmr = false` deliberately (a stray fast-refresh resets
+`GridProvider`'s `useReducer` mid-capture and photographs the editor into a golden). **Vite's one
+repair for this state is disconnected by design**, so the page has already loaded and will never
+load again: `readyState complete`, `#root` empty, forever. §32's ten-minute corpse exactly.
+
+**WHY the optimiser splits, which §32 never reached.** It writes `deps_temp_<hash>/` and RENAMES it
+onto `deps/`. Clearing the cache and running `vite optimize --force` in a loop:
+
+```
+3 of 10 runs FAILED, every one with
+  Error: EBUSY: resource busy or locked, rename
+    '...\.vite\deps_temp_78efe380' -> '...\.vite\deps'
+and every failure left a deps_temp_* directory behind.
+```
+
+A failed rename leaves no usable `deps/`, so the server discovers dependencies request-by-request
+while the page is already loading. **The 30 % rename-failure rate and the 36 % duplicated-React rate
+are the same event.**
+
+### 37d. Which is also the answer to the Dropbox question -- and it was the wrong directory
+
+The standing concern was `app/src-tauri/target`: 100,175 files inside a Dropbox-synced tree. Measured:
+that directory ALREADY carries `com.dropbox.ignored=1`, as does `core/target`. The one that did NOT
+was **`app/node_modules`** (18,810 files) -- which is where Vite's dependency cache lives, and where
+Dropbox was opening every freshly written bundle to index it.
+
+```
+vite optimize --force, cache cleared, on this machine
+  app/node_modules SYNCED   3 of 10 failed with EBUSY
+  app/node_modules IGNORED  1 of 12
+```
+
+So the answer to "can the Dropbox hazard present as a product failure?" is **yes, measured, and it
+already had** -- just not through the directory anyone was watching. It is also **not the whole
+cause**: 1 in 12 still failed, because Defender and the Windows indexer can hold the same handle. A
+rename that is only usually possible cannot be the foundation of a test run, so the marker is a
+mitigation and not the fix.
+
+### 37e. The fix: prevention that runs everywhere, plus detection for when it does not
+
+* **Prevention -- `app/scripts/ensure-dep-cache.mjs`.** Reads the cache off disk, deletes the
+  `deps_temp_*` a failed rename leaves behind, and runs the optimiser with bounded retries until
+  `deps/` holds its bundles AND a parseable `_metadata.json`. Exit status alone is not the test: the
+  measured failures exited non-zero *and* left an empty directory, so what is checked is what is on
+  disk afterwards. Wired as npm's `predev`, which Tauri's `beforeDevCommand` invokes -- so
+  interactive development, the E2E auto-launch and the manual launcher are all covered from ONE
+  place, always before a dev server exists. It never fails the command; a machine where the rename
+  can never succeed still gets its run, and gets the EBUSY printed verbatim.
+
+  **This is not a retry of the thing that failed**, which BUG-0082's fix note keeps last for good
+  reason. Nothing is re-run and no evidence is discarded: a DIFFERENT step is completed first,
+  before the step that would fail is asked to start.
+
+* **Detection -- the startup barrier's new `duplicate-deps` arm.** The probe reports every
+  `deps/*?v=*` URL from the page's own `performance.getEntriesByType("resource")`, and the barrier
+  fails the run by name -- IMMEDIATELY, not after the 45 s stall window, because two copies of React
+  are terminal -- printing the duplicated deps and the one-command remedy. It fires even when the
+  page appears to have mounted, since every spec after that would be running against an incoherent
+  module graph. Prevention can be skipped (`CALCULA_SKIP_DEP_CACHE=1`, or a machine where the rename
+  never succeeds); detection must survive that.
+
+* **`app/scripts/dropbox-ignore.mjs`** marks the long-lived build trees, and
+  `depCacheWired.test.ts` asserts THIS MACHINE's markers -- because the marker is an NTFS alternate
+  data stream and therefore cannot be committed: a fresh clone, or an `npm install` that recreates
+  `node_modules`, starts unprotected and nothing else in the tree can notice.
+
+**Measured after the fix: 0 of 8 cold-cache launches broken** (two of the eight hit the EBUSY and
+the retry cleared it; `predev` costs 2.9 s cold and nothing warm).
+
+**One thing the new Dropbox assertion got right immediately, the honest way:** it went red on
+`app/test-results` seconds after a vitest run had recreated the directory, taking its marker with
+it. Ephemeral output trees are therefore marked but explicitly NOT asserted -- a guard that cries
+wolf for a reason nobody caused is a guard that gets switched off.
+
+### 37f. What this pass did NOT do
+
+* **The reproduction was never driven through a real WebView2 launch.** The crawl reproduces the
+  server-side condition decisively (four `?v=` hashes for `react.js` is not ambiguous), and the
+  console signature it predicts is the one §32 already recorded live. But "the app then fails to
+  mount" is inference from §32's own observation, not a fresh in-app measurement by this pass.
+* **The residual 1-in-12 EBUSY is mitigated, not eliminated.** Whatever still holds the handle after
+  Dropbox is excluded was not identified; the retry covers it, and the barrier names it if it ever
+  gets past the retry.
+* `vite optimize` is deprecated in Vite 6. If a future version removes it, `ensureDepCache`
+  exhausts its attempts, prints, and the run degrades to detection -- the correct direction for a
+  repair to fail in, but it will need replacing.
+* Nothing here touched the oracle, the register audit, or security.
+
+## 38. The undo round-trip oracle can decide again -- and the stated cause was the minority one (BUG-0089/0090/0091, 2026-08-16)
+
+§31k item 2 recorded the finding this section closes: *"the undo round-trip oracle decides nothing.
+Measured across every walk run today -- 10 walks, 32 checkpoints, 0 decided."* It attributed the
+cause to the five structural sheet commands ending the undo history (Excel parity, correct) and
+deliberately left the fix to a pass that could re-baseline the seeds. This is that pass.
+
+The item mattered more than its one-line entry suggests. Undo is where this programme has found its
+most severe defects -- a sheet's entire cell map replaced by another sheet's snapshot (BUG-0034), an
+undo stack outliving its document across File > Open, undo recalculating no dependents at all, undo
+not activating the sheet it restored. **An oracle that structurally cannot fire over that surface is
+blind exactly where the bugs are.**
+
+### 38a. Why it declined, measured -- and the comfortable reason was 25% of it
+
+The window was fixed at the checkpoint cadence: the baseline was captured 25 actions before the
+checkpoint, and only at the checkpoint was it asked whether that baseline was still reachable. One
+history-ending action anywhere in those 25 forfeited the lot.
+
+The census of what ends a window is not what the register recorded. Simulated over the real
+generator, the real catalog and the real weights (40 seeds x 75 actions at cadence 25 -- the
+`invariant` project's own shape), **6 of 120 windows** contained no history-ender, and:
+
+| window-killer | count | share |
+|---|---:|---:|
+| `fr.create` / `fr.delete` / `fr.rename` | 276 | **75%** |
+| `sheet.copy` / `rename` / `add` / `move` / `delete` | 94 | 25% |
+
+The floating-range family landed on **2026-08-13**, after the observation the register attributed to
+sheet structure, carrying weights of 4/2/2 against the sheet family's 1 apiece. `fr.rename` and
+`fr.delete` end the history because an FR's backing store *is* a sheet; `fr.create` ends nothing and
+pushes nothing (§16's add_sheet-parity doctrine), so the object simply survives every undo and the
+window is undecidable anyway. Sheet structure was real and was the minority cause. The check that
+found it is `app/e2e/__tests__/undoOracleDecidability.test.ts`, which runs the actual generator
+against a synthetic workbook in a second.
+
+**Those are generator numbers, and the live rate differs -- said out loud because the register has
+been burned by a model presented as a measurement.** On the running app with the fix switched off,
+12 walks decided **5 of 28 checkpoints**, not 6 of 120: live preconditions gate the FR family far
+harder, because a walk whose `fr.create` fails leaves every other `fr.*` action ineligible. The live
+A/B below is the authority on rates.
+
+Three other candidate causes were checked and cleared. `clearsTotal`/`clearedTotal` accounting is
+correct (`clearsTotal` moves on every clear including one that discarded nothing, which is the case
+BUG-0005's fix left standing). `sheet.hide`/`unhide`/`tabColor` are correctly classified -- BUG-0050
+made them ordinary undoable transactions and they do **not** clear. And the walker is not drawing
+sheet actions unusually often: in the live traces it issues 3-5 sheet actions per 75, all effective.
+
+### 38b. The fix: re-base the window when it dies, not 25 actions later
+
+`OracleBattery.rebaseUndoBaselineIfUnreachable` is called by `WalkRunner` after every action. It
+reads `get_undo_state` (one invoke) and the floating-range ids the walker's own post-action snapshot
+already carries, asks the pure `undoBaselineUnreachableReason` -- the same judgement the checkpoint
+makes, in the same precedence -- and, if the baseline is gone, re-captures it there and then.
+
+**Nothing about the verdict is relaxed, and that was the constraint.** The baseline digest is taken
+at the rebase point, the ids above it are exactly the transactions the round trip pops, and a decided
+window is a genuinely replayable one. Only the START of the window moves. It is deliberately NOT done
+on a checkpoint step: rebasing there would leave the checkpoint zero steps to wind back and report
+"nothing undoable in this window", which is a different claim from "the last action ended the
+history" -- and the false one.
+
+The action that forced each rebase is recorded and checked against
+`ACTIONS_THAT_MAY_END_UNDO_HISTORY` (the five sheet commands, `fr.create`/`rename`/`delete`, and
+`undo` itself). Without that, the rebase would silently absorb the one reading that would be a
+serious defect: an ordinary `cell.edit` clearing the undo stack. `sheet.hide`/`unhide`/`tabColor` are
+deliberately absent from the list, so a regression on BUG-0050 shows up as a named warning.
+
+### 38c. A green run that carries no undo evidence no longer passes
+
+The warning already existed -- `[WARNING] the undo round-trip decided NOTHING in this run` -- and it
+was printed by every walk of 2026-08-15 under a final verdict reading `[OK] Walk passed`. That is the
+same lie `assertCadenceReachable` was written one paragraph earlier to stop. `undoEvidenceFailure()`
+now turns it into an `undo-evidence-missing` violation on the success path, naming the three ways to
+fix it in the SPEC. It is opt-out only where a run genuinely is not asking about undo -- the three
+trace-replay paths, where the shrinker feeds one-action candidates and matches violation ids, and
+where this verdict would corrupt the reduction instead of reporting anything.
+
+The report also gained the rebase census line, so the fact that a window was salvaged is visible
+rather than implied.
+
+### 38d. The A/B, on the running app, same seeds both ways
+
+`invariant` project, seeds 20260815001-006 (each spec derives a second walk at seed+1), 12 walks per
+condition, `INVARIANT_NO_SHRINK=1`.
+
+| | checkpoints | decided | transactions wound back | walks with ZERO undo evidence |
+|---|---:|---:|---:|---:|
+| BEFORE (rebase off) | 28 (11 valid walks) | **5** (18%) | 174 | **6 of 11** |
+| AFTER (rebase on) | 28 | 25 (89%) | 514 | 0 of 12 |
+| FINAL (after 38e) | 30 | **27** (90%) | **546** | 0 of 12 |
+
+The BEFORE half is also the sabotage proof for §38c: four of those walks failed
+`undo-evidence-missing` where the old code printed the same fact as a warning and passed.
+
+Cost, matched pair (seed 20260815002, main walk): **66s before, 68s after**. One `get_undo_state` per
+action plus seven digests. 85 rebases across the final 12 walks, and **none** by an action that had
+no business ending the history -- which is a real, if quiet, result about the product.
+
+### 38e. What the newly-sighted oracle found immediately -- and it was the instrument (BUG-0090)
+
+The very first window it got to judge failed:
+
+```
+Undoing 22 steps did not restore the checkpoint state. 1 differences; first: activeSheet: 2 -> 0
+```
+
+invariant seed 20260815001: `sheet.copy`, `sheet.add` (baseline re-captured here, activeSheet 2),
+an insert-row, then **`sheet.switch {tabIndex: 0}` at action 4** and 22 ordinary transactions on
+Sheet1. Winding all 22 back restored every cell, every style and every object -- exactly ONE
+difference in the whole digest, and it was the walk's own sheet switch.
+
+That is a false positive **by construction, not by degree**. `activate_sheet` is
+`DocumentEffect::deliberately_clean(CleanReason::Navigation)` and records no undo entry, because
+merely looking at a workbook must not dirty it; so a sheet switch inside a window is invisible to the
+history and no number of undo steps can put the view back. Undo *does* move the active sheet -- to
+the sheet the undone change happened on, which is Excel's behaviour and deliberate
+(`undo_commands::activation_target`). A perfectly correct product therefore fails this comparison
+every time a window contains a switch.
+
+`activeSheet` is now excluded from the **undo** diff profile and still compared under **saveReload**,
+where it is genuine document state (`workbook.active_sheet` is persisted; a save/open that lost it is
+a defect). What is lost is stated rather than glossed: undo's own activation behaviour is covered at
+a tighter tier by `app/src-tauri/src/undo_sheet_activation_tests.rs` (undo, redo, a hidden target,
+every per-sheet store, the dependency maps), and frontend/backend disagreement about which sheet is
+active is still caught per action by the cheap invariants.
+
+### 38f. A third defect, found by wiring the rebase in (BUG-0091)
+
+`WalkRunner` ran its **entire oracle battery twice at the same step** for any walk whose length is not
+a multiple of the cadence: the in-loop checkpoint fires on `isLastStep`, and the "final off-cadence
+checkpoint" after the loop fired on `step % cadence !== 0`, both true at the last step. A 40-action
+walk at cadence 25 reached three checkpoints, not two -- digests, the undo round-trip and the
+save/reload round-trip, a second time, over a state nothing had touched in between. It also made
+`plannedCheckpointCount` **under**-count, the one direction its own docstring promises it never goes,
+and that number is what `assertCadenceReachable` uses. The shipped projects are all multiples
+(75/25, 50/25, 150/25), which is why it survived; `SOAK_ACTIONS` is an env var and the 2026-08-13
+soak run quoted at "40 actions, two checkpoints" was one setting away from it.
+
+### 38g. Contract checks, attacked rather than read
+
+* `undoOracleDecidability.test.ts` carries a detector that fires: a killer-saturated catalog must
+  produce a 0% rate through the same formatter, or the guard would be passing on arithmetic.
+* `oracleCoverage.test.ts` pins that `requireUndoEvidence` is ON by default -- "an opt-in guard is
+  one nobody opts into" -- and that it goes quiet when the undo oracle is disabled outright.
+* `digestDiffProfiles.test.ts` pins that the new exclusion did not swallow a real difference: a
+  changed cell is still reported, `sheetNames` is still compared, and saveReload still compares
+  `activeSheet`.
+* `undoHistoryHorizon.test.ts` pins that `undoBaselineUnreachableReason` agrees with the
+  checkpoint's own verdict in its precedence -- a rebase and a checkpoint must never explain the
+  same window differently -- and that every id in `ACTIONS_THAT_MAY_END_UNDO_HISTORY` exists in the
+  catalog, so a typo can neither excuse nor accuse.
+
+### 38h. Suites
+
+`npx vitest run e2e/` -- **28 files, 337 tests, green** (up from 24/293). `npm run check-types`
+green over both projects. `invariant` project: 12 walks green on the final tree. No Rust, no
+`app/src`, no product code was changed by this pass; every edit is in `app/e2e/`.
+
+### 38i. What this pass did NOT do
+
+* **The soak project was not re-run.** Its walks are 150 actions at cadence 25 and share the same
+  battery, so the change reaches them, but the numbers above are `invariant` only.
+* **The scenario harness still checkpoints once per phase and does not rebase.** A phase that adds a
+  sheet is undecidable exactly as before; `defineScenario` has no per-action hook to rebase from, and
+  giving it one is a separate change.
+* **The catalog weights were not touched.** Re-weighting `fr.*` down would raise decidability further
+  and would change what every recorded seed means; the rebase makes it unnecessary, and the decision
+  is left where §31k left it.
+* **`undo` popping past its own baseline is handled but not measured.** It is in the entitled set and
+  the rebase covers it (it appeared once, in a rapid-fire walk); nothing here counts how often the
+  walker undoes past a checkpoint on purpose.
+* The register audit, security and the startup guard were not touched.
+
+---
+
+## 39. Integration and verification pass — the four tracks measured together, and the second file input
+
+**2026-08-16.** Four tracks (undo-oracle decidability, register claim-audit, image ingress, guard
+fragility) landed separately. This pass re-measured every baseline first-hand, attacked the contracts
+each track claims rather than reading them, and ran the projects. It found one product defect and one
+environment defect, both recorded below.
+
+### 39a. The baselines, measured here, and reconciled against what the tracks reported
+
+| gate | measured 2026-08-16 | reported | verdict |
+|---|---|---|---|
+| vitest FULL | **804 files / 107,112 tests, 0 failed** | guard track said 803 / 107,106 | +1 file / +6. Reconciles exactly as 797 + 5 (guard) + 2 (undo); the guard track's own figure was one file short of the tree it left behind. |
+| vitest `e2e/` | 28 files / 337 tests | 28 / 337 | agrees |
+| core workspace | **1,377 / 0** | 1,377 (baseline 1,375, +2 from the xlsx docProps work) | agrees |
+| app-lib | **1,662 / 0**, 5 ignored | 1,662 (from 1,656, +6) | agrees |
+| test_pivot | **56 / 0** | 56 | agrees |
+| model-engine-lib | **2,156 unit + 36 doctests, 0 failed** (80 ignored) | 2,156 + 36 | agrees |
+| `cargo check --all-targets` | clean on all THREE workspaces (`core/`, `app/src-tauri/`, `model-engine-lib/`) | "both" | agrees; there are three, not two |
+| check-types, lint:boundaries, check:script-typings, check:line-endings, `tsc -p e2e` | all green | green | agrees |
+| ledger | 91 entries, 91 fixed, 0 open, 0 duplicate ids, **no gaps in 1..91** | 91, 0 open | agrees |
+| `KNOWN_ISSUES` / `EXCLUDED_UNTIL_FIXED` / `STALE_PRODUCT_STATE_GOLDENS` | all three **empty, verified by brace-matched parse** of each declaration, not by grep | empty | agrees |
+
+Nothing in the four reports was found to be inflated. The single number that was wrong was wrong in
+the *modest* direction, which is the safe way for a claim to rot.
+
+### 39b. Contracts attacked, not read
+
+Each was verified by an effective sabotage — one that provably changed behaviour — because a
+sabotage that is a no-op passes.
+
+* **The undo oracle decides, and a zero-evidence run announces itself.** Weakening
+  `undoEvidenceFailure` to `if (c.undoDecided >= 0) return null` (always silent) turns
+  `oracleCoverage.test.ts` **2 red**, including the case written to stop exactly this ("the
+  requirement must be ON by default -- an opt-in guard is one nobody opts into"). Restored: 15/15.
+  The three `requireUndoEvidence: false` opt-outs were each checked and are all shrink/replay paths
+  (`state-consistency`, `soak-walk`, `replay-trace`); no generated walk opts out.
+* **The boot-error arm survives a production build.** Deleting `data-testid="root-error-boundary"`
+  from `RootErrorBoundary.tsx` turns `bootErrorMarkerSurvivesBuild` + `bootErrorSignals` **6 red**,
+  and the first of those failures comes from a real Vite production build of the sabotaged component.
+  In the same run the role+text fallback still located the panel and reported `role+text` as the
+  firing signal — teeth and graceful degradation proved by one sabotage. Restored: 21/21.
+* **The collection guard fires.** Not simulated: the first (failed) `functional` launch of this pass
+  collected nothing, and the guard failed the run by name rather than letting an empty suite report
+  green.
+
+### 39c. BUG-0092 — a second `<input type="file">`, and it chose its own privilege tier
+
+The image-ingress pass concluded the ingress question was settled, and for images it was. Its source
+assertion, however, scans **`app/extensions/Controls` only**. A second file input lives in
+`app/extensions/ScriptableObjects/components/TemplateManagerDialog.tsx` and was outside every claim
+that pass made.
+
+It is not an image path — it reads text — which is what makes it worse rather than better.
+`importTemplate` was `JSON.parse(json) as ObjectTemplate`: a cast, validating nothing, persisted
+verbatim into `%APPDATA%/Calcula/templates/`. The `accessLevel` field came from the file;
+`stampFromTemplate` copies it onto the stamped `ObjectScriptDefinition`; and
+`buildHandleFromDefinition` (`app/src/api/scriptHost/broker.ts`) turns `"unlocked"` into
+`tier: "unlocked"` — whole-workbook reach (`api.getCellValue`, `api.setCellValue`,
+`api.updateCellsBatch` at 100,000 cells, `api.executeCommand`). Object scripts run on their object's
+events, so nothing further had to be clicked. The import carries no `provenance`, so `isDistributed`
+is false and it lands in the **most** trusted bucket — `ui.html` auto-granted, declared-capability
+ceiling taken from its own source pragmas — rather than the consent-gated distributed one.
+
+The rule already existed one file away. `draftToScriptDefinition` in `lib/scriptDrafts.ts` forces
+`"restricted"` because "an AI-authored script must never arrive pre-escalated to the unlocked tier;
+raising it is a separate, deliberate human action in the editor." A file off the disk deserves that
+at least as much as an AI does; this door simply never got it.
+
+**Fixed:** `importTemplate` now validates (name; objectType against a `Record` keyed by the
+`ScriptableObjectType` union, so adding a type is a compile error rather than a silently unstampable
+template; scriptSource; optional description/metadata) and **forces `accessLevel: "restricted"`**
+whatever the file says, with a freshly minted id so an imported file cannot choose the identity a
+capability grant or source hash is keyed to. Locally-created templates keep their tier: the boundary
+drawn is the import door, not template creation.
+`app/extensions/ScriptableObjects/__tests__/templateImportTier.test.ts`, 17 tests. Sabotage restoring
+the old line fails exactly 3, including the end-to-end import-to-stamp consequence. Two of the tests
+assert against the **broker and allowlist source** rather than a reconstruction, so if
+`buildHandleFromDefinition` stops deriving the tier from `accessLevel`, or the `api.*` rows stop
+being unlocked-tier, the test reports a moved premise instead of passing vacuously.
+
+**Residual, stated rather than implied:** a file written directly into
+`%APPDATA%/Calcula/templates/` never passes through `importTemplate`. Anything able to write there
+can already do worse, so the boundary drawn is the import door, not the directory.
+
+**Why it was missed, and the guard that now covers the class.** The image-ingress pass's absence
+assertion (`extensions/Controls/__tests__/imageIngress.test.ts`) iterates a **hard-coded list of
+seven files, all inside `app/extensions/Controls`**. It could not see another extension, and it could
+not see a new file added to Controls either — yet the claim it backed was written repo-wide. A guard
+scoped to where a defect was found does not cover the class.
+
+`app/src/api/__tests__/fileIngressSurfaces.test.ts` now sweeps all of `app/src` and `app/extensions`
+for every WebView ingress shape (`readAsDataURL`, `readAsArrayBuffer`, `readAsText`, `new
+FileReader`, `type="file"`, `showOpenFilePicker`) and holds the result against a declared inventory
+with a written justification per entry. It asserts in **both** directions — an undeclared door fails,
+and so does an inventory entry describing code that no longer exists, because a suppression that
+outlives its subject is how this programme blinded its own walker. Sabotage-verified both ways
+(adding an `<input type="file">` to `extensions/Charts`; removing the declared one). It also pins
+that the sweep really walks both roots (>1,000 files) and that its regexes still fire on the retired
+image ingress, so it cannot pass by walking nothing.
+
+The sweep's own result is worth recording: **exactly one production ingress surface exists in
+`app/src` + `app/extensions`** — this one. The image track's substance was right; only the scope of
+its sentence was overstated.
+
+**Checked, and it is why this reads as an outlier rather than a pattern.** Every OTHER script-ingress
+door already clamps the tier, which is what made the missing clamp here worth fixing rather than
+arguing about:
+
+* `.calp` pull (`core/calp/src/pull.rs`) forces `ScriptAccessLevel::Restricted` on every distributed
+  script, stamps `provenance = Distributed` so the consent gate fires, and takes the
+  declared-capability ceiling from the package MANIFEST rather than the tamperable source.
+* AI drafts (`lib/scriptDrafts.ts`) force `"restricted"`, with the reasoning quoted above.
+* The extension worker host mounts at `accessLevel: "restricted"`.
+
+Because the pull path clamps, `ScriptConsentDialog`'s unconditional "Scripts run in **restricted
+mode**" is honest for the packages it gates — a sentence worth re-deriving rather than trusting,
+since `consentTextHonesty.test.ts` exists because that dialog once understated reach. It does not
+understate it now.
+
+### 39d. The E2E launcher builds into whichever target directory the shell happens to name
+
+The first `functional` launch of this pass failed to build, with roughly forty
+`LNK2001: unresolved external symbol anon.<hash>.llvm.<id>` errors out of `libcalp` while linking
+`app_lib.dll`.
+
+The obvious suspect was wrong, and it is worth recording so nobody re-suspects it: `global-setup.ts`
+**does** construct the MSVC environment (Hostx64/arm64 `link.exe`, `LIB`, `INCLUDE`, with
+`CC`/`AR`/`CFLAGS` cleared), duplicating `core/setup-rust-env.ps1`. The linker was correct. Git's
+shadowing `link.exe` — the hazard that script exists for — was not involved.
+
+What global-setup does **not** set is `CARGO_TARGET_DIR`. There is no `.cargo/config.toml` and no
+persistent user or machine value, so the variable is whatever the invoking shell exports; when it is
+absent, cargo builds into the in-repo `app/src-tauri/target`. The same source links `app_lib.dll`
+cleanly in the out-of-repo target and fails in the in-repo one, which localises the fault to that
+tree's artifacts (an `anon.*.llvm.*` unresolved set is the incremental-cache signature) rather than
+to the source.
+
+Two things follow, and the second matters more than the first:
+
+1. The in-repo tree is currently unbuildable. It carries `com.dropbox.ignored=1`, so this is not the
+   sync race §37 measured; it is ordinary artifact corruption.
+2. **Which binary an E2E run exercises is a function of ambient shell state.** For a programme whose
+   thesis is that a green number must mean something, "I ran the suite" failing to identify *what was
+   built* is itself the defect, independent of today's corruption.
+
+A third observation belongs with them: **no gate in the tree proves the app can be built at all.**
+`cargo check --all-targets` does not link, and `cargo test --lib` links an executable, not the
+`app_lib.dll` the app loads. Four tracks changed Rust in the week before this pass and none of them
+exercised that link; the first thing to try it was the E2E launcher.
+
+Runs in this pass were made with `CARGO_TARGET_DIR` set to the documented out-of-repo location, which
+is the standing environment rule.
+
+### 39e. The projects, run cold and one at a time — and the two defects that only running them found
+
+Every project was invoked on its own, so each got its own `global-setup` launch and `global-teardown`
+kill. The collection guard verified the collected population against `--list` on every one.
+
+| project | result | collected |
+|---|---|---|
+| functional | **551 passed, 0 failed, 4 skipped** (38.7m) | 555 of 555 |
+| journey | **151 passed, 0 failed, 1 skipped** (27.6m) | 152 of 152 |
+| scenario | **24 passed** (1.6m) | 24 of 24 |
+| visual, cold run 1 | **18 passed** (2.4m) | 18 of 18 |
+| visual, cold run 2 | **18 passed** (2.4m) | 18 of 18 |
+| visual, cold run 3 (after the `global-setup` change below) | **18 passed** (2.4m) | 18 of 18 |
+| soak, seed 20260816501 | **12 passed, 1 skipped** (7.1m) | 13 of 13 |
+| soak, seed 20260816602 | **12 passed, 1 skipped** (7.3m) | 13 of 13 |
+
+#### Decided undo round-trips, per seed
+
+This is the number the undo-oracle track exists to produce, so it is reported per walk rather than
+summarised. BEFORE is the tree as the four tracks left it; AFTER includes BUG-0093's fix.
+
+| seed | main walk | rapid-fire walk |
+|---|---|---|
+| 20260816101 **before** | 3 decided, 36 tx | **0 decided, 2 undecided — FAILED `undo-evidence-missing`** |
+| 20260816101 after | 3 decided, 36 tx | **7 decided, 50 tx** |
+| 20260816202 after | 3 decided, 73 tx | **8 decided, 69 tx** |
+| 20260816303 after | 3 decided, 66 tx | **9 decided, 73 tx** |
+| 20260816404 after | 2 decided, 36 tx | **7 decided, 34 tx** |
+| soak 20260816501 | 6 decided, 72 tx | — |
+| soak 20260816602 | 5 decided, 80 tx | — |
+
+Across the four invariant seeds and two soak seeds after the fix: **60 decided round-trips, 520
+transactions wound back and replayed, and no walk carrying zero undo evidence.** The rapid-fire walk
+alone went from 0 to 31 decided across four seeds.
+
+#### BUG-0093 — the meta-assertion turned the project red on the first seed nobody had chosen
+
+The undo track's per-walk requirement ("a walk that decides zero round-trips FAILS") is right and
+stays. What it shipped without was a rapid-fire walk that could satisfy it.
+
+That walk runs at `rapidFireProbability: 0.5`, so half its actions are rapid create/delete pairs
+drawn from precisely the families that END the undo history — 10 `fr.*` and 6 `sheet.*` in 50
+actions, and 11 baseline rebases. `WalkRunner` re-captures the baseline after every NON-checkpoint
+action, so a window only stays dead when the **checkpoint's own action** is a history-ender: about
+11/50 here. With the two checkpoints that walk got (50 actions at the main walk's cadence of 25),
+zero undo evidence is a ~5% event per run. It duly happened on the first fresh seed tried.
+
+Fixed in the spec, as the guard's own message instructs: `RAPID_ORACLE_EVERY_N_ACTIONS = 5` gives ten
+windows instead of two (~0.22^10 rather than ~0.22^2), and `SAVE_RELOAD_EVERY_RAPID` moves 2 -> 10 so
+the *expensive* oracle still runs exactly once per walk — save/reload resets the undo stack, so
+running it more often would spend the very evidence the change exists to produce. Checkpoint cost was
+measured from the failing run's own log (7-10s at 25-action windows) before choosing the number; the
+new windows are a fifth as long, so each round trip winds back a fifth as many transactions. The main
+walk is untouched.
+
+#### BUG-0094 — the shrinker spent its budget on a verdict it could not reproduce
+
+Watching that failure be minimized found the second defect. `writeFailureBundle` handed the trace to
+ddmin, which ran 16+ candidate replays, **every one `-> pass`**. It could not have gone otherwise:
+all three replay paths build their `OracleBattery` with `requireUndoEvidence: false` — correctly, so
+a one-action candidate is not judged on undo evidence — so the verdict being minimized is one the
+replay function is structurally incapable of returning. ddmin reduced nothing, would have burned up
+to 30 replays and a 15-minute budget per failing seed, and writes a bundle whose "could not reduce"
+reads to the next human like a failed reproduction.
+
+It is also the wrong question: `undo-evidence-missing` is a property of the walk's CONFIGURATION, not
+of the trace, so there is no smaller reproducer to find. `skipShrinkReason` already existed for
+exactly this shape (`page-crashed`, `oracle-infrastructure`); it now has a third entry that states
+both halves.
+
+**Two individually-correct decisions — a per-walk undo requirement, and waiving that requirement on
+replay paths — combining into a broken one. That is the class of defect only an integration pass
+catches, and it is the reason this pass was worth running.**
+
+#### One failure that was MINE, reported rather than buried
+
+Invariant seed 20260816303 failed both tests in the batch driver: test 1 died in **264 ms** with
+`Target page, context or browser has been closed` immediately after the startup barrier had reported
+a healthy mount at 2.1s, and test 2 then failed `deepResetForWalk` with the BUG-0075 chart-residue
+message — a cascade from the first.
+
+The cause was the driver script written for this pass, which started each project in the same second
+the previous teardown finished; one run in seven connected to an app that was on its way out.
+**Re-run alone from a genuinely cold app, seed 20260816303 passes: 2 passed, main 3 decided (66 tx),
+rapid 9 decided (73 tx).** It is recorded here rather than filed as a ledger bug because the trigger
+is an invocation pattern introduced by this pass and it did not reproduce in isolation — but the
+regression runner also drives projects back to back, so a settle gap between projects is worth adding
+before anyone trusts a batch run's reds. Two details are worth carrying: the run reported
+"Test timeout of 300000ms exceeded" on a test that lasted 264 ms, which is a misleading pair, and
+whether `test.setTimeout(1_500_000)` in the describe body actually raises the invariant project's
+300s ceiling was NOT established either way by this pass.
+
+### 39f. The E2E launcher now says what it built
+
+The fix for 39d, since the honest one is not to pick a target directory for the operator but to stop
+the choice being invisible. `app/e2e/buildTarget.ts` resolves the target the way cargo will, and
+`global-setup.ts` prints it before launching:
+
+```
+[e2e] cargo target dir: C:\Users\Salle\AppData\Local\calcula-target  (from CARGO_TARGET_DIR)
+[e2e] app binary:       ...\debug\app.exe  (162.7 MB, built 2026-08-15T23:15:56.742Z)
+```
+
+The binary's size and build time are there because a path alone cannot tell today's build from last
+week's. When the resolved target is inside the repository the banner adds a `[WARNING]` naming the
+rule and this section; when it is where the rules want it, the banner is silent — a warning that
+always fires is noise, which is how "[WARNING] the undo round-trip decided NOTHING" survived under a
+green verdict for a fortnight. The logic is pure and unit-tested
+(`app/e2e/__tests__/buildTarget.test.ts`, 12 cases, including that a sibling directory sharing the
+repo's path prefix is not "inside" it). Verified live: the banner above is copied from the seed-303
+run's own output.
+
+The in-repo tree was left in its broken state deliberately, and this is stated rather than quietly
+repaired: repairing it means a full rebuild of 828 crates in a directory the environment rules say
+not to build in, and the banner now makes an operator who lands there aware of it in the first two
+lines of the run.
+
+### 39g. Two harness observations found while cleaning up, neither filed as a ledger bug
+
+**The two launch paths disagree about the target directory, and the manual one was already right.**
+`scratchpad/launch-vba-batch.ps1` states as item 3 of its own header that it "points
+CARGO_TARGET_DIR outside the Dropbox tree (Dropbox locks target/ mid-build -> os error 32)" — so the
+operator-facing launcher has always done the thing 39d found missing from `global-setup.ts`. That
+makes the finding sharper rather than weaker: the rule was known, written down, and implemented in
+one of the two launch paths, and the auto-launch path used by every `npx playwright test` invocation
+silently did not inherit it. This is exactly the shape of drift the register keeps catching — the
+knowledge exists, in the tree, one file away from where it was needed.
+
+**Completed Playwright runs left orphaned process trees.** After the batch driver reported every
+project finished with exit 0, five node processes were still alive — two `--project=soak` pairs plus
+a `yarn tauri dev` / `tauri.js dev` / `vite` chain — and an `app.exe` with them. They were still
+DRIVING the application: the first attempt to launch a fresh app for hand-off produced a log full of
+`update_cell` and `created floating range 'Float1'` at wall-clock times minutes after every run had
+reported done, and the launch then failed with `The "beforeDevCommand" terminated with a non-zero
+status code` because two dev chains were fighting over port 5173. Nine processes had to be killed by
+PID before a clean launch succeeded.
+
+This matters beyond tidiness, and it is the most likely amplifier of the seed-20260816303 failure in
+39e: if a previous run's app and its driver are still alive, the next project's `global-setup` can
+connect to an application that is about to be reaped — which is precisely the 264 ms
+`Target page, context or browser has been closed` that was observed. Not filed as a ledger bug
+because it was not reproduced deliberately and the invocation pattern (zero gap between projects) was
+introduced by this pass; recorded because the regression runner drives projects back to back too, and
+because a batch run whose reds may be its own orphans is a batch run nobody can read. The cheap
+mitigations, in order: a settle gap plus a "no app.exe, nothing on 9222 or 5173" precondition check
+between projects, and a teardown that verifies the tree it killed is actually gone rather than
+assuming `taskkill /T` reaped it.

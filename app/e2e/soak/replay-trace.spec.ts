@@ -50,6 +50,11 @@ test.describe("Trace replay", () => {
       oracleBattery: new OracleBattery({
         tmpDir: path.join(RESULTS_DIR, "tmp"),
         saveReloadEvery: 1,
+        // A recorded trace is replayed to answer "does THIS still reproduce",
+        // not "did this run exercise undo". A minimized repro is routinely one
+        // or two actions, so requiring undo evidence here would turn every
+        // clean repro check into a failure about the harness.
+        requireUndoEvidence: false,
       }),
       oracleEveryNActions: 1_000_000, // single oracle checkpoint at trace end
       maxActions: trace.actions.length,

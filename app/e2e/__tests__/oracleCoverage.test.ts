@@ -21,7 +21,7 @@
 // the whole value of a warning is what a reader does with it.
 
 import { describe, it, expect } from "vitest";
-import { OracleBattery } from "../oracles";
+import { OracleBattery, summarizeRebaseActions } from "../oracles";
 
 function battery(over: Partial<OracleBattery["coverage"]> = {}): OracleBattery {
   const b = new OracleBattery({ tmpDir: "unused-in-this-tier" });
@@ -125,5 +125,151 @@ describe("oracle coverage is reported, not assumed", () => {
     });
     expect(weak.formatCoverage().includes("[WARNING]")).toBe(true);
     expect(strong.formatCoverage().includes("[WARNING]")).toBe(false);
+  });
+});
+
+// ============================================================================
+// A run with NO undo evidence must not pass
+// ============================================================================
+//
+// The warning above shipped and was PRINTED by every walk run of 2026-08-15 --
+// 10 walks, 32 checkpoints, 0 decided -- under a final verdict reading
+// "[OK] Walk passed". The register wrote it down as an evidentiary gap and the
+// suites stayed green for two more days. A warning nobody can fail on is the
+// same lie `assertCadenceReachable` was written to stop: a guard that could not
+// run is not a guard that passed.
+
+describe("a run that decided no undo round-trip is a FAILURE", () => {
+  it("returns a sentence naming the three ways to fix it", () => {
+    const failure = battery({
+      checkpoints: 3,
+      undoUndecided: 3,
+      undoBaselineRebases: 5,
+      recalcRuns: 3,
+      saveReloadRuns: 1,
+    }).undoEvidenceFailure();
+
+    expect(failure).not.toBeNull();
+    expect(failure).toContain("DECIDED NOTHING across 3 checkpoint(s)");
+    expect(failure).toContain("5 mid-window rebase(s)");
+    expect(failure).toContain("oracleEveryNActions");
+    expect(failure).toContain("categoryWeights");
+    expect(failure).toContain("requireUndoEvidence: false");
+  });
+
+  it("is silent once a single window was decided", () => {
+    expect(
+      battery({
+        checkpoints: 3,
+        undoDecided: 1,
+        undoUndecided: 2,
+        undoStepsWoundBack: 4,
+        recalcRuns: 3,
+      }).undoEvidenceFailure()
+    ).toBeNull();
+  });
+
+  it("is silent on a battery that has run no checkpoint at all", () => {
+    // A walk that ended before its first checkpoint (a crash, a budget) has a
+    // failure of its own to report; accusing it of missing undo evidence would
+    // bury the real one.
+    expect(new OracleBattery({ tmpDir: "x" }).undoEvidenceFailure()).toBeNull();
+  });
+
+  it("is silent when the caller opted out -- and ONLY then", () => {
+    // The trace-replay paths: the shrinker feeds one-action candidates and
+    // matches violation ids, so this verdict would corrupt the reduction.
+    const optedOut = new OracleBattery({
+      tmpDir: "x",
+      requireUndoEvidence: false,
+    });
+    Object.assign(optedOut.coverage, { checkpoints: 3, undoUndecided: 3 });
+    expect(optedOut.undoEvidenceFailure()).toBeNull();
+
+    const defaulted = new OracleBattery({ tmpDir: "x" });
+    Object.assign(defaulted.coverage, { checkpoints: 3, undoUndecided: 3 });
+    expect(
+      defaulted.undoEvidenceFailure(),
+      "the requirement must be ON by default -- an opt-in guard is one nobody " +
+        "opts into"
+    ).not.toBeNull();
+  });
+
+  it("is silent when the undo oracle is disabled outright", () => {
+    const disabled = new OracleBattery({
+      tmpDir: "x",
+      disable: ["undo-round-trip"],
+    });
+    Object.assign(disabled.coverage, { checkpoints: 3 });
+    expect(disabled.undoEvidenceFailure()).toBeNull();
+  });
+});
+
+// ============================================================================
+// The rebase census
+// ============================================================================
+
+describe("mid-window rebases are reported, with the action that forced them", () => {
+  it("counts them and names the actions", () => {
+    const b = battery({
+      checkpoints: 3,
+      undoDecided: 3,
+      undoStepsWoundBack: 21,
+      undoBaselineRebases: 4,
+      recalcRuns: 3,
+      saveReloadRuns: 1,
+    });
+    b.rebases.push(
+      { step: 4, action: "fr.create", reason: "r", unexpected: false },
+      { step: 9, action: "sheet.add", reason: "r", unexpected: false },
+      { step: 14, action: "fr.create", reason: "r", unexpected: false },
+      { step: 22, action: "fr.delete", reason: "r", unexpected: false },
+    );
+    const text = b.formatCoverage();
+    expect(text).toContain("undo baseline rebases: 4");
+    expect(text).toContain("fr.create=2");
+    expect(text).toContain("sheet.add=1");
+    expect(text).not.toContain("[WARNING]");
+  });
+
+  it("WARNS when an action that may not end the history did", () => {
+    // The defect class the rebase would otherwise absorb in silence: an
+    // ordinary cell edit clearing the undo stack. `sheet.hide` is the live
+    // case -- BUG-0050 made it an ordinary undoable transaction, and a
+    // regression to "ends the history" would show up exactly here.
+    const b = battery({
+      checkpoints: 2,
+      undoDecided: 2,
+      undoStepsWoundBack: 8,
+      undoBaselineRebases: 1,
+      recalcRuns: 2,
+      saveReloadRuns: 1,
+    });
+    b.rebases.push({
+      step: 12,
+      action: "cell.edit",
+      reason: "a workbook-structure change ended the undo history",
+      unexpected: true,
+    });
+    const text = b.formatCoverage();
+    expect(text).toContain("have no business ending it");
+    expect(text).toContain("step 12 cell.edit");
+  });
+
+  it("summarizes an empty rebase list without inventing a line", () => {
+    expect(summarizeRebaseActions([])).toBe("");
+    expect(battery({ checkpoints: 1, undoDecided: 1, recalcRuns: 1, saveReloadRuns: 1 })
+      .formatCoverage()).toContain("undo baseline rebases: 0");
+  });
+
+  it("orders the summary by frequency, then by id", () => {
+    expect(
+      summarizeRebaseActions([
+        { action: "b" },
+        { action: "a" },
+        { action: "b" },
+        { action: "c" },
+      ])
+    ).toBe("b=2 a=1 c=1");
   });
 });

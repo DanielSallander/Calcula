@@ -275,7 +275,7 @@ function realmConnections(
  * mechanical — every replay needs a live page and there isn't one — so the
  * bundle has to say that, and say what to do instead.
  */
-function skipShrinkReason(violationId: string): string | null {
+export function skipShrinkReason(violationId: string): string | null {
   if (violationId === "page-crashed") {
     return (
       `not minimized in-spec: the app was GONE, so no replay could run — not ` +
@@ -292,6 +292,32 @@ function skipShrinkReason(violationId: string): string | null {
     return (
       `not minimized: "oracle-infrastructure" means the oracle battery itself ` +
       `threw, so the trace is not what went wrong. Read the violation message.`
+    );
+  }
+  if (violationId === "undo-evidence-missing") {
+    // MEASURED 2026-08-16, invariant seed 20260816102. The rapid-fire walk
+    // failed `undo-evidence-missing` and the shrinker then ran 16+ replays,
+    // EVERY ONE OF WHICH PASSED, because the replay paths construct their
+    // `OracleBattery` with `requireUndoEvidence: false` -- deliberately, so a
+    // one-action candidate is not judged on undo evidence. The verdict being
+    // minimized is therefore one the replay function can never return: ddmin
+    // reduces nothing, burns up to 30 replays and 15 minutes, and writes a
+    // bundle whose "could not reduce" reads like a failed reproduction.
+    //
+    // It is also the wrong question. This verdict is not a property of the
+    // TRACE, it is a property of the walk's CONFIGURATION -- the oracle cadence
+    // measured against how often the generated action mix ends the undo
+    // history. No subset of the actions is "the minimal reproducer"; the whole
+    // walk is, and the fix is a number in the spec.
+    return (
+      `not minimized: "undo-evidence-missing" is a property of the WALK'S ` +
+      `CONFIGURATION (oracle cadence vs how often the action mix ends the undo ` +
+      `history), not of the trace — no subset of these actions is a smaller ` +
+      `reproducer. Minimizing it is also impossible by construction: the replay ` +
+      `paths set \`requireUndoEvidence: false\`, so every candidate PASSES and ` +
+      `ddmin reduces nothing. Read the violation message, which names the three ` +
+      `spec-level fixes, and see \`rebaseActions\` in the details for which ` +
+      `actions were ending the history.`
     );
   }
   return null;

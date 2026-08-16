@@ -3318,11 +3318,12 @@ pub fn open_file(
             media.clear();
             media.extend(workbook.media.iter().map(|(k, v)| (k.clone(), v.clone())));
             let report = crate::media::migrate_legacy_data_urls(&mut controls, &mut media);
-            if report.migrated > 0 || report.refused > 0 {
+            if report.migrated > 0 || report.refused > 0 || report.dropped > 0 {
                 log::info!(
-                    "[media] migrated {} inline image(s) into the media store; {} refused and left inline",
+                    "[media] migrated {} inline image(s) into the media store; {} refused on format and left inline; {} dropped as unsafe to decode",
                     report.migrated,
-                    report.refused
+                    report.refused,
+                    report.dropped
                 );
             }
         }

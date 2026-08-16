@@ -3,7 +3,19 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 84 | Open: 0 | Triaged: 0 | Fixed: 84 | Other: 0
+Total: 94 | Open: 0 | Triaged: 0 | Fixed: 94 | Other: 0
+
+## BUG-0086 `[fixed]`
+
+**Found:** 2026-08-15 (manual)
+**Oracle:** media-ingress
+
+A REFUSED IMAGE WAS STILL DELIVERED TO THE DECODER, so MAX_MEDIA_PIXELS -- the decompression-bomb defence, and the entire reason the header is parsed at all -- protected nothing on the inline path. Mechanism: legacy/distributed control payloads carry pictures as inline `data:image/*;base64,...`. Both migrations (migrate_legacy_data_urls for .cala, rewrite_inline_images for .calp) decoded each payload, ran inspect_media, and on ANY error counted `refused` and LEFT THE STRING EXACTLY WHERE IT WAS. That tolerance was designed for FORMAT refusals (an SVG the old picker accepted must not be destroyed by a later, narrower allowlist) but it was applied to the CAP refusals too. So a 30,000 x 30,000 single-colour PNG -- a few KB on the wire, 3.6 GB of RGBA at decode -- was refused entry to the media store, kept its place in the control property, materialized into the subscriber's own controls.json, and was handed to the WebView as <img src="data:...">, the one component with no caps at all. THE EXISTING TEST NAMED THIS EXACT CASE AND PASSED: `a_correctly_signed_decompression_bomb_inline_is_refused_not_admitted` asserted only `bytes.is_empty()` -- the store was clean and the renderer still got the bomb. THREE COMPOUNDING FACTS: (1) INVERTED CONTROL -- decode_image_data_url returns None for a payload over the byte cap, and None was read as 'leave it alone', so the BIGGER the payload the more certainly it survived, unbounded, into the saved document; (2) the 64 KiB property bound does not apply -- a pull calls materialize_saved_controls DIRECTLY, though MAX_CONTROL_PROPERTY_CHARS' own docstring claimed '.calp materialization' arrives at that door; (3) the write door was open too -- a bomb is SMALL, so set_control_property/set_control_metadata admitted one well inside 64 KiB, and nothing there ever consulted inspect_media. Travels inside a SIGNED .calp: the signature proves the publisher sent those bytes, never that they are a picture.
+
+**Repro:** Unit: migrate_distributed_inline_images / migrate_legacy_data_urls with a control property holding data:image/png;base64,<30000x30000 IHDR> -- pre-fix the payload is returned unchanged and report.refused == 1; the same with a data: URL whose base64 exceeds MAX_MEDIA_BYTES survives verbatim at full length. Command door: check_property_value("src", <same bomb>) returns Ok pre-fix, the payload being ~60 bytes and the cap 64 KiB.
+**Triage:** product-bug (confidence 1) — CONFIRMED from source and by sabotage. One conflation: 'this build will not re-admit it' was treated as a single outcome when it is two. A refusal on FORMAT (SvgRefused, BmpRefused, UnknownFormat, MalformedHeader, Empty) describes a picture that is safe to keep showing; a refusal on a CAP (TooLarge, DimensionOutOfRange, TooManyPixels) describes bytes whose decoding is itself the harm. Read tolerance was correct for the first class and was applied to both.
+**Fix:** fixed — Refusal became COMPLETE instead of bookkeeping. A cap-refused inline payload is cleared to "" (the control keeps its identity, geometry and every other property and paints the honest 'No Image' placeholder -- deleting the control would silently change the sheet layout); a format-refused payload is still left inline and still renders, so no legacy picture is lost. The same judgement now runs on the .cala load, the .calp pull, and the two property commands.
+  Files: core/calcula-format/src/media.rs (+MediaError::is_decode_hazard -- exhaustive match, so a new variant is a compile error rather than a silent default), app/src-tauri/src/media.rs (+InlineVerdict/judge_inline_image: ONE place decides admit/leave/drop for both corpora; +exceeds_byte_cap_encoded closes the inverted control; +is_hazardous_inline_image for the write door; MediaMigration gains `dropped`), app/src-tauri/src/controls.rs (check_property_size -> check_property_value, now also refusing the hazard class; corrected the docstring that wrongly claimed .calp materialization passes this door), app/src-tauri/src/persistence.rs (load-path log reports dropped)
 
 ## BUG-0059 `[fixed]`
 
@@ -1073,3 +1085,99 @@ THE VERDICT SENTENCE IS NO LONGER SHARED, and that is the substance of the fix r
 
 Teeth verified by three sabotages, each producing a targeted red and no other: disabling the boot-error branch failed exactly the two barrier cases; collapsing the verdict split failed exactly the attribution case; disabling the fixtures arm failed exactly the two message cases. Guarded further by source pins in `startupBarrierWired.test.ts` (the barrier must probe for the boundary; its unreadable-page fallback must report `null`, never `""`, which would claim a boundary that reported nothing).
   Files: app/e2e/startupGuard.ts, app/e2e/startupBarrier.ts, app/e2e/fixtures.ts, app/e2e/__tests__/startupGuard.test.ts, app/e2e/__tests__/startupBarrierWired.test.ts, app/e2e/__tests__/unmountedAppMessage.test.ts
+
+## BUG-0085 `[fixed]`
+
+**Found:** 2026-08-15 (manual)
+**Oracle:** save-reload-roundtrip
+
+THE .XLSX EXPORT WRITES DOCUMENT PROPERTIES AND THE IMPORT THREW THEM AWAY. core/persistence/src/xlsx_writer.rs fills rust_xlsxwriter's DocProperties from Workbook::properties on every save (title, author, subject, description, keywords, category, plus a dcterms:created stamp), and core/persistence/src/xlsx_reader.rs built its Workbook with `properties: crate::WorkbookProperties::default()` -- it never opened docProps/core.xml at all. A one-way loss THROUGH THE APP'S OWN EXPORT: save as .xlsx, reopen the file Calcula itself just wrote, and every document property is blank, with nothing anywhere saying it was dropped. Not a fidelity preference against a foreign producer -- the bytes are present in the file and were written by this code.
+
+**Repro:** Unit: build a Workbook with non-empty `properties`, `save_xlsx` it, `load_xlsx` it back, read `properties`. BEFORE: every field is the empty string. AFTER: every field round-trips. Pinned by `xlsx_writer::tests::document_properties_survive_the_xlsx_round_trip`, which fails with `left: ""` / `right: "Quarterly Report"` when the reader wiring is reverted (verified by sabotage, 2026-08-15).
+
+Product route: File > Save As > .xlsx on a workbook with document properties set, then File > Open on that same .xlsx -- the properties are gone.
+**Fix:** fixed — docProps/core.xml is parsed with quick-xml by LOCAL NAME (dc:title, dc:subject, dc:creator -> author, cp:keywords, dc:description -> description, cp:category, dcterms:created/modified), never by namespace prefix, so a producer that binds the same namespaces to different prefixes is still read. A missing or unreadable part leaves every field the Default empty string and never fails the load: document metadata is advisory and must not cost a user their cells. The element names are taken from what the writer (rust_xlsxwriter/src/core.rs) actually emits rather than from the Calcula field names, because the two disagree in two places (author <- dc:creator, description <- dc:description via set_comment).
+  Files: core/persistence/src/xlsx_style_reader.rs (XlsxStyleData.properties + parse_doc_properties, called from parse_xlsx_styles), core/persistence/src/xlsx_reader.rs (Workbook.properties comes off the parsed style data instead of Default), core/persistence/src/xlsx_writer.rs (two tests)
+
+## BUG-0087 `[fixed]`
+
+**Found:** 2026-08-15 (manual)
+**Oracle:** startup-mount
+
+THE DEV SERVER SERVES MORE THAN ONE COPY OF REACT TO ONE PAGE, AND UNDER E2E IT CAN NEVER REPAIR IT. Vite pre-bundles dependencies into node_modules/.vite/deps_temp_<hash>/ and RENAMES that directory onto deps/. Measured on this tree by clearing the cache and running the optimiser in a loop: 3 of 10 runs FAILED with `EBUSY: resource busy or locked, rename '...\.vite\deps_temp_78efe380' -> '...\.vite\deps'`, each leaving a deps_temp_* behind. A failed rename leaves no usable deps/, so the server discovers dependencies request-by-request WHILE THE PAGE IS LOADING and serves /node_modules/.vite/deps/react.js?v=<hash> under more than one hash. Different URL = different module instance, so hooks are registered against one React dispatcher and read through another: `Warning: Invalid hook call` + `TypeError: Cannot read properties of null (reading 'useReducer')` in <GridProvider> -- the exact console lines §32 recorded and could not explain. Vite's own repair is a `full-reload` over the HMR channel, and CALCULA_E2E=1 disables HMR deliberately (a stray fast-refresh resets GridProvider's useReducer mid-capture), so the page stays dead at readyState=complete with an empty #root indefinitely, and the harness reports it as N product failures. Measured rate: 4 of 11 cold-cache launches served react.js under FOUR hashes in a single page load. Contributing cause on this machine: app/node_modules sits inside the Dropbox-synced tree and, unlike app/src-tauri/target and core/target, carried NO com.dropbox.ignored marker, so Dropbox held handles on the freshly written bundles -- 3/10 failures with it synced, 1/12 with it ignored.
+
+**Repro:** rm -rf app/node_modules/.vite/deps*, start the dev server with CALCULA_E2E=1, then crawl the module graph over HTTP exactly as the browser does and count the distinct `?v=` hashes per dep (no browser needed -- app/e2e/depOptimizer.ts crawlModuleGraph does this). BEFORE: 4 of 11 launches produced 2-4 hashes for react.js, 18-30 refused requests, and the server log showing two `optimized dependencies changed. reloading` lines nobody could receive. AFTER (with scripts/ensure-dep-cache.mjs run first): 0 of 8 launches duplicated anything; two of the eight hit the EBUSY and the retry cleared it.
+
+Faster reproduction of the underlying event: clear the cache and run `npx vite optimize --force` in a loop -- 3 of 10 fail with EBUSY on the rename.
+**Fix:** fixed — PREVENTION plus DETECTION, because prevention can be skipped. Prevention: ensureDepCache() reads the cache off disk, deletes the deps_temp_* a failed rename leaves behind, and runs `vite optimize --force` with bounded retries until deps/ holds its bundles AND a parseable _metadata.json -- exit status alone is not the answer, since the measured failures exited non-zero AND left an empty directory. It runs from predev, i.e. before a dev server exists, so every discovery round happens while nothing depends on the result. It NEVER fails the command: a machine where the rename can never succeed still gets its run, and gets the EBUSY printed verbatim. Detection: the startup probe reports every /node_modules/.vite/deps/*?v=* URL from performance.getEntriesByType('resource'), and the barrier fails the run by name -- immediately, not after the 45s stall window, because two copies of React are terminal -- printing the duplicated deps and the one-command remedy. It fires even when the page APPEARS to have mounted, since every spec after that would be running against an incoherent module graph.
+
+NOT a retry of the thing that failed (BUG-0082's fix note keeps retries last): nothing is re-run and no evidence is discarded, a DIFFERENT step is completed first, before the step that would fail is asked to start.
+  Files: app/scripts/ensure-dep-cache.mjs (NEW: complete the optimisation before any server exists, retrying the transient EBUSY; wired as npm predev, which Tauri's beforeDevCommand runs, so it covers interactive dev, the E2E auto-launch and the manual launcher from one place), app/scripts/dropbox-ignore.mjs (NEW: mark the long-lived build trees com.dropbox.ignored; app/node_modules was the one that was missing), app/package.json (predev/predev:data, dropbox:ignore, dropbox:check), app/e2e/depOptimizer.ts (NEW: parseDepVersion / collectDuplicateDepVersions / crawlModuleGraph + re-export of the repair), app/e2e/pageState.ts (probe reports depUrls from the page's own resource timings), app/e2e/startupGuard.ts (new MountFailureKind `duplicate-deps`, decided FIRST and without waiting out a stall window), app/e2e/global-setup.ts (note recording why the repair is NOT run from here), app/e2e/__tests__/depOptimizer.test.ts, app/e2e/__tests__/depCacheWired.test.ts (NEW)
+
+## BUG-0088 `[fixed]`
+
+**Found:** 2026-08-15 (manual)
+**Oracle:** harness-integrity
+
+THE ENTIRE E2E HARNESS WAS OUTSIDE THE TYPE GATE. `npm run check-types` compiled tsconfig.check.json -- src/, extensions/, scripts/ -- and NOT ONE of the 212 TypeScript files under app/e2e/. Playwright and vitest both transpile with esbuild, which strips types WITHOUT checking them, so a type error anywhere in the harness (fixtures, helpers, the collection guard, the app-died marker, the startup barrier) was invisible until it threw at runtime -- inside a run whose entire purpose is to say whether the PRODUCT is broken. The same shape as every other defect this programme has paid for: an instrument that can stop working and say nothing.
+
+**Repro:** `cd app && npx tsc --noEmit -p tsconfig.check.json --listFiles | grep -c e2e/` -> 0. Write `const x: number = "nope";` into any file under app/e2e/ and run `npm run check-types`: BEFORE it exits 0. AFTER it fails with TS2322 (verified by doing exactly that, 2026-08-15).
+**Fix:** fixed — A SEPARATE project rather than an addition to the existing one, because the two need different `types`: merging them would put Node globals into the app's program, which is exactly how a `process.env` read type-checks its way into the WebView bundle. The whole harness was already clean -- 197 files, zero errors -- so this is a gate that costs nothing to keep and would have caught the type error the pass that filed it introduced.
+  Files: app/tsconfig.e2e.json (NEW: a Node-typed project covering e2e/**, with noUnusedLocals/Parameters off because fixture signatures legitimately carry unused parameters), app/package.json (check-types runs both projects), app/e2e/__tests__/e2eIsTypeChecked.test.ts (NEW: pins the wiring, and that the app project has not gained Node types)
+
+## BUG-0089 `[fixed]`
+
+**Found:** 2026-08-16 (invariant)
+**Oracle:** undo-round-trip
+
+THE UNDO ROUND-TRIP ORACLE COULD NOT DECIDE. It captured its baseline at the start of a 25-action window and only asked at the END of the window whether that baseline was still reachable -- so ONE history-ending action anywhere in the window forfeited all 25 actions' worth of evidence. Measured live with the fix switched off (12 walks, seeds 20260815001-007, `invariant` project): 5 of 28 checkpoints decided, and 6 of 11 completed walks decided ZERO, while every one of them reported '[OK] Walk passed'. Undo is where this programme found a sheet's whole cell map replaced by another sheet's snapshot, an undo stack outliving its document across File > Open, and undo recalculating no dependents at all -- and the instrument aimed at that surface was structurally unable to fire over it.
+
+**Repro:** Set AB_NO_UNDO_REBASE=1 (the A/B switch used to measure this, since removed) and run `npx playwright test --project=invariant` on seeds 20260815004 and 20260815006: both walks report 'undo round-trip: 0 decided ... 3 undecided' and, before the meta-assertion landed, still printed '[OK] Walk passed'. The generator-level measurement is in app/e2e/__tests__/undoOracleDecidability.test.ts: 6 of 120 windows in the invariant project's own shape contain no history-ending action.
+**Fix:** fixed — The walker re-captures the undo baseline the MOMENT it becomes unreachable, measured after every action from `get_undo_state` plus the snapshot's floating-range ids, instead of discovering 25 actions later that the window died at action 2. The verdict is not relaxed: the baseline digest is captured at the rebase point and the round trip pops exactly the ids above it, so a decided window is a genuinely replayable one. The action that forced each rebase is recorded and checked against the set of actions ENTITLED to end the history, because a rebase would otherwise absorb 'an ordinary cell edit cleared the undo stack' in silence. And a walk that decides zero round-trips now FAILS with `undo-evidence-missing` rather than printing a warning under '[OK] Walk passed'.
+  Files: app/e2e/oracles/undoRoundTrip.ts (undoBaselineUnreachableReason + ACTIONS_THAT_MAY_END_UNDO_HISTORY), app/e2e/oracles/index.ts (OracleBattery.rebaseUndoBaselineIfUnreachable, rebase census, undoEvidenceFailure, coverage line), app/e2e/walker/walkRunner.ts (per-action rebase; undo-evidence-missing verdict on the pass path), app/e2e/__tests__/undoOracleDecidability.test.ts (NEW), app/e2e/__tests__/undoHistoryHorizon.test.ts, oracleCoverage.test.ts (extended), app/e2e/tests/state-consistency.spec.ts, app/e2e/soak/soak-walk.spec.ts, app/e2e/soak/replay-trace.spec.ts (requireUndoEvidence: false on the trace-replay paths only)
+
+## BUG-0090 `[fixed]`
+
+**Found:** 2026-08-16 (invariant, seed 20260815001)
+**Oracle:** undo-round-trip
+
+Undoing 22 steps did not restore the checkpoint state. 1 differences; first: activeSheet: 2 -> 0
+
+**Repro:** invariant seed 20260815001: sheet.copy, sheet.add (baseline re-captured here, activeSheet 2), structure.insert-row, sheet.switch {tabIndex: 0}, then 22 ordinary transactions on Sheet1. Winding all 22 back restores every cell, style and object -- exactly ONE digest difference in the whole workbook, `activeSheet: 2 -> 0`, which is the walk's own sheet switch.
+**Fix:** fixed — `activeSheet` is excluded from the UNDO profile and still compared under saveReload, where it is real document state (`workbook.active_sheet` is persisted, so a save/open that lost it is a defect). What is lost is stated rather than glossed: undo's own activation behaviour is covered at a tighter tier by app/src-tauri/src/undo_sheet_activation_tests.rs (undo, redo, hidden target, every per-sheet store, the dependency maps), and frontend/backend disagreement about which sheet is active is still caught per action by the cheap invariants.
+  Files: app/e2e/oracles/digest.ts (UNDO_EXCLUDED_SECTIONS = activeSheet, undo profile only), app/e2e/__tests__/digestDiffProfiles.test.ts (NEW)
+
+## BUG-0091 `[fixed]`
+
+**Found:** 2026-08-16 (manual)
+**Oracle:** harness-integrity
+
+THE WALK RAN ITS ENTIRE ORACLE BATTERY TWICE AT THE SAME STEP. The in-loop checkpoint fires on `step % cadence === 0 || isLastStep`, and the 'final off-cadence checkpoint' after the loop fired on `step % cadence !== 0` -- both true at the last step of any walk whose length is not a multiple of the cadence. A 40-action walk at cadence 25 therefore ran three checkpoints, not two: digests, the undo round-trip and the save/reload round-trip, a second time, over a state nothing had touched in between. It also made `plannedCheckpointCount` UNDER-count, which is the one direction its own docstring promises it never goes -- and that number is what `assertCadenceReachable` uses to refuse an unreachable save/reload cadence.
+
+**Repro:** Any walk whose `maxActions` is not a multiple of `oracleEveryNActions` (e.g. SOAK_ACTIONS=40, SOAK_ORACLE_EVERY=25) reported one more checkpoint than `plannedCheckpointCount(40, 25) = 2`.
+**Fix:** fixed — The final off-cadence checkpoint is skipped when the in-loop one already ran at that step. The shipped projects (75/25, 50/25, 150/25) were all multiples and never hit it, which is why it survived; SOAK_ACTIONS is an env var and the 2026-08-13 soak run that measured '40 actions, two checkpoints' was one setting away from it.
+  Files: app/e2e/walker/walkRunner.ts (lastCheckpointStep guards the final checkpoint), app/e2e/__tests__/oracleCadenceReachable.test.ts (pins that the count is now exact)
+
+## BUG-0092 `[fixed]`
+
+**Found:** 2026-08-16 (manual)
+**Oracle:** script-tier-provenance
+
+AN IMPORTED FILE CHOSE THE PRIVILEGE TIER OF THE CODE IT INSTALLED. `importTemplate` (app/extensions/ScriptableObjects/lib/templateManager.ts) was `JSON.parse(json) as ObjectTemplate` -- a CAST, which validates nothing -- and the parsed object was persisted to %APPDATA%/Calcula/templates/ verbatim, `accessLevel` included. That field is load-bearing, not decorative: `stampFromTemplate` copies it onto the stamped `ObjectScriptDefinition`, and `buildHandleFromDefinition` (app/src/api/scriptHost/broker.ts) converts `accessLevel === "unlocked"` into `tier: "unlocked"`, which in ALLOWLIST terms is whole-workbook reach: api.getCellValue, api.setCellValue, api.updateCellsBatch over 100,000 cells, api.executeCommand. Object scripts run on their object's events, so no further gesture was required to execute it. Worse, the import carries no `provenance`, so `isDistributed` is false and the script lands in the MOST trusted bucket -- ui.html auto-granted, declared-capability ceiling taken from its own source pragmas -- rather than the consent-gated distributed one. The dialog's own empty state invites the user to 'import a .calcula-template file', so the user believes they are choosing a document and are in fact choosing executable code AND the privilege level it runs at. Nothing in the flow states the tier. The rule was already written one file away: `draftToScriptDefinition` (lib/scriptDrafts.ts) forces "restricted" because 'an AI-authored script must never arrive pre-escalated to the unlocked tier; raising it is a separate, deliberate human action in the editor.' The template import door simply never got it.
+
+
+## BUG-0093 `[fixed]`
+
+**Found:** 2026-08-16 (walk, seed 20260816102)
+**Oracle:** undo-evidence-missing
+
+THE NEW UNDO-EVIDENCE META-ASSERTION TURNED THE INVARIANT PROJECT RED ON A SEED NOBODY CHOSE. `state-consistency.spec.ts`'s rapid-fire walk failed with `the undo round-trip oracle DECIDED NOTHING across 2 checkpoint(s): 0 had nothing to undo and 2 were undecidable`, after 11 mid-window baseline rebases. It is structural, not bad luck: that walk runs at `rapidFireProbability: 0.5`, so half its actions are rapid create/delete pairs drawn from exactly the families that END the undo history (10 `fr.*` and 6 `sheet.*` in 50 actions). `WalkRunner` re-captures the baseline after every NON-checkpoint action, so a window only stays dead when the CHECKPOINT'S OWN action is a history-ender -- about 11/50 = 0.22 here. The walk had only 2 checkpoints (50 actions at the main walk's cadence of 25), giving ~0.22^2 = 5% per run of zero undo evidence. The undo track measured 0-of-12 zero-evidence walks on its own six seeds and shipped the per-walk requirement without giving the rapid-fire walk a cadence that could satisfy it.
+
+
+## BUG-0094 `[fixed]`
+
+**Found:** 2026-08-16 (manual, seed 20260816102)
+**Oracle:** shrinker
+
+THE SHRINKER SPENT ITS WHOLE BUDGET ON A VIOLATION IT COULD NOT POSSIBLY REPRODUCE. When the rapid-fire walk failed `undo-evidence-missing`, `writeFailureBundle` handed the 50-action trace to ddmin, which ran 16+ candidate replays with EVERY ONE reported `-> pass`. It could not have gone otherwise: all three replay paths (`state-consistency`, `soak-walk`, `replay-trace`) construct their OracleBattery with `requireUndoEvidence: false` -- correctly, so a one-action shrink candidate is not judged on undo evidence -- so the verdict being minimized is one the replay function is structurally incapable of returning. ddmin reduced nothing, would have burned up to 30 replays and a 15-minute budget per failing seed, and writes a bundle whose `could not reduce` reads to the next human like a failed reproduction. It is also the wrong question: `undo-evidence-missing` is a property of the walk's CONFIGURATION (cadence vs history-ender density), not of the trace, so no subset of the actions is a smaller reproducer.
+

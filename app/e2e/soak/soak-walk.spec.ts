@@ -148,6 +148,12 @@ function makeReplayFn(
       oracleBattery: new OracleBattery({
         tmpDir: path.join(resultsDir, "tmp"),
         saveReloadEvery: 1,
+        // Not asked about undo: the shrinker feeds arbitrary subsets of the
+        // failing trace and matches the violation id, so an
+        // `undo-evidence-missing` verdict on a one-action candidate would be a
+        // DIFFERENT failure and would corrupt the reduction. The generated walk
+        // above carries the requirement.
+        requireUndoEvidence: false,
       }),
       oracleEveryNActions: 1_000_000,
       maxActions: trace.actions.length,

@@ -74,7 +74,37 @@ const ORACLE_EVERY_N_ACTIONS = 25;
  * cannot silently rot again.
  */
 const SAVE_RELOAD_EVERY_MAIN = 3;   // 75 actions / 25 = 3 checkpoints
-const SAVE_RELOAD_EVERY_RAPID = 2;  // 50 actions / 25 = 2 checkpoints
+const SAVE_RELOAD_EVERY_RAPID = 10; // 50 actions / 5 = 10 checkpoints
+
+/**
+ * The RAPID-FIRE walk gets its own, much shorter oracle cadence.
+ *
+ * MEASURED 2026-08-16, seed 20260816102: the rapid-fire walk failed
+ * `undo-evidence-missing` — 2 checkpoints, both undecidable, 0 round-trips
+ * decided — on the first fresh seed tried after the meta-assertion landed.
+ *
+ * WHY IT IS STRUCTURAL AND NOT BAD LUCK. This walk runs at
+ * `rapidFireProbability: 0.5`, so half its actions are rapid create/delete
+ * pairs, and the families it draws them from are exactly the ones that END the
+ * undo history: that run issued 10 `fr.*` and 6 `sheet.*` actions in 50 and
+ * rebased the undo baseline ELEVEN times. `WalkRunner` re-captures the baseline
+ * after every NON-checkpoint action, so a window only stays dead when the
+ * checkpoint's OWN action is a history-ender — probability ~11/50 here. With
+ * two checkpoints that is ~5% per run, which is precisely the kind of odds that
+ * turns a suite red on a seed nobody chose.
+ *
+ * Ten checkpoints instead of two takes it to ~0.22^10, i.e. never. The walk
+ * pays for it in oracle time (a checkpoint measured 7-10s at 25-action windows,
+ * and these windows are a fifth as long, so the undo round-trip winds back a
+ * fifth as many transactions), and `SAVE_RELOAD_EVERY_RAPID` is set to the last
+ * reachable checkpoint so the count of the EXPENSIVE oracle is unchanged at one
+ * per walk — save/reload resets the undo stack, so running it more often would
+ * spend the very evidence this change exists to produce.
+ *
+ * The main walk is left alone: at 75 actions / 25 it decided 3 of 3 on the same
+ * seed, with 36 transactions wound back.
+ */
+const RAPID_ORACLE_EVERY_N_ACTIONS = 5;
 
 /** Bundles, live traces and the oracle's temp .cala files. */
 const RESULTS_DIR = path.resolve(HERE, "../results/invariant");
@@ -206,7 +236,7 @@ test.describe("State consistency (invariant monkey testing)", () => {
         tmpDir: path.join(RESULTS_DIR, "tmp"),
         saveReloadEvery: SAVE_RELOAD_EVERY_RAPID,
       }),
-      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
+      oracleEveryNActions: RAPID_ORACLE_EVERY_N_ACTIONS,
       maxActions: 50,
       settleTimeMs: SETTLE_MS,
       resultsDir: path.join(RESULTS_DIR, "live-rapid"),
@@ -281,6 +311,14 @@ function makeReplayFn(
       oracleBattery: new OracleBattery({
         tmpDir: path.join(resultsDir, "tmp"),
         saveReloadEvery: 1,
+        // A SHRINK CANDIDATE IS NOT ASKED ABOUT UNDO. The shrinker feeds this
+        // arbitrary subsets of the failing trace — often a single `sheet.add` —
+        // and matches the violation id to decide whether a candidate still
+        // reproduces. An `undo-evidence-missing` verdict on a one-action
+        // candidate would be a different failure than the one being minimized
+        // and would corrupt the reduction, so the generated walks above carry
+        // the requirement and the replays deliberately do not.
+        requireUndoEvidence: false,
       }),
       oracleEveryNActions: 1_000_000, // single oracle checkpoint at trace end
       maxActions: trace.actions.length,

@@ -87,8 +87,19 @@ describe("the fixture records the same state when it finds it late", () => {
     // product threw". The marker triggers a banner that says THESE ARE NOT TEST
     // RESULTS AND NOT A PRODUCT FAILURE; printing that over a genuine boot crash
     // would exonerate the code that broke. The fixture must read the boundary.
-    expect(fixtures).toContain("root-error-boundary");
     expect(fixtures).toContain("probe.bootErrorText");
+  });
+
+  it("reads the page through the SHARED probe, not a private copy of it", () => {
+    // The fixture and the barrier each had their own inline page reading, and
+    // they had already drifted: the fixture read four fields to the barrier's
+    // ten, and only one of the two trimmed the boundary text. Two copies that
+    // happen to agree are not one source of truth, and the drift is silent --
+    // the half that is not updated goes on calling a crashed boot a healthy
+    // mount.
+    expect(fixtures).toContain('from "./pageState"');
+    expect(fixtures).toContain("readPageState");
+    expect(fixtures).toContain("BOOT_ERROR_SIGNALS");
   });
 });
 
@@ -99,13 +110,34 @@ describe("the barrier reads the root error boundary, not just #root's count", ()
     // Without this the guard's ONLY mount signal is `#root.childElementCount`,
     // which BUG-0083's failure panel satisfies -- so a crashed boot is waved
     // through and re-emerges as N spreadsheet-selector timeouts.
-    expect(barrier).toContain("root-error-boundary");
-    expect(barrier).toContain("bootErrorText");
+    expect(barrier).toContain("readPageState");
+    expect(barrier).toContain("BOOT_ERROR_SIGNALS");
+  });
+});
+
+describe("the boot-error marker does not rest on ONE strippable attribute", () => {
+  // THE FRAGILITY THIS CLOSES, in the words of the pass that shipped it: "the
+  // `boot-error` arm keys on `data-testid` -- nothing verifies it survives a
+  // production `vite build`. A future strip step would silently return the guard
+  // to reading a crashed boot as healthy, with no test failing."
+  const pageState = read("e2e/pageState.ts");
+
+  it("carries a second, non-attribute signal", () => {
+    expect(pageState).toContain("root-error-boundary");
+    // `role` is an accessibility contract and text is content: neither is what
+    // an attribute-stripping build step removes.
+    expect(pageState).toContain('role: "alert"');
+    expect(pageState).toContain('textSignature: "failed to start"');
+  });
+
+  it("reports WHICH signal fired, so a lost attribute is loud", () => {
+    expect(pageState).toContain("bootErrorSignal");
+    expect(read("e2e/startupGuard.ts")).toContain('p.bootErrorSignal === "role+text"');
   });
 
   it("its unreadable-page fallback reports null, not an empty string", () => {
     // "" would be a CLAIM that a boundary is present and said nothing.
-    expect(barrier).toContain("bootErrorText: null as string | null");
+    expect(pageState).toContain("bootErrorText: null,");
   });
 });
 

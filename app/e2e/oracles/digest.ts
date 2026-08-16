@@ -59,6 +59,8 @@ export interface DigestDiff {
 /**
  * Comparison profiles:
  *  - "undo": in-memory round-trip. Style indices are stable, compare directly.
+ *    `activeSheet` is EXCLUDED — undo does not restore the view, and moves it
+ *    on purpose (see UNDO_EXCLUDED_SECTIONS).
  *  - "saveReload": across save/open. Style indices are NOT stable — cells are
  *    compared by resolved style content instead, and the usedStyles map itself
  *    is excluded.
@@ -125,6 +127,46 @@ const COMMON_EXCLUDED_SECTIONS = new Set(["protectedRegions"]);
 const SAVE_RELOAD_EXCLUDED_SECTIONS = new Set(["usedStyles"]);
 
 /**
+ * Extra sections excluded in the UNDO profile — `activeSheet`, and only it.
+ *
+ * WHICH SHEET IS IN FRONT OF THE USER IS NOT SOMETHING UNDO RESTORES, and the
+ * product says so in as many words: `activate_sheet` constructs
+ * `DocumentEffect::deliberately_clean(CleanReason::Navigation)` and records no
+ * undo entry at all, because "merely LOOKING at a workbook must never make it
+ * dirty". A sheet switch inside a checkpoint window is therefore invisible to
+ * the history, and no number of undo steps can put the view back where the
+ * baseline found it. Undo does move the active sheet — to the sheet the undone
+ * change happened on, which is Excel's behaviour and is deliberate
+ * (`undo_commands::activation_target`) — so after winding a window back the
+ * view sits wherever the OLDEST undone change was, not where the checkpoint was.
+ *
+ * MEASURED, on the first walk the newly-decidable oracle ever got to judge
+ * (invariant seed 20260815001): `sheet.copy`, `sheet.add`, an insert-row, then
+ * `sheet.switch {tabIndex: 0}` at action 4 and twenty-two ordinary transactions
+ * on Sheet1. Winding all 22 back restored every cell, every style, every object
+ * — ONE difference in the whole digest: `activeSheet: 2 -> 0`. That is the
+ * walker's own `sheet.switch`, reported as an undo defect.
+ *
+ * A perfectly correct product fails that comparison every time a window
+ * contains a sheet switch, which makes it a false positive by construction, not
+ * a threshold to tune. Excluded here rather than "fixed" in the product,
+ * because the product is right.
+ *
+ * WHAT IS LOST, STATED RATHER THAN GLOSSED. Undo's own activation behaviour
+ * (BUG-0034's family: "undo did not activate the sheet it restored") is no
+ * longer observable through this oracle. It is covered at a tighter tier by
+ * `app/src-tauri/src/undo_sheet_activation_tests.rs`, which asserts the
+ * activation for undo, for redo, for a hidden target, for every per-sheet
+ * store and for the dependency maps; and the frontend/backend disagreement
+ * about WHICH sheet is active (BUG-0046) is still caught per action by the
+ * cheap invariants, which compare `activeSheet` with `backendActiveSheet`.
+ *
+ * The saveReload profile still compares it, and must: `workbook.active_sheet`
+ * IS persisted, so a save/open that lost it is a real defect.
+ */
+const UNDO_EXCLUDED_SECTIONS = new Set(["activeSheet"]);
+
+/**
  * Compare two digests under a profile. Returns path-level diffs that are
  * actionable in triage prompts ("sheets[0].cells.4:1.v: '12,5' -> '12.5'").
  */
@@ -156,6 +198,7 @@ function normalizeForProfile(
     if (profile === "saveReload" && SAVE_RELOAD_EXCLUDED_SECTIONS.has(section)) {
       continue;
     }
+    if (profile === "undo" && UNDO_EXCLUDED_SECTIONS.has(section)) continue;
     out[section] = value;
   }
 

@@ -1,0 +1,66 @@
+// TYPE-CHECK PROJECT FOR THE E2E HARNESS.
+//
+// WHY IT EXISTS. `tsconfig.check.json` compiles `src/`, `extensions/` and
+// `scripts/` -- and NOTHING under `app/e2e/`. Measured 2026-08-15: 212 TypeScript
+// files, every fixture, every guard and every spec, outside the type gate. Vitest
+// and Playwright both transpile with esbuild, which STRIPS types without checking
+// them, so a type error in the harness is invisible until the moment it throws --
+// at which point it throws inside a run whose whole job is to tell you whether
+// the product is broken.
+//
+// That is the same shape as the defect this project was opened to close: an
+// instrument that can stop working and say nothing. The harness now carries
+// guards the product's correctness reporting depends on (the collection guard,
+// the app-died marker, the startup barrier); they are code, and code that nothing
+// type-checks drifts.
+//
+// It is a SEPARATE project rather than an addition to `tsconfig.check.json`
+// because the two need different `types`: the app is a DOM program (`vite/client`)
+// and the harness is a Node program (`node`, `@playwright/test`). Merging them
+// puts Node globals into the app's program, which is exactly the mistake that
+// lets a `process.env` read reach the WebView.
+//
+// Wired into `npm run check-types`, so it runs everywhere that already runs.
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    // OFF, deliberately, and only these two. The harness is full of legitimately
+    // unused destructured fixture parameters (`async ({ page }, use)`) and of
+    // locals kept for the next debugging session. Turning them on would produce
+    // noise that gets the whole gate switched off, which is worse than the noise.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+
+    // The harness imports product modules (`../../src/shell/...`), so it needs
+    // the same aliases the app uses.
+    "paths": {
+      "@api": ["./src/api/index.ts"],
+      "@api/*": ["./src/api/*"],
+      "@core/*": ["./src/core/*"],
+      "@shell/*": ["./src/shell/*"]
+    },
+
+    // `e2e/webview2Args.mjs` is plain JavaScript with no declaration file. It is
+    // checked as JS rather than declared `any`, so its callers still get types.
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["e2e/**/*.ts", "e2e/**/*.tsx", "e2e/**/*.mjs"],
+  "exclude": ["e2e/results/**", "e2e/**/*-snapshots/**", "node_modules"]
+}

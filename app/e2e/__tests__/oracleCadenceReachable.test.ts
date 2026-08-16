@@ -60,6 +60,21 @@ describe("plannedCheckpointCount", () => {
     expect(plannedCheckpointCount(60, 25)).toBe(3);
   });
 
+  it("is now an EXACT bound for a completed walk, which it was not", () => {
+    // The docstring promises this over-counts and never under-counts, and that
+    // was false for every walk whose length is not a multiple of the cadence:
+    // `WalkRunner` fired the in-loop checkpoint at the last step AND then the
+    // "final off-cadence" one at the SAME step, so a 60-action walk at cadence
+    // 25 reached FOUR checkpoints against the three predicted here -- a second,
+    // identical battery run (digests, undo round-trip and save/reload) over a
+    // state nothing had touched in between. `lastCheckpointStep` in
+    // `WalkRunner.run` now suppresses the duplicate, so the arithmetic below is
+    // the count a completed walk actually reaches.
+    expect(plannedCheckpointCount(40, 25)).toBe(2);
+    expect(plannedCheckpointCount(60, 25)).toBe(3);
+    expect(plannedCheckpointCount(25, 25)).toBe(1);
+  });
+
   it("is zero for a degenerate configuration rather than NaN or Infinity", () => {
     expect(plannedCheckpointCount(0, 25)).toBe(0);
     expect(plannedCheckpointCount(75, 0)).toBe(0);
@@ -126,13 +141,49 @@ describe("the invariant project's own configuration", () => {
     ).not.toBeNull();
     const planned = plannedCheckpointCount(
       Number(rapid![1]),
-      constant(source, "ORACLE_EVERY_N_ACTIONS"),
+      // The rapid-fire walk has its OWN cadence and must be checked against it.
+      // Reading ORACLE_EVERY_N_ACTIONS here (the main walk's) would have gone on
+      // passing while the rapid walk's real cadence went unchecked.
+      constant(source, "RAPID_ORACLE_EVERY_N_ACTIONS"),
     );
     const message = describeUnreachableSaveReloadCadence(
       constant(source, "SAVE_RELOAD_EVERY_RAPID"),
       planned,
     );
     expect(message, message ?? "").toBeNull();
+  });
+
+  it("gives the RAPID-FIRE walk a cadence its undo window can survive", () => {
+    // The number this guards, and why it is not arbitrary. `WalkRunner` rebases
+    // the undo baseline after every NON-checkpoint action, so a window is only
+    // lost when the checkpoint's own action ends the undo history. Measured on
+    // seed 20260816102: 11 history-enders in 50 actions, i.e. ~0.22 per action.
+    // With the two checkpoints this walk used to get, ~5% of seeds produced
+    // ZERO undo evidence and failed `undo-evidence-missing` -- which is how a
+    // fresh seed turned the invariant project red on 2026-08-16.
+    //
+    // The assertion is on the SHAPE of the fix (many short windows), not on the
+    // literal 5, so re-tuning stays possible and going back to a handful of long
+    // windows does not.
+    const rapidCadence = constant(source, "RAPID_ORACLE_EVERY_N_ACTIONS");
+    const mainCadence = constant(source, "ORACLE_EVERY_N_ACTIONS");
+    expect(
+      rapidCadence,
+      "the rapid-fire walk churns objects at rapidFireProbability 0.5, so it " +
+        "ends the undo history far more often than the main walk and needs a " +
+        "SHORTER cadence, not the same one",
+    ).toBeLessThan(mainCadence);
+
+    const rapid = /maxActions: (\d+),\n\s+settleTimeMs: SETTLE_MS,\n\s+resultsDir: path\.join\(RESULTS_DIR, "live-rapid"\)/.exec(
+      source,
+    );
+    expect(rapid).not.toBeNull();
+    const windows = plannedCheckpointCount(Number(rapid![1]), rapidCadence);
+    // P(no evidence) ~= 0.22^windows. Eight windows is ~2e-6; two was ~5e-2.
+    expect(
+      windows,
+      "too few undo windows for the walk to be reliably decidable",
+    ).toBeGreaterThanOrEqual(8);
   });
 
   it("states the cadence EXPLICITLY rather than inheriting the default", () => {

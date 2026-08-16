@@ -49,6 +49,17 @@ pub struct XlsxStyleData {
     /// convert; ignoring it -- which is what happened before -- imports every
     /// date in the file 1462 days early, with nothing anywhere saying so.
     pub date1904: bool,
+    /// Document properties from `docProps/core.xml` (and `docProps/app.xml` for
+    /// the one field that lives there).
+    ///
+    /// WHY THIS IS READ AT ALL: the WRITER has always emitted them
+    /// (`xlsx_writer.rs` sets `DocProperties` title/author/subject/comment/
+    /// keywords/category), and the reader defaulted the whole struct -- so
+    /// title/author/subject survived an export and vanished on the next open.
+    /// A one-way loss on a round trip through the app's own format is a data
+    /// loss, not a fidelity preference, which is why it is closed here rather
+    /// than recorded. Filed as **S8** in `docs/design/open-decisions-2026-08.md`.
+    pub properties: crate::WorkbookProperties,
 }
 
 /// Font properties parsed from <font> elements.
@@ -256,6 +267,8 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
     data.sheet_visibility = parse_sheet_visibility(&mut archive);
     // ... and so does the date system.
     data.date1904 = parse_date1904(&mut archive);
+    // Document properties ride their own parts, outside xl/.
+    data.properties = parse_doc_properties(&mut archive);
 
     if !logical_sheet_paths.is_empty() {
         // Use the relationship-based mapping (1-based logical index → path)
@@ -1227,6 +1240,77 @@ pub(crate) fn parse_date1904(archive: &mut zip::ZipArchive<std::fs::File>) -> bo
         buf.clear();
     }
     false
+}
+
+/// Parse `docProps/core.xml` into [`crate::WorkbookProperties`].
+///
+/// THE MAPPING IS THE WRITER'S, READ BACKWARDS. `xlsx_writer.rs` fills
+/// `rust_xlsxwriter`'s `DocProperties`, which emits exactly these element
+/// names (`rust_xlsxwriter/src/core.rs`): `dc:title`, `dc:subject`,
+/// `dc:creator` (Calcula's `author`), `cp:keywords`, `dc:description`
+/// (Calcula's `description`, set through `set_comment`), `cp:category`,
+/// `dcterms:created` / `dcterms:modified`. Reading anything else here would
+/// close the round trip on paper and leave it open in fact, so each field is
+/// named after the element the writer actually produces rather than after the
+/// Calcula field it lands in.
+///
+/// Namespace prefixes are NOT matched: `local_name()` is used, because a file
+/// from another producer may bind the same namespaces to different prefixes
+/// (`dcterms:` vs `dt:`), and matching the prefix would silently drop every
+/// property in such a file. The local names are unique across the part, so
+/// there is nothing to disambiguate -- `cp:lastModifiedBy` is `lastModifiedBy`,
+/// not `modified`.
+///
+/// A missing part, an unreadable part or an unknown element is not an error:
+/// document properties are advisory metadata and no import should fail over
+/// them. Everything absent stays the `Default` empty string, which is exactly
+/// what the reader produced for every field before this existed.
+pub(crate) fn parse_doc_properties(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> crate::WorkbookProperties {
+    let mut props = crate::WorkbookProperties::default();
+    let Ok(xml) = read_zip_entry(archive, "docProps/core.xml") else {
+        return props;
+    };
+    let mut reader = Reader::from_str(&xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    // The element whose text we are currently inside, as a local name.
+    let mut current: Option<String> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(ref e)) => {
+                let tag = e.local_name();
+                current = Some(String::from_utf8_lossy(tag.as_ref()).into_owned());
+            }
+            Ok(Event::Text(ref t)) => {
+                if let Some(name) = current.as_deref() {
+                    let value = t.unescape().unwrap_or_default().trim().to_string();
+                    if value.is_empty() {
+                        buf.clear();
+                        continue;
+                    }
+                    match name {
+                        "title" => props.title = value,
+                        "subject" => props.subject = value,
+                        "creator" => props.author = value,
+                        "keywords" => props.keywords = value,
+                        "description" => props.description = value,
+                        "category" => props.category = value,
+                        "created" => props.created = value,
+                        "modified" => props.last_modified = value,
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(_)) => current = None,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    props
 }
 
 /// Parse a sheet's `_rels` part into rid -> (type, resolved target path).

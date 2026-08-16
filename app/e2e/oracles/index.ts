@@ -16,7 +16,13 @@
 //   3. save/reload       (LAST — open_file clears the undo stack)
 
 import type { Page } from "@playwright/test";
-import { captureUndoBaseline, checkUndoRoundTrip } from "./undoRoundTrip";
+import {
+  ACTIONS_THAT_MAY_END_UNDO_HISTORY,
+  captureUndoBaseline,
+  checkUndoRoundTrip,
+  getUndoState,
+  undoBaselineUnreachableReason,
+} from "./undoRoundTrip";
 import { checkSaveReloadRoundTrip } from "./saveReloadRoundTrip";
 import { checkRecalcConsistency } from "./recalcConsistency";
 import { checkNoCalculationLimit } from "./calculationBudget";
@@ -30,7 +36,14 @@ import type {
 
 export type { Digest, DigestDiff, DigestDiffEntry, DiffProfile } from "./digest";
 export { getWorkbookDigest, diffDigests, canonicalStringify, hashValue } from "./digest";
-export { captureUndoBaseline, checkUndoRoundTrip, getUndoState } from "./undoRoundTrip";
+export {
+  ACTIONS_THAT_MAY_END_UNDO_HISTORY,
+  captureUndoBaseline,
+  checkUndoRoundTrip,
+  getUndoState,
+  stepsBackToBaseline,
+  undoBaselineUnreachableReason,
+} from "./undoRoundTrip";
 export type { UndoRoundTripOutcome } from "./undoRoundTrip";
 export { checkSaveReloadRoundTrip } from "./saveReloadRoundTrip";
 export { checkRecalcConsistency } from "./recalcConsistency";
@@ -53,6 +66,17 @@ export interface OracleBatteryOptions {
   saveReloadEvery?: number;
   /** Disable individual oracles (e.g. while a blocking bug is open). */
   disable?: Array<"undo-round-trip" | "recalc-consistency" | "save-reload-round-trip">;
+  /**
+   * Whether a run that decides ZERO undo round-trips is a FAILURE (default
+   * true). See `undoEvidenceFailure`.
+   *
+   * Set false ONLY where a run genuinely cannot be expected to produce undo
+   * evidence and the caller is reading something else — the trace-replay paths,
+   * where the trace is whatever the shrinker handed over and may be a single
+   * `sheet.add`. Turning it off anywhere a GENERATED walk runs re-creates the
+   * exact silence this flag exists to break.
+   */
+  requireUndoEvidence?: boolean;
 }
 
 /**
@@ -116,10 +140,26 @@ export function describeUnreachableSaveReloadCadence(
   );
 }
 
+/**
+ * `sheet.add=4 fr.create=3` — which actions forced a mid-window rebase, most
+ * frequent first. Exported and pure so the report line has a unit tier.
+ */
+export function summarizeRebaseActions(
+  rebases: ReadonlyArray<{ action: string }>
+): string {
+  const counts: Record<string, number> = {};
+  for (const r of rebases) counts[r.action] = (counts[r.action] ?? 0) + 1;
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([id, n]) => `${id}=${n}`)
+    .join(" ");
+}
+
 export class OracleBattery {
   private readonly tmpDir: string;
   private readonly saveReloadEvery: number;
   private readonly disabled: Set<string>;
+  private readonly requireUndoEvidence: boolean;
   private checkpointCount = 0;
   /** Suppressed violations accumulated across the run (for reporting). */
   readonly suppressed: Array<{ violation: OracleViolation; ledgerId: string }> = [];
@@ -175,9 +215,75 @@ export class OracleBattery {
     undoUndecided: 0,
     /** Total transactions wound back and replayed across all checkpoints. */
     undoStepsWoundBack: 0,
+    /** Times the undo baseline was re-captured mid-window (see `rebases`). */
+    undoBaselineRebases: 0,
     recalcRuns: 0,
     saveReloadRuns: 0,
   };
+
+  /**
+   * Every mid-window re-capture of the undo baseline, with the action that
+   * forced it.
+   *
+   * Kept rather than counted because the ACTION is the interesting half. A
+   * rebase after `sheet.add` is the product behaving exactly as Excel does; a
+   * rebase after `cell.edit` would mean an ordinary edit had ended the undo
+   * history, which is a defect the walker could otherwise absorb in silence
+   * (see `ACTIONS_THAT_MAY_END_UNDO_HISTORY`).
+   */
+  readonly rebases: Array<{
+    step: number;
+    action: string;
+    reason: string;
+    /** True when the action had no business ending the history. */
+    unexpected: boolean;
+  }> = [];
+
+  /**
+   * The sentence a run deserves when its undo oracle decided NOTHING — or null
+   * when it decided something.
+   *
+   * WHY THIS IS A FAILURE AND NOT A WARNING. The warning already existed, in
+   * `formatCoverage` below, and it was printed by EVERY walk run on 2026-08-15
+   * — 10 walks, 32 checkpoints, 0 decided — under a final verdict still reading
+   * `[OK] Walk passed`. The register recorded it as an evidentiary gap and the
+   * suites stayed green, which is the same lie `assertCadenceReachable` was
+   * written to stop one paragraph earlier in this file: a guard that could not
+   * run is not a guard that passed, and an oracle that decided nothing is not
+   * an oracle that agreed.
+   *
+   * Undo is where this programme has found its most severe defects — a sheet's
+   * whole cell map replaced by another sheet's snapshot, an undo stack
+   * outliving its document across File > Open, undo recalculating no dependents
+   * — so "the undo evidence is missing" is exactly the result that must not
+   * look like "the undo evidence is clean".
+   *
+   * PURE (reads only `coverage`), so it has a unit tier.
+   */
+  undoEvidenceFailure(): string | null {
+    if (this.disabled.has("undo-round-trip")) return null;
+    if (!this.requireUndoEvidence) return null;
+    const c = this.coverage;
+    if (c.checkpoints === 0) return null;
+    if (c.undoDecided > 0) return null;
+    return (
+      `the undo round-trip oracle DECIDED NOTHING across ${c.checkpoints} ` +
+      `checkpoint(s): ${c.undoNothingToUndo} had nothing to undo and ` +
+      `${c.undoUndecided} were undecidable. This run carries no undo evidence ` +
+      `at all, so passing it would say "undo is fine" on the strength of zero ` +
+      `comparisons — and undo is where this programme has found its most ` +
+      `severe defects.\n` +
+      `      ${c.undoBaselineRebases} mid-window rebase(s) happened, so the ` +
+      `walk was already trying: the windows still closed on a history-ender.\n` +
+      `      Fix it in the SPEC, by one of:\n` +
+      `        - shorten \`oracleEveryNActions\` so a window closes before the ` +
+      `next history-ender lands;\n` +
+      `        - down-weight the families that end the undo history ` +
+      `(\`categoryWeights: { sheet: 0.2, floating: 0.5 }\`);\n` +
+      `        - pass \`requireUndoEvidence: false\` to state on purpose that ` +
+      `this run is not asking about undo (trace replays only).`
+    );
+  }
 
   /** One line stating what was verified and what was merely not contradicted. */
   formatCoverage(): string {
@@ -187,11 +293,24 @@ export class OracleBattery {
       `${c.undoNothingToUndo} with nothing to undo`,
       `${c.undoUndecided} undecided`,
     ];
+    const unexpected = this.rebases.filter((r) => r.unexpected);
     return (
       `  --- Oracle coverage over ${c.checkpoints} checkpoint(s) ---\n` +
       `  undo round-trip: ${undoParts.join(", ")}\n` +
+      `  undo baseline rebases: ${c.undoBaselineRebases}` +
+      (c.undoBaselineRebases > 0
+        ? ` (${summarizeRebaseActions(this.rebases)})`
+        : "") +
+      `\n` +
       `  recalc consistency: ${c.recalcRuns} run(s); ` +
       `save/reload round-trip: ${c.saveReloadRuns} run(s)` +
+      (unexpected.length > 0
+        ? `\n  [WARNING] ${unexpected.length} action(s) ended the undo history ` +
+          `that have no business ending it: ` +
+          unexpected
+            .map((r) => `step ${r.step} ${r.action}`)
+            .join(", ")
+        : "") +
       (c.undoDecided === 0 && c.checkpoints > 0
         ? `\n  [WARNING] the undo round-trip decided NOTHING in this run — ` +
           `a green result here is not evidence about undo`
@@ -211,6 +330,70 @@ export class OracleBattery {
     this.tmpDir = options.tmpDir;
     this.saveReloadEvery = options.saveReloadEvery ?? 4;
     this.disabled = new Set(options.disable ?? []);
+    this.requireUndoEvidence = options.requireUndoEvidence ?? true;
+  }
+
+  /**
+   * Re-capture the undo baseline IF the current one can no longer be wound back
+   * to — the change that lets this oracle decide anything at all.
+   *
+   * Called by `WalkRunner` after every action, off the snapshot it already
+   * took, at the cost of one `get_undo_state` invoke (and a workbook digest
+   * only on the actions that actually killed the window).
+   *
+   * WHAT IT DOES NOT DO. It does not relax a verdict, skip a comparison, or
+   * decide a window that cannot be decided. The baseline it captures is a real
+   * state of the workbook, its digest is taken at that moment, and the round
+   * trip that later winds back to it pops exactly the ids that sit above it.
+   * The only thing that changes is WHEN the window starts: a window no longer
+   * has to begin 25 actions before the checkpoint and survive every draw in
+   * between. MEASURED LIVE on the `invariant` project, same 6 seeds and 12
+   * walks each way: 5 of 28 checkpoints decided -> 27 of 30, and 174 -> 546
+   * transactions actually wound back and replayed. (Simulated over the
+   * generator alone the same change reads 6/120 -> 112/120; the two disagree,
+   * and the live figure is the one to quote — see
+   * `app/e2e/__tests__/undoOracleDecidability.test.ts`.)
+   *
+   * The action id is recorded with every rebase, because the rebase makes the
+   * cause invisible otherwise and one of the causes would be a serious defect
+   * (see `ACTIONS_THAT_MAY_END_UNDO_HISTORY`).
+   */
+  async rebaseUndoBaselineIfUnreachable(
+    page: Page,
+    baseline: OracleBaseline,
+    context: {
+      step: number;
+      action: string;
+      /** FR ids as of the post-action snapshot the walker already captured. */
+      floatingRangeIdsNow: readonly string[];
+    }
+  ): Promise<{ baseline: OracleBaseline; rebased: boolean }> {
+    if (this.disabled.has("undo-round-trip")) return { baseline, rebased: false };
+    const undoState = await getUndoState(page);
+    const reason = undoBaselineUnreachableReason(
+      baseline,
+      undoState,
+      context.floatingRangeIdsNow
+    );
+    if (reason === null) return { baseline, rebased: false };
+
+    const unexpected = !ACTIONS_THAT_MAY_END_UNDO_HISTORY.has(context.action);
+    this.rebases.push({
+      step: context.step,
+      action: context.action,
+      reason,
+      unexpected,
+    });
+    this.coverage.undoBaselineRebases++;
+    console.log(
+      `  [oracle] undo baseline re-captured after step ${context.step} ` +
+        `(${context.action}): ${reason}` +
+        (unexpected
+          ? `  [WARNING] ${context.action} is not an action that may end the ` +
+            `undo history`
+          : "")
+    );
+    return { baseline: await this.begin(page), rebased: true };
   }
 
   /**

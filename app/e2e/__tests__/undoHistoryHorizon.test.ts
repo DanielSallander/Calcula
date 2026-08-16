@@ -28,7 +28,12 @@
 //          false defect costs a triage cycle (it cost two, S11 and S12).
 
 import { describe, it, expect } from "vitest";
-import { stepsBackToBaseline } from "../oracles/undoRoundTrip";
+import {
+  ACTIONS_THAT_MAY_END_UNDO_HISTORY,
+  stepsBackToBaseline,
+  undoBaselineUnreachableReason,
+} from "../oracles/undoRoundTrip";
+import { FULL_ACTION_CATALOG } from "../walker/actionCatalog";
 
 type Baseline = Parameters<typeof stepsBackToBaseline>[0];
 type Now = Parameters<typeof stepsBackToBaseline>[1];
@@ -196,5 +201,141 @@ describe("stepsBackToBaseline: the other two causes still answer for themselves"
     expect((result as { unreachable: string }).unreachable).toContain(
       "workbook-structure change"
     );
+  });
+});
+
+// ============================================================================
+// `undoBaselineUnreachableReason` -- the same judgement, asked after every
+// action instead of once every 25
+// ============================================================================
+//
+// WHY IT IS A SEPARATE FUNCTION AND NOT AN INLINE `if`. It is the predicate
+// that decides whether the walker re-captures its undo baseline mid-window,
+// and the whole value of the rebase depends on it being EXACTLY as strict as
+// the checkpoint's own verdict. A predicate that were laxer would re-baseline
+// on a window that was still decidable and throw away real coverage; one that
+// were stricter would leave a dead window in place and the oracle would decide
+// nothing, which is the state this pass exists to end. So it composes the two
+// judgements the checkpoint composes, in the checkpoint's own precedence.
+
+describe("undoBaselineUnreachableReason", () => {
+  const frBaseline = (over: Partial<Baseline> & { floatingRangeIds?: string[] } = {}) => ({
+    undoTopSeq: null,
+    evictedTotal: 0,
+    clearedTotal: 0,
+    clearsTotal: 0,
+    floatingRangeIds: [] as string[],
+    ...over,
+  });
+
+  it("is null while the baseline is still reachable", () => {
+    expect(
+      undoBaselineUnreachableReason(
+        frBaseline({ undoTopSeq: 7, floatingRangeIds: ["a"] }),
+        now({ undoSeqs: [7, 8, 9] }),
+        ["a"]
+      )
+    ).toBeNull();
+  });
+
+  it("reports the wholesale clear a sheet operation caused", () => {
+    const reason = undoBaselineUnreachableReason(
+      frBaseline({ undoTopSeq: 7 }),
+      now({ undoSeqs: [], clearedTotal: 3, clearsTotal: 1 }),
+      []
+    );
+    expect(reason).toContain("workbook-structure change");
+  });
+
+  it("reports a floating range created since the baseline", () => {
+    // FR create pushes nothing AND clears nothing (§16), so every counter is
+    // untouched and this is the only observation that can see it.
+    const reason = undoBaselineUnreachableReason(
+      frBaseline({ undoTopSeq: 7, floatingRangeIds: ["a"] }),
+      now({ undoSeqs: [7, 8] }),
+      ["a", "b"]
+    );
+    expect(reason).toContain("floating range(s) were created");
+    expect(reason).toContain("b");
+  });
+
+  it("does NOT fire when a floating range was merely DELETED", () => {
+    // A delete ends the history, which the counters report; the id list must
+    // not invent a second reason out of an object that went away.
+    expect(
+      undoBaselineUnreachableReason(
+        frBaseline({ undoTopSeq: 7, floatingRangeIds: ["a", "b"] }),
+        now({ undoSeqs: [7, 8] }),
+        ["a"]
+      )
+    ).toBeNull();
+  });
+
+  it("prefers the counter's mechanism over the floating-range list", () => {
+    // Both are true at once when a walk creates an FR and then adds a sheet.
+    // The counters name the mechanism; the id list only names an object, and
+    // `checkUndoRoundTrip` reports them in that order. The two must agree, or
+    // a rebase and a checkpoint would explain the same window differently.
+    const reason = undoBaselineUnreachableReason(
+      frBaseline({ undoTopSeq: 7, floatingRangeIds: [] }),
+      now({ undoSeqs: [], clearedTotal: 2, clearsTotal: 1 }),
+      ["new"]
+    );
+    expect(reason).toContain("workbook-structure change");
+  });
+});
+
+// ============================================================================
+// The list of actions allowed to end the undo history
+// ============================================================================
+
+describe("ACTIONS_THAT_MAY_END_UNDO_HISTORY", () => {
+  it("holds the five structural sheet commands and the FR sheet operations", () => {
+    for (const id of [
+      "sheet.add",
+      "sheet.delete",
+      "sheet.rename",
+      "sheet.move",
+      "sheet.copy",
+      "fr.create",
+      "fr.rename",
+      "fr.delete",
+      "undo",
+    ]) {
+      expect(ACTIONS_THAT_MAY_END_UNDO_HISTORY.has(id), id).toBe(true);
+    }
+  });
+
+  it("does NOT hold hide/unhide/tabColor -- BUG-0050 made them undoable", () => {
+    // If one of these ever ends the history again, the walker's rebase census
+    // is what reports it, and it can only do that while they are absent here.
+    for (const id of ["sheet.hide", "sheet.unhide", "sheet.tabColor"]) {
+      expect(ACTIONS_THAT_MAY_END_UNDO_HISTORY.has(id), id).toBe(false);
+    }
+  });
+
+  it("does NOT hold ordinary editing actions", () => {
+    for (const id of [
+      "cell.edit",
+      "cell.clear",
+      "structure.insert-row",
+      "table.create",
+      "chart.create",
+      "fr.setCell",
+      "fr.resize",
+      "sort.range",
+      "replace.all",
+    ]) {
+      expect(ACTIONS_THAT_MAY_END_UNDO_HISTORY.has(id), id).toBe(false);
+    }
+  });
+
+  it("names only actions that exist in the catalog", () => {
+    // A typo here is silent in both directions: an id that matches nothing can
+    // never be excused, and can never accuse either.
+    const ids = new Set(FULL_ACTION_CATALOG.map((a) => a.id));
+    for (const id of ACTIONS_THAT_MAY_END_UNDO_HISTORY) {
+      expect(ids.has(id), `${id} is not an action in the catalog`).toBe(true);
+    }
   });
 });

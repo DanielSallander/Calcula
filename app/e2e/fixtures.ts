@@ -16,6 +16,7 @@ import * as path from "path";
 import { GridHelper } from "./helpers/grid";
 import { APP_DIED_MARKER } from "./appDiedMarker";
 import { recordStartupFailure } from "./startupGuard";
+import { BOOT_ERROR_SIGNALS, readPageState, UNREADABLE_PAGE_STATE } from "./pageState";
 
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
 const MAX_RETRIES = 3;
@@ -319,26 +320,14 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         // Read the page's own state. Every probe is guarded: a page that cannot
         // be evaluated at all must still produce the diagnosis, not a second,
         // more confusing error on top of the first.
+        // ONE reading, defined in `pageState.ts` and shared with the startup
+        // barrier -- including HOW a rendered root error boundary is
+        // recognised, which is no longer a single `data-testid` query. This
+        // fixture and the barrier previously kept separate copies of that
+        // question, and the copies had already drifted.
         const probe = await page
-          .evaluate(() => ({
-            rootChildCount: document.getElementById("root")?.childElementCount ?? -1,
-            calcImportPresent:
-              typeof (window as unknown as { __calcImport?: unknown }).__calcImport !==
-              "undefined",
-            url: document.location.href,
-            // The root error boundary (BUG-0083) renders INTO `#root`, so the
-            // child count alone would call a crashed boot a healthy mount.
-            bootErrorText: (() => {
-              const el = document.querySelector("[data-testid='root-error-boundary']");
-              return el ? (el.textContent ?? "").trim().slice(0, 4000) : null;
-            })(),
-          }))
-          .catch(() => ({
-            rootChildCount: -1,
-            calcImportPresent: false,
-            url: "(unreadable)",
-            bootErrorText: null as string | null,
-          }));
+          .evaluate(readPageState, BOOT_ERROR_SIGNALS)
+          .catch(() => UNREADABLE_PAGE_STATE);
         const message = describeUnmountedApp(
           probe.rootChildCount,
           probe.calcImportPresent,

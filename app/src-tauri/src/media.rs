@@ -261,9 +261,92 @@ pub fn sweep_unreferenced_media(workbook: &mut persistence::Workbook) -> usize {
 pub struct MediaMigration {
     /// Properties rewritten from a data URL to a `media:` handle.
     pub migrated: usize,
-    /// Properties that held a data URL this build refuses to admit (an SVG, or
-    /// something over a cap). Left exactly as they were — see below.
+    /// Properties that held a data URL this build refuses to admit for a
+    /// POLICY reason (SVG, BMP, an unknown format, a malformed header). Left
+    /// exactly as they were, and still rendered — see below.
     pub refused: usize,
+    /// Properties CLEARED because the payload was refused for a reason that
+    /// makes DECODING it the harm: over the byte cap, over a dimension cap, or
+    /// over the pixel cap (a decompression bomb). See
+    /// `MediaError::is_decode_hazard`.
+    ///
+    /// Leaving one of these inline was the hole this counter exists to prove
+    /// closed. `inspect_media` refused it entry to the media store and the
+    /// payload stayed in the control property regardless, so the WebView —
+    /// which has no such caps — decoded it anyway. A 30,000 x 30,000 PNG is a
+    /// few KB of `controls.json` and 3.6 GB of RGBA in the renderer.
+    pub dropped: usize,
+}
+
+/// What should become of one inline `data:image/...` payload.
+enum InlineVerdict {
+    /// Admissible. These are the decoded bytes; file them and leave a handle.
+    Admit(Vec<u8>),
+    /// Refused on POLICY. Leave the payload exactly where it is: it is a
+    /// picture the user can see, and destroying it because a later build
+    /// narrowed the allowlist would be the worse failure.
+    LeaveInline,
+    /// Refused because DECODING it is the harm. It must not survive as
+    /// something renderable, so the property is cleared.
+    Drop,
+}
+
+/// Judge one inline payload: admit, leave, or drop.
+///
+/// The one place the "read tolerance, write strictness" rule is actually
+/// decided, so the `.cala` corpus and the `.calp` corpus cannot drift on what
+/// tolerance means. Tolerance is for pictures a stricter ALLOWLIST now
+/// excludes; it was never meant to cover payloads the CAPS exist to stop.
+fn judge_inline_image(value: &str) -> InlineVerdict {
+    match calcula_format::media::decode_image_data_url(value) {
+        Some(bytes) => match inspect_media(&bytes) {
+            Ok(_) => InlineVerdict::Admit(bytes),
+            Err(err) if err.is_decode_hazard() => InlineVerdict::Drop,
+            Err(_) => InlineVerdict::LeaveInline,
+        },
+        // `decode_image_data_url` returns None for two different situations: a
+        // string that is not a base64 image data URL at all, and one whose
+        // payload is so large it refuses to allocate a decode buffer. The
+        // second is the byte cap speaking, and it is a hazard for exactly the
+        // reason `TooLarge` is — the WebView has no such scruple and will
+        // decode whatever is left inline. Told apart by the only measure
+        // available without decoding: the ENCODED length.
+        None if exceeds_byte_cap_encoded(value) => InlineVerdict::Drop,
+        None => InlineVerdict::LeaveInline,
+    }
+}
+
+/// True when a `data:image/...;base64,` payload's ENCODED length alone puts it
+/// past the per-image byte budget, so nothing will ever admit it.
+///
+/// Mirrors `decode_image_data_url`'s own pre-allocation refusal (4 base64
+/// characters per 3 bytes) rather than re-deriving a second threshold, so the
+/// two cannot disagree about which payloads never get decoded.
+fn exceeds_byte_cap_encoded(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return false;
+    };
+    let Some(comma) = rest.find(',') else {
+        return false;
+    };
+    let meta = &rest[..comma];
+    if !meta.starts_with("image/") || !meta.ends_with(";base64") {
+        return false;
+    }
+    rest[comma + 1..].len() / 4 * 3 > MAX_MEDIA_BYTES
+}
+
+/// The WRITE-door half of `judge_inline_image`: is this property value an
+/// inline image payload that must never reach a decoder?
+///
+/// The migration paths clean the corpus that is ALREADY in a document. This
+/// stops a new one being created, which is what makes "no new inline bytes"
+/// true of the code rather than only of the design note. It refuses the HAZARD
+/// class only — a policy-refused payload (an SVG a legacy document still
+/// carries) must round-trip through a property write unharmed, or editing any
+/// other property of that control would destroy its picture.
+pub fn is_hazardous_inline_image(value: &str) -> bool {
+    value.starts_with("data:image/") && matches!(judge_inline_image(value), InlineVerdict::Drop)
 }
 
 /// Migrate control properties that still hold a `data:image/*;base64,...` URL
@@ -292,21 +375,26 @@ pub fn migrate_legacy_data_urls(
             if !prop.value.starts_with("data:image/") {
                 continue;
             }
-            let Some(bytes) = calcula_format::media::decode_image_data_url(&prop.value) else {
-                report.refused += 1;
-                continue;
-            };
-            if inspect_media(&bytes).is_err() {
-                report.refused += 1;
-                continue;
+            match judge_inline_image(&prop.value) {
+                InlineVerdict::Admit(bytes) => {
+                    let hash = sha256_hex(&bytes);
+                    media.entry(hash.clone()).or_insert(bytes);
+                    *prop = ControlPropertyValue {
+                        value_type: prop.value_type.clone(),
+                        value: media_ref(&hash),
+                    };
+                    report.migrated += 1;
+                }
+                InlineVerdict::LeaveInline => report.refused += 1,
+                InlineVerdict::Drop => {
+                    // Cleared, not deleted: the control keeps its identity,
+                    // geometry and every other property, and paints the honest
+                    // "No Image" placeholder. Removing the control instead
+                    // would silently change the sheet's layout.
+                    prop.value = String::new();
+                    report.dropped += 1;
+                }
             }
-            let hash = sha256_hex(&bytes);
-            media.entry(hash.clone()).or_insert(bytes);
-            *prop = ControlPropertyValue {
-                value_type: prop.value_type.clone(),
-                value: media_ref(&hash),
-            };
-            report.migrated += 1;
         }
     }
     report
@@ -329,18 +417,19 @@ fn rewrite_inline_images(
             if !text.starts_with("data:image/") {
                 return;
             }
-            let Some(bytes) = calcula_format::media::decode_image_data_url(text) else {
-                report.refused += 1;
-                return;
-            };
-            if inspect_media(&bytes).is_err() {
-                report.refused += 1;
-                return;
+            match judge_inline_image(text) {
+                InlineVerdict::Admit(bytes) => {
+                    let hash = sha256_hex(&bytes);
+                    out.entry(hash.clone()).or_insert(bytes);
+                    *text = media_ref(&hash);
+                    report.migrated += 1;
+                }
+                InlineVerdict::LeaveInline => report.refused += 1,
+                InlineVerdict::Drop => {
+                    text.clear();
+                    report.dropped += 1;
+                }
             }
-            let hash = sha256_hex(&bytes);
-            out.entry(hash.clone()).or_insert(bytes);
-            *text = media_ref(&hash);
-            report.migrated += 1;
         }
         serde_json::Value::Array(items) => {
             for item in items {
@@ -421,11 +510,12 @@ pub fn admit_distributed_controls(
         // bytes cannot diverge on what counts as an admissible image.
         merge_pulled_media(state, effect, bytes)?;
     }
-    if report.migrated > 0 || report.refused > 0 {
+    if report.migrated > 0 || report.refused > 0 || report.dropped > 0 {
         log::info!(
-            "[media] distributed controls: migrated {} inline image(s) into the media store; {} refused and left inline",
+            "[media] distributed controls: migrated {} inline image(s) into the media store; {} refused on format and left inline; {} dropped as unsafe to decode",
             report.migrated,
-            report.refused
+            report.refused,
+            report.dropped
         );
     }
     Ok(admitted)
@@ -706,7 +796,7 @@ mod tests {
         let mut media = MediaStore::new();
 
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
-        assert_eq!(report, MediaMigration { migrated: 1, refused: 0 });
+        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0 });
         assert_eq!(media.get(&hash), Some(&bytes));
         assert_eq!(
             controls[&(0, 1, 1)].properties["src"].value,
@@ -748,7 +838,7 @@ mod tests {
         let mut media = MediaStore::new();
 
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
-        assert_eq!(report, MediaMigration { migrated: 0, refused: 1 });
+        assert_eq!(report, MediaMigration { migrated: 0, refused: 1, dropped: 0 });
         assert!(media.is_empty());
         assert_eq!(controls[&(0, 1, 1)].properties["src"].value, svg);
     }
@@ -847,7 +937,7 @@ mod tests {
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
 
         // 3. The picture is preserved, byte for byte, and no longer inline.
-        assert_eq!(report, MediaMigration { migrated: 1, refused: 0 });
+        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0 });
         assert_eq!(media.get(&hash), Some(&logo));
         let src = &controls[&(0, 0, 0)].properties["src"].value;
         assert_eq!(src, &media_ref(&hash));
@@ -1009,13 +1099,124 @@ mod tests {
         // are a picture. A 30k x 30k single-colour PNG is a few KB inline and
         // 3.6 GB of RGBA at decode — the pixel cap, not the byte cap, catches
         // it, and the same gate has to apply to the inline shape.
+        //
+        // THIS TEST USED TO STOP AT `bytes.is_empty()`, and its name has always
+        // claimed more than that checked. Keeping the bomb out of the media
+        // store is not the same statement as refusing it: the payload stayed in
+        // the control property, materialized straight into the subscriber's own
+        // `controls.json`, and was handed to the WebView as
+        // `<img src="data:...">` — which is the one component with no caps at
+        // all. The store was clean and the renderer still got the bomb.
         let bomb = png_bytes(30_000, 30_000);
         let payload = distributed_payload(&[("src", &data_url(&bomb))]);
 
-        let (_, bytes, report) = migrate_distributed_inline_images(&payload);
+        let (admitted, bytes, report) = migrate_distributed_inline_images(&payload);
 
         assert_eq!(report.migrated, 0);
-        assert_eq!(report.refused, 1);
+        assert_eq!(report.refused, 0, "a bomb is not a format refusal");
+        assert_eq!(report.dropped, 1);
         assert!(bytes.is_empty(), "a bomb never enters the media store");
+        assert!(
+            !admitted_value(&admitted).contains("data:image/"),
+            "and it never reaches the renderer either"
+        );
+    }
+
+    // --- refusal must be COMPLETE, not merely bookkeeping ------------------
+
+    #[test]
+    fn an_inline_bomb_in_a_local_cala_is_cleared_rather_than_left_to_the_renderer() {
+        // The `.cala` corpus takes the same rule as the package corpus. The
+        // migration's tolerance exists for pictures a narrowed ALLOWLIST now
+        // excludes — never for payloads the CAPS exist to stop.
+        let mut controls = ControlStorage::new();
+        controls.insert(
+            (0, 1, 1),
+            control_with("src", &data_url(&png_bytes(30_000, 30_000))),
+        );
+        let mut media = MediaStore::new();
+
+        let report = migrate_legacy_data_urls(&mut controls, &mut media);
+
+        assert_eq!(report.dropped, 1);
+        assert_eq!(report.migrated, 0);
+        assert!(media.is_empty());
+        let value = &controls[&(0, 1, 1)].properties["src"].value;
+        assert_eq!(value, "", "cleared, so the control paints \"No Image\"");
+    }
+
+    #[test]
+    fn a_bomb_that_is_merely_too_wide_is_dropped_on_the_dimension_cap_too() {
+        // `DimensionOutOfRange` and `TooManyPixels` are different refusals and
+        // both are hazards: 40,000 x 4 is inside the pixel cap and outside the
+        // dimension cap, and it still asks the decoder for a 40,000-px scanline.
+        let payload = distributed_payload(&[("src", &data_url(&png_bytes(40_000, 4)))]);
+
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(report.dropped, 1);
+        assert!(!admitted_value(&admitted).contains("data:image/"));
+    }
+
+    #[test]
+    fn an_inline_payload_too_large_to_even_decode_is_dropped_not_left_inline() {
+        // The inverted control. `decode_image_data_url` refuses to allocate a
+        // buffer for anything over the byte cap and returns None — and the old
+        // code read None as "leave it alone". So the BIGGER the payload, the
+        // more certainly it survived: the cap meant to stop large payloads was
+        // the very thing that waved them through, unbounded and unvalidated,
+        // into the subscriber's saved document.
+        let huge = format!("data:image/png;base64,{}", "A".repeat(MAX_MEDIA_BYTES * 2));
+        let payload = distributed_payload(&[("src", &huge)]);
+
+        let (admitted, bytes, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(report.dropped, 1);
+        assert_eq!(report.refused, 0);
+        assert!(bytes.is_empty());
+        let text = admitted_value(&admitted);
+        assert!(!text.contains("data:image/"));
+        assert!(
+            text.len() < 500,
+            "the unbounded string must not survive into controls.json (was {})",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn a_format_refusal_is_still_tolerated_because_it_is_safe_to_render() {
+        // The other half of the rule, pinned so a later tightening cannot
+        // quietly turn every refusal into data loss. An SVG the old picker
+        // accepted is a real picture, it is small, and an <img> will not run
+        // its script — so it stays, exactly as before.
+        for safe in [
+            "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+            "data:image/bmp;base64,Qk0AAAAA",
+        ] {
+            let payload = distributed_payload(&[("src", safe)]);
+            let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+            assert_eq!(report.dropped, 0, "{} must not be dropped", safe);
+            assert_eq!(report.refused, 1, "{} is a format refusal", safe);
+            assert!(admitted_value(&admitted).contains(safe), "left exactly as it was");
+        }
+    }
+
+    #[test]
+    fn every_media_error_is_classified_as_hazard_or_policy_on_purpose() {
+        // `is_decode_hazard` matches exhaustively, so a NEW variant is a compile
+        // error rather than a silent default. This pins the classification
+        // itself: the three caps are hazards, and everything that is merely a
+        // statement about FORMAT is not.
+        use calcula_format::media::MediaError;
+        assert!(MediaError::TooLarge { bytes: 1, limit: 0 }.is_decode_hazard());
+        assert!(MediaError::TooManyPixels { pixels: 1, limit: 0 }.is_decode_hazard());
+        assert!(MediaError::DimensionOutOfRange { width: 1, height: 1, limit: 0 }
+            .is_decode_hazard());
+        assert!(!MediaError::SvgRefused.is_decode_hazard());
+        assert!(!MediaError::BmpRefused.is_decode_hazard());
+        assert!(!MediaError::UnknownFormat.is_decode_hazard());
+        assert!(!MediaError::Empty.is_decode_hazard());
+        assert!(!MediaError::MalformedHeader { format: "PNG", detail: "short" }
+            .is_decode_hazard());
     }
 }

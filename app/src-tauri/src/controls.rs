@@ -240,7 +240,7 @@ pub fn get_control_metadata(
 /// corrupt data that looks like good data.
 pub const MAX_CONTROL_PROPERTY_CHARS: usize = 64 * 1024;
 
-fn check_property_size(name: &str, value: &str) -> Result<(), String> {
+fn check_property_value(name: &str, value: &str) -> Result<(), String> {
     if value.chars().count() > MAX_CONTROL_PROPERTY_CHARS {
         return Err(format!(
             "Control property '{}' is {} characters; the limit is {}. \
@@ -249,6 +249,26 @@ fn check_property_size(name: &str, value: &str) -> Result<(), String> {
             name,
             value.chars().count(),
             MAX_CONTROL_PROPERTY_CHARS
+        ));
+    }
+    // THE SIZE BOUND IS NOT THE WHOLE DOOR. A decompression bomb is SMALL: a
+    // 30,000 x 30,000 single-colour PNG is a few kilobytes, so it clears 64 KiB
+    // with room to spare, while every cap that exists to stop it — the byte cap,
+    // both dimension caps — lives in `inspect_media`, which a property write
+    // never reached. The WebView, which has no caps at all, then decoded it
+    // straight off the `data:` URL. Refuse the hazard class here so the
+    // migration paths are cleaning up history rather than racing new arrivals.
+    //
+    // The HAZARD class only. A policy-refused payload (the SVG a legacy document
+    // still carries) has to round-trip through a property write unharmed, or
+    // editing any other property of that control would destroy its picture.
+    if crate::media::is_hazardous_inline_image(value) {
+        return Err(format!(
+            "Control property '{}' holds an inline image this build refuses to decode \
+             (over the byte cap, over a dimension cap, or over the pixel cap). \
+             A picture enters a document through Insert > Image, which validates it \
+             host-side and yields a media: handle.",
+            name
         ));
     }
     Ok(())
@@ -302,7 +322,7 @@ pub fn set_control_property(
     value_type: String,
     value: String,
 ) -> Result<ControlMetadata, String> {
-    check_property_size(&property_name, &value)?;
+    check_property_value(&property_name, &value)?;
 
     // Gate, then decide, WITHOUT releasing the lock in between: Tauri dispatches
     // commands on a thread pool, so a read()-drop-write() pair would leave a
@@ -353,7 +373,7 @@ pub fn set_control_metadata(
     metadata: ControlMetadata,
 ) -> Result<ControlMetadata, String> {
     for (name, prop) in &metadata.properties {
-        check_property_size(name, &prop.value)?;
+        check_property_value(name, &prop.value)?;
     }
     if metadata.control_type.is_empty() {
         return Err("A control must have a controlType.".to_string());
@@ -566,10 +586,17 @@ mod persistence_tests {
     fn a_control_property_over_the_size_cap_is_refused() {
         // The mechanical half of "a restricted script must not write a
         // multi-megabyte string into persisted document state". The bound lives
-        // at the command, not in a policy sentence upstream, because every route
-        // — UI, script broker, MCP, .calp materialization — arrives here.
+        // at the command, not in a policy sentence upstream.
+        //
+        // IT IS NOT, HOWEVER, UNIVERSAL, and the claim that used to stand here —
+        // "every route (UI, script broker, MCP, .calp materialization) arrives
+        // here" — was false in its last term and that is precisely where a hole
+        // opened. A package pull calls `materialize_saved_controls` DIRECTLY, so
+        // it never passes this function at all. Anything that must hold of the
+        // distributed corpus has to be enforced on the pull path as well; see
+        // `media::judge_inline_image`.
         let over = "x".repeat(MAX_CONTROL_PROPERTY_CHARS + 1);
-        let err = check_property_size("src", &over).unwrap_err();
+        let err = check_property_value("src", &over).unwrap_err();
         assert!(err.contains("limit is"), "the refusal must state the limit: {}", err);
         assert!(
             err.contains("media"),
@@ -578,12 +605,53 @@ mod persistence_tests {
         );
 
         // Exactly at the cap is allowed: this is a boundary, not a blanket ban.
-        assert!(check_property_size("src", &"x".repeat(MAX_CONTROL_PROPERTY_CHARS)).is_ok());
+        assert!(check_property_value("src", &"x".repeat(MAX_CONTROL_PROPERTY_CHARS)).is_ok());
         // A media handle — the shape that replaces the megabyte data URL — is 70
         // characters, three orders of magnitude inside the cap.
         let handle = format!("media:{}", "a".repeat(64));
         assert_eq!(handle.len(), 70);
-        assert!(check_property_size("src", &handle).is_ok());
+        assert!(check_property_value("src", &handle).is_ok());
+    }
+
+    #[test]
+    fn a_small_decompression_bomb_is_refused_even_though_it_fits_the_size_cap() {
+        // The size cap and the image caps are answering different questions, and
+        // for a long time only one of them was asked at this door. A 30,000 x
+        // 30,000 single-colour PNG is a few KB — comfortably INSIDE 64 KiB — and
+        // 3.6 GB of RGBA once the WebView decodes it off the data: URL.
+        let mut png: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&30_000u32.to_be_bytes());
+        png.extend_from_slice(&30_000u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut b64 = String::new();
+        for chunk in png.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    b64.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    b64.push('=');
+                }
+            }
+        }
+        let bomb = format!("data:image/png;base64,{}", b64);
+        assert!(
+            bomb.chars().count() < MAX_CONTROL_PROPERTY_CHARS,
+            "precondition: the bomb is SMALL — that is the whole point"
+        );
+
+        let err = check_property_value("src", &bomb).unwrap_err();
+        assert!(err.contains("refuses to decode"), "{}", err);
+
+        // A policy refusal still round-trips: editing some other property of a
+        // legacy control must not destroy the picture it still shows.
+        let svg = "data:image/svg+xml;base64,PHN2Zy8+";
+        assert!(check_property_value("src", svg).is_ok());
     }
 
     #[test]
@@ -592,7 +660,7 @@ mod persistence_tests {
         // in Swedish or Japanese is not a size problem.
         let text = "å".repeat(MAX_CONTROL_PROPERTY_CHARS);
         assert!(text.len() > MAX_CONTROL_PROPERTY_CHARS, "precondition: 2 bytes per char");
-        assert!(check_property_size("text", &text).is_ok());
+        assert!(check_property_value("text", &text).is_ok());
     }
 
     #[test]

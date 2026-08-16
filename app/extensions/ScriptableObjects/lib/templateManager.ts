@@ -132,11 +132,134 @@ export function exportTemplate(template: ObjectTemplate): string {
 }
 
 /**
+ * The object types a template is allowed to name.
+ *
+ * Declared as a `Record` KEYED BY THE UNION rather than an array of strings, so
+ * adding a `ScriptableObjectType` is a compile error here instead of a template
+ * that imports with a type nothing can stamp.
+ */
+const VALID_OBJECT_TYPES: Record<ScriptableObjectType, true> = {
+  workbook: true,
+  sheet: true,
+  cell: true,
+  row: true,
+  column: true,
+  slicer: true,
+  chart: true,
+  pivot: true,
+  button: true,
+  textbox: true,
+  timeline: true,
+  shape: true,
+  table: true,
+  namedRange: true,
+  range: true,
+  panel: true,
+};
+
+/** A `.calcula-template` file that is not a template. */
+export class TemplateImportError extends Error {
+  constructor(message: string) {
+    super(`Not a valid Calcula script template: ${message}`);
+    this.name = "TemplateImportError";
+  }
+}
+
+/**
  * Import a template from a JSON string.
+ *
+ * TWO THINGS THIS DOES THAT THE ORIGINAL DID NOT, both for the same reason: a
+ * `.calcula-template` is a FILE THAT ARRIVES FROM SOMEWHERE ELSE. The dialog's
+ * own empty state invites the user to "import a .calcula-template file", so the
+ * user is choosing what they believe is a document, and what they get is
+ * executable code plus the privilege level it runs at.
+ *
+ * 1. IT VALIDATES. The original was `JSON.parse(json) as ObjectTemplate` — a
+ *    cast, which checks nothing at all — and the result was written straight to
+ *    the templates directory. Any JSON object at all became a "template".
+ *
+ * 2. IT REFUSES TO TAKE THE TIER FROM THE FILE. `accessLevel` is forced to
+ *    "restricted" no matter what the file says. It used to be copied verbatim,
+ *    and it is load-bearing: `stampFromTemplate` puts it on the stamped
+ *    `ObjectScriptDefinition`, and `buildHandleFromDefinition`
+ *    (app/src/api/scriptHost/broker.ts) turns `accessLevel === "unlocked"` into
+ *    `tier: "unlocked"` — whole-workbook reach, `api.getCellValue` /
+ *    `api.setCellValue` / `api.updateCellsBatch` over 100,000 cells /
+ *    `api.executeCommand`. An object script runs on its object's events, so
+ *    nothing further had to be clicked. A file could therefore choose its own
+ *    privilege level, and no part of the import flow ever said so.
+ *
+ *    This is not a new rule, it is the rule this door was missing:
+ *    `draftToScriptDefinition` in ./scriptDrafts.ts already states it for
+ *    AI-authored scripts — "must never arrive pre-escalated to the unlocked
+ *    tier; raising it is a separate, deliberate human action in the editor."
+ *    A file off the disk deserves it at least as much as an AI does. Raising
+ *    the tier stays one visible click in the editor.
+ *
+ * Provenance stays "local" (the field is absent), which is correct and is why
+ * the tier had to be closed here: a local script auto-grants `ui.html` and
+ * takes its declared-capability ceiling from source pragmas, so the import
+ * lands in the MOST trusted bucket, not the least.
+ *
+ * NOT COVERED, deliberately and stated rather than implied: a file written
+ * DIRECTLY into %APPDATA%/Calcula/templates/ never passes through this
+ * function. Anything that can write there can already write far worse, so the
+ * boundary drawn here is the import door, not the directory.
  */
 export function importTemplate(json: string): ObjectTemplate {
-  const template = JSON.parse(json) as ObjectTemplate;
-  // Assign a new ID on import to avoid collisions
-  template.id = crypto.randomUUID();
-  return template;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (e) {
+    throw new TemplateImportError(`the file is not valid JSON (${String(e)})`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new TemplateImportError("the file is not a JSON object");
+  }
+  const raw = parsed as Record<string, unknown>;
+
+  const name = raw.name;
+  if (typeof name !== "string" || name.trim() === "") {
+    throw new TemplateImportError("`name` is missing or not a non-empty string");
+  }
+  const objectType = raw.objectType;
+  if (
+    typeof objectType !== "string" ||
+    !Object.prototype.hasOwnProperty.call(VALID_OBJECT_TYPES, objectType)
+  ) {
+    throw new TemplateImportError(
+      `\`objectType\` is missing or not a scriptable object type (got ${JSON.stringify(objectType)})`,
+    );
+  }
+  const scriptSource = raw.scriptSource;
+  if (typeof scriptSource !== "string") {
+    throw new TemplateImportError("`scriptSource` is missing or not a string");
+  }
+  const description = raw.description;
+  if (description !== undefined && typeof description !== "string") {
+    throw new TemplateImportError("`description` is present but not a string");
+  }
+  const metadata = raw.metadata;
+  if (
+    metadata !== undefined &&
+    (typeof metadata !== "object" || metadata === null || Array.isArray(metadata))
+  ) {
+    throw new TemplateImportError("`metadata` is present but not a JSON object");
+  }
+  const createdAt = raw.createdAt;
+
+  return {
+    // A FRESH id, so an imported file cannot choose the identity that a
+    // capability grant or a source hash is keyed to (same reasoning as
+    // `draftToScriptDefinition`).
+    id: crypto.randomUUID(),
+    name,
+    objectType: objectType as ScriptableObjectType,
+    scriptSource,
+    // NEVER `raw.accessLevel`. See the note above.
+    accessLevel: "restricted",
+    ...(description !== undefined ? { description } : {}),
+    createdAt: typeof createdAt === "string" ? createdAt : new Date().toISOString(),
+    ...(metadata !== undefined ? { metadata: metadata as Record<string, unknown> } : {}),
+  };
 }

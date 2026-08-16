@@ -1984,4 +1984,72 @@ mod tests {
         }
     }
 
+    /// S8: the writer emitted document properties and the reader threw them
+    /// away, so `save_xlsx` -> `load_xlsx` -- the app's own round trip through
+    /// its own export -- lost the title, author, subject, description,
+    /// keywords and category the user had typed. Nothing said so: the Document
+    /// Properties dialog simply came back empty.
+    #[test]
+    fn document_properties_survive_the_xlsx_round_trip() {
+        let mut workbook = Workbook::new();
+        workbook.properties = crate::WorkbookProperties {
+            title: "Quarterly Report".to_string(),
+            author: "Daniel Sallander".to_string(),
+            subject: "Revenue".to_string(),
+            description: "Figures for Q3, unaudited".to_string(),
+            keywords: "revenue,q3,draft".to_string(),
+            category: "Finance".to_string(),
+            created: String::new(),
+            last_modified: String::new(),
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("props.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        assert_eq!(loaded.properties.title, "Quarterly Report");
+        assert_eq!(
+            loaded.properties.author, "Daniel Sallander",
+            "dc:creator is Calcula's `author`, and it is the field most likely \
+             to be mapped to the wrong name"
+        );
+        assert_eq!(loaded.properties.subject, "Revenue");
+        assert_eq!(
+            loaded.properties.description, "Figures for Q3, unaudited",
+            "the writer puts `description` in dc:description via set_comment; \
+             reading dc:subject here would look correct on a fixture where the \
+             two agree"
+        );
+        assert_eq!(loaded.properties.keywords, "revenue,q3,draft");
+        assert_eq!(loaded.properties.category, "Finance");
+        // rust_xlsxwriter stamps dcterms:created on every file it writes, so
+        // this one is asserted as PRESENT rather than as a value.
+        assert!(
+            !loaded.properties.created.is_empty(),
+            "dcterms:created is written unconditionally and must be read back"
+        );
+    }
+
+    /// The counterweight: a file with no `docProps/core.xml` at all, and one
+    /// whose properties are empty, must import as empty strings rather than
+    /// failing the whole load. Document metadata is advisory; nothing about it
+    /// may cost a user their data.
+    #[test]
+    fn a_workbook_without_document_properties_still_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodocprops.xlsx");
+        // `write_dated_xlsx` builds the archive by hand and writes no docProps
+        // part at all -- exactly the case under test.
+        write_dated_xlsx(&path, "");
+
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        assert_eq!(loaded.properties.title, "");
+        assert_eq!(loaded.properties.author, "");
+        assert_eq!(
+            number_at(&loaded.sheets[0], 0, 1),
+            36892.0,
+            "the cells must still load -- a missing docProps part is not an error"
+        );
+    }
 }

@@ -165,6 +165,40 @@ impl fmt::Display for MediaError {
 
 impl std::error::Error for MediaError {}
 
+impl MediaError {
+    /// Is this refusal one where handing the bytes to an image DECODER is
+    /// itself the harm, rather than a matter of policy?
+    ///
+    /// The distinction decides the fate of a legacy inline `data:` payload this
+    /// build will not re-admit. Those are deliberately left in place so that a
+    /// stricter rule arriving late never destroys a picture the user can see --
+    /// but "left in place" means the WebView still decodes it, and for three of
+    /// these variants that IS the attack. A 30,000 x 30,000 single-colour PNG is
+    /// a few KB on the wire and 3.6 GB of RGBA in the renderer;
+    /// `MAX_MEDIA_PIXELS` exists to stop precisely that, and it stops nothing if
+    /// the refused bytes are handed to the decoder anyway.
+    ///
+    ///   * hazard -> the payload must not survive as something renderable
+    ///   * policy -> SVG, BMP, an unknown format, a malformed header, an empty
+    ///               file. Refused entry to the media store, still safe on screen.
+    ///
+    /// Exhaustive on purpose: a new variant must be classified here, at the
+    /// point where "what does a refusal cost the user" is being decided, rather
+    /// than defaulting to whichever answer a wildcard arm happened to give.
+    pub fn is_decode_hazard(&self) -> bool {
+        match self {
+            MediaError::TooLarge { .. }
+            | MediaError::DimensionOutOfRange { .. }
+            | MediaError::TooManyPixels { .. } => true,
+            MediaError::Empty
+            | MediaError::UnknownFormat
+            | MediaError::SvgRefused
+            | MediaError::BmpRefused
+            | MediaError::MalformedHeader { .. } => false,
+        }
+    }
+}
+
 fn human_bytes(n: usize) -> String {
     const MIB: usize = 1024 * 1024;
     const KIB: usize = 1024;

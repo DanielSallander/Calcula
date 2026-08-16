@@ -368,6 +368,8 @@ export class WalkRunner {
 
     let snapshot = await captureSnapshot(this.page);
     let step = 0;
+    /** Step the last checkpoint ran at, so the final one cannot repeat it. */
+    let lastCheckpointStep = -1;
 
     while (step < maxActions) {
       if (budgetMs !== undefined && Date.now() - startedAt > budgetMs) {
@@ -555,12 +557,64 @@ export class WalkRunner {
       const isLastStep = step === maxActions;
       const budgetExhausted =
         budgetMs !== undefined && Date.now() - startedAt > budgetMs;
+      const checkpointDue =
+        step % oracleEveryNActions === 0 || isLastStep || budgetExhausted;
+
+      // RE-BASE THE UNDO WINDOW THE MOMENT IT DIES, not 25 actions later.
+      //
+      // This is what made the undo round-trip able to decide anything. A single
+      // history-ending action anywhere in a window decided the whole window's
+      // fate, and the walker draws one roughly every ten actions — MEASURED
+      // LIVE, 5 to 11 of them per 75-action walk. That is why the oracle
+      // reported 0 decided across every walk run of 2026-08-15, and why the same
+      // seeds went from 5 of 28 checkpoints decided to 27 of 30 once the window
+      // was allowed to start here instead. (The generator-level census, and the
+      // finding that three quarters of the killers are floating-range actions
+      // rather than sheet structure, is in
+      // `app/e2e/__tests__/undoOracleDecidability.test.ts`.)
+      //
+      // Asking after each action costs one `get_undo_state` invoke and
+      // re-captures the baseline (a digest) only on the actions that actually
+      // ended the history: 66s -> 68s on a matched 75-action walk.
+      //
+      // NOT DONE ON A CHECKPOINT STEP, deliberately. Rebasing there would leave
+      // the checkpoint with zero steps to wind back and report "nothing undoable
+      // in this window" — which is a different claim from "the last action ended
+      // the history", and the false one. The checkpoint says `undecided` instead
+      // and recaptures its own baseline afterwards.
+      if (oracleBattery !== null && oracleBaseline !== null && !checkpointDue) {
+        const frIdsNow = (snapshot.logical.floatingRanges ?? []).map((fr) =>
+          String(fr.id)
+        );
+        try {
+          const rebase = await oracleBattery.rebaseUndoBaselineIfUnreachable(
+            this.page,
+            oracleBaseline,
+            { step, action: instance.id, floatingRangeIdsNow: frIdsNow }
+          );
+          oracleBaseline = rebase.baseline;
+        } catch (err) {
+          const msg = (err as Error).message ?? String(err);
+          return fail(
+            step,
+            {
+              invariantId: "oracle-infrastructure",
+              message: `Undo baseline rebase failed after "${instance.id}": ${msg}`,
+              details: { action: instance.id, error: msg },
+            },
+            [],
+            snapshot
+          );
+        }
+      }
+
       if (
         oracleBattery !== null &&
         oracleBaseline !== null &&
-        (step % oracleEveryNActions === 0 || isLastStep || budgetExhausted)
+        checkpointDue
       ) {
         if (verbose) console.log(`  [oracle checkpoint] after step ${step}`);
+        lastCheckpointStep = step;
         const checkpointTiming: CheckpointTiming = { step, durationMs: 0 };
         checkpoints.push(checkpointTiming);
         const checkpointStartedAt = Date.now();
@@ -588,11 +642,21 @@ export class WalkRunner {
       }
     }
 
-    // Final oracle checkpoint if the loop ended off-cadence (budget/trace end)
+    // Final oracle checkpoint if the loop ended off-cadence (budget/trace end).
+    //
+    // `lastCheckpointStep` is the guard, and it is not cosmetic: the in-loop
+    // checkpoint also fires on the LAST step, so for any walk whose length is
+    // not a multiple of the cadence this block used to run a SECOND, identical
+    // checkpoint at the same step — the same digests, the same save/reload, the
+    // same undo round-trip, on a state nothing had touched in between. It also
+    // made `plannedCheckpointCount` under-count (a 40-action walk at cadence 25
+    // reached three checkpoints, not the two it predicted), which is the one
+    // direction the comment on that function promises it never goes.
     if (
       oracleBattery !== null &&
       oracleBaseline !== null &&
       step > 0 &&
+      step !== lastCheckpointStep &&
       step % (this.opts.oracleEveryNActions ?? 25) !== 0
     ) {
       if (verbose) console.log(`  [oracle checkpoint] final after step ${step}`);
@@ -619,6 +683,33 @@ export class WalkRunner {
           snapshot
         );
       }
+    }
+
+    // A WALK THAT PRODUCED NO UNDO EVIDENCE DOES NOT PASS.
+    //
+    // Asked last, on the success path only, so it can never mask a real
+    // violation — and asked at all because the alternative already shipped: the
+    // battery printed "[WARNING] the undo round-trip decided NOTHING in this
+    // run" under a verdict reading `[OK] Walk passed`, on every walk run of
+    // 2026-08-15, and the suites stayed green. Same reasoning as
+    // `assertCadenceReachable`: an oracle that could not fire is not an oracle
+    // that agreed.
+    const undoEvidence = oracleBattery?.undoEvidenceFailure() ?? null;
+    if (undoEvidence !== null) {
+      return fail(
+        step,
+        {
+          invariantId: "undo-evidence-missing",
+          message: `[oracles] ${undoEvidence}`,
+          details: {
+            checkpoints: checkpoints.length,
+            rebases: oracleBattery!.coverage.undoBaselineRebases,
+            rebaseActions: oracleBattery!.rebases.map((r) => r.action),
+          },
+        },
+        [],
+        snapshot
+      );
     }
 
     return {

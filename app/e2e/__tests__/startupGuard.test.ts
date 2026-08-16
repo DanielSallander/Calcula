@@ -57,6 +57,9 @@ function probe(over: Partial<StartupProbe> = {}): StartupProbe {
     networkResponses: 100,
     // The healthy baseline: no root error boundary on screen.
     bootErrorText: null,
+    bootErrorSignal: null,
+    // ...and one optimiser generation, i.e. exactly one copy of every dependency.
+    depUrls: [],
     ...over,
   };
 }
@@ -496,6 +499,37 @@ describe("describeStartupFailure", () => {
     expect(msg).toContain("ROOT ERROR BOUNDARY IS ON SCREEN");
     expect(msg).toContain("TypeError: x is null");
     expect(msg).toContain("BUG-0083");
+  });
+
+  it("says so when the panel was found WITHOUT its `data-testid`", () => {
+    // A fallback hit is itself a finding: the guard is still working, but the
+    // marker it was built on has been removed by something in the toolchain.
+    // Degrading silently is the failure this guard's own note warned about.
+    const msg = describeStartupFailure(
+      failureOf("boot-error", {
+        probe: probe({
+          rootChildCount: 1,
+          bootErrorText: "Calcula - Calcula failed to start",
+          bootErrorSignal: "role+text",
+        }),
+      }),
+    );
+    expect(msg).toContain("found by role+text");
+    expect(msg).toContain("`data-testid` was ABSENT");
+  });
+
+  it("does not shout about the fallback when the attribute did its job", () => {
+    const msg = describeStartupFailure(
+      failureOf("boot-error", {
+        probe: probe({
+          rootChildCount: 1,
+          bootErrorText: "Calcula - Calcula failed to start",
+          bootErrorSignal: "data-testid",
+        }),
+      }),
+    );
+    expect(msg).toContain("found by data-testid");
+    expect(msg).not.toContain("ABSENT and the panel was recognised");
   });
 
   it("does not mention the boundary at all when it is not on screen", () => {
