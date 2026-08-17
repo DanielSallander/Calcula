@@ -14,9 +14,12 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**97 entries, 94 fixed, 3 open** as of
-2026-08-16: BUG-0095, BUG-0096, BUG-0097 — all filed 2026-08-16 by the documentation audit, all
-severity low). Nothing in this file duplicates a ledger entry.
+reproduction live in `tests/regression/bug-ledger.json` (**98 entries, 94 fixed, 4 open** as of
+2026-08-17: BUG-0095, BUG-0096, BUG-0097 — filed 2026-08-16 by the documentation audit, all severity
+low — plus BUG-0098, the backend wedge in §2.5, which is unreproduced). Nothing in this file
+duplicates a ledger entry. **Recount before restating**: the histogram is one line of node
+(`{fixed:94, open:4}`), and the previous figure here (97/94/3) was already stale the day after it
+was written.
 
 ---
 
@@ -199,26 +202,78 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 ### 2.2 The `Persisted<T>` migration is not finished
 
 `AppState` has **104 fields**: **59** are `Persisted<T>`, **43** are still a bare
-`Mutex`/`RwLock`, and 2 are unlocked (`undo_stack`, `calc_cancel`). Only the `Persisted<T>` ones
-force a command to name a `DocumentEffect`, so a command touching only the remaining 43 can still
-mutate without deciding — which is the exact hole `DocumentEffect` was built to close.
+`Mutex`/`RwLock`, and 2 are neither — `undo_stack` and `calc_cancel`. (Do not read "neither" as
+"unlocked": `undo_stack` is `undo_history::UndoHistory` (`lib.rs:392`), which holds its own
+`Mutex<UndoStack>` (`undo_history.rs:125-127`) precisely so every existing `.lock()` site stays
+unchanged. Only `calc_cancel` is genuinely lock-free — `CancelToken(Arc<AtomicBool>)`. An earlier
+wording said "unlocked", which invites someone to add a Mutex and double-lock it.) Only the
+`Persisted<T>` ones force a command to name a `DocumentEffect`, so a command touching only the
+remaining 43 can still mutate without deciding — the exact hole `DocumentEffect` was built to close.
 
-The 43 are **overwhelmingly derived caches** (the dependency maps, the spill maps, `id_registry`,
-`gather_cache`), which is why this is a work item rather than a data-loss risk. But "overwhelmingly"
-is not "entirely", so **check the field before assuming it**, and declare any NEW persisted store
-`Persisted<T>` from the start.
+**The 43 are not one population, and the previous summary of them was wrong in both directions.**
+Classified by opening each: roughly **22 are derived/rebuildable** (the 16 dependency maps
+`lib.rs:342-385`, `computed_prop_dependencies`/`dependents`, `spill_hosts`, `spill_blocks`,
+`gather_cache`, `writeback_index`, `id_registry`) — about half, not "overwhelmingly". And **11 are
+application preferences that must NEVER become `Persisted<T>`**: `calculation_mode`,
+`iteration_enabled`, `max_iterations`, `max_change`, `locale`, `reference_style`,
+`precision_as_displayed`, `calculate_before_save`, `auto_recover_enabled`,
+`auto_recover_interval_ms`, `subscriber_identity`. Those are the USER's, not the document's, and
+`document_store_census_tests.rs`'s `SESSION_SCOPED` table records each with its reason. So the row
+overstated the backlog (11 of the 43 are permanent exemptions, not work) while understating the one
+real risk. Declare any NEW persisted store `Persisted<T>` from the start.
 
-**Count the fields, not one grep spelling.** This number has been published three times as three
-different values (36, 51, 59), because `rg 'document_effect::Persisted<'` returns 51 and misses the
-8 fields spelled `crate::document_effect::Persisted<`. 59 + 43 + 2 = 104 reconciles; nothing else
-does.
+**Two of the 43 are read by the SAVE path, and here they are by name** — "check the field before
+assuming it" put the burden on a reader with no list, which is how these stayed invisible:
+
+- **`spill_ranges`** (`lib.rs:488`) — `apply_spill_extents_to_sheet` (`persistence.rs:375-397`) calls
+  itself "the only authority for which origin owns which cells" and sets `origin.spill`; it runs from
+  the save assembler (`persistence.rs:648`), and `zip_io.rs:197-199` stamps the `.cala` v7
+  `spill_extents` feature purely on that field's presence. A store deciding what bytes hit disk,
+  ungated. **Promoting this one is the cheapest real fix in this row.**
+- **`advanced_filter_hidden_rows`** (`lib.rs:510`) — unioned into `hidden_rows` at save
+  (`persistence.rs:902-911`); its writers hand-roll `DocumentEffect::mutates` with a comment saying
+  "both arms change what a save writes" (`autofilter.rs:1453-1470`, `:1484-1495`).
+
+Also not derived caches, though not save sources: `protected_regions` (`:426`), `next_cf_rule_id`
+(`:452`), `next_computed_prop_id` (`:462`), and `scroll_areas` (`:556`, whose own comment documents a
+missing-persistence gap).
+
+**And the guard that looks like it covers this does not** (open-items rule 4, again).
+`every_persisted_appstate_store_is_gated_not_a_bare_mutex` (`document_effect.rs:1037-1088`) reads
+exactly like the enforcement this row wants, but `must_be_gated` is a **hand-written allow-list of 22
+field names** — it asserts those 22 still say `Persisted<` and is structurally blind to anything not
+on it. Neither save source appears in it. `document_store_census_tests.rs` covers reset-on-open, not
+gating, and both save sources *are* reset (`persistence.rs:4121`, `:3914`), so that census passes
+while saying nothing about this. The missing guard is the parse-don't-list one: derive the save
+sources by parsing `build_workbook_for_save` for `state.<field>.lock()` and fail if any is not
+`Persisted<`. Pin 104/59/43 at the same time — no test anywhere asserts those numbers, which is why
+they keep drifting.
+
+**Count the fields, not one grep spelling** — and note the pattern, because this warning previously
+named the wrong one. Measured on `app/src-tauri/src/lib.rs`: `document_effect::Persisted<` returns
+**59** (it is a substring of the crate-qualified spelling, so it catches everything);
+`: document_effect::Persisted<` returns **51**, because after `: ` the other 8 read
+`crate::document_effect::Persisted<` — and that spelling alone returns **8**. 51 + 8 = 59, and
+59 + 43 + 2 = 104 reconciles; nothing else does. A passage whose whole job is to stop a grep error
+was making one, and the pattern it blamed happens to give the right answer.
 
 ### 2.3 Import fidelity
 
 **S7 — calamine expands only 1-D shared formulas.** An upstream limitation of the
 `calamine = "0.26"` dependency (`core/persistence/Cargo.toml:11`); `core/persistence/src/xlsx_reader.rs`
 carries no shared-formula expansion of its own to work around it. Still open, still without a
-reproduction fixture — which is the first thing anyone picking it up should build. §7142, §35c.
+reproduction fixture — which is the first thing anyone picking it up should build. §3bi, §35c.
+(The anchor here read `§7142` until 2026-08-17; that section does not exist — a line number into a
+1.33 MB append-only archive was never going to survive, so cite the §.)
+
+**Build that fixture against the code, not against the archive's description of it.** Re-read
+2026-08-17 in `calamine-0.26.1/src/xlsx/cells_reader.rs:221-245`: the offset map is built in two
+**mutually exclusive** branches — if the `ref` spans rows, it walks rows only at the fixed start
+column; else if it spans columns, it walks columns only at the fixed start row. So a 2-D
+`ref="B2:D10"` does **not** yield an empty map: the first branch fires and the range's first COLUMN
+keeps its formula while every other column loses it. §3bi says "an empty map and every follower gets
+no formula", and that half is wrong. A test written to the archive's wording would fail on the first
+column and be misread as a fix, so expect **partial** survival.
 
 ### 2.4 Test infrastructure
 
@@ -229,22 +284,27 @@ reproduction fixture — which is the first thing anyone picking it up should bu
 | **The two `evaluate-formula` goldens assert residue, not their feature.** `grid-evaluate-formula-init` and `-constant` are whole-grid captures of a spec whose subject is off-screen until its own `navigateTo`, so they photograph whatever the preceding specs left on rows 1-26. Stable now, but they are layout assertions wearing a feature's name. Turning them into region captures of the AI column is a golden change owned by that spec. | `e2e/tests/__screenshots__/evaluate-formula.spec.ts/`, §30f |
 | ~~**The journey project has no side-panel residue guard.**~~ **CLOSED 2026-08-16.** `e2e/journeys/zz-persisted-residue.spec.ts` now runs last and asserts the app-owned storage namespaces are at their DEFAULTS. Two corrections came out of building it, both worth keeping: (1) the guard must assert *value is default*, not *key is absent* — its first draft failed on a clean app because `calcula-task-pane` and `calcula-panel-placements` are `zustand/persist` stores that write themselves on hydration, and a check that reds a clean run is one somebody switches off; (2) the 1218 -> 898 px canvas class is **not** this key — `partialize` persists only `{width, dockMode}` and deliberately omits `isOpen`, so an open pane cannot survive a reload at all. The teardown side is necessary but insufficient, so the same catalogue also drives a reset on the way IN (next row). | `e2e/journeys/zz-persisted-residue.spec.ts`, `e2e/volatilePersistedState.ts`, `useTaskPaneStore.ts:219-224` |
 | **Cleanup-on-exit cannot run when the app is dead — so the reset moved to run START.** `shapes-hometab.spec.ts` test 8 *does* restore the ribbon in a `finally`; on 2026-08-16 the app wedged mid-test, `restoreDefaultHomeLayout` needed a living app to reload, and it swallowed its own failure. The injected `rowBreak` survived into the next project, which failed `ribbon-core-default-ribbon.png` with `deleteColumn` clipped out — the visual project reporting a red golden for something no visual spec did. `e2e/volatilePersistedState.ts` now sweeps the app storage namespaces by PREFIX immediately after `assertAppMounted`, when the app is known-healthy. It sweeps rather than lists because the `ext.<extensionId>.<key>` family cannot be enumerated even in principle. It reports a leak **only** when a cleared value was non-default; a sweep clears something on essentially every run, and an alarm that always fires is one nobody reads. | `e2e/volatilePersistedState.ts`, `e2e/global-setup.ts` |
-| **Completed Playwright runs leave orphaned process trees.** After every project reported exit 0, five node processes plus an `app.exe` were still driving the application minutes later, and the next launch failed on port 5173. Recorded rather than filed because the zero-gap invocation pattern was introduced by the pass that saw it — but the regression runner also drives projects back to back. Cheapest mitigations, in order: a settle gap plus a "no `app.exe`, nothing on 9222 or 5173" precondition between projects, and a teardown that verifies the tree it killed is gone rather than trusting `taskkill /T`. | §39g |
+| **Completed Playwright runs leave orphaned process trees.** After every project reported exit 0, five node processes plus an `app.exe` were still driving the application minutes later, and the next launch failed on port 5173. Recorded rather than filed because the zero-gap invocation pattern was introduced by the pass that saw it — but the regression runner also drives projects back to back. Now with the file:line rule 2 demands: the teardown fires `taskkill /F /T` and **never verifies the tree is gone** (`global-teardown.ts:100-108`), manual mode returns before reaching any of it (`:89-91`), and the only repair is 5173-only (`global-setup.ts:145-163`). Cheapest mitigations, in order: verify-after-kill (poll the PID and ports 9222/5173 for a bounded window, fail loudly), then a "no `app.exe`, nothing on 9222 or 5173" precondition. Put the precondition in **global-setup**, not the teardown — manual mode is exactly the path that skips the teardown, and it is how these runs are driven. | `global-teardown.ts:89-91,100-108`; `global-setup.ts:145-163`; §39g |
 
 ### 2.5 The backend can stop answering mid-run, and nothing could see it (BUG-0098)
 
 **Open, unreproduced, and deliberately not "fixed".** On 2026-08-16 a journey run failed **64
 consecutive tests over 5.4 hours**, every one on timeout, none on an assertion. The first failing
-spec (`document-store-leak`) contains **zero Playwright locators** — every step is
-`page.evaluate(() => __TAURI__.core.invoke(...))` — so its 300 s timeouts cannot be blamed on a
-selector, a repaint, or anything in the DOM. The backend simply never returned.
+spec (`document-store-leak`) contains **zero Playwright locators** — verified, `grep` for
+`locator(|getBy|.click(|.fill(|waitForSelector` over its 839 lines returns nothing — so no
+actionability wait exists that could burn 300 s. Every step goes through `page.evaluate`, either
+`__TAURI__.core.invoke` directly or one of the app's own modules imported via `__calcImport`
+(`:79-91`, `:94-115`). The backend simply never returned.
 
-**Why nothing stopped it.** The harness had two liveness notions and neither can see this state:
-`connectWithRetry` proves *CDP accepted a connection*; `assertAppMounted` proves *a DOM node became
-visible*, and it runs **once**, before the first test. A wedged backend falsifies neither. Playwright
-rebuilds the worker after every failed test, so all 64 rebuilds ran that check and all 64 reported a
-healthy app. With `maxFailures: 0` and `globalTimeout: 0` there was no bail-out, so every remaining
-test paid its **full** timeout.
+**Why nothing stopped it.** The harness had two liveness notions and neither can see this state.
+`assertAppMounted` proves *a DOM node became visible*, but it runs **once per RUN** — exactly two
+call sites, both in `global-setup.ts` (`:128`, `:288`), pinned by `startupBarrierWired.test.ts:43-46`.
+What re-ran on each of the 64 worker rebuilds is the worker-scoped `sharedPage` fixture:
+`connectWithRetry` plus a 60 s `waitForSelector` on the spreadsheet container
+(`fixtures.ts:244`, `:316`). Same shape, equally blind — it reported healthy every time. And nothing
+sets `maxFailures` or `globalTimeout` anywhere in the harness; Playwright's defaults (0/0, meaning
+unlimited failures and no global deadline) apply, so there was no bail-out and every remaining test
+paid its **full** 300 s (`playwright.config.ts:120,124`).
 
 **What was ruled out, by running it.** `document-store-leak` alone: 7/7 pass. Specs 7-8 + dsl: 13
 pass. Specs 1-6 + dsl: 33 pass. The **full journey project, unmodified: 156 passed in 27.8 minutes.**
@@ -253,18 +313,20 @@ timing alone — each fails fast (3 s / instantly / 60 s) where these burned 300
 
 **The mechanism is NOT claimed.** A lock-order inversion is the leading candidate on this project's
 history, but nothing here proves it, and two decisive pieces of evidence were destroyed by design:
-`init_log_file` opens the app log with `.truncate(true)` on **every app start**, so four later runs
-overwrote the backend's only account of itself, and `results.json` is overwritten per run. Fixing
-product locks without a reproduction would be guessing.
+`init_log_file` opened the app log with `.truncate(true)` on **every app start**, so four later runs
+overwrote the backend's only account of itself, and `results.json` is overwritten per run
+(`playwright.config.ts:50` — a fixed path). Fixing product locks without a reproduction would be
+guessing. **The log half of that is fixed as of 2026-08-17 (see below), so the next occurrence keeps
+its evidence.**
 
 **What was built instead** — make the next occurrence cheap, attributed, and diagnosable:
 
 | | |
 |---|---|
-| `e2e/wedgeGuard.ts` | Probes the backend with a real `get_cell` before every test. The race is **double** because `page.evaluate` has no timeout in Playwright's API: an inner race bounds the *invoke* (distinguishing a wedged backend from a wedged renderer), an outer one bounds the *evaluate*. Latches after **two consecutive** unanswered probes — one slow answer is not a wedge, and a guard that latches on one is worse than the disease. It **fails**, never skips (§3bx): a skipped test reports coverage it does not have. |
+| `e2e/wedgeGuard.ts` | Probes the backend with a real `get_cell` before every test that takes the `appPage` or `grid` fixture — i.e. all of them **except** the 7 `gridPersistent` tests in `tests/workflow-dashboard.spec.ts`, which bypass the fixture. The race is **double** because `page.evaluate` has no timeout in Playwright's API: an inner race bounds the *invoke* (distinguishing a wedged backend from a wedged renderer), an outer one bounds the *evaluate*. Latches after **two consecutive** unanswered probes — one slow answer is not a wedge, and a guard that latches on one is worse than the disease. It **fails**, never skips (§3bx): a skipped test reports coverage it does not have. **It is deliberately biased to fail OPEN**: a rejected invoke (`:85`) and a thrown `evaluate` (`:91`) both count as "ok", so a crashed page reads healthy here and is left to `appDiedMarker`, whose job it is. This guard answers one question only — is the backend ANSWERING. |
 | `e2e/wedgeMarker.ts` + `global-teardown.ts` | Same three-stage pattern as `appDiedMarker`: setup clears, the fixture writes, teardown prints a banner saying the failures are **one fact**, not 64 defects. |
 | `global-teardown.ts` log archive | Copies `app-dev.log` to `results/app-logs/app-dev-<stamp>.log` (last 10 kept), so the next run no longer destroys this run's evidence. |
-| `app/e2e/__tests__/wedgeGuard.test.ts` | 8 tests pinning the decision logic against a fake page, since a healthy suite can never exercise it. Sabotage-checked twice: relaxing the two-consecutive rule reds 2 tests, and moving the counter into module memory reds exactly the restart test. |
+| `app/e2e/__tests__/wedgeGuard.test.ts` | 8 tests pinning the decision logic against a fake page, since a healthy suite can never exercise it. Sabotage-checked twice, both **measured** by running them: latching on the first bad probe reds **5 of the 8**, and moving the counter into module memory reds **exactly the restart test** (`:149`, the only one that re-imports the module between probes). It redirects its state to a temp dir via `E2E_WEDGE_STATE_DIR`, because writing the real marker would latch a concurrently running suite. |
 
 **The one subtlety worth carrying forward.** The pre-latch counter is on DISK, and
 the obvious implementation is silently broken. Playwright rebuilds the worker after every failed
@@ -276,20 +338,46 @@ cannot see it; `wedgeGuard.test.ts` re-imports the module between probes to repr
 **To close it:** a reproduction. The next occurrence leaves `e2e/results/APP-WEDGED.txt` naming the
 test it was first seen before, and an archived app log. Start there.
 
-**Recommended, not done** (it is a product change, not test infrastructure): `init_log_file` should
-append or rotate rather than truncate. The harness archive is a workaround for a product behaviour
-that destroys diagnostic evidence on every start.
+**The product side is now fixed too (2026-08-17).** `init_log_file` no longer truncates: it ROTATES
+the previous session's log into `context_manager/history/log-<stamp>.log`, keeping the last 10
+(`RETAINED_SESSION_LOGS`), and `log.log` stays the stable live path. Pinned by 5 tests in
+`logging.rs`'s own `rotation_tests`; sabotage-checked (disabling rotation reds 3 of them).
+
+Two things that pass required getting right, both counter-intuitive:
+
+- **Append would have been wrong.** `LOG_SEQ` is a per-process `AtomicU64` restarting at 0 each
+  launch, and `sort_log_file` reads the whole file and sorts by it — appending would shuffle two
+  sessions together beyond reconstruction. Rotation preserves the "one file is one session"
+  invariant the sort depends on.
+- **A failed rename must never fall back to truncating**, or the fallback becomes the original
+  defect. It takes a uniquely-named file instead. Measured while testing: Rust's `File` includes
+  `FILE_SHARE_DELETE`, so a second instance starting mid-run *does* rotate successfully, and the
+  first instance's handle follows the file into `history/` and loses nothing — the opposite of the
+  sharing-violation everyone expects. The fallback still earns its place for Dropbox/Defender locks
+  (`os error 32`, which this repo hits often enough to have a retry helper for it).
+
+This also retires the workaround in `e2e-test-plan.md` operational rule 9, where an isolated second
+launch needed a fake `src-tauri` marker directory as its cwd purely to stop it truncating the shared
+log under a run in progress.
 
 ### 2.6 The startup gap that no gate covers
 
-**Nothing in the tree proves the app can be linked at all.** Verified against CI, not inferred:
-`.github/workflows/ci.yml` runs `npm run check-types`, `npm test`, and — in a job whose
-`working-directory` is `core` — `cargo test --workspace` and `cargo check --workspace --benches`
-(`ci.yml:50-72`). `cargo check` does not link; `cargo test --lib` links a **test executable**, not
-the `app_lib.dll` the app loads; and no workflow builds the app crate at all (`npm run tauri build`
-appears only in `release.yml:79`, which runs on a release tag). Four tracks changed Rust in the week
-before this was noticed and the first thing to exercise the link was the E2E launcher, which failed
-with ~40 `LNK2001` errors. §39d.
+**No gate that blocks a PR proves the app can be linked.** Verified by reading the workflows, and
+restated 2026-08-17 because the previous wording was both mis-cited and too strong.
+`.github/workflows/ci.yml` runs `npm run check-types` (`:34`), `npm test` (`:49`) and — in the
+`rust-core` job, whose `working-directory` is `core` — `cargo test --workspace` (`:65`) and
+`cargo check --workspace --benches` (`:72`). `cargo check` does not link; `cargo test --lib` links a
+**test executable**, not the `app_lib.dll` the app loads; and `core/Cargo.toml` does not list
+`app/src-tauri` among its 11 members, so `cargo test --workspace` there *structurally cannot* link
+it. `ci.yml`'s own header (`:9-12`) says the app crate is intentionally not gated yet.
+
+What was wrong before: "no workflow builds the app crate at all" — two do. `release.yml:79`
+(`npm run tauri build`, on a `v*` tag or manual dispatch) and **`e2e-nightly.yml`, which launches the
+real app via `cargo tauri dev` on a self-hosted Windows runner** and therefore does link it. So the
+gap is narrower and more specific than stated: nothing on the **PR path** links the app, and the
+nightly that does is self-hosted, so a runner that is offline takes the only routine link check with
+it silently. Four tracks changed Rust in the week before this was noticed and the first thing to
+exercise the link was the E2E launcher, which failed with ~40 `LNK2001` errors. §39d.
 
 **Related and still true: a pre-React failure shows a blank window with no message.** `app/index.html`
 is an empty `<div id="root"></div>` and a module script — no fallback markup, no `window.onerror`.

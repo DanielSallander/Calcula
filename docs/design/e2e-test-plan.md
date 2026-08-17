@@ -320,20 +320,25 @@ came from.
 
 ### 5. `wedgeGuard.ts` — is the backend still ANSWERING?
 
-*Why.* Guard 2 asks whether the app ever mounted, **once**, before the first test.
-It has no mid-run counterpart, and on 2026-08-16 that cost a journey run **64
-consecutive tests over 5.4 hours**, every one on timeout. The first failing spec
-has zero locators — every step is `page.evaluate(() => __TAURI__.core.invoke(...))`
-— so nothing in the DOM explains it: the backend stopped returning. Playwright
-rebuilds the worker after each failure, so the mount check ran 64 times and passed
-64 times, because "CDP connected + a DOM node is visible" stays true of a wedged
-backend. See open-items §2.5 and BUG-0098; the mechanism is still unreproduced.
+*Why.* Guard 2 asks whether the app ever mounted, **once per run** — `assertAppMounted`
+has exactly two call sites, both in `global-setup.ts` (`:128`, `:288`). It had no
+mid-run counterpart, and on 2026-08-16 that cost a journey run **64 consecutive
+tests over 5.4 hours**, every one on timeout. The first failing spec has zero
+locators (`grep` over its 839 lines finds none) — every step goes through
+`page.evaluate`, either `__TAURI__.core.invoke` or an app module pulled in via
+`__calcImport` — so nothing in the DOM explains it: the backend stopped returning.
+What DID re-run on each of the 64 worker rebuilds is the worker-scoped `sharedPage`
+fixture — `connectWithRetry` plus a 60 s `waitForSelector` on the spreadsheet
+container (`fixtures.ts:244`, `:316`) — and it passed all 64 times, because
+"CDP connected + a DOM node is visible" stays true of a wedged backend. See
+open-items §2.5 and BUG-0098; the mechanism is still unreproduced.
 
 *What it does* (`e2e/wedgeGuard.ts`, called from the `appPage` fixture):
 
 | Aspect | Behaviour |
 |---|---|
-| The probe | One real `get_cell` invoke. The failure is BEHIND the IPC boundary, so every DOM-level signal stays green — only a question the backend must ANSWER can distinguish "busy" from "wedged". A refusal counts as answering. |
+| The probe | One real `get_cell` invoke, before every test that takes `appPage`/`grid` — all of them except the 7 `gridPersistent` tests in `tests/workflow-dashboard.spec.ts`. The failure is BEHIND the IPC boundary, so every DOM-level signal stays green — only a question the backend must ANSWER can distinguish "busy" from "wedged". |
+| Biased to fail OPEN | A refusal counts as answering, and so does a thrown `evaluate` (`:85`, `:91`). This guard answers exactly one question — is the backend ANSWERING — and leaves a dead page to `appDiedMarker`. Worth stating because `get_cell` being mapped to "ok" on rejection means a MISNAMED command would produce a guard that can never fire; it is registered at `lib.rs:4822` with the signature the probe uses. |
 | Double race | `page.evaluate` **has no timeout in Playwright's API** (`actionTimeout` governs locators only). An inner race bounds the invoke — separating a wedged *backend* from a wedged *renderer*, which have different owners — and an outer race in Node bounds the evaluate itself, since a wedged renderer would never run the inner one. |
 | Two consecutive | One slow answer is not a wedge. A guard that latches on a single probe reds whole runs over machine noise, which is worse than the disease it treats. |
 | The counter is ON DISK | **The subtlest part, and the obvious implementation is silently broken.** Playwright rebuilds the worker after every FAILED test, and a rebuilt worker re-imports the module with fresh state. On a wedged app every test fails, so a module-level `let` resets between every pair of probes: the count never reaches two, nothing ever latches, and the guard degrades into a log line while the run still costs 5.4 hours. The latch marker was already a file; the pre-latch count has to be one too (`.wedge-probe-count`, cleared by `global-setup`). An in-process unit test cannot see this — `wedgeGuard.test.ts` re-imports the module between probes to reproduce the restart, and that test is the one the in-memory version fails. |
@@ -344,9 +349,10 @@ backend. See open-items §2.5 and BUG-0098; the mechanism is still unreproduced.
 **A healthy suite can never exercise this guard**, so its decision logic is pinned
 by `e2e/__tests__/wedgeGuard.test.ts` against a fake page — eight tests covering
 the healthy path, the single-slow-probe path, the latch, the short-circuit, the
-off switch, and the three cross-restart properties. Sabotage-checked twice:
-relaxing the two-consecutive rule reds two tests, and moving the counter back
-into module memory reds exactly the restart test.
+off switch, and the three cross-restart properties. Sabotage-checked twice, both
+numbers **measured by running them**: latching on the first bad probe reds **5 of
+the 8**, and moving the counter back into module memory reds **exactly the restart
+test**, which is the only one that re-imports the module between probes.
 
 That test file sets `E2E_WEDGE_STATE_DIR` to a temp directory before importing
 the guard. Without it the test writes the REAL marker, which would latch a
@@ -696,6 +702,11 @@ These are not style preferences. Each was measured.
    shared `context_manager/log.log` is not truncated underneath it, and the same
    deterministic capture flags every other launch path uses
    (`--force-color-profile=sRGB --disable-accelerated-2d-canvas`).
+   **The log half of that is obsolete as of 2026-08-17:** `init_log_file` now
+   ROTATES rather than truncates (`logging.rs`, `rotate_previous_session`), so a
+   second instance can no longer destroy a running one's log and the fake marker
+   directory is no longer needed for that reason. The `WEBVIEW2_USER_DATA_FOLDER`
+   and exe-copy parts of this rule still stand.
 10. **Know which binary you are testing.** `global-setup` constructs the MSVC
     environment and says nothing about `CARGO_TARGET_DIR`, which it does not set;
     there is no `.cargo/config.toml` and no persistent machine value, so it is

@@ -171,10 +171,13 @@ enforced by the compiler, not by review.
 
 - **Persisted backend state is `Persisted<T>`, never a bare `Mutex<T>`.** `read()` is free;
   `write(&effect)` requires a `DocumentEffect`. 59 of `AppState`'s 104 fields are converted
-  (counted 2026-08-16 by a bracket-aware split of the struct body, because a plain
-  `rg 'document_effect::Persisted<'` reads **51** and misses the 8 spelled
-  `crate::document_effect::Persisted<` — that is how the previous two numbers here, 36 and 51, were
-  both wrong; count the fields, not one spelling). `grids` / `grid` are among them (a test in
+  (counted 2026-08-16 by a bracket-aware split of the struct body; count the FIELDS, not one grep
+  spelling — that is how the previous two numbers here, 36 and 51, were both wrong). **Re-measured
+  2026-08-17, because this warning used to name the wrong pattern:**
+  `rg 'document_effect::Persisted<'` returns **59** and is correct — it is a substring of the
+  crate-qualified spelling, so it catches everything. The pattern that reads **51** is the one
+  anchored on the field prefix, `': document_effect::Persisted<'`; the 8 it misses are spelled
+  `crate::document_effect::Persisted<`, and 51 + 8 = 59. `grids` / `grid` are among them (a test in
   `document_effect.rs` pins those two
   declarations by their exact text, so a silent revert to a bare `Mutex` fails the build). The 43
   still on a bare `Mutex`/`RwLock` are mid-migration and listed as a work item in

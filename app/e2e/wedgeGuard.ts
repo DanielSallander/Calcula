@@ -6,13 +6,23 @@
 // THE GAP THIS CLOSES. The harness has two liveness notions and neither can see
 // this state:
 //
-//   `connectWithRetry` (fixtures.ts)     "CDP accepted a connection"
 //   `assertAppMounted` (startupBarrier)  "a DOM node became visible" — and it
-//                                        runs ONCE, before the first test
+//                                        runs ONCE PER RUN, from global-setup
+//                                        (:128 and :288; exactly two call sites,
+//                                        pinned by startupBarrierWired.test.ts)
+//   the worker-scoped `sharedPage`       "CDP accepted a connection"
+//   fixture (fixtures.ts:244, :316)      + a 60 s wait for the spreadsheet
+//                                        container — this is what re-runs on
+//                                        every worker rebuild
 //
-// A wedged backend falsifies neither. On 2026-08-16 all 64 worker restarts of a
-// journey run passed both checks and reported a healthy app while every Tauri
-// invoke hung. The startup barrier had a mid-run counterpart missing; this is it.
+// A wedged backend falsifies neither. On 2026-08-16 a journey run rebuilt its
+// worker 64 times, the `sharedPage` checks passed every time and reported a
+// healthy app, while every Tauri invoke hung. `assertAppMounted` had no mid-run
+// counterpart at all; this is it.
+//
+// (An earlier version of this comment said all 64 restarts ran `assertAppMounted`.
+// They did not — global-setup runs once per RUN. The substance was unaffected:
+// the checks that DID re-run are the same shape and equally blind to this state.)
 //
 // WHY IT PROBES WITH AN INVOKE AND NOT A LOCATOR. The failure is BEHIND the IPC
 // boundary. Every DOM-level signal stays green — that is the whole difficulty —
