@@ -377,7 +377,7 @@ pub(crate) fn apply_spill_extents_to_sheet(
     sheet: &mut persistence::Sheet,
     sheet_index: usize,
 ) {
-    let Ok(spill_ranges) = state.spill_ranges.lock() else {
+    let Ok(spill_ranges) = state.spill_ranges.read() else {
         return;
     };
     for (&(sheet_idx, origin_row, origin_col), cells) in spill_ranges.iter() {
@@ -902,7 +902,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     // Advanced-filter hidden rows (the runtime authority
     // `collect_hidden_rows_for_sheet` counts them; the cache used not to,
     // so an advanced filter's rows exported visible)
-    if let Ok(adv) = state.advanced_filter_hidden_rows.lock() {
+    if let Ok(adv) = state.advanced_filter_hidden_rows.read() {
         if let Some(rows) = adv.get(&i) {
             for row in rows {
                 workbook.sheets[i].hidden_rows.insert(*row);
@@ -1128,7 +1128,7 @@ pub fn attach_pending_recalc_for_save(
 ) {
     workbook.pending_recalc = state
         .pending_recalc
-        .lock()
+        .read()
         .ok()
         .and_then(|p| p.clone())
         .filter(|p| !p.is_empty())
@@ -1154,7 +1154,12 @@ pub fn attach_pending_recalc_for_save(
 /// The `SheetId` is resolved back to this session's sheet index here, which is
 /// the whole reason it was persisted as an id rather than an index.
 pub fn restore_pending_recalc_on_load(state: &AppState, workbook: &persistence::Workbook) {
-    if let Ok(mut pending) = state.pending_recalc.lock() {
+    // LOAD PATH: restoring a document's own staleness marker is not the user
+    // modifying it, and `open_file` clears `is_modified` as its last act anyway.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    if let Ok(mut pending) = state.pending_recalc.write(&load) {
         // `and_then`, not `map`: a staleness marker naming a sheet this
         // workbook does not have is dropped. Landing it on sheet 0 would warn
         // the user that a fully-calculated sheet is stale.
@@ -2596,7 +2601,7 @@ pub fn save_file(
             );
         } else if state
             .pending_recalc
-            .lock()
+            .read()
             .ok()
             .is_some_and(|p| p.as_ref().is_some_and(|pr| !pr.is_empty()))
         {
@@ -3911,7 +3916,7 @@ pub(crate) fn reset_document_scoped_stores(
     // into every sheet's persisted `hidden_rows`), and `open_file` never cleared
     // them — so rows an advanced filter had hidden in the PREVIOUS document were
     // written out as hidden in the one just opened.
-    state.advanced_filter_hidden_rows.lock().map_err(|e| e.to_string())?.clear();
+    state.advanced_filter_hidden_rows.write(effect).map_err(|e| e.to_string())?.clear();
 
     // ---- Cell-level annotation stores --------------------------------------
     state.notes.write(effect).map_err(|e| e.to_string())?.clear();
@@ -4118,7 +4123,7 @@ pub(crate) fn reset_document_scoped_stores(
     //     `spill_ranges` branch that does `grid.cells.remove(...)` over every
     //     coordinate the previous document's spill covered, deleting the new
     //     document's cells with no undo entry for them.
-    state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
+    state.spill_ranges.write(effect).map_err(|e| e.to_string())?.clear();
     state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
     // The #SPILL! obstruction map has the same document scope: an address in
     // the previous workbook would otherwise be named in this one's error pane.
@@ -4168,7 +4173,7 @@ pub(crate) fn reset_document_scoped_stores(
     // `workbook_protection`. `open_file` restores it from the file below;
     // `new_file` used to leave the previous document's "these cells were never
     // calculated" claim standing over a blank grid, and save it there.
-    *state.pending_recalc.lock().map_err(|e| e.to_string())? = None;
+    *state.pending_recalc.write(effect).map_err(|e| e.to_string())? = None;
 
     // ---- Animation / simulation transient snapshots ------------------------
     // token -> the PRIOR `Cell` values a running playback must restore. Those

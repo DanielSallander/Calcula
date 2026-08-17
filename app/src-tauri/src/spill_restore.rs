@@ -141,8 +141,14 @@ pub(crate) fn restore_spill_extents_for_sheet(
 ) -> SpillRestoreReport {
     let mut report = SpillRestoreReport::default();
 
+    // LOAD PATH. `open_file` / `new_file` rebuild every store from disk and assign
+    // `is_modified = false` as their last act, so a write here must not fight that:
+    // restoring a document's own spill extents is not the user modifying it.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
     let (Ok(mut spill_ranges), Ok(mut spill_hosts)) =
-        (state.spill_ranges.lock(), state.spill_hosts.lock())
+        (state.spill_ranges.write(&effect), state.spill_hosts.lock())
     else {
         return report;
     };
@@ -482,8 +488,13 @@ fn commit_recovered_spills(
     proven: Vec<(usize, (u32, u32), Vec<(u32, u32)>)>,
     report: &mut SpillRestoreReport,
 ) {
+    // Same load-path reasoning as `restore_spill_extents_for_sheet`: this is the
+    // pre-v7 recovery arm, reconstructing ownership a document already had.
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
     let (Ok(mut spill_ranges), Ok(mut spill_hosts)) =
-        (state.spill_ranges.lock(), state.spill_hosts.lock())
+        (state.spill_ranges.write(&effect), state.spill_hosts.lock())
     else {
         return;
     };

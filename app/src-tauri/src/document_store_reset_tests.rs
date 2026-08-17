@@ -430,11 +430,11 @@ fn advanced_filter_hidden_rows_do_not_survive_the_document_they_belong_to() {
     let s = Stores::new();
     s.state
         .advanced_filter_hidden_rows
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert(0, vec![3, 4, 5]);
     assert_eq!(
-        s.state.advanced_filter_hidden_rows.lock().unwrap().len(),
+        s.state.advanced_filter_hidden_rows.write(&crate::document_effect::test_seed_effect()).unwrap().len(),
         1,
         "precondition: rows really are hidden before the reset"
     );
@@ -442,7 +442,7 @@ fn advanced_filter_hidden_rows_do_not_survive_the_document_they_belong_to() {
     s.reset();
 
     assert!(
-        s.state.advanced_filter_hidden_rows.lock().unwrap().is_empty(),
+        s.state.advanced_filter_hidden_rows.write(&crate::document_effect::test_seed_effect()).unwrap().is_empty(),
         "rows hidden by the previous document's advanced filter would be \
          written into the next document's saved `hidden_rows`"
     );
@@ -657,7 +657,7 @@ fn the_spill_maps_do_not_survive_the_document_they_belong_to() {
     // Workbook A: `=SEQUENCE(4)` in A1, spilling A1:A4.
     s.state
         .spill_ranges
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert((0, 0, 0), vec![(1, 0), (2, 0), (3, 0)]);
     {
@@ -667,7 +667,7 @@ fn the_spill_maps_do_not_survive_the_document_they_belong_to() {
         hosts.insert((0, 3, 0), (0, 0));
     }
     assert_eq!(
-        s.state.spill_ranges.lock().unwrap().len(),
+        s.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().len(),
         1,
         "precondition: workbook A's spill really is tracked"
     );
@@ -680,7 +680,7 @@ fn the_spill_maps_do_not_survive_the_document_they_belong_to() {
     s.reset();
 
     assert!(
-        s.state.spill_ranges.lock().unwrap().is_empty(),
+        s.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().is_empty(),
         "the previous document's spill RANGE survived. Clearing A1 in the newly \
          opened workbook now walks these coordinates and deletes the cells it \
          finds there — data the user never touched, with no undo entry for it"
@@ -987,19 +987,19 @@ fn the_pending_recalc_marker_does_not_survive_the_document() {
     use crate::eval_budget::{PendingCell, PendingRecalc};
 
     let s = Stores::new();
-    *s.state.pending_recalc.lock().unwrap() = Some(PendingRecalc {
+    *s.state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap() = Some(PendingRecalc {
         sheet_index: 0,
         cells: vec![PendingCell { row: 12, col: 3 }],
     });
     assert!(
-        s.state.pending_recalc.lock().unwrap().is_some(),
+        s.state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap().is_some(),
         "precondition: workbook A really has a cancelled pass on record"
     );
 
     s.reset();
 
     assert!(
-        s.state.pending_recalc.lock().unwrap().is_none(),
+        s.state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap().is_none(),
         "the previous document's cancelled-recalculation marker survived: the \
          new document reports cells as never-calculated on coordinates it has \
          never evaluated, and writes that claim into the next save"

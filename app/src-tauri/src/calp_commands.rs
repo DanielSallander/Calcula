@@ -641,7 +641,7 @@ pub fn calp_publish(
     // nobody can tell is wrong is a data-correctness bug in the distribution
     // story, not a UI nicety — so the author is told to finish the calculation
     // (F9) rather than being allowed to ship it by accident.
-    if let Ok(pending) = state.pending_recalc.lock() {
+    if let Ok(pending) = state.pending_recalc.read() {
         if let Some(p) = pending.as_ref().filter(|p| !p.is_empty()) {
             return Err(format!(
                 "Cannot publish: {} cell(s) still hold values from before a cancelled \

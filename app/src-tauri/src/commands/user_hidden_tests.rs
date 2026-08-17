@@ -241,7 +241,7 @@ fn effective_hidden_is_the_union_of_user_filter_and_outline() {
     // An advanced filter hides row 2.
     state
         .advanced_filter_hidden_rows
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert(0, vec![2]);
     // A collapsed outline group hides rows 4..=5.
@@ -276,13 +276,13 @@ fn clearing_a_filter_does_not_clear_a_user_hide() {
     set_rows_hidden_inner(&state, &file_state, &[3], true).unwrap();
     state
         .advanced_filter_hidden_rows
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert(0, vec![3, 7]);
     assert!(collect_hidden_rows_for_sheet(&state, 0).contains(&7));
 
     // The filter is cleared — it only ever owned its OWN set.
-    state.advanced_filter_hidden_rows.lock().unwrap().remove(&0);
+    state.advanced_filter_hidden_rows.write(&crate::document_effect::test_seed_effect()).unwrap().remove(&0);
 
     let hidden = collect_hidden_rows_for_sheet(&state, 0);
     assert!(
@@ -300,7 +300,7 @@ fn unhiding_by_hand_does_not_resurrect_a_filter_hidden_row() {
     set_rows_hidden_inner(&state, &file_state, &[3], true).unwrap();
     state
         .advanced_filter_hidden_rows
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert(0, vec![3]);
 
@@ -547,7 +547,7 @@ fn hidden_info_separates_the_by_hand_set_from_the_effective_union() {
     set_rows_hidden_inner(&state, &file_state, &[5], true).unwrap();
     state
         .advanced_filter_hidden_rows
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert(0, vec![11, 12]);
 

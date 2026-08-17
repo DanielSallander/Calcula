@@ -566,6 +566,7 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, effect: &crate::docum
 /// script, which is why this function skipped them.
 fn shift_flat_cell_stores(
     state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
 ) {
@@ -588,7 +589,7 @@ fn shift_flat_cell_stores(
     }
 
     // spill_ranges: value is the LIST of cells this origin spilled into.
-    if let Ok(mut ranges) = state.spill_ranges.lock() {
+    if let Ok(mut ranges) = state.spill_ranges.write(effect) {
         shift_flat_cell_map(&mut ranges, sheet_index, edit, |cells, e| {
             cells.retain_mut(|c| shift_coord_pair(c, e));
         });
@@ -1798,7 +1799,7 @@ pub(crate) fn insert_rows_impl(
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
-    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowInsert { at: row, count });
+    shift_flat_cell_stores(&state, &effect, active_sheet, calp::writeback::StructuralEdit::RowInsert { at: row, count });
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet's name.
@@ -2256,7 +2257,7 @@ pub(crate) fn insert_columns_impl(
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
-    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColInsert { at: col, count });
+    shift_flat_cell_stores(&state, &effect, active_sheet, calp::writeback::StructuralEdit::ColInsert { at: col, count });
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
@@ -2955,7 +2956,7 @@ pub(crate) fn delete_rows_impl(
     // Block if any spill range has cells both inside and outside the deleted rows.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
-        let spill_ranges = state.spill_ranges.lock().unwrap();
+        let spill_ranges = state.spill_ranges.read().unwrap();
         for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
             if sheet_idx != active_sheet { continue; }
             // Compute the full extent of this spill range (origin + spilled cells)
@@ -3172,7 +3173,7 @@ pub(crate) fn delete_rows_impl(
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
-    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowDelete { at: row, count });
+    shift_flat_cell_stores(&state, &effect, active_sheet, calp::writeback::StructuralEdit::RowDelete { at: row, count });
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
@@ -3498,7 +3499,7 @@ pub(crate) fn delete_columns_impl(
     // Check if any spill range would be broken by this column deletion.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
-        let spill_ranges = state.spill_ranges.lock().unwrap();
+        let spill_ranges = state.spill_ranges.read().unwrap();
         for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
             if sheet_idx != active_sheet { continue; }
             let mut min_c = origin_col;
@@ -3706,7 +3707,7 @@ pub(crate) fn delete_columns_impl(
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
-    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColDelete { at: col, count });
+    shift_flat_cell_stores(&state, &effect, active_sheet, calp::writeback::StructuralEdit::ColDelete { at: col, count });
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     // `sheet_names_snapshot` was taken at the top, BEFORE `style_registry` --
@@ -4386,7 +4387,9 @@ pub(crate) fn shift_misc_coordinate_stores(
 
     // --- Advanced-filter hidden rows: row indices only. ---
     let prev_hidden = {
-        let mut store = match state.advanced_filter_hidden_rows.lock() { Ok(s) => s, Err(_) => return };
+        // The enclosing `shift_misc_coordinate_stores` already carries the effect its
+        // caller decided on, so this is a plain gated write.
+        let mut store = match state.advanced_filter_hidden_rows.write(effect) { Ok(s) => s, Err(_) => return };
         let before = store.get(&sheet_index).cloned();
         if row_edit {
             if let Some(rows) = store.get_mut(&sheet_index) {
@@ -5729,7 +5732,7 @@ pub(crate) fn off_sheet_structural_edit(
     // active-sheet commands, scanned against the TARGET sheet's spill ranges).
     match edit {
         SE::RowDelete { at, count } => {
-            let spill_ranges = state.spill_ranges.lock().map_err(|e| e.to_string())?;
+            let spill_ranges = state.spill_ranges.read().map_err(|e| e.to_string())?;
             for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
                 if sheet_idx != target {
                     continue;
@@ -5753,7 +5756,7 @@ pub(crate) fn off_sheet_structural_edit(
             }
         }
         SE::ColDelete { at, count } => {
-            let spill_ranges = state.spill_ranges.lock().map_err(|e| e.to_string())?;
+            let spill_ranges = state.spill_ranges.read().map_err(|e| e.to_string())?;
             for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
                 if sheet_idx != target {
                     continue;
@@ -5906,7 +5909,7 @@ pub(crate) fn off_sheet_structural_edit(
         shift_sheet_range_strings(state, &effect, &mut undo_stack, target, edit);
         shift_controls(state, &effect, &mut undo_stack, target, edit);
         shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, edit);
-        shift_flat_cell_stores(state, target, edit);
+        shift_flat_cell_stores(state, &effect, target, edit);
 
         // Every OTHER sheet (including the ACTIVE mirror) may reference the
         // edited sheet by name. BEFORE commit, so the rewrites join THIS

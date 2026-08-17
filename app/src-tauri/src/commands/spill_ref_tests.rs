@@ -317,7 +317,7 @@ fn no_spill_map_holder_also_resolves_a_formula() {
 fn the_lock_census_detector_finds_the_pattern() {
     const SAMPLE: &str = "\
 fn safe_holder() {
-    let map = state.spill_ranges.lock().unwrap();
+    let map = state.spill_ranges.read().unwrap();
     map.len();
 }
 
@@ -326,18 +326,32 @@ fn safe_resolver() {
 }
 
 pub(crate) fn deadlocks() {
-    let map = state.spill_ranges.lock().unwrap();
+    let map = state.spill_ranges.read().unwrap();
     let t = crate::name_resolution::eval_ast(ast, &ctx);
 }
 
+pub(crate) fn deadlocks_through_write() {
+    let map = state.spill_ranges.write(&effect).unwrap();
+    let t = crate::name_resolution::eval_ast(ast, &ctx);
+}
+
+pub(crate) fn deadlocks_through_pending() {
+    let map = state.spill_ranges.lock_pending().unwrap();
+    let t = crate::name_resolution::stored_ast_references(ast, &ctx);
+}
+
 fn only_a_comment() {
-    // state.spill_ranges.lock() and eval_ast( in prose
+    // state.spill_ranges.read() and eval_ast( in prose
 }
 ";
     assert_eq!(
         functions_holding_and_resolving(SAMPLE),
-        vec!["deadlocks".to_string()],
-        "the detector must find the unsafe combination, and only it"
+        vec![
+            "deadlocks".to_string(),
+            "deadlocks_through_write".to_string(),
+            "deadlocks_through_pending".to_string(),
+        ],
+        "the detector must find the unsafe combination through EVERY accessor, and          only it -- dropping any one needle is how this census went vacuous once"
     );
 }
 
@@ -362,7 +376,20 @@ fn collect_rs_files_for_lock_census(dir: &std::path::Path, out: &mut Vec<std::pa
 /// Top-level functions whose CODE both takes the spill map's lock and resolves
 /// a formula through the resolver that now takes it too.
 fn functions_holding_and_resolving(text: &str) -> Vec<String> {
-    const HOLDS: &str = "spill_ranges.lock(";
+    // EVERY WAY THE SPILL MAP CAN BE HELD, not one spelling of it.
+    //
+    // This needle was `spill_ranges.lock(` alone, and on 2026-08-17 the store
+    // became `Persisted<SpillRangeMap>` -- so `.lock()` stopped existing anywhere
+    // in the crate and this census would have passed VACUOUSLY over every file
+    // while the deadlock it exists to prevent stayed perfectly possible. The
+    // sibling non-vacuity test caught it, which is the whole reason that test is
+    // there. A guard keyed on one spelling of a thing that has three is not a
+    // guard; all three are listed here for the same reason.
+    const HOLDS: [&str; 3] = [
+        "spill_ranges.read(",
+        "spill_ranges.write(",
+        "spill_ranges.lock_pending(",
+    ];
     const RESOLVES: [&str; 2] = ["eval_ast(", "stored_ast_references("];
 
     let mut out: Vec<String> = Vec::new();
@@ -392,7 +419,7 @@ fn functions_holding_and_resolving(text: &str) -> Vec<String> {
             current = Some((name, false, false));
         }
         if let Some((_, holds, resolves)) = current.as_mut() {
-            if code.contains(HOLDS) {
+            if HOLDS.iter().any(|n| code.contains(n)) {
                 *holds = true;
             }
             if RESOLVES.iter().any(|n| code.contains(n)) {

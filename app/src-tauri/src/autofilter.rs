@@ -1424,7 +1424,7 @@ pub fn get_hidden_rows(
 ) -> Vec<u32> {
     let active_sheet = *state.active_sheet.read().unwrap();
     let auto_filters = state.auto_filters.read().unwrap();
-    let adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
+    let adv_hidden = state.advanced_filter_hidden_rows.read().unwrap();
 
     let mut result: HashSet<u32> = HashSet::new();
 
@@ -1456,17 +1456,24 @@ pub(crate) fn set_advanced_filter_hidden_rows_inner(
     rows: Vec<u32>,
 ) {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
     // These rows are unioned into the persisted `Sheet::hidden_rows` at save time,
     // so both arms change what a save writes -- unless the "clear" arm finds nothing
     // to clear, which is a genuine no-op.
+    //
+    // `lock_pending` rather than `write(&effect)`: the effect must be constructed
+    // AFTER the gate (is there anything to clear?), because `DocumentEffect::mutates`
+    // dirties at construction and a no-op must not dirty. Reading the store IS the
+    // gate, so the two have to share one critical section -- read, drop, write would
+    // be a TOCTOU window, and Tauri dispatches commands on a thread pool.
+    let pending = state.advanced_filter_hidden_rows.lock_pending().unwrap();
     if rows.is_empty() {
-        if adv_hidden.remove(&active_sheet).is_some() {
-            let _effect = DocumentEffect::mutates(file_state);
+        if pending.contains_key(&active_sheet) {
+            let effect = DocumentEffect::mutates(file_state);
+            pending.authorize(&effect).remove(&active_sheet);
         }
     } else {
-        let _effect = DocumentEffect::mutates(file_state);
-        adv_hidden.insert(active_sheet, rows);
+        let effect = DocumentEffect::mutates(file_state);
+        pending.authorize(&effect).insert(active_sheet, rows);
     }
 }
 
@@ -1486,11 +1493,13 @@ pub(crate) fn clear_advanced_filter_hidden_rows_inner(
     file_state: &FileState,
 ) {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
     // Only dirty if there was something to clear: this runs on every advanced-filter
-    // teardown, including ones where no rows were ever hidden.
-    if adv_hidden.remove(&active_sheet).is_some() {
-        let _effect = DocumentEffect::mutates(file_state);
+    // teardown, including ones where no rows were ever hidden. Same `lock_pending`
+    // reasoning as `set_advanced_filter_hidden_rows_inner` above.
+    let pending = state.advanced_filter_hidden_rows.lock_pending().unwrap();
+    if pending.contains_key(&active_sheet) {
+        let effect = DocumentEffect::mutates(file_state);
+        pending.authorize(&effect).remove(&active_sheet);
     }
 }
 
@@ -2213,14 +2222,20 @@ fn run_advanced_filter_inner(
                 // TS layer performs the cell writes through the undoable batch path,
                 // which dirties on its own; the error arm changes nothing. Marking at
                 // the top of the command would dirty on a rejected criteria range.
-                let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
+                // Same gate-then-decide shape as the two `_inner` helpers: the
+                // effect cannot be built before the store has been consulted,
+                // because a no-op must not dirty.
+                let pending = state.advanced_filter_hidden_rows.lock_pending().unwrap();
                 if hidden_rows.is_empty() {
-                    if adv_hidden.remove(&active_sheet).is_some() {
-                        let _effect = DocumentEffect::mutates(file_state);
+                    if pending.contains_key(&active_sheet) {
+                        let effect = DocumentEffect::mutates(file_state);
+                        pending.authorize(&effect).remove(&active_sheet);
                     }
                 } else {
-                    let _effect = DocumentEffect::mutates(file_state);
-                    adv_hidden.insert(active_sheet, hidden_rows.clone());
+                    let effect = DocumentEffect::mutates(file_state);
+                    pending
+                        .authorize(&effect)
+                        .insert(active_sheet, hidden_rows.clone());
                 }
             }
             AdvancedFilterResult {

@@ -456,7 +456,7 @@ fn remap_sheet_keyed_stores(
     }
     // Advanced-filter hidden rows: per-sheet session state that is never
     // recomputed on sheet ops (and shows up in the state digest).
-    remap_indexed_map(&mut state.advanced_filter_hidden_rows.lock().unwrap(), &remap);
+    remap_indexed_map(&mut state.advanced_filter_hidden_rows.write(effect).unwrap(), &remap);
     // Spill tracking is a TWIN pair maintained in lockstep in commands/data.rs
     // (spill_hosts: spill cell -> origin; spill_ranges: origin -> its spill
     // cells; both origins and spill cells are in-sheet coords). It is updated
@@ -464,7 +464,7 @@ fn remap_sheet_keyed_stores(
     // sides remap together (remapping one alone would desync the pair and
     // mis-target spill protection).
     remap_cell_keyed_map(&mut state.spill_hosts.lock().unwrap(), &remap);
-    remap_cell_keyed_map(&mut state.spill_ranges.lock().unwrap(), &remap);
+    remap_cell_keyed_map(&mut state.spill_ranges.write(effect).unwrap(), &remap);
     // Protection stores are sheet-index-keyed like CF/DV. Without remapping,
     // deleting/reordering sheets leaves protection attached to the WRONG index
     // — and now that protection persists, a stale index serializes under a

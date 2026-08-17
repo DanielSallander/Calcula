@@ -101,7 +101,7 @@ pub(super) fn reopen(wb: &Workbook, loaded: &persistence::Workbook) {
     );
 
     // --- reset_document_scoped_stores, the two lines this file is about ---
-    wb.state.spill_ranges.lock().unwrap().clear();
+    wb.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
     wb.state.spill_hosts.lock().unwrap().clear();
 
     // --- the incoming document's grids and styles -------------------------
@@ -136,7 +136,7 @@ fn spill_ranges_of(wb: &Workbook) -> Vec<((usize, u32, u32), Vec<(u32, u32)>)> {
     let mut out: Vec<((usize, u32, u32), Vec<(u32, u32)>)> = wb
         .state
         .spill_ranges
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .iter()
         .map(|(k, v)| {
@@ -655,7 +655,7 @@ fn the_recovery_leaves_a_genuine_blocker_alone() {
 fn a_v7_workbook_pays_for_no_evaluation_on_load() {
     let wb = workbook_with_a_sized_spill(4.0);
     let loaded = round_trip(&wb);
-    wb.state.spill_ranges.lock().unwrap().clear();
+    wb.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
     wb.state.spill_hosts.lock().unwrap().clear();
 
     let report = crate::spill_restore::restore_spill_map_on_load(
@@ -687,7 +687,7 @@ fn an_extent_without_a_formula_is_refused() {
     assert!(origin.spill.is_some());
 
     let report = {
-        wb.state.spill_ranges.lock().unwrap().clear();
+        wb.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
         wb.state.spill_hosts.lock().unwrap().clear();
         crate::spill_restore::restore_spill_map_from_workbook(&wb.state, &tampered.sheets)
     };
@@ -725,7 +725,7 @@ fn overlapping_extents_are_refused_rather_than_interleaved() {
         },
     );
 
-    wb.state.spill_ranges.lock().unwrap().clear();
+    wb.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
     wb.state.spill_hosts.lock().unwrap().clear();
     let report = crate::spill_restore::restore_spill_map_from_workbook(&wb.state, &tampered.sheets);
 
@@ -914,7 +914,7 @@ fn bench_the_load_path_cost_of_spill_ownership() {
 
         // --- the v7 path: read the extents the save wrote -------------------
         let saved = workbook_for_save(&wb);
-        wb.state.spill_ranges.lock().unwrap().clear();
+        wb.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
         wb.state.spill_hosts.lock().unwrap().clear();
         let started = Instant::now();
         let restore = crate::spill_restore::restore_spill_map_from_workbook(&wb.state, &saved.sheets);
@@ -1413,7 +1413,7 @@ fn bench_the_save_path_cost_of_the_spill_decision() {
         let spilled: usize = wb
             .state
             .spill_ranges
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
             .values()
             .map(|v| v.len())

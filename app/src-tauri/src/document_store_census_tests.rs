@@ -645,7 +645,13 @@ fn join_method_chains(code: &str) -> String {
 
 /// The `Store.field` keys mentioned in one comment-stripped body.
 fn scan_store_accesses(code: &str) -> Vec<(String, String)> {
-    const ACCESSORS: [&str; 3] = ["read", "write", "lock"];
+    // `lock_pending` belongs here as much as the other three. It was missing, so
+    // every gate-then-decide site -- the shape `Persisted::lock_pending` exists to
+    // support, used wherever a no-op must not dirty -- was INVISIBLE to both
+    // censuses in this file. Added 2026-08-17 while gating the save sources, after
+    // converting `advanced_filter_hidden_rows` to exactly that shape and noticing
+    // the census stopped seeing it.
+    const ACCESSORS: [&str; 4] = ["read", "write", "lock", "lock_pending"];
     let joined = join_method_chains(code);
     let code = joined.as_str();
     let mut out: Vec<(String, String)> = Vec::new();
@@ -2251,4 +2257,191 @@ mod xlsx_loss_census {
              it would pass on a report that stopped emitting one"
         );
     }
+}
+
+/// **EVERY `AppState` STORE THE SAVE PATH READS MUST BE `Persisted<T>`** — the
+/// gating twin of `every_store_the_save_path_reads_is_reset_when_the_document_is_replaced`.
+///
+/// WHY THIS BELONGS HERE and not beside `DocumentEffect`. The population is
+/// already computed in this file, exactly and defensibly:
+/// `store_accesses(call_closure(&fns, SAVE_ROOTS))` IS "every store a saved
+/// workbook or a published package is projected from". A second reachability
+/// walk elsewhere would be a second source of truth for the same fact, and the
+/// first thing two copies of a fact do is disagree.
+///
+/// WHY IT IS NOT ALREADY COVERED. The reset census above asks a different
+/// question — is this store CLEARED when the document is replaced — and both
+/// halves are needed for different failures:
+///
+/// | census | failure it prevents |
+/// |---|---|
+/// | reset (above) | the next document you save physically contains the previous one's content |
+/// | gating (here) | a command changes what lands on disk without deciding whether the document is dirty, so the close prompt and AutoRecover both lie |
+///
+/// A store can pass one and fail the other, and on 2026-08-17 three did:
+/// `spill_ranges`, `advanced_filter_hidden_rows` and `pending_recalc` were all
+/// correctly RESET — so the census above was green — while sitting on bare
+/// `Mutex`es that no `DocumentEffect` guarded. The audit that found the first two
+/// missed the third; this census found it.
+///
+/// WHY `every_persisted_appstate_store_is_gated_not_a_bare_mutex` (in
+/// `document_effect.rs`) did not catch them either: its list is 22 HAND-WRITTEN
+/// field names, so it proves those 22 have not regressed and is structurally
+/// blind to everything else. Derive the population, do not list it.
+///
+/// THE EXEMPTION LIST HAS EXACTLY ONE ENTRY, and it is none of the three. All
+/// three offenders were PROMOTED rather than excused. The single exemption is
+/// `protected_regions`, and it earns it on a fact rather than an opinion: it never
+/// reaches a `.cala` save at all (`rg protected_regions src/persistence.rs`
+/// returns one hit, the reset), so no change to it can make a saved document
+/// stale, and its own declaration says the extensions that own it — pivot tables,
+/// charts — re-register it every session. `DocumentEffect::mutates` would be a
+/// false statement about it.
+///
+/// Before adding a second entry, read `spill_restore.rs`. `spill_ranges` looked
+/// exactly like a derived cache that needed no gate, and that module header
+/// explains why it is the opposite: a spilled `2` and a typed `2` are the same
+/// bytes, so ownership cannot be recomputed at any price. "It looks derived" is
+/// not a reason; "it is never written to disk" is.
+#[test]
+fn every_store_the_save_path_reads_is_gated_by_a_document_effect() {
+    let sources = read_crate_sources();
+    let fns = index_functions(&sources);
+    let reads = store_accesses(&call_closure(&fns, SAVE_ROOTS));
+
+    // The declarations, with WRAPPED ones joined: `package_connection_restore_skips`
+    // puts its type on a continuation line, and a per-line reading of the struct
+    // mistakes it for a field with no lock at all.
+    let lib = sources
+        .iter()
+        .find(|(p, _)| p.ends_with("lib.rs"))
+        .map(|(_, t)| t.clone())
+        .expect("the crate walk must include lib.rs");
+    let mut decls: BTreeMap<String, String> = BTreeMap::new();
+    let mut in_struct = false;
+    let mut pending: Option<(String, String)> = None;
+    for line in lib.lines() {
+        if !in_struct {
+            if line.starts_with("pub struct AppState") {
+                in_struct = true;
+            }
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("pub ") && t.contains(':') {
+            if let Some((n, ty)) = pending.take() {
+                decls.insert(n, ty);
+            }
+            let rest = &t["pub ".len()..];
+            let colon = rest.find(':').expect("a declaration has a colon");
+            pending = Some((
+                rest[..colon].trim().to_string(),
+                rest[colon + 1..].trim().to_string(),
+            ));
+        } else if let Some((_, ty)) = pending.as_mut() {
+            ty.push(' ');
+            ty.push_str(t);
+        }
+    }
+    if let Some((n, ty)) = pending.take() {
+        decls.insert(n, ty);
+    }
+    assert!(
+        decls.len() > 90,
+        "parsed only {} AppState fields — the struct parse has broken and this \
+         census would pass vacuously",
+        decls.len()
+    );
+
+    // NON-VACUITY, and it is the load-bearing half of this test. The three stores
+    // this census was built for must be inside its own population; otherwise a
+    // green result means nothing.
+    for field in ["spill_ranges", "advanced_filter_hidden_rows", "pending_recalc"] {
+        let must = &format!("AppState.{}", field);
+        assert!(
+            reads.contains_key(must),
+            "`{}` is a save source this census exists to gate, and the population \
+             does not contain it. Either SAVE_ROOTS has drifted or the store is now \
+             reached through a path `call_closure` cannot see — fix that before \
+             trusting any pass of this test.",
+            must
+        );
+    }
+
+    // (field, why it needs no `DocumentEffect`). Deliberately minimal; the doc
+    // comment above states the bar an entry has to clear.
+    const PUBLISH_ONLY_DERIVED: &[(&str, &str)] = &[(
+        "protected_regions",
+        "publish-only and never written to a .cala (persistence.rs touches it once,          to reset it), and re-registered every session by the extensions that own          it (pivots, charts). A change to it cannot make a SAVED document stale,          which is the only thing is_modified claims.",
+    )];
+
+    let mut ungated: Vec<String> = Vec::new();
+    for (key, via) in &reads {
+        // Keys are `<StructName>.<field>`; only `AppState` is `Persisted`-gated.
+        // The other receivers (`SlicerState`, `RibbonFilterState`, ...) carry their
+        // own discipline and are not this census's subject.
+        let Some(field) = key.strip_prefix("AppState.") else {
+            continue;
+        };
+        let Some(ty) = decls.get(field) else {
+            continue; // a local binding, or a field this parse did not see
+        };
+        if PUBLISH_ONLY_DERIVED.iter().any(|(n, _)| *n == field) {
+            continue;
+        }
+        if !ty.contains("Persisted<") {
+            let mut who: Vec<&str> = via.iter().map(|s| s.as_str()).collect();
+            who.sort_unstable();
+            who.truncate(3);
+            ungated.push(format!("{} : {}   (via {})", field, ty, who.join(", ")));
+        }
+    }
+    ungated.sort();
+
+    assert!(
+        ungated.is_empty(),
+        "these AppState stores are read by the SAVE or PUBLISH path while sitting \
+         on a bare lock, so a command can change what lands on disk without any \
+         `DocumentEffect` having decided whether the document is dirty — which \
+         breaks the close prompt and AutoRecover together, silently:\n  {}\n\n\
+         Promote each to `Persisted<T>`. Do NOT add an exemption without first \
+         reading `spill_restore.rs` on why a store that looks derived may be the \
+         opposite.",
+        ungated.join("\n  ")
+    );
+
+    // AN EXEMPTION MUST NOT OUTLIVE ITS SUBJECT. A stale name reads as a
+    // considered decision about code that no longer exists -- the failure a
+    // suppression list in this repo already had once, where an entry outlived its
+    // bug and blinded a walker. Same check the reset census applies to its EXEMPT.
+    let stale: Vec<&str> = PUBLISH_ONLY_DERIVED
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| !reads.contains_key(&format!("AppState.{}", n)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "PUBLISH_ONLY_DERIVED names stores no projection path reads any more, so \
+         the exemption is now a claim about nothing:\n  {}",
+        stale.join("\n  ")
+    );
+
+    // ...and it must not excuse something that has since become gated anyway.
+    let redundant: Vec<&str> = PUBLISH_ONLY_DERIVED
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| decls.get(*n).is_some_and(|t| t.contains("Persisted<")))
+        .collect();
+    assert!(
+        redundant.is_empty(),
+        "these are exempted but are already Persisted<T>, so the exemption is dead \
+         weight that weakens the list:\n  {}",
+        redundant.join("\n  ")
+    );
 }

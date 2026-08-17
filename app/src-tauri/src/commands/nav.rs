@@ -376,7 +376,7 @@ pub(crate) fn hidden_row_sources_for_sheet(
         }
     }
     {
-        let adv = state.advanced_filter_hidden_rows.lock().unwrap();
+        let adv = state.advanced_filter_hidden_rows.read().unwrap();
         if let Some(rows) = adv.get(&sheet_index) {
             filter_hidden.extend(rows.iter().copied());
         }
@@ -675,7 +675,7 @@ mod special_cells_tests {
         // An advanced filter hides row 4.
         state
             .advanced_filter_hidden_rows
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
             .insert(0, vec![4]);
         // A collapsed outline group over rows 5..=6 hides row 5 (row 6 is the

@@ -127,7 +127,7 @@ pub fn set_iteration_settings(
 pub fn get_calculation_state(state: State<AppState>) -> String {
     let stale = state
         .pending_recalc
-        .lock()
+        .read()
         .ok()
         .is_some_and(|p| p.as_ref().is_some_and(|pr| !pr.is_empty()));
     if stale { "pending".to_string() } else { "done".to_string() }
@@ -1271,7 +1271,7 @@ pub(crate) fn run_calculation_pass(
     // If the previous pass was cancelled, recalculate only what it never
     // reached, so an accidental Cancel costs nothing.
     let resume: Option<std::collections::HashSet<(u32, u32)>> = {
-        let pending = state.pending_recalc.lock().map_err(|e| e.to_string())?;
+        let pending = state.pending_recalc.read().map_err(|e| e.to_string())?;
         match scope {
             CalcScope::ActiveSheet => pending
                 .as_ref()
@@ -1709,7 +1709,12 @@ pub(crate) fn run_calculation_pass(
     // `pending_recalc` is a LEAF mutex — nothing else is locked underneath it —
     // so taking it here, while the grid locks are still held, cannot deadlock.
     {
-        let mut pending = state.pending_recalc.lock().map_err(|e| e.to_string())?;
+        // RECALC COMPANION: recording the remainder of a cancelled pass is part of
+        // that pass, and the command which started it owns the dirty flag.
+        let recalc = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::RecalcCompanion,
+        );
+        let mut pending = state.pending_recalc.write(&recalc).map_err(|e| e.to_string())?;
         if cancelled {
             log_info!("CALC", "cancelled after {} of {} cells; {} left un-recalculated",
                 cells_done, total_cells, pending_nodes.len());
@@ -2058,7 +2063,10 @@ pub(crate) fn recalculate_sheet_values(
     // Same contract as calculate_now: a cancelled pass records its remainder so
     // the workbook is never silently half-calculated. A clean pass on this sheet
     // clears any pending set that belonged to it.
-    if let Ok(mut pending) = state.pending_recalc.lock() {
+    let recalc = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
+    if let Ok(mut pending) = state.pending_recalc.write(&recalc) {
         if cancelled {
             *pending = Some(PendingRecalc { sheet_index, cells: pending_cells });
         } else if pending.as_ref().is_some_and(|p| p.sheet_index == sheet_index) {
@@ -2136,7 +2144,7 @@ pub fn cancel_calculation(state: State<AppState>) -> bool {
 /// indistinguishable from a correct one.
 #[tauri::command]
 pub fn get_pending_recalc(state: State<AppState>) -> Option<PendingRecalc> {
-    state.pending_recalc.lock().ok().and_then(|p| p.clone())
+    state.pending_recalc.read().ok().and_then(|p| p.clone())
 }
 
 /// Forget the pending set WITHOUT recalculating.
@@ -2162,11 +2170,14 @@ pub(crate) fn clear_pending_recalc_impl(
     state: &AppState,
     file_state: &crate::persistence::FileState,
 ) -> bool {
-    if let Ok(mut pending) = state.pending_recalc.lock() {
-        let had = pending.is_some();
-        *pending = None;
+    // Gate-then-decide: clearing a set that was already empty is a genuine no-op and
+    // must not dirty, so the effect cannot be built before the store is consulted.
+    let Ok(pending) = state.pending_recalc.lock_pending() else { return false };
+    let had = pending.is_some();
+    {
         if had {
-            let _effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+            *pending.authorize(&effect) = None;
         }
         return had;
     }

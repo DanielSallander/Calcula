@@ -1124,4 +1124,106 @@ mod tests {
              direction. Fix the persistence gap first."
         );
     }
+
+    // =======================================================================
+    // THE SAVE-SOURCE CENSUS  (open-items 2.2)
+    // =======================================================================
+
+    /// `AppState`'s field declarations as (name, type text), with WRAPPED
+    /// declarations joined.
+    ///
+    /// The joining is not fussiness. `package_connection_restore_skips` puts its
+    /// type on a continuation line, and a per-line reading of the struct counts it
+    /// as carrying no lock at all -- which is exactly how a count of these fields
+    /// came out wrong for the fourth time on 2026-08-17. Parse the declarations,
+    /// not the lines.
+    fn appstate_field_decls() -> Vec<(String, String)> {
+        let lib = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("read lib.rs");
+        let mut lines = lib.lines();
+        for l in lines.by_ref() {
+            if l.starts_with("pub struct AppState") {
+                break;
+            }
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut pending: Option<(String, String)> = None;
+        for l in lines {
+            if l == "}" {
+                break;
+            }
+            let t = l.trim();
+            if t.starts_with("//") {
+                continue;
+            }
+            // A new declaration begins at `pub <name>:`; anything else continues the
+            // previous one.
+            let is_decl = t.starts_with("pub ") && t.contains(':');
+            if is_decl {
+                if let Some(prev) = pending.take() {
+                    out.push(prev);
+                }
+                let rest = &t["pub ".len()..];
+                let colon = rest.find(':').expect("a declaration has a colon");
+                let name = rest[..colon].trim().to_string();
+                pending = Some((name, rest[colon + 1..].trim().to_string()));
+            } else if let Some((_, ty)) = pending.as_mut() {
+                ty.push(' ');
+                ty.push_str(t);
+            }
+        }
+        if let Some(prev) = pending.take() {
+            out.push(prev);
+        }
+        out
+    }
+
+    /// The published 104 / 62 / 40 / 2 split, pinned.
+    ///
+    /// WHY A TEST AND NOT A DOC LINE. This count has been published wrong four
+    /// times (36, 51, 59, and a 2026-08-17 miscount reading 39 bare + 3 unlocked
+    /// because it split the struct by LINES). `docs/design/open-items.md` cites it,
+    /// `CLAUDE.md` cites it, and nothing anywhere made it fail when it drifted. Now
+    /// the numbers live next to the code they describe.
+    #[test]
+    fn the_appstate_lock_census_reconciles() {
+        let decls = appstate_field_decls();
+        let persisted: Vec<&String> = decls
+            .iter()
+            .filter(|(_, t)| t.contains("Persisted<"))
+            .map(|(n, _)| n)
+            .collect();
+        let bare: Vec<&String> = decls
+            .iter()
+            .filter(|(_, t)| {
+                !t.contains("Persisted<") && (t.contains("Mutex<") || t.contains("RwLock<"))
+            })
+            .map(|(n, _)| n)
+            .collect();
+        let neither: Vec<&String> = decls
+            .iter()
+            .filter(|(_, t)| {
+                !t.contains("Persisted<") && !t.contains("Mutex<") && !t.contains("RwLock<")
+            })
+            .map(|(n, _)| n)
+            .collect();
+
+        assert_eq!(decls.len(), 104, "AppState field count changed");
+        assert_eq!(persisted.len(), 62, "Persisted<T> count changed");
+        assert_eq!(bare.len(), 40, "bare Mutex/RwLock count changed");
+        assert_eq!(
+            neither,
+            ["undo_stack", "calc_cancel"],
+            "exactly two fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
+             which holds its OWN Mutex (do not read this as unlocked and add one), and \
+             `calc_cancel` is `CancelToken(Arc<AtomicBool>)`, genuinely lock-free"
+        );
+        assert_eq!(
+            persisted.len() + bare.len() + neither.len(),
+            decls.len(),
+            "the three buckets must partition the struct"
+        );
+    }
 }

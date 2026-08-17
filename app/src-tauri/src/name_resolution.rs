@@ -112,7 +112,7 @@ pub struct NameTables<'a> {
     /// is not reentrant and this would deadlock;
     /// `no_spill_map_holder_also_resolves_a_formula` in `spill_ref_tests`
     /// enumerates the crate and refuses the combination.
-    pub spill_ranges: &'a std::sync::Mutex<crate::SpillRangeMap>,
+    pub spill_ranges: &'a crate::document_effect::Persisted<crate::SpillRangeMap>,
 }
 
 impl<'a> NameTables<'a> {
@@ -143,7 +143,7 @@ pub struct NameEvalCtx<'a> {
     /// See [`NameTables::sheet_names`].
     pub sheet_names: &'a [String],
     /// See [`NameTables::spill_ranges`].
-    pub spill_ranges: &'a std::sync::Mutex<crate::SpillRangeMap>,
+    pub spill_ranges: &'a crate::document_effect::Persisted<crate::SpillRangeMap>,
     /// Scope: a sheet-scoped name resolves only on its own sheet.
     pub sheet_index: usize,
     /// The evaluating cell's row — only consulted for `[@ThisRow]` table refs
@@ -207,7 +207,7 @@ pub fn eval_ast<'a>(stored: &'a Expression, ctx: &NameEvalCtx<'_>) -> Cow<'a, Ex
     // The lock is taken and released HERE, around a pure map read: no
     // evaluation happens inside it. See `NameTables::spill_ranges`.
     let expanded = if crate::ast_has_spill_refs(&expanded) {
-        let map = ctx.spill_ranges.lock().unwrap();
+        let map = ctx.spill_ranges.read().unwrap();
         let out = crate::resolve_spill_refs_in_ast(&expanded, &map, ctx.sheet_index, ctx.sheet_names);
         drop(map);
         out

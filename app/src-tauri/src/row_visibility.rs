@@ -98,7 +98,7 @@ fn nothing_is_hidden(state: &AppState) -> bool {
         .unwrap_or(false);
     let advanced_empty = state
         .advanced_filter_hidden_rows
-        .lock()
+        .read()
         .map(|m| m.values().all(|v| v.is_empty()))
         .unwrap_or(false);
     let outlines_empty = state
@@ -148,7 +148,7 @@ mod tests {
         set_rows_hidden_inner(&state, &FileState::default(), &[1], true).unwrap();
         state
             .advanced_filter_hidden_rows
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
             .insert(0, vec![4]);
         state
@@ -193,7 +193,7 @@ mod tests {
         let by_filter = two_sheet_state();
         by_filter
             .advanced_filter_hidden_rows
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
             .insert(1, vec![9]);
         assert!(!nothing_is_hidden(&by_filter));
@@ -299,7 +299,7 @@ mod tests {
         // Filter-hidden: code 9 excludes it.
         state
             .advanced_filter_hidden_rows
-            .lock()
+            .write(&crate::document_effect::test_seed_effect())
             .unwrap()
             .insert(0, vec![1]);
         crate::calculation::recalc_visibility_dependents_core(&state, &files, &pivots, None)

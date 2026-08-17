@@ -384,7 +384,7 @@ fn a_cancelled_recalc_writes_nothing_and_records_every_stale_cell() {
     state.calc_cancel.cancel();
     crate::calculation::recalculate_sheet_values(&state, &files, &pivots, 0, None);
 
-    let pending = state.pending_recalc.lock().unwrap().clone().expect(
+    let pending = state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap().clone().expect(
         "a cancelled pass must record what it did not reach — otherwise a stale \
          cell is indistinguishable from a correct one",
     );
@@ -413,7 +413,7 @@ fn a_completed_recalc_clears_the_stale_marker() {
     let pivots = crate::pivot::types::PivotState::new();
 
     // Pretend a previous pass was cancelled.
-    *state.pending_recalc.lock().unwrap() = Some(PendingRecalc {
+    *state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap() = Some(PendingRecalc {
         sheet_index: 0,
         cells: (1..=10).map(|r| PendingCell { row: r, col: 0 }).collect(),
     });
@@ -421,7 +421,7 @@ fn a_completed_recalc_clears_the_stale_marker() {
     crate::calculation::recalculate_sheet_values(&state, &files, &pivots, 0, None);
 
     assert!(
-        state.pending_recalc.lock().unwrap().is_none(),
+        state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap().is_none(),
         "a clean pass must clear the stale marker"
     );
     let grids = state.grids.read().unwrap();
@@ -519,7 +519,7 @@ fn a_cancel_from_another_thread_is_safe_wherever_it_lands() {
 
     let pending_count = state
         .pending_recalc
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .as_ref()
         .map(|p| p.cells.len())
@@ -596,7 +596,7 @@ fn the_progress_event_serialises_with_camel_case_keys() {
 fn staleness_from_a_cancelled_recalc_survives_a_save_and_reload() {
     let state = state_with_formulas(6);
     let sheet_id = state.sheet_ids.read().unwrap()[0];
-    *state.pending_recalc.lock().unwrap() = Some(PendingRecalc {
+    *state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap() = Some(PendingRecalc {
         sheet_index: 0,
         cells: vec![PendingCell { row: 2, col: 0 }, PendingCell { row: 5, col: 0 }],
     });
@@ -614,12 +614,12 @@ fn staleness_from_a_cancelled_recalc_survives_a_save_and_reload() {
 
     // RELOAD into a FRESH session that knows nothing about the cancel.
     let reopened = crate::create_app_state();
-    assert!(reopened.pending_recalc.lock().unwrap().is_none());
+    assert!(reopened.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap().is_none());
     crate::persistence::restore_pending_recalc_on_load(&reopened, &workbook);
 
     let pending = reopened
         .pending_recalc
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .clone()
         .expect("reopening a stale workbook must still report it as stale");
@@ -631,7 +631,7 @@ fn staleness_from_a_cancelled_recalc_survives_a_save_and_reload() {
     // user already closed cannot haunt the next one.
     let clean = persistence::Workbook::new();
     crate::persistence::restore_pending_recalc_on_load(&reopened, &clean);
-    assert!(reopened.pending_recalc.lock().unwrap().is_none());
+    assert!(reopened.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap().is_none());
 }
 
 /// The `.calp` override layer identifies a changed cell by its DISPLAY string,

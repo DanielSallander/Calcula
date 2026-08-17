@@ -176,7 +176,14 @@ fn take_spills_where(
     sheet: usize,
     origin_affected: impl Fn(u32, u32) -> bool,
 ) -> Vec<(u32, u32)> {
-    let mut spill_ranges = state.spill_ranges.lock().unwrap();
+    // RECALC COMPANION. Tearing down a spill claim is never an act of its own: it
+    // happens because an origin was cleared, overwritten or re-evaluated, and THAT
+    // command owns the dirty flag. Naming `mutates` here would dirty a document on a
+    // pure F9, which is the failure the `RecalcCompanion` variant exists to prevent.
+    let teardown = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
+    let mut spill_ranges = state.spill_ranges.write(&teardown).unwrap();
     if spill_ranges.is_empty() {
         return Vec::new();
     }
@@ -416,7 +423,7 @@ fn check_no_spill_origin_within(
     end_row: u32,
     end_col: u32,
 ) -> Result<(), String> {
-    let spill_ranges = state.spill_ranges.lock().unwrap();
+    let spill_ranges = state.spill_ranges.read().unwrap();
     if spill_ranges.is_empty() {
         return Ok(());
     }
@@ -454,7 +461,7 @@ fn spilled_cells_owned_within(
     end_row: u32,
     end_col: u32,
 ) -> crate::CoordSet {
-    let spill_ranges = state.spill_ranges.lock().unwrap();
+    let spill_ranges = state.spill_ranges.read().unwrap();
     if spill_ranges.is_empty() {
         return crate::CoordSet::default();
     }
@@ -657,7 +664,13 @@ pub(crate) fn apply_spill_decision(
     note_spill_block(state, sheet, row, col, None);
     let mut new_spill_cells = Vec::new();
     {
-        let mut spill_ranges = state.spill_ranges.lock().unwrap();
+        // RECALC COMPANION, for the same reason as `take_spills_where`: the extent is
+        // a consequence of the origin's re-evaluation, and the edit or the recalc
+        // command that triggered it has already decided about dirtiness.
+        let claim = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::RecalcCompanion,
+        );
+        let mut spill_ranges = state.spill_ranges.write(&claim).unwrap();
         let mut spill_hosts = state.spill_hosts.lock().unwrap();
 
         for (dr, dc, cv) in &spill_values {
@@ -796,7 +809,7 @@ fn check_region_cells_protection<'a>(
 #[tauri::command]
 pub fn get_spill_ranges(state: State<AppState>) -> Vec<SpillRangeInfo> {
     let active_sheet = *state.active_sheet.read().unwrap();
-    let spill_ranges = state.spill_ranges.lock().unwrap();
+    let spill_ranges = state.spill_ranges.read().unwrap();
     let mut result = Vec::new();
 
     for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
@@ -1501,7 +1514,12 @@ fn update_cell_impl(
         crate::eval_budget::EvalSurface::Interactive,
         &state.calc_cancel,
     );
-    if let Ok(mut pending) = state.pending_recalc.lock() {
+    // RECALC COMPANION: this drops a cell from the stale set BECAUSE it was just
+    // re-evaluated, which is the recalculation's own bookkeeping.
+    let recalc = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::RecalcCompanion,
+    );
+    if let Ok(mut pending) = state.pending_recalc.write(&recalc) {
         if let Some(pr) = pending.as_mut() {
             pr.remove_cell(row, col);
             if pr.is_empty() {
@@ -6478,7 +6496,7 @@ pub(crate) fn recalc_after_active_sheet_bulk_rewrite(
     // has already found something to release — so a 10,000-cell remove-
     // duplicates seed list is never hashed for nothing.
     {
-        let has_spills = !state.spill_ranges.lock().unwrap().is_empty();
+        let has_spills = !state.spill_ranges.read().unwrap().is_empty();
         if has_spills {
             let vacated: crate::CoordSet = seeds
                 .iter()

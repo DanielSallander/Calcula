@@ -816,7 +816,7 @@ pub(crate) fn build_workbook_state_digest(
     if let Ok(wp) = state.workbook_protection.read() {
         digest.workbook_protection = to_value_or_null(&*wp);
     }
-    if let Ok(hidden) = state.advanced_filter_hidden_rows.lock() {
+    if let Ok(hidden) = state.advanced_filter_hidden_rows.read() {
         for (sheet, rows) in hidden.iter() {
             let mut sorted = rows.clone();
             sorted.sort_unstable();

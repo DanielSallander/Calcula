@@ -4176,7 +4176,7 @@ fn apply_object_swap_restore(
                 if let Some(v) = snap.computed.clone() { m.insert(idx, v); }
                 prev
             });
-            let cur_hidden = state.advanced_filter_hidden_rows.lock().ok().and_then(|mut m| {
+            let cur_hidden = state.advanced_filter_hidden_rows.write(effect).ok().and_then(|mut m| {
                 let prev = m.remove(&idx);
                 if let Some(v) = snap.hidden_rows.clone() { m.insert(idx, v); }
                 prev

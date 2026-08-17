@@ -1320,7 +1320,7 @@ fn the_generalised_detector_stays_quiet_on_the_shapes_that_are_correct() {
             // HEADER really does scope its guard to the block, so the census
             // must not carry it past the closing brace.
             "an if-let header scopes its guard to the block",
-            "pub fn f(state: &AppState) {\n    if let Ok(mut p) = state.pending_recalc.lock() {\n        p.clear();\n    }\n    let g = state.grids.read().unwrap();\n}\n",
+            "pub fn f(state: &AppState) {\n    if let Ok(mut p) = state.pending_recalc.read() {\n        p.clear();\n    }\n    let g = state.grids.read().unwrap();\n}\n",
         ),
     ];
     for (label, src) in cases {

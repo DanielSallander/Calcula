@@ -485,7 +485,18 @@ pub struct AppState {
     pub sheet_visibility: document_effect::Persisted<Vec<String>>,
     /// Spill tracking: maps (sheet_index, origin_row, origin_col) to list of (row, col) spill cells
     /// Used by dynamic array functions (FILTER, SORT, UNIQUE, SEQUENCE)
-    pub spill_ranges: Mutex<HashMap<(usize, u32, u32), Vec<(u32, u32)>>>,
+    ///
+    /// PERSISTED (`SavedCell::spill`, the `sp` field, .cala format version 7) ->
+    /// `Persisted<T>`. It looks like a derived cache and is NOT one: `spill_restore.rs`
+    /// explains why at length -- a spilled `2` and a typed `2` are the same bytes, so
+    /// "which cells belong to which origin" cannot be recovered from the grid at any
+    /// price short of re-evaluating every formula in the workbook. The extent is
+    /// therefore written at save (`apply_spill_extents_to_sheet`, the only authority for
+    /// which origin owns which cells) and restored directly on load. That makes it a SAVE
+    /// SOURCE, and a save source on a bare `Mutex` can change what lands on disk without
+    /// any command having decided whether the document is dirty -- the exact hole
+    /// `DocumentEffect` exists to close.
+    pub spill_ranges: document_effect::Persisted<SpillRangeMap>,
     /// Reverse spill map: (sheet_index, row, col) -> (origin_row, origin_col)
     /// Used to detect #SPILL! errors when a spill cell is occupied
     pub spill_hosts: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
@@ -507,7 +518,13 @@ pub struct AppState {
     /// maps when the document is replaced.
     pub spill_blocks: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
     /// Hidden rows set by the Advanced Filter extension (per sheet)
-    pub advanced_filter_hidden_rows: Mutex<HashMap<usize, Vec<u32>>>,
+    ///
+    /// PERSISTED -> `Persisted<T>`: unioned into `Sheet::hidden_rows` at save
+    /// (`persistence.rs`), so it decides which rows a distributed report ships as
+    /// hidden. Its writers already hand-rolled `DocumentEffect::mutates` with a comment
+    /// saying "both arms change what a save writes"; a discarded `let _effect` is a
+    /// convention, and this makes it a compiler-enforced fact instead.
+    pub advanced_filter_hidden_rows: document_effect::Persisted<HashMap<usize, Vec<u32>>>,
     /// Document theme (colors + fonts). Defaults to Office theme.
     /// PERSISTED (`workbook.theme`) -> `Persisted<T>`: the document theme restyles the
     /// whole workbook and is written into the .cala.
@@ -658,7 +675,14 @@ pub struct AppState {
     /// Cells a CANCELLED recalculation never reached. `None` = the workbook is
     /// fully calculated. See `eval_budget::PendingRecalc` for why the remainder
     /// is recorded rather than rolled back.
-    pub pending_recalc: Mutex<Option<crate::eval_budget::PendingRecalc>>,
+    /// PERSISTED (`workbook.pending_recalc`) -> `Persisted<T>`. Found 2026-08-17 by the
+    /// save-source census, not by the audit that preceded it: `attach_pending_recalc_for_save`
+    /// writes it straight into the saved workbook. The failure mode is the one the .cala
+    /// versioning rule names explicitly as a LIE rather than a loss -- "a stale workbook
+    /// that comes back looking calculated" -- so a command that changes which cells are
+    /// known-stale without deciding about dirtiness is exactly the hole `DocumentEffect`
+    /// closes.
+    pub pending_recalc: document_effect::Persisted<Option<crate::eval_budget::PendingRecalc>>,
 }
 
 impl AppState {
@@ -759,10 +783,10 @@ pub fn create_app_state() -> AppState {
         page_setups: document_effect::Persisted::new(vec![crate::api_types::PageSetup::default()]),
         tab_colors: document_effect::Persisted::new(vec![String::new()]),
         sheet_visibility: document_effect::Persisted::new(vec!["visible".to_string()]),
-        spill_ranges: Mutex::new(HashMap::new()),
+        spill_ranges: document_effect::Persisted::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
         spill_blocks: Mutex::new(HashMap::new()),
-        advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
+        advanced_filter_hidden_rows: document_effect::Persisted::new(HashMap::new()),
         theme: crate::document_effect::Persisted::new(engine::ThemeDefinition::default()),
         scenarios: document_effect::Persisted::new(HashMap::new()),
         animation_snapshots: Mutex::new(HashMap::new()),
@@ -822,7 +846,7 @@ pub fn create_app_state() -> AppState {
         model_writeback: document_effect::Persisted::new(crate::bi::writeback::ModelWritebackStore::default()),
         model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
         calc_cancel: engine::CancelToken::new(),
-        pending_recalc: Mutex::new(None),
+        pending_recalc: document_effect::Persisted::new(None),
     };
 
     // Register the initial sheet in the IdRegistry
@@ -2008,7 +2032,7 @@ fn resolve_spill_refs_at_entry(
     if !ast_has_spill_refs(ast) {
         return ast.clone();
     }
-    let spill_ranges_map = state.spill_ranges.lock().unwrap();
+    let spill_ranges_map = state.spill_ranges.read().unwrap();
     let r = resolve_spill_refs_in_ast(ast, &spill_ranges_map, sheet_index, sheet_names);
     drop(spill_ranges_map);
     r

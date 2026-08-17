@@ -65,7 +65,7 @@ fn spill_ranges_of(wb: &Workbook) -> Vec<((usize, u32, u32), Vec<(u32, u32)>)> {
     let mut out: Vec<((usize, u32, u32), Vec<(u32, u32)>)> = wb
         .state
         .spill_ranges
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .iter()
         .map(|(k, v)| {
@@ -1038,7 +1038,7 @@ fn the_restored_spill_map_is_what_keeps_a_reloaded_origin_alive_2ab() {
     let broken = workbook_with_a_spill();
     // What `reset_document_scoped_stores` does on load — the cells stay,
     // because the grid comes back from the file.
-    broken.state.spill_ranges.lock().unwrap().clear();
+    broken.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
     broken.state.spill_hosts.lock().unwrap().clear();
     assert_eq!(broken.value(0, 2, 0), CellValue::Number(3.0));
 
@@ -1066,7 +1066,7 @@ fn the_restored_spill_map_is_what_keeps_a_reloaded_origin_alive_2ab() {
 
     // ---- With the map restored: the array survives -------------------------
     let fixed = workbook_with_a_spill();
-    fixed.state.spill_ranges.lock().unwrap().clear();
+    fixed.state.spill_ranges.write(&crate::document_effect::test_seed_effect()).unwrap().clear();
     fixed.state.spill_hosts.lock().unwrap().clear();
 
     // The one line `open_file` gained. `A1:A4` is what the file's `sp` field

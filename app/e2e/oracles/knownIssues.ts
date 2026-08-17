@@ -7,6 +7,14 @@
 // substring for violations without digest diffs). Each entry must reference
 // a bug-ledger id (tests/regression/bug-ledger.json) so suppressions stay
 // accountable. Remove the entry when the bug is fixed.
+//
+// ENFORCED as of 2026-08-17: app/e2e/__tests__/knownIssueExpiry.test.ts reads
+// tests/regression/bug-ledger.json and fails when an entry here names a bug that
+// does not exist or is no longer "open". Closing the bug now turns the
+// suppression into a red unit test instead of leaving it here forever. That is
+// not hypothetical for this list -- a suppression on it outlived its bug once,
+// and because the filter suppresses when EVERY digest-diff path is covered, a
+// stale prefix hides that subtree from ANY cause.
 
 import type { OracleViolation } from "./types";
 

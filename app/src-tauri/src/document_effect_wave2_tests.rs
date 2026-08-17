@@ -231,7 +231,7 @@ fn clearing_a_pending_recalc_marker_dirties_only_when_there_was_one() {
     // With a marker: pending_recalc IS persisted (attach_pending_recalc_for_save /
     // restore_pending_recalc_on_load), and discarding it is an explicit human claim
     // that the stale cells no longer matter -- exactly what the close prompt protects.
-    *state.pending_recalc.lock().unwrap() = Some(PendingRecalc {
+    *state.pending_recalc.write(&crate::document_effect::test_seed_effect()).unwrap() = Some(PendingRecalc {
         sheet_index: 0,
         cells: vec![PendingCell { row: 1, col: 0 }],
     });

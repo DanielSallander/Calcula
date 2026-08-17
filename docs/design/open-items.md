@@ -20,7 +20,7 @@ low — plus BUG-0098, the backend wedge in §2.5, which is unreproduced. BUG-00
 2026-08-17, is the sibling of BUG-0086: that fix turned out to be SPELLING-SPECIFIC, and a
 capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely). Nothing in this file
 duplicates a ledger entry. **Recount before restating**: the histogram is one line of node
-(`{fixed:94, open:4}`), and the previous figure here (97/94/3) was already stale the day after it
+(`{fixed:95, open:4}`), and the previous figure here (97/94/3) was already stale the day after it
 was written.
 
 ---
@@ -247,7 +247,7 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 | **`set_active_sheet` accepts a hidden sheet index.** Worth stating carefully, because it now *looks* guarded: `activate_sheet` does call `ensure_user_sheet` (`sheets.rs:917`), but that guard tests `is_user_sheet` (`sheets.rs:144-149`), which refuses **only** `OBJECT_SHEET_VISIBILITY` — floating-range backing sheets. A user-hidden sheet (`"hidden"`) passes straight through. Excel's `Activate` errors on a hidden sheet. Not tightened because scripts and E2E specs use it to reach hidden sheets. | `sheets.rs:144-168,917` |
 | **`default_row_height` / `default_column_width` announce no undo domain.** Both registered with `domains: NONE` (`undo_commands.rs:1625-1626`) and the registry test pins it (`:4578-4579`), so undoing either notifies nothing that needs to repaint. | `app/src-tauri/src/undo_commands.rs:1625,1626,4578` |
 
-### 2.2 The `Persisted<T>` migration is not finished
+### 2.2 The `Persisted<T>` migration — the SAVE SOURCES are done (2026-08-17); the rest is not
 
 `AppState` has **104 fields**: **59** are `Persisted<T>`, **43** are still a bare
 `Mutex`/`RwLock`, and 2 are neither — `undo_stack` and `calc_cancel`. (Do not read "neither" as
@@ -270,23 +270,58 @@ application preferences that must NEVER become `Persisted<T>`**: `calculation_mo
 overstated the backlog (11 of the 43 are permanent exemptions, not work) while understating the one
 real risk. Declare any NEW persisted store `Persisted<T>` from the start.
 
+**CLOSED for the part that could lose data (2026-08-17).** All three save sources named below were
+promoted to `Persisted<T>`, and the class is now guarded by derivation rather than by a list:
+`every_store_the_save_path_reads_is_gated_by_a_document_effect`
+(`document_store_census_tests.rs`) takes the population the reset census already computes —
+`store_accesses(call_closure(&fns, SAVE_ROOTS))` — and requires every `AppState` field in it to be
+`Persisted<T>`. A new `collect_*_for_save` reading a bare `Mutex` now fails on the commit that adds
+it. Sabotage-verified: bypassing the one exemption makes it report that field by name.
+
+Building the census found **a third offender the audit had missed** — `pending_recalc`, written into
+the saved workbook by `attach_pending_recalc_for_save`, whose failure mode is the one the `.cala`
+versioning rule names as a LIE rather than a loss: *a stale workbook that comes back looking
+calculated.* It also found a **fourth** store, `protected_regions`, which is the single exemption:
+it never reaches a `.cala` at all (one hit in `persistence.rs`, the reset) and the extensions that
+own it re-register it every session, so `mutates` would be a false statement about it. Two further
+assertions stop that exemption outliving its subject or excusing something already gated.
+
+Three incidental fixes fell out, each a guard that had gone quietly blind:
+- `ACCESSORS` in `document_store_census_tests.rs` was `["read","write","lock"]` — missing
+  `lock_pending`, so **every gate-then-decide site was invisible to both censuses in that file**.
+- The spill deadlock census keyed on the literal `spill_ranges.lock(`; once the store became
+  `Persisted`, that spelling stopped existing and the census would have passed **vacuously over the
+  whole crate**. It now covers all three accessors, and its sample exercises each.
+- The 104/62/40/2 split is now pinned by a test (`the_appstate_lock_census_reconciles`), because it
+  has been published wrong four times — including once during this very pass, by a counter that split
+  the struct by LINES and so mistook `package_connection_restore_skips` (whose type wraps) for a field
+  with no lock.
+
+**Still open:** the remaining 40 bare-lock fields, none of which the save path reads.
+
 **Two of the 43 are read by the SAVE path, and here they are by name** — "check the field before
 assuming it" put the burden on a reader with no list, which is how these stayed invisible:
 
-- **`spill_ranges`** (`lib.rs:488`) — `apply_spill_extents_to_sheet` (`persistence.rs:375-397`) calls
-  itself "the only authority for which origin owns which cells" and sets `origin.spill`; it runs from
-  the save assembler (`persistence.rs:648`), and `zip_io.rs:197-199` stamps the `.cala` v7
-  `spill_extents` feature purely on that field's presence. A store deciding what bytes hit disk,
-  ungated. **Promoting this one is the cheapest real fix in this row.**
-- **`advanced_filter_hidden_rows`** (`lib.rs:510`) — unioned into `hidden_rows` at save
-  (`persistence.rs:902-911`); its writers hand-roll `DocumentEffect::mutates` with a comment saying
-  "both arms change what a save writes" (`autofilter.rs:1453-1470`, `:1484-1495`).
+- ~~**`spill_ranges`**~~ **PROMOTED.** `apply_spill_extents_to_sheet` calls itself "the only
+  authority for which origin owns which cells"; it runs from the save assembler and `zip_io.rs`
+  stamps the `.cala` v7 `spill_extents` feature on that field's presence. It looks like a derived
+  cache and is not one — `spill_restore.rs`'s header is worth reading before touching it: a spilled
+  `2` and a typed `2` are the same bytes, so ownership cannot be recomputed at any price. Its two
+  recalculation writers name `CleanReason::RecalcCompanion` (the triggering edit owns the flag) and
+  its load-path writers name `LoadingFromDisk`.
+- ~~**`advanced_filter_hidden_rows`**~~ **PROMOTED.** Unioned into `hidden_rows` at save. Its three
+  writers had hand-rolled `DocumentEffect::mutates` as a discarded `let _effect` — a convention, now
+  a compiler-enforced fact. They use `lock_pending()` + `authorize()`, because the effect must be
+  built AFTER the gate (a clear that finds nothing must not dirty) and `read`-then-`write` would open
+  a TOCTOU window on Tauri's thread pool.
+- ~~**`pending_recalc`**~~ **PROMOTED** — found by the census, not the audit. See the banner above.
 
 Also not derived caches, though not save sources: `protected_regions` (`:426`), `next_cf_rule_id`
 (`:452`), `next_computed_prop_id` (`:462`), and `scroll_areas` (`:556`, whose own comment documents a
 missing-persistence gap).
 
-**And the guard that looks like it covers this does not** (open-items rule 4, again).
+**The guard that looked like it covered this did not** (open-items rule 4, again) — which is why the
+new census derives its population instead.
 `every_persisted_appstate_store_is_gated_not_a_bare_mutex` (`document_effect.rs:1037-1088`) reads
 exactly like the enforcement this row wants, but `must_be_gated` is a **hand-written allow-list of 22
 field names** — it asserts those 22 still say `Persisted<` and is structurally blind to anything not
@@ -327,6 +362,7 @@ column and be misread as a fix, so expect **partial** survival.
 
 | item | verified at |
 |---|---|
+| ~~**The oracle suppression list had no expiry check.**~~ **CLOSED 2026-08-17.** `KNOWN_ISSUES` (`e2e/oracles/knownIssues.ts`) suppresses oracle violations while a ledgered bug makes them fire, its header said "Remove the entry when the bug is fixed", and nothing compared `ledgerId` to the ledger — a comment is not an enforcement mechanism. `e2e/__tests__/knownIssueExpiry.test.ts` now fails when an entry names a bug that does not exist or is no longer `open`, mirroring `walkerExclusions.test.ts`. It lands green because the list is empty, so the third test runs the SAME predicate against a synthetic stale list — otherwise the two real cases would pass even with a broken predicate. This list is where the failure mode was first seen: a stale entry kept swallowing violations, and because the filter suppresses when EVERY digest-diff path is covered, one stale prefix hides that subtree from ANY cause. | `e2e/__tests__/knownIssueExpiry.test.ts`, `e2e/oracles/knownIssues.ts` |
 | **The soak walker's formula alphabet is six formulas.** `FORMULAS` is exactly `SUM`, `&`, `IF`, `AVERAGE`, `COUNT`, `MAX` (`e2e/walker/actionCatalog.ts:129-136`). Widening it changes what the committed seeds mean, so it belongs to a pass that can re-baseline them. | `actionCatalog.ts:129-136` |
 | **Only charts are re-synced after the walker's `new_file`.** `deepResetForWalk` calls `resyncChartStoreToBackend` and nothing equivalent for sparklines, slicers or pane controls, which sit on the same fan-out (`e2e/walker/reset.ts:242,281`). The chart case is the one BUG-0075 photographed; the others are the same shape, unphotographed. | `e2e/walker/reset.ts:242,281` |
 | **The two `evaluate-formula` goldens assert residue, not their feature.** `grid-evaluate-formula-init` and `-constant` are whole-grid captures of a spec whose subject is off-screen until its own `navigateTo`, so they photograph whatever the preceding specs left on rows 1-26. Stable now, but they are layout assertions wearing a feature's name. Turning them into region captures of the AI column is a golden change owned by that spec. | `e2e/tests/__screenshots__/evaluate-formula.spec.ts/`, §30f |

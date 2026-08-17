@@ -103,7 +103,7 @@ fn spill_ranges_of(wb: &Workbook) -> Vec<((usize, u32, u32), Vec<(u32, u32)>)> {
     let mut out: Vec<((usize, u32, u32), Vec<(u32, u32)>)> = wb
         .state
         .spill_ranges
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .iter()
         .map(|(k, v)| {
@@ -353,7 +353,7 @@ fn f9_releases_the_cells_of_an_origin_that_stopped_spilling() {
                            // so re-arm the stale state the way a reload would:
     wb.state
         .spill_ranges
-        .lock()
+        .write(&crate::document_effect::test_seed_effect())
         .unwrap()
         .insert((0, 0, 0), vec![(1, 0), (2, 0)]);
     {
