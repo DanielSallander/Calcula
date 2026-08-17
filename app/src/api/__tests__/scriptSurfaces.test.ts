@@ -12,6 +12,8 @@
 // any understatement, including one introduced by a future `cap.*` row.
 
 import { describe, it, expect } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
 import {
   SCRIPT_SURFACES,
   getScriptSurface,
@@ -444,5 +446,116 @@ describe("script-surface capability completeness", () => {
     const enforceable = enforceableCapabilities(drifted);
     const declared = new Set(drifted.capabilities);
     expect(enforceable.filter((c) => !declared.has(c))).toEqual(["bi.sql"]);
+  });
+});
+
+/* THE PROSE IN `gate` AND `containment` IS LOAD-BEARING, so it gets a guard.
+ *
+ * `scriptSurfaces.ts` is the FIRST source of truth anyone reads for "what is this
+ * surface allowed to do and what stops it". When the code moves and the prose does
+ * not, the file becomes confidently wrong — worse than absent, because it is
+ * quotable.
+ *
+ * BUG-0097 was exactly that. The 128-bit relay token was deleted (library calls are
+ * now authorized by CALLER IDENTITY: `authorizeImportCall` resolves an alias in
+ * `scriptImports`, host state keyed by the calling script's own id), and the strings
+ * went on describing "an unguessable host-issued token" and "one token-gated entry
+ * point" for a mechanism that no longer existed. The deleting commit even added a
+ * test asserting `__addToken` is absent from the source — and left the prose saying
+ * it was the gate. */
+describe("gate/containment prose stays anchored to live code", () => {
+  const REPO = path.resolve(__dirname, "..", "..", "..", "..");
+
+  /** Every gate/containment string, with enough context to name a failure. */
+  function proseFields(): Array<{ id: string; field: string; text: string }> {
+    const out: Array<{ id: string; field: string; text: string }> = [];
+    for (const surface of Object.values(SCRIPT_SURFACES)) {
+      for (const field of ["gate", "containment"] as const) {
+        const text = (surface as unknown as Record<string, unknown>)[field];
+        if (typeof text === "string" && text.length > 0) {
+          out.push({ id: String(surface.id), field, text });
+        }
+      }
+    }
+    return out;
+  }
+
+  /* THE ONE WITH TEETH FOR BUG-0097.
+   *
+   * A symbol-existence check (below) could not have caught it: "unguessable
+   * host-issued token" names no symbol at all, so that guard is green before AND
+   * after the fix. What IS checkable is the claim itself — no surface is gated or
+   * contained by a bearer credential any more.
+   *
+   * The only `token`s left anywhere in the script host are unprotect HOLDS and a
+   * rate-limiter bucket, and neither is a gate or a containment property. So the
+   * word appearing in either field is, by construction, stale. */
+  it("no surface claims a token or bearer mechanism", () => {
+    const offenders = proseFields()
+      .filter((f) => /\b(?:token|token-gated|bearer)\b/i.test(f.text))
+      .map((f) => `${f.id}.${f.field}`);
+
+    expect(
+      offenders,
+      "Library calls are authorized by CALLER IDENTITY (`authorizeImportCall` over " +
+        "the `scriptImports` table), not by a credential the caller holds — the " +
+        "relay token was deleted. The only tokens left in the script host are " +
+        "unprotect holds and a rate-limiter bucket, neither of which gates or " +
+        "contains anything. Update the prose, or if a bearer mechanism has genuinely " +
+        "been reintroduced, update this test and say why in the commit.",
+    ).toEqual([]);
+  });
+
+  /* FORWARD PROTECTION for the next drift, which will probably name a symbol.
+   *
+   * Only symbol-SHAPED backticked spans are checked; pragmas (`// @uses`), paths and
+   * prose phrases are skipped, because this is a drift guard and not a spell-checker. */
+  it("every symbol named in gate/containment prose still exists in the enforcing code", () => {
+    const ENFORCERS = [
+      "app/src/api/scriptHost/broker.ts",
+      "app/src/api/scriptHost/host.ts",
+      "app/src/api/scriptHost/allowlist.ts",
+      "app/src/api/scriptHost/validators.ts",
+      "app/src/api/scriptHost/capabilityIds.ts",
+      "app/src/api/scriptLibraries/linker.ts",
+      "app/src/api/scriptLibraries/ceiling.ts",
+      "app/src/api/codeInventory.ts",
+      "core/script-engine/src/manifest.rs",
+    ];
+    const haystack = ENFORCERS.map((rel) => {
+      const abs = path.join(REPO, rel);
+      return fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : "";
+    }).join("\n");
+    expect(
+      haystack.length,
+      "the enforcing sources did not load, so this guard would pass vacuously",
+    ).toBeGreaterThan(100_000);
+
+    const SYMBOL_SHAPES = [
+      /^(?:[a-z][A-Za-z0-9]*\.)+[a-z][A-Za-z0-9]*$/, // net.fetch, base.callImport
+      /^[a-z]+(?:_[a-z0-9]+)+$/, // check_script_security
+      /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/, // HOST_ONLY_EXPOSED_PREFIX
+      /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/, // authorizeImportCall
+    ];
+
+    const missing: string[] = [];
+    for (const f of proseFields()) {
+      for (const m of f.text.matchAll(/`([^`]+)`/g)) {
+        const tok = m[1].trim();
+        if (tok.startsWith("// @")) continue; // a source pragma, not a symbol
+        if (tok.includes("/") || /\.(ts|rs|js|json)$/.test(tok)) continue; // a path
+        if (tok.includes(" ") || tok.includes(":")) continue; // a phrase
+        if (!SYMBOL_SHAPES.some((re) => re.test(tok))) continue;
+        if (!haystack.includes(tok)) missing.push(`${tok}  (${f.id}.${f.field})`);
+      }
+    }
+
+    expect(
+      missing,
+      "these symbols are named in a gate/containment string but appear nowhere in " +
+        "the enforcing code, so the file that is the FIRST source of truth for what " +
+        "stops a script is describing something that does not exist. Update the " +
+        "prose OR the code.",
+    ).toEqual([]);
   });
 });

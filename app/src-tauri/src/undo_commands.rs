@@ -1620,13 +1620,23 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     m.insert("comment", RestoreSpec { restore: r_comment, domains: MutationDomains::of(Annotations), defer: false });
     m.insert("note", RestoreSpec { restore: r_note, domains: MutationDomains::of(Annotations), defer: false });
     m.insert("hyperlink", RestoreSpec { restore: r_hyperlink, domains: MutationDomains::of(Hyperlinks), defer: false });
-    // Default row height / column width: geometry, re-read through the
-    // dimension refresh the frontend already runs, so no store domain.
-    m.insert("default_row_height", RestoreSpec { restore: r_default_dim, domains: NONE, defer: false });
-    m.insert("default_column_width", RestoreSpec { restore: r_default_dim, domains: NONE, defer: false });
+    // Default row height / column width. `Dimensions`, NOT `NONE`.
+    //
+    // The comment that used to sit here said "geometry, re-read through the
+    // dimension refresh the frontend already runs" — and that refresh does not
+    // run for these. `refreshDimensionsFromBackend`
+    // (`useSpreadsheetSelection.ts:857`) is gated on
+    // `structuralRestore || mergeChanged || hiddenChanged`, and a
+    // default-dimension restore sets none of the three. The renderer paints
+    // from Redux `config.defaultCellWidth/Height`, which nothing else updates,
+    // so undoing a default row height wrote the old value into the backend and
+    // left the new one on screen — the grid and the file disagreeing, silently,
+    // until something unrelated forced a re-read.
+    m.insert("default_row_height", RestoreSpec { restore: r_default_dim, domains: MutationDomains::of(Dimensions), defer: false });
+    m.insert("default_column_width", RestoreSpec { restore: r_default_dim, domains: MutationDomains::of(Dimensions), defer: false });
     // A pivot auto-fit's column resize (BUG-0014). Geometry, like the two
-    // above, so no store domain — the frontend re-reads dimensions on the
-    // refresh it already runs.
+    // above — and so the same `Dimensions` domain, for the same reason: the
+    // frontend does NOT re-read dimensions on an undo unless it is told.
     //
     // DEFERRED, and the first version of this was not. `apply_changes` takes
     // `column_widths` at the top of the pass and holds it until the inline
@@ -1637,7 +1647,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // application went away", not as a lock bug. The deferred pass runs after
     // every grid/style/width lock is dropped, which is exactly the contract the
     // pivot/slicer/ribbon-filter restores already rely on.
-    m.insert(PIVOT_COL_WIDTHS_RESTORE_KIND, RestoreSpec { restore: r_pivot_col_widths, domains: NONE, defer: true });
+    m.insert(PIVOT_COL_WIDTHS_RESTORE_KIND, RestoreSpec { restore: r_pivot_col_widths, domains: MutationDomains::of(Dimensions), defer: true });
     // Deferred (defer: true) — acquire other state locks; run after grid locks drop.
     m.insert(PIVOT_DEFINITION_RESTORE_KIND, RestoreSpec { restore: r_pivot_definition, domains: MutationDomains::of(Pivot), defer: true });
     m.insert("pivot_create", RestoreSpec { restore: r_pivot_create, domains: MutationDomains::of(Pivot), defer: true });
@@ -4560,7 +4570,6 @@ mod restore_registry_tests {
     #[test]
     fn registry_matches_expected_domains() {
         use MutationDomain::*;
-        const NONE: MutationDomains = MutationDomains::none();
         const OBJ: MutationDomains = MutationDomains::of(Objects);
         fn obj_plus(d: MutationDomain) -> MutationDomains {
             let mut s = OBJ;
@@ -4575,12 +4584,17 @@ mod restore_registry_tests {
             ("comment", false, MutationDomains::of(Annotations)),
             ("note", false, MutationDomains::of(Annotations)),
             ("hyperlink", false, MutationDomains::of(Hyperlinks)),
-            ("default_row_height", false, NONE),
-            ("default_column_width", false, NONE),
+            // The three GEOMETRY kinds. These said NONE, justified by a frontend
+            // re-read that is gated and does not run for them — so undoing a
+            // default row height left the undone value painted while the backend
+            // and the saved file said otherwise. `Dimensions` fans out to the
+            // same bare `dimensions:refresh` every forward dimension route fires.
+            ("default_row_height", false, MutationDomains::of(Dimensions)),
+            ("default_column_width", false, MutationDomains::of(Dimensions)),
             // DEFERRED, unlike the two geometry kinds above it: `apply_changes`
             // holds `column_widths` for the whole inline pass, so an inline
             // handler that writes it deadlocks against its own caller.
-            ("pivot_col_widths", true, NONE),
+            ("pivot_col_widths", true, MutationDomains::of(Dimensions)),
             ("outline", true, MutationDomains::of(Outline)),
             ("pivot_definition", true, MutationDomains::of(Pivot)),
             ("pivot_create", true, MutationDomains::of(Pivot)),
@@ -4674,14 +4688,16 @@ mod restore_registry_tests {
     fn every_ui_domain_is_in_all() {
         let names: std::collections::BTreeSet<Option<&'static str>> =
             MutationDomain::ALL.iter().map(|d| d.wire_name()).collect();
-        // 17 variants, 15 of which have a distinct wire name; `Hidden` and
-        // `None` share the absent one.
+        // 18 variants, 16 of which have a distinct wire name; `Hidden` and
+        // `None` share the absent one. (+1 on 2026-08-17: `Dimensions`, added
+        // because the three geometry restore kinds announced NOTHING and an
+        // undone default row height stayed painted.)
         assert_eq!(
             MutationDomain::ALL.len(),
-            16 + 1,
+            17 + 1,
             "UiDomain::ALL has fallen out of step with the enum"
         );
-        assert_eq!(names.len(), 15 + 1, "two domains share a wire name");
+        assert_eq!(names.len(), 16 + 1, "two domains share a wire name");
         // And every ObjectKind's answer is a member.
         for kind in crate::object_deps::ObjectKind::ALL {
             assert!(

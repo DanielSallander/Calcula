@@ -6,10 +6,17 @@
 # shadowing MSVC, the ARM64-only core/setup-rust-env.ps1, and the in-Dropbox
 # target/ lock) — none apply to a clean Linux checkout.
 #
-# The app/src-tauri crate (the heavy Tauri backend: ~5.5k tests + webkit/gtk
-# system deps) is intentionally NOT gated here yet — a follow-up job. The core
-# workspace already covers the engine + calp + parser crates (incl. the column-
-# ref fast path, the grid bench, and the .calp publish/identity changes).
+# The app/src-tauri crate is NOT built here, and never can be: it imports
+# `windows::Win32::Security::Credentials` with no cfg gate (src/ai_chat.rs:22,
+# src/file_keychain.rs:16, src/bi/credential_cache.rs), so it does not compile on
+# Linux at all. That is a real gap and not a preference — `cargo check` never
+# links, and this job's `--workspace` is rooted at `core`, whose 11 members do
+# not include app/src-tauri, so nothing here can prove the app links.
+#
+# `link-check.yml` closes exactly that on a windows runner, on the same PR
+# triggers. Its own header explains why a green CI used to be compatible with an
+# app that could not start. The app crate's ~1.7k unit tests are still ungated on
+# a PR; that is the remaining follow-up.
 name: CI
 
 on:

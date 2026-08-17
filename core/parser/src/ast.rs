@@ -2413,6 +2413,7 @@ impl BuiltinFunction {
             FunctionMeta::new("GATHER.FROM", "Writeback", "GATHER.FROM(region_id, submitter_id)", "Returns one submitter's writeback value"),
             FunctionMeta::new("GATHER.COUNT", "Writeback", "GATHER.COUNT(region_id)", "Counts writeback submissions for a region"),
             FunctionMeta::new("GATHER.SUBMITTERS", "Writeback", "GATHER.SUBMITTERS(region_id)", "Lists submitter identities for a region"),
+            FunctionMeta::new("GATHER.AT", "Writeback", "GATHER.AT(region_id, row, col)", "Returns every submitter value for ONE writeback input cell (1-based absolute row/col)"),
             // Collections
             FunctionMeta::new("COLLECT", "Dynamic Array", "COLLECT(value)", "Wraps an array result into a contained List cell"),
             FunctionMeta::new("DICT", "Dynamic Array", "DICT(key1, value1, [key2, value2], ...)", "Creates a Dict cell from alternating key-value pairs"),

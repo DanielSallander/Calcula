@@ -361,6 +361,18 @@ pub enum UiDomain {
     Controls,
     ConditionalFormats,
     FloatingRanges,
+    /// ROW HEIGHTS / COLUMN WIDTHS, and the sheet DEFAULTS.
+    ///
+    /// Geometry is not a feature store, which is why this took so long to
+    /// notice: a dimension restore changes no cell and no extension cache, so
+    /// there was nothing obviously stale to announce to. What DOES go stale is
+    /// the renderer's own `config.defaultCellWidth/Height` and the dimension
+    /// overrides in Redux, and only a `dimensions:refresh` re-read repairs
+    /// those. The registry used to justify `NONE` here by saying the frontend
+    /// re-reads dimensions "on the refresh it already runs" -- it does not:
+    /// that re-read is gated on structuralRestore/mergeChanged/hiddenChanged,
+    /// and a default-dimension restore sets none of the three.
+    Dimensions,
 }
 
 impl UiDomain {
@@ -389,6 +401,7 @@ impl UiDomain {
         UiDomain::Controls,
         UiDomain::ConditionalFormats,
         UiDomain::FloatingRanges,
+        UiDomain::Dimensions,
     ];
 
     /// The exact string the `MutationDomain` union uses, or `None`.
@@ -411,6 +424,7 @@ impl UiDomain {
             UiDomain::Controls => Some("controls"),
             UiDomain::ConditionalFormats => Some("conditionalFormats"),
             UiDomain::FloatingRanges => Some("floatingRanges"),
+            UiDomain::Dimensions => Some("dimensions"),
         }
     }
 }

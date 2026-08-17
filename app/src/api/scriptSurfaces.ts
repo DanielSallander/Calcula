@@ -126,7 +126,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Script libraries",
     runtime: "worker-realm",
     containment:
-      "A third-party library imported with `// @uses` runs in its OWN hardened worker realm, never inside its consumer's — so its module state, its exceptions and its capability grants are all separate. Its R19 ceiling is `declared(library) INTERSECT declared(consumer)` (and, for a library's own dependency, INTERSECT its parent's), so importing a library can never hand a script reach the script did not itself declare. Only names the module marked `// @export` are routable, through one token-gated entry point. The exact bytes live in the workbook (.calcula/script-libs/<sha256>.js) and are re-hashed on every read",
+      "A third-party library imported with `// @uses` runs in its OWN hardened worker realm, never inside its consumer's — so its module state, its exceptions and its capability grants are all separate. Its R19 ceiling is `declared(library) INTERSECT declared(consumer)` (and, for a library's own dependency, INTERSECT its parent's), so importing a library can never hand a script reach the script did not itself declare. Only names the module marked `// @export` are routable, and only through the realm's HOST-ONLY entry point: the namespace carries `HOST_ONLY_EXPOSED_PREFIX` with `public: false`, so `callExposed` refuses the whole namespace for every script before it even looks a name up, and only the host itself can route in. The exact bytes live in the workbook (.calcula/script-libs/<sha256>.js) and are re-hashed on every read",
     // The ceiling is AUTHOR-declared (source pragmas) exactly like an object
     // script's, so every broker-gated capability is reachable in principle —
     // what a GIVEN realm holds is the intersection, which is per-mount data and
@@ -155,7 +155,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "distribution.publish",
       "distribution.subscribe",
     ],
-    gate: "Ed25519 signature + TOFU publisher pin at resolve (the SAME .calp trust root as report packages, no second signer), per-workbook consent keyed `lib:<package>` over the exact module sources, a version pin in .calcula/script-deps.json that mount never re-resolves against the registry, and then the tier broker + the INTERSECTED R19 ceiling. Calls in are authorized by an unguessable host-issued token, which is delegation-transparent but not caller-identifying — see docs/design/script-package-manager.md §10.4",
+    gate: "Ed25519 signature + TOFU publisher pin at resolve (the SAME .calp trust root as report packages, no second signer), per-workbook consent keyed `lib:<package>` over the exact module sources, a version pin in .calcula/script-deps.json that mount never re-resolves against the registry, and then the tier broker + the INTERSECTED R19 ceiling. Calls in are authorized by CALLER IDENTITY rather than by any credential the caller holds: `base.callImport` takes only an alias, `authorizeImportCall` resolves it in `scriptImports` (host state keyed by the calling script’s own id and written only by the linker), refuses an alias the script never declared with `// @uses`, refuses a name that is not an `// @export`, and then caps the call by the CALLER’s own declared capabilities (`requireCallerCoversLibrary`). A script therefore cannot widen its reach by holding something — there is nothing to hold. See docs/design/script-package-manager.md §10.3",
     executesUserCode: true,
   },
   {

@@ -7,9 +7,12 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import { APP_DIED_MARKER } from "./appDiedMarker";
 import { APP_WEDGED_MARKER } from "./wedgeMarker";
+import { killRunAndVerify } from "./processResidue";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PID_FILE = path.join(__dirname, ".tauri-pid");
+const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
+const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
 
 export default async function globalTeardown() {
   // ANNOUNCE A RUN WHOSE APPLICATION DIED, BEFORE ANYTHING ELSE.
@@ -90,20 +93,67 @@ export default async function globalTeardown() {
     return; // user manages the app
   }
 
-  if (!fs.existsSync(PID_FILE)) {
+  // KILL, THEN PROVE IT.
+  //
+  // This used to be one `taskkill /F /T /PID` with `stdio: "ignore"` inside a bare
+  // `catch {}`, followed by an UNCONDITIONAL "[e2e] Tauri stopped." — so a refused
+  // kill and a clean exit printed the same sentence, and the next run discovered
+  // the truth by failing to bind port 5173.
+  //
+  // Two things make the old shape unable to work even when the kill succeeds:
+  // the recorded pid is the `cmd.exe` wrapper (`spawn({shell: true})`), and
+  // `taskkill /T` walks LIVE parent links — so once yarn/cargo have exited, the
+  // surviving `app.exe` is no longer reachable from it. `killRunAndVerify` kills
+  // every pid this run RECORDED as well, then polls until the pids are dead and
+  // 9222/5173 are free.
+  const { clean, blockers, unattributed, waitedMs } = await killRunAndVerify({
+    pidFile: PID_FILE,
+    cdpPort: CDP_PORT,
+    vitePort: VITE_PORT,
+  });
+
+  if (unattributed.length > 0) {
+    // SAID, NEVER KILLED. Another agent builds from the same CARGO_TARGET_DIR, so
+    // "an app.exe I did not record" is indistinguishable from "someone else's live
+    // suite" — and killing one of those is a measured past defect (a pass died at
+    // test 166 of ~550).
+    console.warn(
+      [
+        "[e2e] Calcula processes are alive that this run did not start - NOT killed:",
+        ...unattributed.map((u) => `        ${u}`),
+      ].join("\n"),
+    );
+  }
+
+  try {
+    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
+  } catch {
+    /* the file may already be gone; that is not a teardown failure */
+  }
+
+  if (clean) {
+    console.log(`[e2e] Tauri stopped — verified clean in ${waitedMs} ms.`);
     return;
   }
 
-  const pid = fs.readFileSync(PID_FILE, "utf-8").trim();
-  console.log(`[e2e] Shutting down Tauri (PID ${pid})...`);
-
-  try {
-    // /T kills the whole process tree (cargo, vite, the Tauri app)
-    execSync(`taskkill /F /T /PID ${pid}`, { stdio: "ignore" });
-  } catch {
-    // already exited
-  }
-
-  fs.unlinkSync(PID_FILE);
-  console.log("[e2e] Tauri stopped.");
+  // LOUD, because the cost lands on the NEXT run and looks like something else
+  // entirely: "Port 5173 is already in use", or a second window silently joining
+  // this one's Vite server.
+  console.error(
+    [
+      "",
+      "==============================================================================",
+      "  THIS RUN LEFT PROCESSES BEHIND.",
+      `  Still alive after ${waitedMs} ms:`,
+      ...blockers.map((b) => `    - ${b}`),
+      "",
+      "  The next run will inherit these and may fail to bind its ports, or drive",
+      "  the WRONG window. Clear them with `node app/scripts/kill-stale-dev.mjs`,",
+      "  which targets app.exe/Calcula.exe BY PID. NEVER kill msedgewebview2 by",
+      "  image name: those processes also belong to Windows SearchHost, and",
+      "  Calcula itself renders in WebView2 - doing so destroyed a journey run.",
+      "==============================================================================",
+      "",
+    ].join("\n"),
+  );
 }

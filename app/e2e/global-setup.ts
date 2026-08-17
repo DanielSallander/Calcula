@@ -17,6 +17,12 @@ import { clearStartupFailure } from "./startupGuard";
 import { assertAppMounted } from "./startupBarrier";
 import { APP_WEDGED_MARKER } from "./wedgeMarker";
 import { resetWedgeCounter } from "./wedgeGuard";
+import {
+  describeInheritedResidue,
+  clearRecordedPids,
+  recordAppPid,
+  surveyCalculaProcesses,
+} from "./processResidue";
 import { resetVolatilePersistedStateOverCdp } from "./volatilePersistedState";
 import {
   resolveBuildTarget,
@@ -104,6 +110,31 @@ export default async function globalSetup(config: FullConfig) {
   // before it could ever reach two (see `wedgeGuard.ts`). Being on disk, it
   // also outlives the run, so it is cleared here with the marker.
   resetWedgeCounter();
+
+  // WHAT IS THIS RUN INHERITING? Reported here, at the START, and not in the
+  // teardown — because `global-teardown` returns before its kill when
+  // `E2E_MANUAL=1`, and manual mode is how 11 of the `e2e:*` scripts are driven.
+  // A residue check in the teardown would never run on the paths that leak.
+  //
+  // It REPORTS and does not kill. At the start of a run an app on our ports may
+  // be the operator's own manual instance, which in manual mode is SUPPOSED to be
+  // there; and a Calcula built from the same CARGO_TARGET_DIR may be another
+  // agent's live suite. Killing either is the measured 2026-08-11 defect.
+  {
+    const inherited = describeInheritedResidue({ cdpPort: CDP_PORT, vitePort: VITE_PORT });
+    if (inherited.length > 0) {
+      console.warn(
+        [
+          "[e2e] INHERITED PROCESSES from an earlier run or another agent (not killed):",
+          ...inherited.map((n) => `        ${n}`),
+          "      In managed mode this is usually a previous run whose teardown could not",
+          "      finish; `node app/scripts/kill-stale-dev.mjs` clears it BY PID. In manual",
+          "      mode it is expected — it is your own app.",
+        ].join("\n"),
+      );
+    }
+    clearRecordedPids(); // a fresh ledger: these are not ours to kill later
+  }
 
   // NOTE ON THE DEPENDENCY CACHE (BUG-0082's second mechanism, §32). Nothing is
   // done about it HERE, and that is deliberate. The repair --
@@ -270,6 +301,19 @@ export default async function globalSetup(config: FullConfig) {
 
   // Wait for the CDP endpoint to appear.
   await waitForCDP(CDP_PORT, STARTUP_TIMEOUT_MS);
+
+  // RECORD THE APP'S OWN PID, not just the wrapper's.
+  //
+  // `child.pid` above is the `cmd.exe` that `spawn({ shell: true })` created; the
+  // real tree is cmd -> yarn(node) -> cargo-tauri -> cargo -> app.exe. `taskkill
+  // /T` walks LIVE parent links at kill time, so the moment an intermediate exits
+  // — which is exactly what a journey spec closing the window causes — the
+  // surviving `app.exe` is no longer reachable from the recorded pid, and the
+  // teardown's kill silently misses it. CDP is up by now, so the app exists to be
+  // found. Recorded pids are the ONLY ones the teardown will kill.
+  for (const p of surveyCalculaProcesses()) {
+    recordAppPid(p.pid);
+  }
 
   // Also wait for the Vite dev server to be ready.
   // Without this, WebView2 may load before Vite is serving, showing an error page.

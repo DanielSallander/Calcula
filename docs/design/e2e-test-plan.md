@@ -692,6 +692,25 @@ These are not style preferences. Each was measured.
    only, and Vite binds "localhost" which resolves to `::1` here, so the listener
    that actually blocks a restart shows up as `[::1]:5173` under TCPv6 and a
    `-p TCP` scan never sees it. `CALCULA_SKIP_KILL=1` disables it.
+9b. **The teardown now PROVES its kill, and the run-start check lives in
+   global-setup.** `global-teardown` used to fire one `taskkill /F /T /PID` with
+   `stdio: "ignore"` inside a bare `catch {}` and print "[e2e] Tauri stopped."
+   unconditionally — refused and clean looked identical. And the recorded pid is
+   the `cmd.exe` wrapper, while `taskkill /T` walks LIVE parent links, so once
+   yarn/cargo have exited the surviving `app.exe` is unreachable from it.
+   `e2e/processResidue.ts` records the app's own pid, kills what this run
+   recorded, and polls until the pids are dead and 9222/5173 are free.
+   **The inherited-residue report is in `global-setup`, not the teardown**,
+   because the teardown returns before its kill under `E2E_MANUAL=1` — which is
+   how 11 of the `e2e:*` scripts are driven, so a check there would never run on
+   the paths that leak. It REPORTS and never kills anything it did not start: a
+   second agent builds from the same `CARGO_TARGET_DIR`, and killing one of those
+   is a measured past defect. **It never names `msedgewebview2`** (a source
+   assertion pins that), because those processes belong to Windows SearchHost as
+   well. Note `scripts/kill-stale-dev.mjs` matches only the IN-REPO
+   `src-tauri/target`, so it cannot see an app built into the out-of-repo
+   `CARGO_TARGET_DIR` this project mandates.
+
 9. **An isolated second instance needs its OWN `WEBVIEW2_USER_DATA_FOLDER`.**
    Without it WebView2 joins the other instance's browser process and **IGNORES
    the CDP port and the capture pins** — you get a second window driven by the

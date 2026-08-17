@@ -14,14 +14,14 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**99 entries, 95 fixed, 4 open** as of
-2026-08-17: BUG-0095, BUG-0096, BUG-0097 — filed 2026-08-16 by the documentation audit, all severity
-low — plus BUG-0098, the backend wedge in §2.5, which is unreproduced. BUG-0099, filed and fixed
-2026-08-17, is the sibling of BUG-0086: that fix turned out to be SPELLING-SPECIFIC, and a
-capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely). Nothing in this file
-duplicates a ledger entry. **Recount before restating**: the histogram is one line of node
-(`{fixed:95, open:4}`), and the previous figure here (97/94/3) was already stale the day after it
-was written.
+reproduction live in `tests/regression/bug-ledger.json` (**99 entries, 97 fixed, 2 open** as of
+2026-08-17). The two open: **BUG-0096** (a pivot in script drill mode whose script does not register
+`onDrillThrough` swallows the double-click entirely) and **BUG-0098**, the backend wedge in §2.5,
+which is unreproduced. BUG-0095 and BUG-0097 were fixed 2026-08-17; BUG-0099, filed and fixed the
+same day, is the sibling of BUG-0086 — that fix turned out to be SPELLING-SPECIFIC, and a capitalised
+`;BASE64,` tag or a percent-escaped body bypassed it entirely. Nothing in this file duplicates a
+ledger entry. **Recount before restating**: the histogram is one line of node, and this figure has
+been stale within a day of being written more than once.
 
 ---
 
@@ -245,7 +245,7 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 | **Excel's array literal `{1;2;3}` does not parse.** The lexer has no `;` arm at all — `;` falls through to `Token::Illegal(ch)` (`core/parser/src/lexer.rs:76`), and `parser.rs:526/566` treats `{…}` as a Python-style `ListLiteral`. `{1,2,3}` parses, but as a list, not a 1x3 array. | `lexer.rs:76`, `parser.rs:526,566` |
 | **`#NULL!` is never produced.** `rg CellError::Null core` returns exactly three hits, all in `cell.rs`: a doc-comment cross-reference inside `Num`'s docs (`:82`), `as_literal` (`:164`), `from_literal` (`:189`). The declaration itself is `:78`, spelled `Null,`, which the pattern does not match. It round-trips an imported `#NULL!` faithfully and the evaluator never raises one. Its sibling `Num` carries a doc comment saying "the evaluator PRODUCES this now" (`cell.rs:82`) — `Null` has no such line, which is the difference. | `core/engine/src/cell.rs:78,82,164,189` |
 | **`set_active_sheet` accepts a hidden sheet index.** Worth stating carefully, because it now *looks* guarded: `activate_sheet` does call `ensure_user_sheet` (`sheets.rs:917`), but that guard tests `is_user_sheet` (`sheets.rs:144-149`), which refuses **only** `OBJECT_SHEET_VISIBILITY` — floating-range backing sheets. A user-hidden sheet (`"hidden"`) passes straight through. Excel's `Activate` errors on a hidden sheet. Not tightened because scripts and E2E specs use it to reach hidden sheets. | `sheets.rs:144-168,917` |
-| **`default_row_height` / `default_column_width` announce no undo domain.** Both registered with `domains: NONE` (`undo_commands.rs:1625-1626`) and the registry test pins it (`:4578-4579`), so undoing either notifies nothing that needs to repaint. | `app/src-tauri/src/undo_commands.rs:1625,1626,4578` |
+| ~~**`default_row_height` / `default_column_width` announce no undo domain.**~~ **CLOSED 2026-08-17, and it was a real repaint bug rather than metadata tidiness.** The registry justified `NONE` with a comment saying the frontend re-reads these "through the dimension refresh it already runs" — **it does not**: `refreshDimensionsFromBackend` is gated on `structuralRestore \|\| mergeChanged \|\| hiddenChanged`, and a default-dimension restore sets none of the three. The renderer paints from Redux `config.defaultCellWidth/Height`, which nothing else updates, so undoing a default row height wrote the old value to the backend and left the new one **on screen** — grid and file disagreeing, silently. Fixed by adding `UiDomain::Dimensions` (Rust enum + `ALL` + wire name, TS union, and a `dimensions: ["dimensions:refresh"]` row in the shell fan-out, which is the bare event every FORWARD dimension route already fires). `pivot_col_widths` had the identical `NONE` and is fixed with it. Sabotage-verified through `crossLayerConstantDrift`. | `object_deps.rs`, `undo_commands.rs:1623-1642,4578`, `events.ts`, `bootstrap.ts` |
 
 ### 2.2 The `Persisted<T>` migration — the SAVE SOURCES are done (2026-08-17); the rest is not
 
@@ -368,7 +368,7 @@ column and be misread as a fix, so expect **partial** survival.
 | **The two `evaluate-formula` goldens assert residue, not their feature.** `grid-evaluate-formula-init` and `-constant` are whole-grid captures of a spec whose subject is off-screen until its own `navigateTo`, so they photograph whatever the preceding specs left on rows 1-26. Stable now, but they are layout assertions wearing a feature's name. Turning them into region captures of the AI column is a golden change owned by that spec. | `e2e/tests/__screenshots__/evaluate-formula.spec.ts/`, §30f |
 | ~~**The journey project has no side-panel residue guard.**~~ **CLOSED 2026-08-16.** `e2e/journeys/zz-persisted-residue.spec.ts` now runs last and asserts the app-owned storage namespaces are at their DEFAULTS. Two corrections came out of building it, both worth keeping: (1) the guard must assert *value is default*, not *key is absent* — its first draft failed on a clean app because `calcula-task-pane` and `calcula-panel-placements` are `zustand/persist` stores that write themselves on hydration, and a check that reds a clean run is one somebody switches off; (2) the 1218 -> 898 px canvas class is **not** this key — `partialize` persists only `{width, dockMode}` and deliberately omits `isOpen`, so an open pane cannot survive a reload at all. The teardown side is necessary but insufficient, so the same catalogue also drives a reset on the way IN (next row). | `e2e/journeys/zz-persisted-residue.spec.ts`, `e2e/volatilePersistedState.ts`, `useTaskPaneStore.ts:219-224` |
 | **Cleanup-on-exit cannot run when the app is dead — so the reset moved to run START.** `shapes-hometab.spec.ts` test 8 *does* restore the ribbon in a `finally`; on 2026-08-16 the app wedged mid-test, `restoreDefaultHomeLayout` needed a living app to reload, and it swallowed its own failure. The injected `rowBreak` survived into the next project, which failed `ribbon-core-default-ribbon.png` with `deleteColumn` clipped out — the visual project reporting a red golden for something no visual spec did. `e2e/volatilePersistedState.ts` now sweeps the app storage namespaces by PREFIX immediately after `assertAppMounted`, when the app is known-healthy. It sweeps rather than lists because the `ext.<extensionId>.<key>` family cannot be enumerated even in principle. It reports a leak **only** when a cleared value was non-default; a sweep clears something on essentially every run, and an alarm that always fires is one nobody reads. | `e2e/volatilePersistedState.ts`, `e2e/global-setup.ts` |
-| **Completed Playwright runs leave orphaned process trees.** After every project reported exit 0, five node processes plus an `app.exe` were still driving the application minutes later, and the next launch failed on port 5173. Recorded rather than filed because the zero-gap invocation pattern was introduced by the pass that saw it — but the regression runner also drives projects back to back. Now with the file:line rule 2 demands: the teardown fires `taskkill /F /T` and **never verifies the tree is gone** (`global-teardown.ts:100-108`), manual mode returns before reaching any of it (`:89-91`), and the only repair is 5173-only (`global-setup.ts:145-163`). Cheapest mitigations, in order: verify-after-kill (poll the PID and ports 9222/5173 for a bounded window, fail loudly), then a "no `app.exe`, nothing on 9222 or 5173" precondition. Put the precondition in **global-setup**, not the teardown — manual mode is exactly the path that skips the teardown, and it is how these runs are driven. | `global-teardown.ts:89-91,100-108`; `global-setup.ts:145-163`; §39g |
+| ~~**Completed Playwright runs leave orphaned process trees.**~~ **CLOSED 2026-08-17.** The teardown fired ONE `taskkill /F /T /PID` with `stdio: "ignore"` inside a bare `catch {}` and then printed "[e2e] Tauri stopped." **unconditionally** — a refused kill and a clean exit produced the same sentence. Worse, the recorded pid is the `cmd.exe` wrapper `spawn({shell:true})` made, and `taskkill /T` walks LIVE parent links, so once yarn/cargo exit (which is what a journey spec closing the window causes) the surviving `app.exe` is unreachable from it — a check that polled only the recorded pid would have passed on every run that actually orphaned something. `e2e/processResidue.ts` now records the app's OWN pid, kills what this run recorded, and POLLS until the pids are dead and 9222/5173 are free before claiming success. The run-start report lives in **global-setup**, because the teardown returns before its kill under `E2E_MANUAL=1` and that is how 11 of the `e2e:*` scripts are driven. It REPORTS and never kills unattributed processes: another agent builds from the same `CARGO_TARGET_DIR`, and killing one of those is a measured past defect. It also never names `msedgewebview2` — pinned by a source assertion, because those processes belong to Windows SearchHost too. Incidental find: `scripts/kill-stale-dev.mjs` matches the **in-repo** `src-tauri/target` only, so it cannot recognise an app built into the `CARGO_TARGET_DIR` this project mandates; `processResidue` asks `resolveBuildTarget` instead. | `e2e/processResidue.ts`, `e2e/__tests__/processResidue.test.ts`, `global-teardown.ts`, `global-setup.ts` |
 
 ### 2.5 The backend can stop answering mid-run, and nothing could see it (BUG-0098)
 
@@ -458,10 +458,30 @@ it. `ci.yml`'s own header (`:9-12`) says the app crate is intentionally not gate
 What was wrong before: "no workflow builds the app crate at all" — two do. `release.yml:79`
 (`npm run tauri build`, on a `v*` tag or manual dispatch) and **`e2e-nightly.yml`, which launches the
 real app via `cargo tauri dev` on a self-hosted Windows runner** and therefore does link it. So the
-gap is narrower and more specific than stated: nothing on the **PR path** links the app, and the
-nightly that does is self-hosted, so a runner that is offline takes the only routine link check with
+gap was narrower and more specific than stated: nothing on the **PR path** linked the app, and the
+nightly that does is self-hosted, so a runner that is offline took the only routine link check with
 it silently. Four tracks changed Rust in the week before this was noticed and the first thing to
 exercise the link was the E2E launcher, which failed with ~40 `LNK2001` errors. §39d.
+
+**CLOSED for the PR path 2026-08-17: `.github/workflows/link-check.yml`.** A `windows-latest` job on
+the same `push: [main]` + `pull_request` triggers running `cargo build --lib --bins` inside
+`app/src-tauri` — the minimum that actually invokes `link.exe` — and then VERIFYING `app_lib.dll` is
+on disk afterwards, because a fully-cached `cargo build` can report success having produced nothing.
+Three constraints it obeys, each of which would otherwise be a defect:
+
+- **Windows is not a preference.** `app/src-tauri` imports
+  `windows::Win32::Security::Credentials` with **no cfg gate** (`ai_chat.rs:22`,
+  `file_keychain.rs:16`, `bi/credential_cache.rs`), so the crate cannot compile on Linux at all and
+  this can never fold into `ci.yml`'s ubuntu jobs.
+- **No `paths:` filter.** GitHub reports a path-skipped job as **pending**, not success, so the day
+  this becomes a required check every docs-only PR would block forever. If cost forces filtering, the
+  correct shape is an always-running companion job that reports success.
+- **`CARGO_TARGET_DIR` is deliberately unset.** The rule to point it outside the repo exists because
+  the dev box keeps the repo in Dropbox; a CI checkout has no such problem, and setting it would
+  silently defeat the cache key.
+
+**Still open:** the app crate's ~1,700 unit tests remain ungated on a PR — this job links, it does
+not test.
 
 **Related and still true: a pre-React failure shows a blank window with no message.** `app/index.html`
 is an empty `<div id="root"></div>` and a module script — no fallback markup, no `window.onerror`.

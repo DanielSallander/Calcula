@@ -563,6 +563,12 @@ export function bootstrapShell(): void {
     // overlay (and refetches cells — an undone resize can reveal cells the
     // cache never held).
     floatingRanges: [AppEvents.FLOATING_RANGES_CHANGED, "grid:refresh"],
+    // Geometry. `dimensions:refresh` is the bare window event the Spreadsheet
+    // already listens to (`Spreadsheet.tsx`) and that every FORWARD dimension
+    // route dispatches — `grid.ts` after a width/height write, and
+    // `gridExtensions.ts` after an extension's. Undo was the one direction that
+    // never fired it, because these restore kinds announced no domain at all.
+    dimensions: ["dimensions:refresh"],
   };
   const fanOutDomains = (domains: readonly MutationDomain[] | undefined): void => {
     const fired = new Set<string>();

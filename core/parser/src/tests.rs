@@ -1702,6 +1702,152 @@ fn test_get_controlvalue_catalog_entry_and_aliases() {
 }
 
 // ========================================
+// THE CATALOG CENSUS (BUG-0095)
+// ========================================
+
+/// **EVERY NAME `from_name` ACCEPTS MUST HAVE A CATALOG ENTRY.**
+///
+/// WHY THIS EXISTS. `GATHER.AT` parsed, evaluated and returned correct values for
+/// its whole life while appearing in NO catalog, so autocomplete never offered it,
+/// the Insert Function dialog never listed it and `get_function_template` had
+/// nothing to expand — a function that works and cannot be discovered. Nothing
+/// could have noticed: the two sides are a `match` in one function and a `vec!` in
+/// another, with no compiler relationship between them.
+///
+/// DIRECTION IS `from_name` -> catalog, deliberately. `from_name` is what makes a
+/// name WORK; the catalog is what makes it findable. A name that works and is not
+/// findable is the defect. (The reverse direction is the second test below, and it
+/// catches a different mistake: a catalog entry nothing can parse.)
+///
+/// WHY IT READS SOURCE TEXT. `BuiltinFunction` has no variant iterator and
+/// `from_name` is a string match, so the accepted names exist only as source. The
+/// scan is bounded by BOTH ends of that function and `.expect()`s each marker, so a
+/// rename fails loudly rather than silently scanning nothing — and it asserts a
+/// FLOOR on how many names it found, because "the extraction broke" and "the
+/// catalog is complete" would otherwise look identical.
+#[test]
+fn every_name_from_name_accepts_has_a_catalog_entry() {
+    use crate::ast::BuiltinFunction as BF;
+    use std::collections::BTreeSet;
+
+    const SRC: &str = include_str!("ast.rs");
+    let start = SRC
+        .find("pub fn from_name(")
+        .expect("from_name was renamed or removed - fix this census, do not delete it");
+    let body = &SRC[start..];
+    let end = body
+        .find("_ => BuiltinFunction::Custom(")
+        .expect("from_name's catch-all arm was renamed - fix this census");
+    let body = &body[..end];
+
+    let mut accepted: BTreeSet<String> = BTreeSet::new();
+    for line in body.lines() {
+        // `.lines()` leaves the \r on this CRLF file; trim() removes it.
+        let t = line.trim();
+        if !t.starts_with('"') || !t.contains("=>") {
+            continue;
+        }
+        let left = t.split("=>").next().unwrap_or("");
+        // `"A" | "B" => ...` yields both names: odd split indices are the literals.
+        for (i, part) in left.split('"').enumerate() {
+            if i % 2 == 1 {
+                accepted.insert(part.to_ascii_uppercase());
+            }
+        }
+    }
+    assert!(
+        accepted.len() > 450,
+        "the arm scan found only {} names, so the EXTRACTION is broken rather than \
+         the catalog being complete. A census that scans nothing passes vacuously.",
+        accepted.len()
+    );
+
+    let catalog: BTreeSet<String> = BF::all_catalog_entries()
+        .iter()
+        .map(|m| m.name.to_ascii_uppercase())
+        .collect();
+
+    let missing: Vec<&String> = accepted.difference(&catalog).collect();
+    assert!(
+        missing.is_empty(),
+        "{} function name(s) parse and evaluate but appear in NO catalog entry, so \
+         they are invisible to autocomplete, to the Insert Function dialog and to \
+         get_function_template: {:?}\n\nAdd a FunctionMeta::new(..) in \
+         all_catalog_entries(). Do NOT use FunctionMeta::alias(..) to silence this \
+         - alias entries are FILTERED OUT of the user-facing catalog, so that would \
+         leave the defect in place while making the test green.",
+        missing.len(),
+        missing
+    );
+}
+
+/// **AN ALIAS ENTRY MUST BE A REAL ALIAS** — the loophole in the census above.
+///
+/// `all_catalog_entries()` contains alias entries too, so the census is satisfied
+/// by a `FunctionMeta::alias(..)`. But `build_full_catalog` FILTERS aliases out of
+/// the user-facing list, so silencing the census that way would leave the function
+/// exactly as invisible as it was — a green test over a live defect. The census
+/// warns about that in prose; this makes it impossible.
+///
+/// The distinction is checkable rather than a matter of judgement: a genuine alias
+/// resolves to the SAME `BuiltinFunction` variant as some non-alias entry (AVG and
+/// AVERAGE are both `Average`). A primary function marked as an alias has no such
+/// sibling — precisely the shape `GATHER.AT` would have had.
+#[test]
+fn every_alias_entry_shadows_a_real_entry_for_the_same_function() {
+    use crate::ast::BuiltinFunction as BF;
+    use std::collections::BTreeSet;
+
+    let entries = BF::all_catalog_entries();
+    let primary: BTreeSet<String> = entries
+        .iter()
+        .filter(|m| !m.is_alias)
+        .map(|m| format!("{:?}", BF::from_name(m.name)))
+        .collect();
+
+    let orphaned: Vec<&'static str> = entries
+        .iter()
+        .filter(|m| m.is_alias)
+        .filter(|m| !primary.contains(&format!("{:?}", BF::from_name(m.name))))
+        .map(|m| m.name)
+        .collect();
+
+    assert!(
+        orphaned.is_empty(),
+        "these are marked as ALIASES but no non-alias entry resolves to the same \
+         function, so they are filtered out of the user-facing catalog and nothing \
+         offers them at all: {:?}\n\nIf one of these is a primary function, give it \
+         a real FunctionMeta::new entry. Marking a primary function as an alias \
+         satisfies the name census while leaving it invisible - which is exactly \
+         what BUG-0095 was.",
+        orphaned
+    );
+}
+
+/// The reverse direction: a catalog entry nothing can parse.
+///
+/// Cheap (no source scan needed - `from_name` falls back to `Custom` for anything
+/// it does not know) and it catches the opposite mistake: a name offered in the
+/// Insert Function dialog that produces `#NAME?` when the user picks it.
+#[test]
+fn every_catalog_entry_names_a_function_the_parser_knows() {
+    use crate::ast::BuiltinFunction as BF;
+
+    let unparsed: Vec<&'static str> = BF::all_catalog_entries()
+        .iter()
+        .map(|m| m.name)
+        .filter(|name| matches!(BF::from_name(name), BF::Custom(_)))
+        .collect();
+
+    assert!(
+        unparsed.is_empty(),
+        "these names are offered by the catalog but `from_name` does not recognise \
+         them, so choosing one from the Insert Function dialog yields #NAME?: {:?}",
+        unparsed
+    );
+}
+
+// ========================================
 // SCIENTIFIC NOTATION (register 3bj)
 // ========================================
 //

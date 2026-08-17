@@ -1,0 +1,90 @@
+# Link gate: prove on every PR that the application can actually be LINKED.
+#
+# WHY THIS EXISTS AS ITS OWN WORKFLOW.
+#
+# `ci.yml`'s rust-core job runs with `working-directory: core`, and that
+# workspace's 11 members do not include `app/src-tauri` — so `cargo test
+# --workspace` there structurally cannot reach the app crate. `cargo check`
+# never invokes the linker at all. Before this gate, the first thing in the whole
+# tree that tried to link `app_lib.dll` was either a release build
+# (`release.yml`, tag or manual dispatch only) or the nightly E2E launcher
+# (`e2e-nightly.yml`, on a SELF-HOSTED runner). Neither gates a PR.
+#
+# So a green CI was compatible with an app that cannot start — and that is not
+# hypothetical: four tracks changed Rust in one week, CI stayed green, and the
+# first thing to exercise the link was a developer's E2E launcher, which failed
+# with ~40 `LNK2001 unresolved external symbol` errors out of libcalp. See
+# `docs/design/open-items.md` section 2.6.
+#
+# WINDOWS IS NOT A PREFERENCE HERE. `app/src-tauri` imports
+# `windows::Win32::Security::Credentials` with NO cfg gate
+# (`src/ai_chat.rs:22`, `src/file_keychain.rs:16`, `src/bi/credential_cache.rs`),
+# so the crate cannot compile on Linux at all. This can never be folded into
+# `ci.yml`'s ubuntu jobs; it needs its own windows runner.
+#
+# WHAT IT DOES AND DOES NOT DO. It LINKS the app's library and binary. It does
+# not bundle an installer (no WiX/NSIS), does not run tests, and does not launch
+# the app — all of which are covered elsewhere and none of which is what this
+# gate is for. `cargo build` is the minimum that invokes `link.exe`.
+#
+# CARGO_TARGET_DIR IS DELIBERATELY UNSET. The standing rule to point it outside
+# the repo exists because the dev box keeps the repo in Dropbox, which locks
+# `target/` mid-build (os error 32). A CI checkout has no such problem, and
+# setting it would silently defeat the actions/cache key below.
+
+name: Link check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# NO `paths:` FILTER, on purpose. GitHub reports a path-skipped job as PENDING
+# rather than success, so the moment this becomes a required status check every
+# docs-only PR would block forever waiting for a job that will never run. If cost
+# ever forces filtering, the correct shape is an always-running companion job
+# that reports success — not a workflow-level paths filter.
+
+jobs:
+  link:
+    name: app_lib.dll links
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Keyed on the app crate's lockfile: this job builds only that crate tree.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            app/src-tauri -> target
+          key: link-check
+
+      # The frontend is NOT built. `tauri build` would demand `dist/`, but
+      # `cargo build` inside src-tauri does not — and the question this gate asks
+      # is about the Rust link, not the bundle.
+      - name: Build (this is the step that invokes link.exe)
+        working-directory: app/src-tauri
+        run: cargo build --lib --bins
+
+      # PROVE IT, rather than trusting the exit code. `cargo build` can succeed
+      # having done nothing if the artefacts were fully cached, and a missing
+      # `app_lib.dll` is exactly the failure this gate exists to catch — so the
+      # artefact has to be on disk at the end.
+      #
+      # `shell: pwsh` is required: the default on windows runners is PowerShell
+      # 5.1, where `$LASTEXITCODE` propagation and `throw` behaviour differ.
+      - name: Verify the linked artefacts exist
+        shell: pwsh
+        working-directory: app/src-tauri
+        run: |
+          $lib = Get-ChildItem -Path target/debug -Filter app_lib.dll -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $lib) {
+            Write-Error "app_lib.dll was not produced. cargo build reported success, so this is a CACHE or PROFILE problem, not a compile error."
+            exit 1
+          }
+          Write-Host "[OK] $($lib.FullName) - $([math]::Round($lib.Length/1MB,1)) MB"

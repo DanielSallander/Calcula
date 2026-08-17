@@ -345,7 +345,14 @@ export type MutationDomain =
   // Floating range object rows (geometry, window size, existence). The
   // FloatingRange extension caches the row store and derives overlay regions
   // from it; undo/redo of a move/resize must make it reload.
-  | "floatingRanges";
+  | "floatingRanges"
+  // Row heights / column widths, and the sheet DEFAULTS. Geometry is not a
+  // feature store, so there is no extension cache to invalidate — what goes
+  // stale is the renderer's own `config.defaultCellWidth/Height` and the
+  // dimension overrides in Redux, and only a `dimensions:refresh` re-read
+  // repairs those. Undo announced nothing here, so an undone default row height
+  // stayed on screen while the backend and the saved file said otherwise.
+  | "dimensions";
 
 /** Payload of AppEvents.MUTATION_REFRESH. */
 export interface MutationRefreshPayload {
