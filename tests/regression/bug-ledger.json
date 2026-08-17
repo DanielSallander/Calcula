@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 99,
+  "nextId": 100,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -44,7 +44,8 @@
           "a_format_refusal_is_still_tolerated_because_it_is_safe_to_render pins the OTHER half, so the fix cannot drift into data loss",
           "existing imageIngress.test.ts 22/22 (CSP img-src assertion unchanged)"
         ]
-      }
+      },
+      "notes": " [2026-08-17] The fix was SPELLING-SPECIFIC: BUG-0099 records that a capitalised \";BASE64,\" tag and a percent-escaped base64 body both bypassed it entirely, because the host parser was stricter than the browser one. Fixed there."
     },
     {
       "id": "BUG-0059",
@@ -3927,6 +3928,22 @@
         "digestDiffPaths": []
       },
       "notes": "Product-side follow-up DONE 2026-08-17: init_log_file no longer truncates. It rotates the previous session log to context_manager/history/log-<stamp>.log, retaining the last 10, so the next occurrence of this wedge leaves the backend log intact. Append was rejected deliberately: LOG_SEQ restarts at 0 per process and sort_log_file sorts the whole file by it, so appending would interleave sessions beyond reconstruction. A failed rename takes a uniquely-named file rather than truncating, since a truncating fallback IS the original defect. Pinned by 5 tests in logging.rs rotation_tests, sabotage-checked (disabling rotation reds 3)."
+    },
+    {
+      "id": "BUG-0099",
+      "status": "fixed",
+      "discovered": "2026-08-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "adversarial review of the open-item 1.6 implementation (2026-08-17): 5 lenses, 24 findings raised, 17 refuted, 4 confirmed"
+      },
+      "violation": {
+        "oracleId": "inline-media-hazard-refused",
+        "message": "BUG-0086 WAS FIXED ONLY FOR THE LOWERCASE SPELLING. A decompression bomb whose base64 tag is capitalised -- data:image/png;BASE64,<4 KB 30000x30000 PNG> -- or whose base64 BODY is percent-escaped -- data:image/png;base64,%69VBORw... -- was classified as a POLICY refusal (\"safe on screen, leave inline\") and delivered to the WebView decoder, allocating ~3.6 GB of RGBA, exactly as BUG-0086 described.\n\nROOT CAUSE, and it is the interesting part: the hazard/policy split is only as good as the agreement between the HOST parser and the parser that ACTUALLY RUNS, and the host was STRICTER. decode_image_data_url (core/calcula-format/src/media.rs) required a byte-exact lowercase \";base64\" and its hand-rolled decode_base64 returns None at the first \"%\". The WHATWG data-URL processor WebView2 implements matches the base64 tag ASCII case-insensitively and PERCENT-DECODES the body BEFORE base64-decoding. Every string in that gap took the None arm of judge_inline_image, and that arm treated \"could not parse\" as \"harmless\" -- so no byte, dimension or pixel cap ever looked at the payload, while paintableUrl (app/extensions/Controls/Image/imageRenderer.ts:214) hands any non-handle string straight to img.src (:246). The widened exceeds_byte_cap_encoded added by the 1.6 work repeated the same wrong literal, so there were TWO copies of one wrong spelling.\n\nREPRODUCTION: publish a .calp whose controls.json holds src = \"data:image/png;BASE64,<base64 of a 30000x30000 single-colour PNG>\" and sign it normally. Subscribe and pull (calp_commands.rs:2698). Before the fix: report.refused == 1, the string is materialised verbatim, written into the subscriber own .cala, and decoded by the renderer. The percent-escaped variant needs no case difference at all.\n\nFIXED 2026-08-17, two parts. (1) The host now agrees with the browser: one shared ends_with_base64_tag (case-insensitive) used by both call sites so they cannot drift again, plus percent-decoding of the body. Both are pure widenings of what the host can READ, so they strictly increase inspection coverage. (2) The default is INVERTED: LeaveInline now requires a payload the host could actually read, and an undecodable string declaring a RASTER format is dropped -- \"we could not parse it\" is not evidence the renderer cannot. SVG keeps its tolerance, being the one declared type this host never decodes by design.\n\nWHY THE SUITE COULD NOT SEE IT: the BUG-0086 regression test builds its fixture with the data_url() helper, which is format!(\"data:image/png;base64,{}\") -- lowercase only. Now covered by a_bomb_spelled_with_an_uppercase_base64_tag_is_dropped, a_bomb_with_a_percent_escaped_base64_body_is_dropped, an_undecodable_raster_declaration_is_dropped_not_tolerated and svg_keeps_its_policy_tolerance_under_the_inverted_default; reverting the three fixes reds 4 tests.",
+        "digestDiffPaths": []
+      },
+      "notes": "Sibling of BUG-0086, same harm class, different spelling. As-built record: docs/design/open-item-1-6-calp-media-bound-2026-08-17.md. The generalisable lesson: when a host validates something another engine will parse, the host parser must accept AT LEAST everything that engine accepts, or the difference is a bypass."
     }
   ]
 }

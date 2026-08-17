@@ -14,9 +14,11 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**98 entries, 94 fixed, 4 open** as of
+reproduction live in `tests/regression/bug-ledger.json` (**99 entries, 95 fixed, 4 open** as of
 2026-08-17: BUG-0095, BUG-0096, BUG-0097 — filed 2026-08-16 by the documentation audit, all severity
-low — plus BUG-0098, the backend wedge in §2.5, which is unreproduced). Nothing in this file
+low — plus BUG-0098, the backend wedge in §2.5, which is unreproduced. BUG-0099, filed and fixed
+2026-08-17, is the sibling of BUG-0086: that fix turned out to be SPELLING-SPECIFIC, and a
+capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely). Nothing in this file
 duplicates a ledger entry. **Recount before restating**: the histogram is one line of node
 (`{fixed:94, open:4}`), and the previous figure here (97/94/3) was already stale the day after it
 was written.
@@ -139,7 +141,53 @@ value-versus-reference line IS implemented for the functions that matter (`INDEX
 `INDIRECT` keep a blank; `VLOOKUP` and friends collapse it to 0, which is why
 `ISBLANK(VLOOKUP(…))` is FALSE in Excel).
 
-### 1.6 Policy-refused inline payloads still reach the decoder on the `.calp` pull path
+### ~~1.6 Policy-refused inline payloads still reach the decoder on the `.calp` pull path~~ — **CLOSED 2026-08-17**
+
+Implemented as recommended in `open-items-1-owner-calls-2026-08-16.md` §1.6, plus one gap that
+document did not state and two defects an adversarial review found in the implementation itself. Full
+as-built record: **`docs/design/open-item-1-6-calp-media-bound-2026-08-17.md`**.
+
+**What shipped**, all in `app/src-tauri/src/media.rs` and `core/calcula-format/src/media.rs`:
+
+1. `exceeds_byte_cap_encoded` **widened** — it answered only for `;base64,` payloads and returned
+   `false` for everything else, so a `data:image/svg+xml,<svg …>` or a comma-less data URL was
+   unbounded at ANY length. All three shapes now measure against `MAX_MEDIA_BYTES`. A differential
+   run over the old and new bodies agreed on every base64 input, so this is a proven pure widening.
+2. `clamp_oversized_distributed_values` — a **pull-path-only** ceiling clearing any string over
+   `MAX_CONTROL_PROPERTY_CHARS`, or over `MAX_MEDIA_BYTES` for a `data:image/` payload, counted into
+   a new `MediaMigration.oversized`. It runs LAST, after admissible images have become ~70-character
+   handles, so a legitimate picture cannot be caught by it. The `.cala` load path takes no such
+   ceiling, deliberately: a user's own 90 KiB inline SVG logo must not vanish on open.
+3. **The unstated gap:** a base64 payload is judged on its DECODED size, so its encoded text could
+   reach 4/3 × `MAX_MEDIA_BYTES` ≈ **10.67 MiB — 171× the property cap** — and still be "policy-
+   refused, left inline". Measuring the string's own length is what bounds that.
+4. **BUG-0086 through two other spellings, found by adversarial review and the most serious thing
+   here.** The hazard/policy split is only as good as the agreement between the host's parser and the
+   one that actually runs, and the host's was STRICTER. `decode_image_data_url` required a byte-exact
+   lowercase `;base64` (and the widened cap repeated that same literal), while the WHATWG processor
+   WebView2 implements matches the tag **case-insensitively** and **percent-decodes the body before
+   base64-decoding**. So `data:image/png;BASE64,<4 KB 30,000×30,000 PNG>` — and, needing no case
+   difference at all, `data:image/png;base64,%69VBORw…` — were classified "refused on format, safe on
+   screen", written verbatim into the subscriber's `.cala`, and handed to `img.src`, which has no caps:
+   ~3.6 GB of RGBA. Fixed by making the host agree with the browser (one shared
+   `ends_with_base64_tag`, plus percent-decoding), and by **inverting the default**: `LeaveInline` now
+   requires a payload the host could actually READ. An undecodable string that declares a RASTER
+   format is dropped, because "we could not parse it" is not evidence the renderer cannot. SVG keeps
+   its tolerance — it is the one declared type this host never decodes by design.
+
+**What is still not caught, and is accepted:** aggregate volume (5,000 controls × 63 KiB is ~315 MB
+and every value is legal — that needs a per-pull total budget), and an SVG under the cap that is
+expensive to rasterise (uncatchable without an SVG parser, which the media module refuses on
+principle, correctly).
+
+**Verification:** 40 media tests, **1,695 app-crate**, **1,411 core workspace**, all passing.
+Sabotage-checked in four rounds — reverting the clamp reds 2, narrowing the byte cap reds 2, and
+reverting the three bypass fixes reds 4. Two of the review's own findings were about the TESTS rather
+than the code and are fixed: one regression guard's fixture was too small to exhibit the failure it
+claimed to guard (87 KB against an 8 MiB ceiling), and the clamp's `data:image/` branch had no test
+at all.
+
+### ~~1.6 (original statement, kept for the record)~~
 
 BUG-0086 split media refusals into two outcomes (`MediaError::is_decode_hazard`, exhaustive match
 so a new variant is a compile error): **hazards** (`TooLarge`, `DimensionOutOfRange`,

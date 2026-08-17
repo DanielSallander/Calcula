@@ -251,7 +251,12 @@ pub fn get_control_metadata(
 /// corrupt data that looks like good data.
 pub const MAX_CONTROL_PROPERTY_CHARS: usize = 64 * 1024;
 
-fn check_property_value(name: &str, value: &str) -> Result<(), String> {
+/// `pub(crate)` only so `media.rs`'s distributed clamp can pin its own boundary
+/// AGAINST this one rather than restating the number. The two doors must agree on
+/// what "too long" means at the exact cap, or a property that is legal when the
+/// user authors it locally gets cleared when the same document arrives through a
+/// pull. Nothing outside the crate calls this; it is not part of any API surface.
+pub(crate) fn check_property_value(name: &str, value: &str) -> Result<(), String> {
     if value.chars().count() > MAX_CONTROL_PROPERTY_CHARS {
         return Err(format!(
             "Control property '{}' is {} characters; the limit is {}. \

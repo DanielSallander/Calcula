@@ -38,7 +38,7 @@ use calcula_format::media::{
 };
 use calp::integrity::sha256_hex;
 
-use crate::controls::{ControlPropertyValue, ControlStorage};
+use crate::controls::{ControlPropertyValue, ControlStorage, MAX_CONTROL_PROPERTY_CHARS};
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
 use crate::AppState;
@@ -276,6 +276,12 @@ pub struct MediaMigration {
     /// which has no such caps — decoded it anyway. A 30,000 x 30,000 PNG is a
     /// few KB of `controls.json` and 3.6 GB of RGBA in the renderer.
     pub dropped: usize,
+    /// Properties CLEARED on a DISTRIBUTED pull because the string was simply too
+    /// long — over `MAX_CONTROL_PROPERTY_CHARS`, or over `MAX_MEDIA_BYTES` for a
+    /// `data:image/` payload. Always 0 on the `.cala` load path, which
+    /// deliberately applies no such ceiling. Open-item 1.6; see
+    /// `clamp_oversized_distributed_values` for why the two paths differ.
+    pub oversized: usize,
 }
 
 /// What should become of one inline `data:image/...` payload.
@@ -312,28 +318,104 @@ fn judge_inline_image(value: &str) -> InlineVerdict {
         // decode whatever is left inline. Told apart by the only measure
         // available without decoding: the ENCODED length.
         None if exceeds_byte_cap_encoded(value) => InlineVerdict::Drop,
+
+        // "WE COULD NOT PARSE IT" IS NOT EVIDENCE THAT THE RENDERER CANNOT.
+        //
+        // This arm used to be a bare `LeaveInline`, and that was the wrong
+        // default. Tolerance is for a picture this build can SEE and has decided
+        // not to file — a decodable payload whose format the allowlist excludes.
+        // It was silently also covering payloads the host could not read AT ALL,
+        // and an unreadable payload is an UNINSPECTED one: no byte cap, no
+        // dimension cap, no pixel cap has looked at it, while `paintableUrl`
+        // hands any non-handle string straight to `img.src`. A 4 KB
+        // 30,000 x 30,000 PNG spelled `;BASE64,` or with a percent-escaped body
+        // rode through here as "refused on format, safe on screen" and allocated
+        // 3.6 GB in the renderer — BUG-0086 again, through a different spelling.
+        //
+        // So the default inverts: an undecodable payload that DECLARES a raster
+        // format is dropped. SVG keeps its tolerance, because it is the one
+        // declared type this host never decodes by design (the media module
+        // refuses to carry an SVG parser, correctly) and it is the case the
+        // corpus actually contains. An SVG that is merely expensive to rasterise
+        // remains uncatchable and is a named, accepted limitation.
+        None if declares_raster_image(value) => InlineVerdict::Drop,
         None => InlineVerdict::LeaveInline,
     }
 }
 
-/// True when a `data:image/...;base64,` payload's ENCODED length alone puts it
-/// past the per-image byte budget, so nothing will ever admit it.
+/// True when a `data:image/...` string declares a RASTER format — i.e. anything
+/// this host would normally decode and inspect, as opposed to `image/svg+xml`.
 ///
-/// Mirrors `decode_image_data_url`'s own pre-allocation refusal (4 base64
-/// characters per 3 bytes) rather than re-deriving a second threshold, so the
-/// two cannot disagree about which payloads never get decoded.
+/// Deliberately decided on the DECLARED type rather than on content: reaching a
+/// verdict is the whole problem here, and the declared type is the only thing
+/// available when the payload will not parse.
+fn declares_raster_image(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return false;
+    };
+    if !rest.starts_with("image/") {
+        return false;
+    }
+    // The media type is everything up to the comma, or the whole remainder when
+    // there is no comma at all — which is itself one of the malformed shapes.
+    let meta = match rest.find(',') {
+        Some(comma) => &rest[..comma],
+        None => rest,
+    };
+    let subtype = meta["image/".len()..]
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    subtype != "svg+xml" && subtype != "svg"
+}
+
+/// True when an inline `data:image/...` payload's own length puts it past the
+/// per-image byte budget, so nothing will ever admit it.
+///
+/// **It used to answer only for `;base64,` payloads and return `false` for every
+/// other shape** (open-item 1.6). `decode_image_data_url` returns `None` for a
+/// non-base64 or comma-less data URL *without measuring it*, so those two shapes
+/// reached `InlineVerdict::LeaveInline` at ANY length: a
+/// `data:image/svg+xml,<svg …>` of arbitrary size was copied through untouched.
+/// All three shapes are now measured against the same `MAX_MEDIA_BYTES`.
+///
+/// This is a widening of an EXISTING rule to encodings it was silently skipping,
+/// not a new policy — which is why it is safe on the `.cala` load path too, where
+/// a genuinely new bound would not be (see open-item 1.6 on why the 64 KiB
+/// property cap is applied to distributed payloads ONLY).
 fn exceeds_byte_cap_encoded(value: &str) -> bool {
     let Some(rest) = value.strip_prefix("data:") else {
         return false;
     };
-    let Some(comma) = rest.find(',') else {
-        return false;
-    };
-    let meta = &rest[..comma];
-    if !meta.starts_with("image/") || !meta.ends_with(";base64") {
+    if !rest.starts_with("image/") {
         return false;
     }
-    rest[comma + 1..].len() / 4 * 3 > MAX_MEDIA_BYTES
+    let Some(comma) = rest.find(',') else {
+        // No comma at all, so this is not a well-formed data URL and no media
+        // type can be parsed out of it. Its LENGTH is real all the same — it is
+        // bytes in the document and a string handed to the WebView — and this
+        // shape bailed out of both the decoder and the cap before either could
+        // measure it.
+        return rest.len() > MAX_MEDIA_BYTES;
+    };
+    let payload = &rest[comma + 1..];
+    // `ends_with_base64_tag` rather than a second `ends_with(";base64")` literal.
+    // The byte-exact spelling was written out here AND in
+    // `decode_image_data_url`, and both disagreed with the browser, which matches
+    // the tag case-insensitively — so `;BASE64,` took this function's non-base64
+    // branch and a few-KB decompression bomb measured as harmless. One shared
+    // predicate now, so the two cannot drift again.
+    if calcula_format::media::ends_with_base64_tag(&rest[..comma]) {
+        // 4 base64 characters per 3 bytes. Mirrors `decode_image_data_url`'s own
+        // pre-allocation refusal rather than re-deriving a second threshold, so
+        // the two cannot disagree about which payloads never get decoded.
+        return payload.len() / 4 * 3 > MAX_MEDIA_BYTES;
+    }
+    // Not base64: a literal or percent-encoded payload, where the payload IS the
+    // bytes, so its raw length is the measure.
+    payload.len() > MAX_MEDIA_BYTES
 }
 
 /// The WRITE-door half of `judge_inline_image`: is this property value an
@@ -445,10 +527,89 @@ fn rewrite_inline_images(
     }
 }
 
-/// The pure half of `admit_distributed_controls`: sanitize the payload and
-/// rewrite its legacy inline images, returning the rewritten controls, the bytes
-/// they now reference, and what happened. No locks, no state — so the admission
-/// rules can be tested directly rather than through a live `AppState`.
+/// Clear any string in a DISTRIBUTED payload that exceeds what a locally-created
+/// control property is allowed to be (open-item 1.6).
+///
+/// WHY THE PULL PATH AND NOT THE `.cala` LOAD. A local property write goes
+/// through `check_property_value`, which refuses anything over
+/// `MAX_CONTROL_PROPERTY_CHARS` (64 KiB). Materialization does NOT — a pull calls
+/// `materialize_saved_controls` directly, so that bound never sees a distributed
+/// payload, and whatever lands there is written verbatim into the SUBSCRIBER's own
+/// `.cala` on their next save. Applying the same cap on the `.cala` load path was
+/// considered and REJECTED: a user whose own workbook holds a 90 KiB inline SVG
+/// logo — legal, created by the shipped picker, rendering fine today — would lose
+/// their picture on the next open, silently.
+///
+/// On a distributed pull the rule is clean, because this runs AFTER
+/// `rewrite_inline_images` has turned every ADMISSIBLE image into a ~70-character
+/// `media:` handle. The only value that can still legitimately be large is a
+/// policy-refused inline picture, and those are exactly what the two ceilings
+/// below are for.
+///
+/// THE HARM BEING BOUNDED IS PERSISTENCE, NOT EXECUTION. There is no script path
+/// here: `onSelect` is stripped, an SVG in an `<img>` is rendered in secure static
+/// mode, and the CSP has no `data:` in `script-src`. What was unbounded is the
+/// subscriber's DOCUMENT — the media GC prunes the media store, but an inline
+/// string is not in the media store, it *is* the document, so nothing ever
+/// reclaims it. A durable, silent bloating of the victim's own file, delivered
+/// inside a correctly-signed artifact.
+///
+/// WHY `data:image/` GETS THE LARGER CEILING. A policy-refused picture is a
+/// picture the subscriber can see, and BUG-0086's split says those survive. So
+/// they are held to the media budget rather than the property budget. Note this
+/// closes a gap the recommendation did not state: a base64 payload passes
+/// `exceeds_byte_cap_encoded` on its DECODED size, so its ENCODED text could reach
+/// 4/3 × `MAX_MEDIA_BYTES` ≈ 10.67 MiB — 171× the property cap — and still be
+/// left inline. Measuring the string's own length here is what bounds that.
+///
+/// WHY IT IS VALUE-SHAPED and visits structural strings too, exactly as
+/// `rewrite_inline_images` is: a `properties`-only walk would miss the day someone
+/// adds a field, and here that miss is the whole vulnerability. No legitimate
+/// `control_type` or `value_type` is 64 KiB long, so clearing one is right.
+fn clamp_oversized_distributed_values(
+    value: &mut serde_json::Value,
+    report: &mut MediaMigration,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            let over = if text.starts_with("data:image/") {
+                // Bytes, because bytes are what land in the subscriber's file.
+                text.len() > MAX_MEDIA_BYTES
+            } else {
+                // Characters, to measure it the way the local write door does.
+                text.chars().count() > MAX_CONTROL_PROPERTY_CHARS
+            };
+            if over {
+                // Cleared, not removed — matching the established `Drop`
+                // treatment, so geometry and identity survive and a picture
+                // control paints "No Image" rather than vanishing.
+                text.clear();
+                report.oversized += 1;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                clamp_oversized_distributed_values(item, report);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                clamp_oversized_distributed_values(v, report);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The pure half of `admit_distributed_controls`: sanitize the payload, rewrite
+/// its legacy inline images, and bound what is left, returning the rewritten
+/// controls, the bytes they now reference, and what happened. No locks, no state
+/// — so the admission rules can be tested directly rather than through a live
+/// `AppState`.
+///
+/// ORDER IS LOAD-BEARING. The clamp runs LAST, after inline images have become
+/// handles, so an admissible multi-megabyte picture is a short handle by the time
+/// the ceilings apply and cannot be destroyed by them.
 pub fn migrate_distributed_inline_images(
     saved: &[persistence::SavedSheetControls],
 ) -> (Vec<persistence::SavedSheetControls>, MediaStore, MediaMigration) {
@@ -457,6 +618,7 @@ pub fn migrate_distributed_inline_images(
     let mut report = MediaMigration::default();
     for sheet_controls in &mut admitted {
         rewrite_inline_images(&mut sheet_controls.controls, &mut bytes, &mut report);
+        clamp_oversized_distributed_values(&mut sheet_controls.controls, &mut report);
     }
     (admitted, bytes, report)
 }
@@ -510,12 +672,13 @@ pub fn admit_distributed_controls(
         // bytes cannot diverge on what counts as an admissible image.
         merge_pulled_media(state, effect, bytes)?;
     }
-    if report.migrated > 0 || report.refused > 0 || report.dropped > 0 {
+    if report.migrated > 0 || report.refused > 0 || report.dropped > 0 || report.oversized > 0 {
         log::info!(
-            "[media] distributed controls: migrated {} inline image(s) into the media store; {} refused on format and left inline; {} dropped as unsafe to decode",
+            "[media] distributed controls: migrated {} inline image(s) into the media store; {} refused on format and left inline; {} dropped as unsafe to decode; {} cleared as oversized",
             report.migrated,
             report.refused,
-            report.dropped
+            report.dropped,
+            report.oversized
         );
     }
     Ok(admitted)
@@ -796,7 +959,7 @@ mod tests {
         let mut media = MediaStore::new();
 
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
-        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0 });
+        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0, oversized: 0 });
         assert_eq!(media.get(&hash), Some(&bytes));
         assert_eq!(
             controls[&(0, 1, 1)].properties["src"].value,
@@ -838,7 +1001,7 @@ mod tests {
         let mut media = MediaStore::new();
 
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
-        assert_eq!(report, MediaMigration { migrated: 0, refused: 1, dropped: 0 });
+        assert_eq!(report, MediaMigration { migrated: 0, refused: 1, dropped: 0, oversized: 0 });
         assert!(media.is_empty());
         assert_eq!(controls[&(0, 1, 1)].properties["src"].value, svg);
     }
@@ -937,7 +1100,7 @@ mod tests {
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
 
         // 3. The picture is preserved, byte for byte, and no longer inline.
-        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0 });
+        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0, oversized: 0 });
         assert_eq!(media.get(&hash), Some(&logo));
         let src = &controls[&(0, 0, 0)].properties["src"].value;
         assert_eq!(src, &media_ref(&hash));
@@ -1060,6 +1223,483 @@ mod tests {
         assert_eq!(report.refused, 1);
         assert!(bytes.is_empty());
         assert!(admitted_value(&admitted).contains(svg), "left exactly as it was");
+    }
+
+    // --- open-item 1.6: the pull path's unbounded property values ------------
+    //
+    // Each of these is one of the shapes that was copied through at UNLIMITED
+    // length. The harm is PERSISTENCE, not execution: the payload is written
+    // verbatim into the subscriber's own `.cala` on their next save, and because
+    // an inline string is not in the media store, the media GC never reclaims it.
+    // A durable, silent bloating of the victim's file, inside a correctly-signed
+    // artifact.
+
+    /// A `data:image/svg+xml,<svg …>` — NOT base64, so `decode_image_data_url`
+    /// returned `None` and `exceeds_byte_cap_encoded` returned `false` without
+    /// measuring anything. Shape 1 of 3.
+    #[test]
+    fn a_distributed_non_base64_data_url_over_the_media_cap_is_cleared() {
+        let huge = format!("data:image/svg+xml,<svg>{}</svg>", "A".repeat(MAX_MEDIA_BYTES));
+        assert!(
+            calcula_format::media::decode_image_data_url(&huge).is_none(),
+            "precondition: the decoder does not measure this shape at all"
+        );
+        let payload = distributed_payload(&[("src", &huge)]);
+
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+
+        let out = admitted_value(&admitted);
+        assert!(!out.contains("<svg>"), "the payload must not survive: {}", &out[..200.min(out.len())]);
+        assert!(
+            out.len() < 4096,
+            "the admitted payload is still {} bytes — it was not bounded",
+            out.len()
+        );
+        // Counted as a decode hazard, because widening `exceeds_byte_cap_encoded`
+        // is what catches this one: it is over the MEDIA budget, so it never
+        // reaches the property-length ceiling.
+        assert_eq!(report.dropped, 1, "report was {:?}", report);
+    }
+
+    /// A `data:image/...` string with NO COMMA, which bailed out of the decoder
+    /// AND the cap check before either could measure it. Shape 2 of 3.
+    #[test]
+    fn a_distributed_comma_less_data_url_of_any_length_is_cleared() {
+        let huge = format!("data:image/png{}", "A".repeat(MAX_MEDIA_BYTES));
+        assert!(!huge.contains(','), "precondition: no comma, so no media type parses");
+        let payload = distributed_payload(&[("src", &huge)]);
+
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+
+        let out = admitted_value(&admitted);
+        assert!(out.len() < 4096, "still {} bytes — not bounded", out.len());
+        assert_eq!(report.dropped, 1, "report was {:?}", report);
+    }
+
+    /// ANY OTHER PROPERTY — `text`, `tooltip`, an invented key — which the inline
+    /// image judgement never examines because it only looks at `data:image/`
+    /// strings. Shape 3 of 3, and the one needing no `data:` URL at all.
+    ///
+    /// Worth stating: a `text` of tens of millions of characters also goes to
+    /// `ctx.fillText` on the render thread every frame.
+    #[test]
+    fn a_distributed_ordinary_property_over_the_char_cap_is_cleared() {
+        let huge = "x".repeat(MAX_CONTROL_PROPERTY_CHARS + 1);
+        let payload = distributed_payload(&[("text", &huge), ("tooltip", "fine")]);
+
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+
+        let out = admitted_value(&admitted);
+        assert!(out.len() < 4096, "still {} bytes — not bounded", out.len());
+        assert!(out.contains("fine"), "a legal sibling property must survive: {}", out);
+        assert_eq!(report.oversized, 1, "report was {:?}", report);
+    }
+
+    /// The gap the recommendation did NOT state, found while implementing: a
+    /// base64 payload is judged on its DECODED size, so its ENCODED text can
+    /// reach 4/3 x MAX_MEDIA_BYTES (~10.67 MiB, 171x the property cap) and still
+    /// be "policy-refused, left inline". The string's own length is what bounds it.
+    #[test]
+    fn a_policy_refused_base64_payload_is_bounded_by_its_encoded_length() {
+        // Encoded length just over MAX_MEDIA_BYTES, but a DECODED size under it,
+        // so `exceeds_byte_cap_encoded` says no and the format check refuses it
+        // on policy — the exact combination that stayed inline.
+        let payload_chars = MAX_MEDIA_BYTES + 1024;
+        let inline = format!("data:image/gif;base64,{}", "A".repeat(payload_chars));
+        assert!(
+            !exceeds_byte_cap_encoded(&inline),
+            "precondition: the DECODED size is under the media cap, so the byte cap does not fire"
+        );
+        assert!(
+            inline.len() > MAX_MEDIA_BYTES,
+            "precondition: but the ENCODED text is over it"
+        );
+        let payload = distributed_payload(&[("src", &inline)]);
+
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+
+        let out = admitted_value(&admitted);
+        assert!(
+            out.len() < 4096,
+            "a {} byte string rode the pull into the subscriber's document",
+            out.len()
+        );
+        assert_eq!(report.oversized, 1, "report was {:?}", report);
+    }
+
+    /// PART 1 PINNED WHERE IT IS ACTUALLY LOAD-BEARING — the paths the clamp does
+    /// NOT run on.
+    ///
+    /// Found by reading a sabotage result rather than by writing the test first:
+    /// with the widened cap reverted, the two distributed tests above still
+    /// bounded their payloads (the clamp caught them) and failed only on WHICH
+    /// counter fired. On the pull path the two halves overlap. Part 1 earns its
+    /// place on the `.cala` load and at the write door, where nothing else looks,
+    /// so that is where it has to be proved.
+    #[test]
+    fn the_widened_byte_cap_holds_on_the_paths_with_no_clamp() {
+        let huge_svg = format!("data:image/svg+xml,<svg>{}</svg>", "A".repeat(MAX_MEDIA_BYTES));
+        let huge_comma_less = format!("data:image/png{}", "A".repeat(MAX_MEDIA_BYTES));
+
+        // (a) THE WRITE DOOR. `is_hazardous_inline_image` is what stops a NEW
+        //     inline payload being created; before 1.6 it said `false` for both
+        //     of these at any size, because the decoder never measured them.
+        assert!(
+            is_hazardous_inline_image(&huge_svg),
+            "an oversized non-base64 data URL must be refused at the write door"
+        );
+        assert!(
+            is_hazardous_inline_image(&huge_comma_less),
+            "an oversized comma-less data URL must be refused at the write door"
+        );
+
+        // (b) THE `.cala` LOAD PATH, which applies no property ceiling at all —
+        //     so if the cap did not catch these, nothing on that path would.
+        let mut controls: ControlStorage = HashMap::new();
+        controls.insert((0, 0, 0), control_with("src", &huge_svg));
+        controls.insert((0, 0, 1), control_with("src", &huge_comma_less));
+        let mut media = MediaStore::new();
+
+        let report = migrate_legacy_data_urls(&mut controls, &mut media);
+
+        assert_eq!(report.dropped, 2, "both are decode hazards by size: {:?}", report);
+        assert!(controls[&(0, 0, 0)].properties["src"].value.is_empty());
+        assert!(controls[&(0, 0, 1)].properties["src"].value.is_empty());
+        assert_eq!(
+            report.oversized, 0,
+            "and the ceiling is still not applied on the local path"
+        );
+    }
+
+    // --- the OTHER SPELLINGS of the decode hazard (found by adversarial review) -
+    //
+    // BUG-0086 fixed the bomb spelled `data:image/png;base64,`. The hazard/policy
+    // split is only as good as the agreement between the host's parser and the
+    // one that actually runs, and the host's was STRICTER — so every spelling in
+    // the gap was classified "policy-refused, safe on screen" and handed to a
+    // renderer with no caps. The existing regression test could not see it because
+    // its fixture is built by `data_url()`, which is lowercase-only.
+
+    /// A bomb whose base64 tag is spelled in CAPITALS. The WHATWG data-URL
+    /// processor matches that tag ASCII case-insensitively; the host required an
+    /// exact lowercase `;base64`, in two separate hand-written literals.
+    #[test]
+    fn a_bomb_spelled_with_an_uppercase_base64_tag_is_dropped() {
+        let bomb = png_bytes(30_000, 30_000);
+        assert!(
+            bomb.len() < 4096,
+            "precondition: the bomb is TINY on disk ({} bytes) — size cannot catch it",
+            bomb.len()
+        );
+        let url = format!("data:image/png;BASE64,{}", encode_base64(&bomb));
+
+        // The host can now READ it, which is what lets it JUDGE it.
+        assert!(
+            calcula_format::media::decode_image_data_url(&url).is_some(),
+            "the tag must be matched case-insensitively, as the browser does"
+        );
+        assert!(
+            matches!(judge_inline_image(&url), InlineVerdict::Drop),
+            "a 900-megapixel image is a decode hazard however its tag is spelled"
+        );
+        assert!(is_hazardous_inline_image(&url), "and the write door must refuse it too");
+
+        let payload = distributed_payload(&[("src", &url)]);
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+        assert_eq!(report.dropped, 1, "report was {:?}", report);
+        assert!(!admitted_value(&admitted).contains("BASE64"));
+    }
+
+    /// A bomb whose base64 BODY is percent-escaped. This one needs no case
+    /// difference at all: it satisfies `ends_with(";base64")`, so the byte cap
+    /// measured it as base64 and passed it at 4 KB, while the host's decoder bailed
+    /// at the first `%`. Browsers percent-decode the body BEFORE base64-decoding.
+    #[test]
+    fn a_bomb_with_a_percent_escaped_base64_body_is_dropped() {
+        let bomb = png_bytes(30_000, 30_000);
+        let b64 = encode_base64(&bomb);
+        // Escape the first character, exactly as a hostile publisher would.
+        let escaped = format!("%{:02X}{}", b64.as_bytes()[0], &b64[1..]);
+        let url = format!("data:image/png;base64,{}", escaped);
+        assert!(url.contains('%'), "precondition: the body carries an escape");
+
+        assert!(
+            calcula_format::media::decode_image_data_url(&url).is_some(),
+            "the host must percent-decode the body the way the browser does"
+        );
+        assert!(
+            matches!(judge_inline_image(&url), InlineVerdict::Drop),
+            "and having read it, must recognise the bomb"
+        );
+
+        let payload = distributed_payload(&[("src", &url)]);
+        let (_, _, report) = migrate_distributed_inline_images(&payload);
+        assert_eq!(report.dropped, 1, "report was {:?}", report);
+    }
+
+    /// The inverted default: a payload that DECLARES a raster format and cannot be
+    /// read at all is dropped, because an uninspected payload is not a safe one.
+    /// No cap has looked at it and `paintableUrl` would hand it to `img.src`.
+    #[test]
+    fn an_undecodable_raster_declaration_is_dropped_not_tolerated() {
+        for url in [
+            "data:image/png;base64,!!!!not-base64-at-all!!!!",
+            "data:image/jpeg,raw-bytes-that-are-not-a-jpeg",
+            "data:image/png", // no comma at all
+        ] {
+            assert!(
+                matches!(judge_inline_image(url), InlineVerdict::Drop),
+                "{:?} declares a raster format this host cannot inspect, so it must \
+                 not be left renderable",
+                url
+            );
+        }
+
+        // AND THE LINE IN THE RIGHT PLACE: an EMPTY payload decodes perfectly well
+        // — to zero bytes — so it is an ordinary policy refusal, not an
+        // uninspected one. There is nothing for a renderer to decode and nothing
+        // to bound. Asserted rather than omitted, because the first version of
+        // this test expected a Drop here and the code was right.
+        assert!(
+            matches!(judge_inline_image("data:image/gif;base64,"), InlineVerdict::LeaveInline),
+            "an empty payload was READ successfully; the inverted default is about \
+             payloads that could not be read at all"
+        );
+    }
+
+    /// ...and the tolerance that must SURVIVE the inverted default: SVG is the one
+    /// declared type this host never decodes by design, and it is what the corpus
+    /// actually contains. Dropping these would destroy pictures users can see.
+    #[test]
+    fn svg_keeps_its_policy_tolerance_under_the_inverted_default() {
+        for url in [
+            "data:image/svg+xml,<svg width='4' height='4'/>",
+            "data:image/svg+xml;charset=utf-8,<svg/>",
+            "data:image/SVG+XML,<svg/>", // declared type is matched case-insensitively
+        ] {
+            assert!(
+                matches!(judge_inline_image(url), InlineVerdict::LeaveInline),
+                "{:?} must keep BUG-0086's policy tolerance",
+                url
+            );
+            assert!(!is_hazardous_inline_image(url), "{:?} is not a hazard", url);
+        }
+    }
+
+    /// A LEGITIMATE uppercase-tag picture must now be ADMITTED, not merely
+    /// dropped. Without this, the case-insensitivity fix could "pass" by refusing
+    /// everything it newly understands.
+    #[test]
+    fn a_valid_picture_with_an_uppercase_base64_tag_is_admitted_as_a_handle() {
+        let logo = png_bytes(32, 32);
+        let hash = sha256_hex(&logo);
+        let url = format!("data:image/png;BASE64,{}", encode_base64(&logo));
+
+        let payload = distributed_payload(&[("src", &url)]);
+        let (admitted, bytes, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(report.migrated, 1, "report was {:?}", report);
+        assert_eq!(bytes.get(&hash), Some(&logo), "the pixels were filed");
+        assert!(admitted_value(&admitted).contains(&media_ref(&hash)));
+    }
+
+    /// THE `data:image/` BRANCH OF THE CLAMP, which nothing exercised: a
+    /// policy-refused SVG between the property cap (64 KiB) and the media cap
+    /// (8 MiB) must SURVIVE a pull. Hold everything to 64 KiB instead and this
+    /// picture disappears from a subscriber's report.
+    #[test]
+    fn a_policy_refused_svg_over_the_property_cap_survives_a_pull() {
+        let svg = format!(
+            "data:image/svg+xml,<svg>{}</svg>",
+            "A".repeat(MAX_CONTROL_PROPERTY_CHARS)
+        );
+        assert!(svg.len() > MAX_CONTROL_PROPERTY_CHARS, "precondition: over the property cap");
+        assert!(svg.len() < MAX_MEDIA_BYTES, "precondition: under the media cap");
+
+        let payload = distributed_payload(&[("src", &svg)]);
+        let (admitted, _, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(
+            report.oversized, 0,
+            "the data:image/ branch must give a visible picture the LARGER ceiling: {:?}",
+            report
+        );
+        assert_eq!(report.refused, 1, "it is policy-refused and left inline");
+        assert!(admitted_value(&admitted).contains("<svg>"), "the picture survived");
+    }
+
+    /// THE BOUNDARIES, because both ceilings are `>` and an off-by-one here is a
+    /// picture destroyed or a payload admitted.
+    ///
+    /// Also pins that the rewrite is a pure WIDENING: a differential run over the
+    /// old and new bodies agreed on every base64-shaped input, and the two
+    /// assertions below are the boundary case from that run.
+    #[test]
+    fn the_ceilings_are_exclusive_at_exactly_the_cap() {
+        // (a) The media cap, non-base64: exactly MAX is allowed, one more is not.
+        let head = "data:image/svg+xml,";
+        let at = format!("{}{}", head, "A".repeat(MAX_MEDIA_BYTES));
+        let over = format!("{}{}", head, "A".repeat(MAX_MEDIA_BYTES + 1));
+        assert!(!exceeds_byte_cap_encoded(&at), "exactly at the cap is admissible");
+        assert!(exceeds_byte_cap_encoded(&over), "one byte over is not");
+
+        // (b) The property cap, in the distributed clamp: same exclusivity, and
+        //     measured in CHARACTERS to match the local write door.
+        for (len, expect_cleared) in [
+            (MAX_CONTROL_PROPERTY_CHARS, false),
+            (MAX_CONTROL_PROPERTY_CHARS + 1, true),
+        ] {
+            let payload = distributed_payload(&[("text", &"x".repeat(len))]);
+            let (_, _, report) = migrate_distributed_inline_images(&payload);
+            assert_eq!(
+                report.oversized == 1,
+                expect_cleared,
+                "a {}-char property: expected cleared={}, report {:?}",
+                len,
+                expect_cleared,
+                report
+            );
+        }
+
+        // (c) `check_property_value` is the local door this cap mirrors. If the two
+        //     ever disagree about the boundary, a value legal locally would be
+        //     cleared on a pull (or the reverse), so pin them against each other
+        //     rather than restating the number.
+        assert!(
+            crate::controls::check_property_value("text", &"x".repeat(MAX_CONTROL_PROPERTY_CHARS))
+                .is_ok(),
+            "the local door admits exactly the cap, so the clamp must too"
+        );
+        assert!(
+            crate::controls::check_property_value(
+                "text",
+                &"x".repeat(MAX_CONTROL_PROPERTY_CHARS + 1)
+            )
+            .is_err(),
+            "the local door refuses one over, so the clamp must too"
+        );
+    }
+
+    /// A multi-byte property must be measured the way the local door measures it.
+    ///
+    /// The clamp uses `chars().count()` for ordinary strings and `len()` (bytes)
+    /// for `data:image/` ones. That asymmetry is deliberate — bytes are what land
+    /// in the subscriber's file, characters are what `check_property_value`
+    /// counts — but it means a 3-byte-per-char string is up to 3x its char count
+    /// on disk. This records the ACTUAL behaviour so a future reader does not have
+    /// to re-derive which measure won where.
+    #[test]
+    fn a_multibyte_property_is_measured_in_characters_like_the_local_door() {
+        // Just under the CHARACTER cap, but ~3x that in bytes.
+        let s = "\u{4e00}".repeat(MAX_CONTROL_PROPERTY_CHARS - 1);
+        assert!(s.len() > MAX_CONTROL_PROPERTY_CHARS * 2, "precondition: bytes >> chars");
+        assert!(
+            crate::controls::check_property_value("text", &s).is_ok(),
+            "precondition: the LOCAL door admits it, so a pull must not be stricter"
+        );
+
+        let payload = distributed_payload(&[("text", &s)]);
+        let (_, _, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(
+            report.oversized, 0,
+            "a value the local door accepts must survive a pull, or the same document \
+             is legal when authored and mangled when distributed: {:?}",
+            report
+        );
+    }
+
+    /// A SAFE non-base64 payload must be untouched by the widened cap — the
+    /// widening is about SIZE, not about encoding. Without this, part 1 could
+    /// pass its tests by refusing every SVG.
+    #[test]
+    fn a_small_non_base64_data_url_is_still_left_inline() {
+        let small = "data:image/svg+xml,<svg width='4' height='4'/>";
+        assert!(!exceeds_byte_cap_encoded(small));
+        assert!(
+            !is_hazardous_inline_image(small),
+            "a small SVG is policy-refused, not a hazard — it must round-trip"
+        );
+
+        let mut controls: ControlStorage = HashMap::new();
+        controls.insert((0, 0, 0), control_with("src", small));
+        let mut media = MediaStore::new();
+
+        let report = migrate_legacy_data_urls(&mut controls, &mut media);
+
+        assert_eq!(controls[&(0, 0, 0)].properties["src"].value, small);
+        assert_eq!(report.refused, 1, "left inline on policy: {:?}", report);
+        assert_eq!(report.dropped, 0);
+    }
+
+    /// THE REGRESSION GUARD FOR THE ORDERING, and the fixture has to be big
+    /// enough to actually be one.
+    ///
+    /// The first version of this test padded to `MAX_CONTROL_PROPERTY_CHARS` and
+    /// asserted its precondition against the PROPERTY cap — but the clamp holds
+    /// `data:image/` strings to the MEDIA cap, so at 87 KB reversing the order
+    /// would have changed nothing and the test's stated failure mode was
+    /// unexhibitable. Adversarial review caught that.
+    ///
+    /// The window that matters is real and narrow: `decode_image_data_url` admits
+    /// up to `MAX_MEDIA_BYTES` DECODED, so an admissible picture's data URL runs to
+    /// 4/3 of that — 8 to 10.67 MiB — which is OVER the clamp's `data:image/`
+    /// ceiling. Only the ordering saves it, and this fixture sits in that window.
+    #[test]
+    fn a_large_but_admissible_picture_still_arrives_as_a_handle() {
+        // `png_bytes` builds a header only (66 chars encoded). Pad it into the
+        // 8-10.67 MiB data-URL window: `inspect_media` proves the format from the
+        // magic bytes and reads dimensions out of IHDR, so trailing bytes are
+        // exactly what a real PNG has.
+        let mut logo = png_bytes(400, 400);
+        logo.extend(std::iter::repeat(0x5A).take(MAX_MEDIA_BYTES - 1024));
+        assert!(
+            inspect_media(&logo).is_ok(),
+            "precondition: the padded fixture is still an admissible image"
+        );
+        let hash = sha256_hex(&logo);
+        let url = data_url(&logo);
+        assert!(
+            url.len() > MAX_MEDIA_BYTES,
+            "precondition: the data URL ({} bytes) must exceed the clamp's OWN \
+             data:image ceiling, or this test cannot detect a reordering",
+            url.len()
+        );
+        let payload = distributed_payload(&[("src", &url)]);
+
+        let (admitted, bytes, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(report.migrated, 1, "report was {:?}", report);
+        assert_eq!(report.oversized, 0, "the clamp must not touch an admitted handle");
+        assert_eq!(bytes.get(&hash), Some(&logo), "the pixels arrived");
+        assert!(admitted_value(&admitted).contains(&media_ref(&hash)));
+    }
+
+    /// The `.cala` load path takes NO property ceiling, deliberately: a user's own
+    /// 90 KiB inline SVG logo — legal, created by the shipped picker, rendering
+    /// today — must not vanish on the next open. This is the asymmetry open-item
+    /// 1.6 chose, so it gets a test rather than a comment.
+    #[test]
+    fn the_local_cala_path_does_not_apply_the_distributed_property_ceiling() {
+        let svg = format!(
+            "data:image/svg+xml,<svg>{}</svg>",
+            "A".repeat(MAX_CONTROL_PROPERTY_CHARS)
+        );
+        assert!(svg.len() > MAX_CONTROL_PROPERTY_CHARS);
+        assert!(svg.len() < MAX_MEDIA_BYTES, "under the MEDIA cap, so not a hazard");
+
+        let mut controls: ControlStorage = HashMap::new();
+        controls.insert((0, 0, 0), control_with("src", &svg));
+        let mut media = MediaStore::new();
+
+        let report = migrate_legacy_data_urls(&mut controls, &mut media);
+
+        assert_eq!(
+            controls[&(0, 0, 0)].properties["src"].value, svg,
+            "the user's own oversized-but-safe picture must survive a local open"
+        );
+        assert_eq!(report.oversized, 0, "the .cala path applies no ceiling at all");
+        assert_eq!(report.refused, 1, "it is refused on FORMAT and left inline");
     }
 
     #[test]

@@ -539,7 +539,7 @@ pub fn decode_image_data_url(value: &str) -> Option<Vec<u8>> {
     let rest = value.strip_prefix("data:")?;
     let comma = rest.find(',')?;
     let meta = &rest[..comma];
-    if !meta.starts_with("image/") || !meta.ends_with(";base64") {
+    if !meta.starts_with("image/") || !ends_with_base64_tag(meta) {
         return None;
     }
     let payload = &rest[comma + 1..];
@@ -547,7 +547,63 @@ pub fn decode_image_data_url(value: &str) -> Option<Vec<u8>> {
     if payload.len() / 4 * 3 > MAX_MEDIA_BYTES {
         return None;
     }
-    decode_base64(payload)
+    // PERCENT-DECODE FIRST, because the browser does.
+    //
+    // The WHATWG data-URL processor percent-decodes the body BEFORE
+    // base64-decoding it, so `data:image/png;base64,%69VBORw0KGgo…` is a valid
+    // image to WebView2 and was NOT one to this function — `decode_base64`
+    // returns None at the first `%`. That disagreement was a security hole, not a
+    // cosmetic gap: a payload this host cannot read is a payload it cannot
+    // INSPECT, while the renderer decodes it happily. See the `None` arm of
+    // `judge_inline_image` for the other half of the fix.
+    //
+    // It is a no-op for every honest payload: `%` is not in the base64 alphabet,
+    // so a string the shipped picker produced passes through unchanged.
+    decode_base64(&percent_decode_ascii(payload))
+}
+
+/// True when a data-URL media type ends with the `;base64` tag, matched the way
+/// the WHATWG data-URL processor matches it: **ASCII case-insensitively**.
+///
+/// It used to be `meta.ends_with(";base64")` — byte-exact and lowercase-only — in
+/// this function and again in the host's `exceeds_byte_cap_encoded`. Both
+/// disagreed with the decoder that actually runs, so `data:image/png;BASE64,<4 KB
+/// 30000x30000 PNG>` was classified "policy-refused, safe to leave inline" and
+/// handed to a renderer that has no caps at all. Two copies of one wrong literal.
+pub fn ends_with_base64_tag(meta: &str) -> bool {
+    const TAG: &str = ";base64";
+    let Some(tail) = meta.get(meta.len().saturating_sub(TAG.len())..) else {
+        return false;
+    };
+    tail.eq_ignore_ascii_case(TAG)
+}
+
+/// Percent-decode ASCII escapes, leaving anything malformed exactly as it is.
+///
+/// Lenient on purpose: browsers leave an invalid `%` sequence literal rather than
+/// rejecting the URL, and the point of this function is to agree with the browser
+/// about what the bytes are. A sequence left literal simply fails base64 decoding
+/// afterwards, which is the conservative outcome.
+fn percent_decode_ascii(input: &str) -> String {
+    if !input.contains('%') {
+        return input.to_string(); // the overwhelmingly common case
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &input[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// Standard-alphabet base64 decoder (RFC 4648), whitespace-tolerant.
