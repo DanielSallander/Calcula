@@ -16,6 +16,7 @@ import * as path from "path";
 import { GridHelper } from "./helpers/grid";
 import { APP_DIED_MARKER } from "./appDiedMarker";
 import { recordStartupFailure } from "./startupGuard";
+import { checkForWedge } from "./wedgeGuard";
 import { BOOT_ERROR_SIGNALS, readPageState, UNREADABLE_PAGE_STATE } from "./pageState";
 
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
@@ -370,7 +371,23 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   ],
 
   // ---- Test-scoped: lightweight reset per test ----
-  appPage: async ({ sharedPage }, use) => {
+  appPage: async ({ sharedPage }, use, testInfo) => {
+    // IS THE BACKEND STILL ANSWERING? — asked FIRST, before the eight page
+    // operations below.
+    //
+    // Everything in this fixture goes through CDP, so on a wedged app the
+    // SETUP is what burns the test's whole budget, and the failure reads as
+    // "Test timeout of 300000ms exceeded" with nothing naming the cause.
+    // Measured 2026-08-16: 64 consecutive tests did exactly that, for 5.4
+    // hours, and every one of the 64 worker restarts passed the existing
+    // health checks — because "CDP answers" and "a DOM node is visible" are
+    // both still true of an app whose Rust backend has stopped returning.
+    //
+    // This is the mid-run counterpart to `assertAppMounted`, which runs once
+    // and cannot see a state that begins at test 38.
+    const wedged = await checkForWedge(sharedPage, testInfo.title);
+    if (wedged) throw new Error(wedged);
+
     // Close any open dialogs/menus left over from a prior test by pressing
     // Escape multiple times (DialogContainer listens on capture phase).
     for (let i = 0; i < 5; i++) {

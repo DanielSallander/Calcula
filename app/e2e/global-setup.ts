@@ -15,6 +15,9 @@ import { APP_DIED_MARKER } from "./appDiedMarker";
 import { assertCollectionGuardPresent } from "./collectionGuard";
 import { clearStartupFailure } from "./startupGuard";
 import { assertAppMounted } from "./startupBarrier";
+import { APP_WEDGED_MARKER } from "./wedgeMarker";
+import { resetWedgeCounter } from "./wedgeGuard";
+import { resetVolatilePersistedStateOverCdp } from "./volatilePersistedState";
 import {
   resolveBuildTarget,
   describeBinary,
@@ -87,6 +90,21 @@ export default async function globalSetup(config: FullConfig) {
   // clears; `startupBarrier.ts`/`fixtures.ts` write; `collectionGuard.ts` reads.
   clearStartupFailure();
 
+  // And the third way, which is the expensive one: the app is up, CDP answers,
+  // the frontend IS mounted, and the BACKEND stops returning from Tauri
+  // commands. Every existing detector keys on unreachability, so none of them
+  // fires — measured 2026-08-16 at 64 consecutive full-timeout failures, 5.4
+  // hours, and a run abandoned at test 101 of 157. This clears;
+  // `e2e/fixtures.ts` writes; `global-teardown.ts` reads.
+  try {
+    if (fs.existsSync(APP_WEDGED_MARKER)) fs.unlinkSync(APP_WEDGED_MARKER);
+  } catch { /* a stale marker we cannot remove must not stop the run */ }
+  // The pre-latch probe counter is on disk too — it HAS to be, because a
+  // rebuilt worker re-imports the module and would reset an in-memory count
+  // before it could ever reach two (see `wedgeGuard.ts`). Being on disk, it
+  // also outlives the run, so it is cleared here with the marker.
+  resetWedgeCounter();
+
   // NOTE ON THE DEPENDENCY CACHE (BUG-0082's second mechanism, §32). Nothing is
   // done about it HERE, and that is deliberate. The repair --
   // `app/scripts/ensure-dep-cache.mjs` -- runs from npm's `predev`, which
@@ -108,6 +126,10 @@ export default async function globalSetup(config: FullConfig) {
     // are all driven with E2E_MANUAL=1 against an app the operator launched), so
     // a barrier that skipped this branch would skip every case it exists for.
     await assertAppMounted({ cdpPort: CDP_PORT, vitePort: VITE_PORT });
+    // Manual mode needs this MORE, not less: the operator's app has been alive
+    // across however many earlier runs, so it is the likeliest to be carrying
+    // another run's residue.
+    await resetInheritedUiState();
     return;
   }
 
@@ -264,6 +286,68 @@ export default async function globalSetup(config: FullConfig) {
   // `waitForSelector` timeouts that read as a product collapse (18 of 18 in the
   // visual project). Throwing here fails the RUN with zero test results instead.
   await assertAppMounted({ cdpPort: CDP_PORT, vitePort: VITE_PORT });
+
+  // ...and only now, with the app proved healthy, put its PERSISTED UI state
+  // back to defaults. Ordering matters: this needs a mounted page to reload.
+  await resetInheritedUiState();
+}
+
+/**
+ * Reset the app-owned storage namespaces so this run cannot inherit another
+ * run's residue.
+ *
+ * WHY ON THE WAY IN, AND NOT IN ANYBODY'S TEARDOWN. On 2026-08-16 a journey run
+ * wedged inside `shapes-hometab.spec.ts` test 8. That test DOES restore the
+ * Home-tab layout in a `finally`, and the `finally` DID run — but restoring
+ * needs a living app to reload, so it swallowed its own failure and the
+ * customised layout stayed on disk. The next project (visual) then failed
+ * `ribbon-core-default-ribbon.png` for something no visual spec did.
+ *
+ * The lesson generalises: cleanup-on-exit cannot be relied on when the failure
+ * mode is "the app died", because the cases that leave residue are exactly the
+ * cases with no app left to clean up with. A reset on the way IN runs at the one
+ * moment the app is known-healthy. Both belong — the `finally` keeps a passing
+ * run tidy, this keeps a CRASHED run from spreading.
+ *
+ * IT IS LOUD WHEN IT FINDS ANYTHING. Silently repairing inherited residue would
+ * conceal that a previous run leaked, which is the fact worth knowing.
+ */
+async function resetInheritedUiState(): Promise<void> {
+  const reset = await resetVolatilePersistedStateOverCdp(CDP_PORT);
+  if (!reset) {
+    console.warn(
+      "[e2e] could not reset persisted UI state (CDP unavailable) — this run may " +
+        "inherit residue from an earlier one; the residue guard will say so.",
+    );
+    return;
+  }
+  // SWEEPING IS ROUTINE; FINDING A NON-DEFAULT VALUE IS NOT. Several of these
+  // keys belong to `zustand/persist` stores that write themselves on hydration,
+  // so a sweep clears something on essentially every run. Reporting that as
+  // "a previous run left the application reconfigured" would cry wolf every
+  // time — and an alarm that always fires is one nobody reads. Only a value
+  // that differs from the store's own default is evidence of a leak.
+  if (reset.disturbed.length > 0) {
+    console.warn(
+      "[e2e] INHERITED NON-DEFAULT UI STATE FROM AN EARLIER RUN — a previous run " +
+        "left the application reconfigured and did not put it back. Cleared " +
+        "before the first test:\n" +
+        reset.disturbed
+          .map((d) => `        ${d.key} = ${d.value}\n          -> ${d.consequence}`)
+          .join("\n") +
+        "\n      This reset only stops it spreading; the leak is in whichever spec " +
+        "set them.",
+    );
+    return;
+  }
+  if (reset.cleared.length === 0) {
+    console.log("[e2e] persisted UI state: clean (nothing to clear)");
+    return;
+  }
+  console.log(
+    `[e2e] persisted UI state: reset ${reset.cleared.length} key(s) to defaults ` +
+      "(all were already at default — self-writing stores, not residue)",
+  );
 }
 
 /** Poll http://localhost:<port>/ until it responds with a 2xx/3xx status. */

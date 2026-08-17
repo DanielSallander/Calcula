@@ -132,8 +132,10 @@ config, so a run that lost the guard **refuses to start** and prints this line.
 
 ## The guards that make a green number mean something
 
-Four of them, all added after 2026-08-08 and therefore absent from every earlier
-version of this document. Each replaced a specific way a passing run lied.
+Six of them, all added after 2026-08-08 and therefore absent from every earlier
+version of this document. Each replaced a specific way a passing run lied — or,
+for the last two, a specific way a FAILING run lied about how many things were
+wrong.
 
 ### 1. `collectionGuard.ts` — did the run collect the tests it claims?
 
@@ -315,6 +317,81 @@ saturated chrome. `STALE_PRODUCT_STATE_GOLDENS` is the named quarantine and is
 accepts whatever the app rendered that day as the new truth.** The only thing
 that makes it safe is being able to say afterwards WHICH capture path each golden
 came from.
+
+### 5. `wedgeGuard.ts` — is the backend still ANSWERING?
+
+*Why.* Guard 2 asks whether the app ever mounted, **once**, before the first test.
+It has no mid-run counterpart, and on 2026-08-16 that cost a journey run **64
+consecutive tests over 5.4 hours**, every one on timeout. The first failing spec
+has zero locators — every step is `page.evaluate(() => __TAURI__.core.invoke(...))`
+— so nothing in the DOM explains it: the backend stopped returning. Playwright
+rebuilds the worker after each failure, so the mount check ran 64 times and passed
+64 times, because "CDP connected + a DOM node is visible" stays true of a wedged
+backend. See open-items §2.5 and BUG-0098; the mechanism is still unreproduced.
+
+*What it does* (`e2e/wedgeGuard.ts`, called from the `appPage` fixture):
+
+| Aspect | Behaviour |
+|---|---|
+| The probe | One real `get_cell` invoke. The failure is BEHIND the IPC boundary, so every DOM-level signal stays green — only a question the backend must ANSWER can distinguish "busy" from "wedged". A refusal counts as answering. |
+| Double race | `page.evaluate` **has no timeout in Playwright's API** (`actionTimeout` governs locators only). An inner race bounds the invoke — separating a wedged *backend* from a wedged *renderer*, which have different owners — and an outer race in Node bounds the evaluate itself, since a wedged renderer would never run the inner one. |
+| Two consecutive | One slow answer is not a wedge. A guard that latches on a single probe reds whole runs over machine noise, which is worse than the disease it treats. |
+| The counter is ON DISK | **The subtlest part, and the obvious implementation is silently broken.** Playwright rebuilds the worker after every FAILED test, and a rebuilt worker re-imports the module with fresh state. On a wedged app every test fails, so a module-level `let` resets between every pair of probes: the count never reaches two, nothing ever latches, and the guard degrades into a log line while the run still costs 5.4 hours. The latch marker was already a file; the pre-latch count has to be one too (`.wedge-probe-count`, cleared by `global-setup`). An in-process unit test cannot see this — `wedgeGuard.test.ts` re-imports the module between probes to reproduce the restart, and that test is the one the in-memory version fails. |
+| Fails, never skips | Per §3bx: a skipped test reports coverage it does not have. Every test after the latch fails immediately with the reason — 5.4 hours becomes minutes. |
+| Attribution | Latching writes `results/APP-WEDGED.txt`; `global-teardown` prints a banner stating the later failures are **one fact**, not N defects. `global-teardown` also archives `app-dev.log` per run, because the product truncates it on every app start and four later runs had already destroyed the only evidence of the original event. |
+| Escape hatch | `E2E_WEDGE_GUARD=off`, which announces itself on stderr rather than going quiet. Budgets: `E2E_WEDGE_BACKEND_MS` (5 s), `E2E_WEDGE_PROBE_MS` (15 s). |
+
+**A healthy suite can never exercise this guard**, so its decision logic is pinned
+by `e2e/__tests__/wedgeGuard.test.ts` against a fake page — eight tests covering
+the healthy path, the single-slow-probe path, the latch, the short-circuit, the
+off switch, and the three cross-restart properties. Sabotage-checked twice:
+relaxing the two-consecutive rule reds two tests, and moving the counter back
+into module memory reds exactly the restart test.
+
+That test file sets `E2E_WEDGE_STATE_DIR` to a temp directory before importing
+the guard. Without it the test writes the REAL marker, which would latch a
+concurrently running E2E suite and fail every remaining test in it — a unit test
+able to red a live run.
+
+### 6. `zz-persisted-residue.spec.ts` + `volatilePersistedState.ts` — is the app still configured the way the run found it?
+
+*Why.* The functional project's `zz-workbook-residue.spec.ts` had no journey
+counterpart. On 2026-08-16 `shapes-hometab.spec.ts` test 8 customised the Home-tab
+ribbon, the app wedged mid-test, and its `finally` — which is correctly written —
+could not do its work, because `restoreDefaultHomeLayout` needs a **living app**
+to reload. The residue survived into the next project, which failed
+`ribbon-core-default-ribbon.png` with `deleteColumn` clipped out of the Cells
+group: the visual project reporting a red golden for something no visual spec did.
+
+*The structural lesson.* **Cleanup-on-exit cannot be relied on when the failure
+mode is "the app died"** — the cases that leave residue are exactly the cases with
+no app left to clean up with. Making the teardown more robust cannot fix that. So
+the reset runs on the way **IN**, immediately after `assertAppMounted`, the one
+moment the app is known-healthy. Both belong: the `finally` keeps a passing run
+tidy, the run-start sweep keeps a *crashed* one from spreading.
+
+*Two things it gets right that are easy to get wrong:*
+
+- **It sweeps by PREFIX, not by list** (`calcula.`, `calcula-`, `calcula:`, `ext.`
+  — three separators because the convention drifted, and a sweep that knew only
+  `calcula.` would miss `calcula-panel-placements`). The `ext.<extensionId>.<key>`
+  family cannot be enumerated even in principle.
+- **It asks "is the value DEFAULT", not "is the key present".** The guard's first
+  draft asserted absence and failed on a clean app: `calcula-task-pane` and
+  `calcula-panel-placements` are `zustand/persist` stores that write themselves on
+  hydration. A check that reds a clean run is one somebody switches off. For the
+  same reason the run-start sweep reports a *leak* only when a cleared value was
+  non-default — it clears something on essentially every run, and an alarm that
+  always fires is one nobody reads.
+
+**The reload is not optional.** Removing a key is not enough: the owning stores
+are alive in the page and write back on change or shutdown. Clearing
+`calcula.homeTab.layout` on a running app left the ribbon customised **and** the
+key re-saved from memory.
+
+One catalogue in `volatilePersistedState.ts` serves both the sweep and the guard,
+each entry citing the default it checks against. They were briefly two lists and
+had already disagreed about what `calcula-task-pane` does.
 
 ---
 

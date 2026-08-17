@@ -227,10 +227,60 @@ reproduction fixture — which is the first thing anyone picking it up should bu
 | **The soak walker's formula alphabet is six formulas.** `FORMULAS` is exactly `SUM`, `&`, `IF`, `AVERAGE`, `COUNT`, `MAX` (`e2e/walker/actionCatalog.ts:129-136`). Widening it changes what the committed seeds mean, so it belongs to a pass that can re-baseline them. | `actionCatalog.ts:129-136` |
 | **Only charts are re-synced after the walker's `new_file`.** `deepResetForWalk` calls `resyncChartStoreToBackend` and nothing equivalent for sparklines, slicers or pane controls, which sit on the same fan-out (`e2e/walker/reset.ts:242,281`). The chart case is the one BUG-0075 photographed; the others are the same shape, unphotographed. | `e2e/walker/reset.ts:242,281` |
 | **The two `evaluate-formula` goldens assert residue, not their feature.** `grid-evaluate-formula-init` and `-constant` are whole-grid captures of a spec whose subject is off-screen until its own `navigateTo`, so they photograph whatever the preceding specs left on rows 1-26. Stable now, but they are layout assertions wearing a feature's name. Turning them into region captures of the AI column is a golden change owned by that spec. | `e2e/tests/__screenshots__/evaluate-formula.spec.ts/`, §30f |
-| **The journey project has no side-panel residue guard.** `zz-workbook-residue.spec.ts` exists under `e2e/tests` (functional) and has **no counterpart** under `e2e/journeys` — confirmed by listing both directories. An open side panel left by a journey spec is invisible to that project, which is how a run once lost 10 tests behind a 1218 -> 898 px canvas. | `e2e/tests/zz-workbook-residue.spec.ts` exists; `e2e/journeys/` has none |
+| ~~**The journey project has no side-panel residue guard.**~~ **CLOSED 2026-08-16.** `e2e/journeys/zz-persisted-residue.spec.ts` now runs last and asserts the app-owned storage namespaces are at their DEFAULTS. Two corrections came out of building it, both worth keeping: (1) the guard must assert *value is default*, not *key is absent* — its first draft failed on a clean app because `calcula-task-pane` and `calcula-panel-placements` are `zustand/persist` stores that write themselves on hydration, and a check that reds a clean run is one somebody switches off; (2) the 1218 -> 898 px canvas class is **not** this key — `partialize` persists only `{width, dockMode}` and deliberately omits `isOpen`, so an open pane cannot survive a reload at all. The teardown side is necessary but insufficient, so the same catalogue also drives a reset on the way IN (next row). | `e2e/journeys/zz-persisted-residue.spec.ts`, `e2e/volatilePersistedState.ts`, `useTaskPaneStore.ts:219-224` |
+| **Cleanup-on-exit cannot run when the app is dead — so the reset moved to run START.** `shapes-hometab.spec.ts` test 8 *does* restore the ribbon in a `finally`; on 2026-08-16 the app wedged mid-test, `restoreDefaultHomeLayout` needed a living app to reload, and it swallowed its own failure. The injected `rowBreak` survived into the next project, which failed `ribbon-core-default-ribbon.png` with `deleteColumn` clipped out — the visual project reporting a red golden for something no visual spec did. `e2e/volatilePersistedState.ts` now sweeps the app storage namespaces by PREFIX immediately after `assertAppMounted`, when the app is known-healthy. It sweeps rather than lists because the `ext.<extensionId>.<key>` family cannot be enumerated even in principle. It reports a leak **only** when a cleared value was non-default; a sweep clears something on essentially every run, and an alarm that always fires is one nobody reads. | `e2e/volatilePersistedState.ts`, `e2e/global-setup.ts` |
 | **Completed Playwright runs leave orphaned process trees.** After every project reported exit 0, five node processes plus an `app.exe` were still driving the application minutes later, and the next launch failed on port 5173. Recorded rather than filed because the zero-gap invocation pattern was introduced by the pass that saw it — but the regression runner also drives projects back to back. Cheapest mitigations, in order: a settle gap plus a "no `app.exe`, nothing on 9222 or 5173" precondition between projects, and a teardown that verifies the tree it killed is gone rather than trusting `taskkill /T`. | §39g |
 
-### 2.5 The startup gap that no gate covers
+### 2.5 The backend can stop answering mid-run, and nothing could see it (BUG-0098)
+
+**Open, unreproduced, and deliberately not "fixed".** On 2026-08-16 a journey run failed **64
+consecutive tests over 5.4 hours**, every one on timeout, none on an assertion. The first failing
+spec (`document-store-leak`) contains **zero Playwright locators** — every step is
+`page.evaluate(() => __TAURI__.core.invoke(...))` — so its 300 s timeouts cannot be blamed on a
+selector, a repaint, or anything in the DOM. The backend simply never returned.
+
+**Why nothing stopped it.** The harness had two liveness notions and neither can see this state:
+`connectWithRetry` proves *CDP accepted a connection*; `assertAppMounted` proves *a DOM node became
+visible*, and it runs **once**, before the first test. A wedged backend falsifies neither. Playwright
+rebuilds the worker after every failed test, so all 64 rebuilds ran that check and all 64 reported a
+healthy app. With `maxFailures: 0` and `globalTimeout: 0` there was no bail-out, so every remaining
+test paid its **full** timeout.
+
+**What was ruled out, by running it.** `document-store-leak` alone: 7/7 pass. Specs 7-8 + dsl: 13
+pass. Specs 1-6 + dsl: 33 pass. The **full journey project, unmodified: 156 passed in 27.8 minutes.**
+Not that spec, not that ordering, not deterministic. The three harness death-modes are excluded on
+timing alone — each fails fast (3 s / instantly / 60 s) where these burned 300 s.
+
+**The mechanism is NOT claimed.** A lock-order inversion is the leading candidate on this project's
+history, but nothing here proves it, and two decisive pieces of evidence were destroyed by design:
+`init_log_file` opens the app log with `.truncate(true)` on **every app start**, so four later runs
+overwrote the backend's only account of itself, and `results.json` is overwritten per run. Fixing
+product locks without a reproduction would be guessing.
+
+**What was built instead** — make the next occurrence cheap, attributed, and diagnosable:
+
+| | |
+|---|---|
+| `e2e/wedgeGuard.ts` | Probes the backend with a real `get_cell` before every test. The race is **double** because `page.evaluate` has no timeout in Playwright's API: an inner race bounds the *invoke* (distinguishing a wedged backend from a wedged renderer), an outer one bounds the *evaluate*. Latches after **two consecutive** unanswered probes — one slow answer is not a wedge, and a guard that latches on one is worse than the disease. It **fails**, never skips (§3bx): a skipped test reports coverage it does not have. |
+| `e2e/wedgeMarker.ts` + `global-teardown.ts` | Same three-stage pattern as `appDiedMarker`: setup clears, the fixture writes, teardown prints a banner saying the failures are **one fact**, not 64 defects. |
+| `global-teardown.ts` log archive | Copies `app-dev.log` to `results/app-logs/app-dev-<stamp>.log` (last 10 kept), so the next run no longer destroys this run's evidence. |
+| `app/e2e/__tests__/wedgeGuard.test.ts` | 8 tests pinning the decision logic against a fake page, since a healthy suite can never exercise it. Sabotage-checked twice: relaxing the two-consecutive rule reds 2 tests, and moving the counter into module memory reds exactly the restart test. |
+
+**The one subtlety worth carrying forward.** The pre-latch counter is on DISK, and
+the obvious implementation is silently broken. Playwright rebuilds the worker after every failed
+test, and a rebuilt worker re-imports the module with fresh state — so on a wedged app (where every
+test fails) a module-level `let` resets between every pair of probes, the count never reaches two,
+and the guard degrades into a log line while the run still costs 5.4 hours. An in-process unit test
+cannot see it; `wedgeGuard.test.ts` re-imports the module between probes to reproduce the restart.
+
+**To close it:** a reproduction. The next occurrence leaves `e2e/results/APP-WEDGED.txt` naming the
+test it was first seen before, and an archived app log. Start there.
+
+**Recommended, not done** (it is a product change, not test infrastructure): `init_log_file` should
+append or rotate rather than truncate. The harness archive is a workaround for a product behaviour
+that destroys diagnostic evidence on every start.
+
+### 2.6 The startup gap that no gate covers
 
 **Nothing in the tree proves the app can be linked at all.** Verified against CI, not inferred:
 `.github/workflows/ci.yml` runs `npm run check-types`, `npm test`, and — in a job whose
