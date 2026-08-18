@@ -489,9 +489,30 @@ function wrapText(
 }
 
 /**
+ * The line weight a border STYLE paints at, in logical pixels. The style string
+ * decides the weight; `BorderSideData.width` is the backend's 0..3 weight and is
+ * read only as an on/off gate at the call sites. Exported so the border pass can
+ * resolve a contested boundary by weight without a second copy of this map.
+ */
+export function borderLineWidth(style: string): number {
+  if (style === "medium") return 2;
+  if (style === "thick") return 3;
+  return 1;
+}
+
+/** One cell EDGE border, captured during the cell pass and stroked afterwards. */
+interface QueuedBorder {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  border: { style: string; color: string; width: number };
+}
+
+/**
  * Draw a single border line between two points with the given border style.
  */
-function drawBorderLine(
+export function drawBorderLine(
   ctx: CanvasRenderingContext2D,
   x1: number,
   y1: number,
@@ -502,14 +523,43 @@ function drawBorderLine(
   ctx.save();
   ctx.strokeStyle = border.color;
 
-  // Map style name to line width
-  let lineWidth = 1;
-  if (border.style === "medium") {
-    lineWidth = 2;
-  } else if (border.style === "thick") {
-    lineWidth = 3;
-  }
-  ctx.lineWidth = lineWidth;
+  const lineWidth = borderLineWidth(border.style);
+
+  // DEVICE-PIXEL SNAPPING. The canvas transform is a pure scale by
+  // devicePixelRatio*zoom, so a logical coordinate must be taken into DEVICE
+  // space before it can be snapped at all. `drawGridLines` has always done this
+  // for its hairline (rendering/grid.ts:189-191); borders never did. Because row
+  // boundaries are integral (defaultCellHeight 20) while column boundaries are
+  // not (defaultCellWidth 64.29, core/types/types.ts:256), on a dpr-1 machine
+  // every VERTICAL border smeared across two partially covered device pixels
+  // while horizontal ones came out solid.
+  //
+  // MEASURED, from the trace of the test that caught this: the 5x12 probe band
+  // on the right edge of X63 held, on every one of its 12 rows,
+  //     255,255,255 | 255,107,107 | 238,131,131 | 255,255,255 | 255,255,255
+  // i.e. one red line spread over two pixels at ~58%/42% -- against a predicate
+  // needing >=64.7% coverage, so it read as NO red at all. The top edge of the
+  // same outline was a single fully covered row of pure 255,0,0.
+  //
+  // A stroke of W device pixels centred at device coordinate d covers
+  // [d - W/2, d + W/2], which lands on whole device pixels only when d - W/2 is
+  // an integer: an ODD W must sit on a pixel CENTRE, an EVEN W on a pixel EDGE.
+  // Worked, boundary x = 150.58 (rowHeaderWidth 22 + 2 * 64.29):
+  //   dpr 1  thin   -> 151.5, lw 1 -> device [151,152]   (the pixel grid.ts picks)
+  //   dpr 1  medium -> 151,   lw 2 -> device [150,152]   (the smear, gone)
+  //   dpr 1  thick  -> 151.5, lw 3 -> device [150,153]
+  //   dpr 2  medium -> 150.5, lw 2 -> device [299,303]
+  // For W = 1 at dpr 1 this reduces algebraically to grid.ts:191, which is why
+  // the odd case uses Math.round(d) + 0.5 rather than the nearer-centre form: a
+  // thin border must land on the SAME device pixel as the gridline it replaces,
+  // or toggling gridlines would shift it.
+  const deviceScale = (ctx.getTransform?.().a) || 1;
+  const deviceWidth = Math.max(1, Math.round(lineWidth * deviceScale));
+  ctx.lineWidth = deviceWidth / deviceScale;
+  const snap = (v: number): number => {
+    const edge = Math.round(v * deviceScale);
+    return (deviceWidth % 2 === 1 ? edge + 0.5 : edge) / deviceScale;
+  };
 
   // Set dash pattern
   if (border.style === "dashed") {
@@ -520,30 +570,50 @@ function drawBorderLine(
     ctx.setLineDash([]);
   }
 
-  if (border.style === "double") {
-    // Double border: draw two lines with a gap
-    const offset = 1.5;
-    const isHorizontal = y1 === y2;
-    const isVertical = x1 === x2;
+  const isHorizontal = y1 === y2;
+  const isVertical = x1 === x2;
 
-    ctx.lineWidth = 1;
+  if (border.style === "double") {
+    // Double border: two 1-device-px rules with a gap.
+    //
+    // BOTH RULES COME FROM ONE SNAPPED BOUNDARY. Snapping each rule
+    // independently is what breaks: Math.round ties UP, so on an INTEGRAL
+    // boundary (row boundaries are integral) y-1.5 and y+1.5 round the SAME
+    // direction and the whole ornament shifts one device pixel off the boundary.
+    //   dpr 1, y = 180: today 178.5/181.5 (device 178 and 181, centred on 180)
+    //                   per-rule snap 179.5/182.5 (centred 181) -- WRONG
+    //                   derived below  178.5/181.5 -- identical to today
+    //   dpr 1, x = 150.58: today 149.08/152.08 (blurred)
+    //                   derived 149.5/152.5, symmetric about the snapped 151
+    // So this is provably a NO-OP on the axis that is already crisp, and only
+    // sharpens the fractional (vertical) one.
+    const offset = 1.5;
+    const halfIn = deviceWidth % 2 === 1 ? 0.5 : 0;
+    const rules = (v: number): [number, number] => {
+      const dEdge = Math.round(v * deviceScale);
+      const dGap = Math.max(1, Math.round(offset * deviceScale));
+      return [(dEdge - dGap + halfIn) / deviceScale, (dEdge + dGap - halfIn) / deviceScale];
+    };
+
     if (isHorizontal) {
+      const [near, far] = rules(y1);
       ctx.beginPath();
-      ctx.moveTo(x1, y1 - offset);
-      ctx.lineTo(x2, y2 - offset);
+      ctx.moveTo(x1, near);
+      ctx.lineTo(x2, near);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(x1, y1 + offset);
-      ctx.lineTo(x2, y2 + offset);
+      ctx.moveTo(x1, far);
+      ctx.lineTo(x2, far);
       ctx.stroke();
     } else if (isVertical) {
+      const [near, far] = rules(x1);
       ctx.beginPath();
-      ctx.moveTo(x1 - offset, y1);
-      ctx.lineTo(x2 - offset, y2);
+      ctx.moveTo(near, y1);
+      ctx.lineTo(near, y2);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(x1 + offset, y1);
-      ctx.lineTo(x2 + offset, y2);
+      ctx.moveTo(far, y1);
+      ctx.lineTo(far, y2);
       ctx.stroke();
     } else {
       // Diagonal line: offset perpendicular to the line direction
@@ -563,8 +633,17 @@ function drawBorderLine(
     }
   } else {
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
+    if (isVertical) {
+      ctx.moveTo(snap(x1), y1);
+      ctx.lineTo(snap(x2), y2);
+    } else if (isHorizontal) {
+      ctx.moveTo(x1, snap(y1));
+      ctx.lineTo(x2, snap(y2));
+    } else {
+      // Diagonal: snapping one axis of a diagonal only skews it.
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+    }
     ctx.stroke();
   }
 
@@ -614,6 +693,46 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   const useOverSelection = hasCellDecorations("over-selection");
   const chromeRects = useOverSelection ? collectChromeRects(state) : [];
   const deferred: DeferredCellDecoration[] = [];
+
+  // Cell EDGE borders, held back until every background in the viewport is down.
+  //
+  // WHY A SECOND PASS IS REQUIRED, NOT MERELY TIDIER. A border straddles the
+  // boundary it names -- a "medium" is 2px centred on the edge, so half of it
+  // lies in the NEXT cell. This loop paints row-major, so cell (r,c) is finished
+  // before (r,c+1). Painted in place, a RIGHT or BOTTOM border spilling forward
+  // is erased the moment the neighbour fills its own background, while LEFT and
+  // TOP borders spill backwards onto already-painted cells and survive. Neither
+  // widening the per-cell clip nor restoring around the border pass fixes that:
+  // the ORDERING is the defect, not only the clip.
+  //
+  // ONE STROKE PER BOUNDARY. Until now the per-cell clip left cell A's right half
+  // and cell B's left half DISJOINT, so both were visible and each was half its
+  // nominal weight. Full-weight strokes at the same coordinate are not disjoint:
+  // a "thick" black right border and a "thin" grey left border would paint
+  // black|grey|black, and an rgba border would double-composite. So contested
+  // boundaries are collapsed here -- HEAVIER WINS, ties to the LATER cell,
+  // preserving the row-major intuition. This IS a behaviour change on a contested
+  // edge, and it is deliberate.
+  //
+  // Diagonals are NOT queued: they are interior lines and stay inside the
+  // per-cell clip, so a 3px "thick" diagonal cannot bleed out of its own box.
+  const deferredBorders = new Map<string, QueuedBorder>();
+  const queueBorder = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    border: { style: string; color: string; width: number },
+  ): void => {
+    // Key on the RAW boundary coordinate, not the snapped one: two weights snap
+    // to different coordinates (at dpr 1, x=150.58 -> medium 151, thin 151.5) and
+    // would then never collide. A's cellRight and B's cellLeft are the identical
+    // float, so exact equality holds.
+    const key = x1 === x2 ? `v|${x1}|${y1}|${y2}` : `h|${y1}|${x1}|${x2}`;
+    const prev = deferredBorders.get(key);
+    if (prev && borderLineWidth(border.style) < borderLineWidth(prev.border.style)) return;
+    deferredBorders.set(key, { x1, y1, x2, y2, border });
+  };
 
   // Cell types render as their own content (suppressed in Show Formulas mode,
   // where the raw value/formula must stay visible).
@@ -708,16 +827,16 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
             }
             // Draw CF border overrides on empty cells
             if (effective.borderTopColor) {
-              drawBorderLine(ctx, cellLeft, cellTop, cellRight, cellTop, { style: effective.borderTopStyle || "solid", color: effective.borderTopColor, width: 1 });
+              queueBorder(cellLeft, cellTop, cellRight, cellTop, { style: effective.borderTopStyle || "solid", color: effective.borderTopColor, width: 1 });
             }
             if (effective.borderBottomColor) {
-              drawBorderLine(ctx, cellLeft, cellBottom, cellRight, cellBottom, { style: effective.borderBottomStyle || "solid", color: effective.borderBottomColor, width: 1 });
+              queueBorder(cellLeft, cellBottom, cellRight, cellBottom, { style: effective.borderBottomStyle || "solid", color: effective.borderBottomColor, width: 1 });
             }
             if (effective.borderLeftColor) {
-              drawBorderLine(ctx, cellLeft, cellTop, cellLeft, cellBottom, { style: effective.borderLeftStyle || "solid", color: effective.borderLeftColor, width: 1 });
+              queueBorder(cellLeft, cellTop, cellLeft, cellBottom, { style: effective.borderLeftStyle || "solid", color: effective.borderLeftColor, width: 1 });
             }
             if (effective.borderRightColor) {
-              drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, { style: effective.borderRightStyle || "solid", color: effective.borderRightColor, width: 1 });
+              queueBorder(cellRight, cellTop, cellRight, cellBottom, { style: effective.borderRightStyle || "solid", color: effective.borderRightColor, width: 1 });
             }
           }
           if (useDecorations || useOverSelection) {
@@ -1096,7 +1215,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
             ];
             for (const { b, x1, y1, x2, y2 } of ocBorders) {
               if (b && b.style !== "none" && b.width > 0) {
-                drawBorderLine(ctx, x1, y1, x2, y2, b);
+                queueBorder(x1, y1, x2, y2, b);
               }
             }
           }
@@ -1120,16 +1239,16 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       const bDiagUp = baseCellStyle.borderDiagonalUp;
 
       if (bTop && bTop.style !== "none" && bTop.width > 0) {
-        drawBorderLine(ctx, cellLeft, cellTop, cellRight, cellTop, bTop);
+        queueBorder(cellLeft, cellTop, cellRight, cellTop, bTop);
       }
       if (bBottom && bBottom.style !== "none" && bBottom.width > 0) {
-        drawBorderLine(ctx, cellLeft, cellBottom, cellRight, cellBottom, bBottom);
+        queueBorder(cellLeft, cellBottom, cellRight, cellBottom, bBottom);
       }
       if (bLeft && bLeft.style !== "none" && bLeft.width > 0) {
-        drawBorderLine(ctx, cellLeft, cellTop, cellLeft, cellBottom, bLeft);
+        queueBorder(cellLeft, cellTop, cellLeft, cellBottom, bLeft);
       }
       if (bRight && bRight.style !== "none" && bRight.width > 0) {
-        drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, bRight);
+        queueBorder(cellRight, cellTop, cellRight, cellBottom, bRight);
       }
       // Diagonal down: top-left to bottom-right (\)
       if (bDiagDown && bDiagDown.style !== "none" && bDiagDown.width > 0) {
@@ -1497,5 +1616,28 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   }
 
   // Handed to drawDeferredCellDecorations() once the selection chrome is down.
+  // ---------------------------------------------------------------------
+  // BORDER PASS
+  // ---------------------------------------------------------------------
+  // Every background in the viewport is down, so a border may now straddle its
+  // boundary without the next cell's background erasing the half on its side.
+  //
+  // The clip is INSURANCE, not load-bearing: cellLeft/cellTop are clamped to the
+  // gutters, so a straddling border on the first visible row/column could reach
+  // ~1.5px into a gutter -- which the header repaint covers anyway (headers are
+  // drawn after this pass), and which is a no-op when headings are hidden and
+  // both gutters are 0. It is kept so this pass does not DEPEND on that
+  // ordering. Do not delete it as dead code.
+  if (deferredBorders.size > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(rowHeaderWidth, colHeaderHeight, width - rowHeaderWidth, height - colHeaderHeight);
+    ctx.clip();
+    for (const b of deferredBorders.values()) {
+      drawBorderLine(ctx, b.x1, b.y1, b.x2, b.y2, b.border);
+    }
+    ctx.restore();
+  }
+
   return deferred;
 }

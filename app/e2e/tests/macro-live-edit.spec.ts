@@ -594,6 +594,238 @@ async function buttonCanvasPoint(
   );
 }
 
+// ---------------------------------------------------------------------------
+// WHY THE BUTTON CLICK IS INSTRUMENTED
+// ---------------------------------------------------------------------------
+// On 2026-08-18 the baseline step of test 3 failed with the output cell empty
+// after a 60 SECOND poll, and the failure could not be attributed for a day,
+// because the only thing the test observed was the cell. "The click never
+// arrived", "the click arrived and the run path broke" and "the run happened and
+// wrote nothing" are three different defects with three different owners, and an
+// empty cell is all three.
+//
+// Two independent investigations then disagreed about the cause and BOTH were
+// wrong in the same way: they reconstructed the geometry from the source instead
+// of measuring it. One blamed a success toast overlapping the click point; the
+// measured toast top edge is 705.6 and the click is dispatched at y=705.0, so it
+// misses by 0.6 px.
+//
+// So the delivery question is now asked of the product ITSELF, before the click:
+// `hitTestOverlays` (app/src/api/gridOverlays.ts:252) is the very function the
+// canvas click path consults. If it returns the button's region for the point we
+// are about to click, the click was deliverable and any failure is downstream. If
+// it returns null, the test's own aim is wrong and no product defect is implied.
+// That single call replaces the whole class of argument-from-arithmetic.
+//
+// Note the click is dispatched with `force: true`, which SKIPS actionability — a
+// point that lands on nothing dispatches into nothing and throws nothing. That is
+// why the probe has to be explicit; Playwright will not complain.
+
+interface DeliveryProbe {
+  /** Canvas-relative point the click will be dispatched at. */
+  point: { x: number; y: number };
+  /** Page coordinates of that point, for comparison against fixed overlays. */
+  pagePoint: { x: number; y: number };
+  /** Did the PRODUCT'S OWN hit test find a floating control there? */
+  hit: null | { id: string; controlType: string; row: number; col: number };
+  /** Every floating-control region, so a near-miss is visible as a near-miss. */
+  regions: Array<{ id: string; x: number; y: number; width: number; height: number }>;
+  /** What the DOM says is on top at that page point. */
+  topElement: { tag: string; isCanvas: boolean; overlay: string | null };
+  /** Toasts on screen at click time. */
+  toasts: string[];
+  designMode: boolean | null;
+}
+
+async function probeButtonDelivery(
+  page: Page,
+  point: { x: number; y: number },
+): Promise<DeliveryProbe> {
+  return page.evaluate(async (pt) => {
+    const gs = (window as any).__CALCULA_GRID_STATE__;
+    if (!gs) throw new Error("__CALCULA_GRID_STATE__ is not exposed — is the app running?");
+    const cfg = gs.config ?? {};
+    const overlays: any = await (window as any).__calcImport(
+      new URL("/src/api/gridOverlays.ts", document.baseURI).href,
+    );
+
+    // The product's own hit test, with the product's own scroll/header values.
+    const hitRegion = overlays.hitTestOverlays(
+      pt.x,
+      pt.y,
+      0,
+      0,
+      gs.viewport?.scrollX ?? 0,
+      gs.viewport?.scrollY ?? 0,
+      cfg.rowHeaderWidth ?? 50,
+      cfg.colHeaderHeight ?? 24,
+    );
+
+    const regions = (overlays.getGridRegions() as any[])
+      .filter((r) => r.type === "floating-control" && r.floating)
+      .map((r) => ({
+        id: String(r.id),
+        x: r.floating.x,
+        y: r.floating.y,
+        width: r.floating.width,
+        height: r.floating.height,
+      }));
+
+    // Canvas-relative -> page, so the DOM question is asked in DOM coordinates.
+    const canvas = document.querySelector("canvas");
+    const rect = canvas ? canvas.getBoundingClientRect() : { left: 0, top: 0 };
+    const pageX = rect.left + pt.x;
+    const pageY = rect.top + pt.y;
+    const el = document.elementFromPoint(pageX, pageY);
+
+    // If something other than the canvas is on top, name the overlay it belongs
+    // to — a bare tag name does not tell you WHAT swallowed the click.
+    let overlay: string | null = null;
+    if (el && el.tagName.toLowerCase() !== "canvas") {
+      let node: Element | null = el;
+      while (node) {
+        if (node instanceof HTMLElement) {
+          if (node.hasAttribute("data-toast")) {
+            overlay = `[data-toast] "${(node.textContent ?? "").trim().slice(0, 80)}"`;
+            break;
+          }
+          const cs = getComputedStyle(node);
+          if (cs.position === "fixed") {
+            overlay = `fixed ${node.tagName.toLowerCase()} z=${cs.zIndex} rect=${JSON.stringify(
+              node.getBoundingClientRect().toJSON(),
+            )}`;
+            break;
+          }
+        }
+        node = node.parentElement;
+      }
+      if (!overlay) overlay = `<${el.tagName.toLowerCase()}> (not fixed, not a toast)`;
+    }
+
+    const toasts = Array.from(document.querySelectorAll("[data-toast]")).map((t) =>
+      (t.textContent ?? "").trim().slice(0, 120),
+    );
+
+    let designMode: boolean | null = null;
+    try {
+      const dm: any = await (window as any).__calcImport(
+        new URL("/src/api/designMode.ts", document.baseURI).href,
+      );
+      designMode = dm.getDesignMode() === true;
+    } catch {
+      designMode = null;
+    }
+
+    return {
+      point: { x: pt.x, y: pt.y },
+      pagePoint: { x: pageX, y: pageY },
+      hit: hitRegion
+        ? {
+            id: String(hitRegion.id),
+            controlType: String(hitRegion.data?.controlType ?? "(none)"),
+            row: Number(hitRegion.data?.row ?? -1),
+            col: Number(hitRegion.data?.col ?? -1),
+          }
+        : null,
+      regions,
+      topElement: {
+        tag: el ? el.tagName.toLowerCase() : "(none)",
+        isCanvas: !!el && el.tagName.toLowerCase() === "canvas",
+        overlay,
+      },
+      toasts,
+      designMode,
+    };
+  }, point);
+}
+
+/**
+ * Clear the toast backlog so anything read after a click belongs to THAT click.
+ * The sibling spec does this before the identical gesture
+ * (`macro-link-model.spec.ts:456-462`); this one did not, which is why its
+ * diagnosis would have quoted the "Button created at …" toast from setup.
+ */
+async function dismissToasts(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    document
+      .querySelectorAll("[data-toast] button")
+      .forEach((b) => (b as HTMLButtonElement).click());
+  });
+}
+
+/**
+ * Dismiss stale toasts, aim, PROVE the point is deliverable, then click.
+ * Returns the probe so the failure path can report it.
+ */
+async function clickButtonControl(
+  page: Page,
+  grid: any,
+  ctrl: { row: number; col: number },
+): Promise<DeliveryProbe> {
+  // MEASURED 2026-08-18, A/B on this exact spec: WITHOUT this dismissal the run
+  // fails (1 failed / 4 passed), WITH it the run passes (5 passed). The probe
+  // below names the cause outright — the product's own hit test HITS the button
+  // at the click point, while `document.elementFromPoint` returns a <div> inside
+  // the "Button created at P63" toast. The click is deliverable and eaten.
+  //
+  // Do not replace this with a wait: the toast lives 5 s and the click is 312 ms
+  // after it appears, so a sleep would work by coincidence and rot the moment the
+  // duration changes.
+  await dismissToasts(page);
+  const point = await buttonCanvasPoint(page, ctrl.row, ctrl.col);
+  const probe = await probeButtonDelivery(page, point);
+  await grid.canvas.click({ position: point, force: true });
+  return probe;
+}
+
+/**
+ * Everything the empty cell cannot say. Attached to the poll failure so the test
+ * fails with a cause rather than a symptom.
+ */
+async function diagnoseSilentButton(
+  page: Page,
+  macroId: string | null,
+  probe: DeliveryProbe,
+): Promise<string> {
+  const source = macroId ? await storedSource(page, macroId).catch(() => "(unreadable)") : "(no id)";
+  const deliverable = probe.hit !== null;
+  return [
+    "",
+    "--- why did the button write nothing? --------------------------------",
+    `click point:      canvas ${JSON.stringify(probe.point)}  page ${JSON.stringify(probe.pagePoint)}`,
+    `product hit test: ${
+      deliverable
+        ? `HIT ${probe.hit!.controlType} id=${probe.hit!.id} at r${probe.hit!.row}c${probe.hit!.col}`
+        : "MISS — hitTestOverlays found no floating control at that point"
+    }`,
+    `  => ${
+      deliverable
+        ? "the click WAS deliverable; the defect is downstream of hit-testing (run path)"
+        : "the click was NOT deliverable; the TEST's aim is wrong — no product defect implied"
+    }`,
+    `floating regions: ${
+      probe.regions.length === 0
+        ? "(none registered — the button never reached the floating store)"
+        : JSON.stringify(probe.regions)
+    }`,
+    `topmost element:  <${probe.topElement.tag}>${
+      probe.topElement.isCanvas ? " (the grid canvas — nothing is covering it)" : ""
+    }${probe.topElement.overlay ? `  COVERED BY: ${probe.topElement.overlay}` : ""}`,
+    `design mode:      ${probe.designMode === null ? "unknown" : probe.designMode}${
+      probe.designMode ? "  <-- ON: a click SELECTS the control instead of running it" : ""
+    }`,
+    `toasts at click:  ${probe.toasts.length === 0 ? "(none)" : JSON.stringify(probe.toasts)}`,
+    `toasts now:       ${JSON.stringify(await page.evaluate(() =>
+      Array.from(document.querySelectorAll("[data-toast]")).map((t) =>
+        (t.textContent ?? "").trim().slice(0, 120),
+      ),
+    ))}`,
+    "stored source:",
+    source.split("\n").map((l) => `  | ${l}`).join("\n"),
+    "----------------------------------------------------------------------",
+  ].join("\n");
+}
+
 async function readDesignMode(page: Page): Promise<boolean> {
   return page.evaluate(async () => {
     const mod: any = await (window as any).__calcImport(
@@ -908,11 +1140,26 @@ test.describe("Live macro editing (the VBE model)", () => {
 
       await test.step("baseline: the button runs the ORIGINAL macro", async () => {
         await clearCells(page, [BTN_OUT_CELL]);
-        const point = await buttonCanvasPoint(page, BTN_CTRL.row, BTN_CTRL.col);
-        await grid.canvas.click({ position: point, force: true });
-        await expect
-          .poll(async () => readCell(page, BTN_OUT_CELL.row, BTN_OUT_CELL.col), { timeout: 60_000 })
-          .toBe(ORIGINAL);
+        const probe = await clickButtonControl(page, grid, BTN_CTRL);
+        // Assert DELIVERY separately from OUTCOME. Without this the next line's
+        // 60-second timeout is the only evidence, and it cannot tell a click that
+        // never landed from a run path that is broken.
+        expect(
+          probe.hit,
+          `the click point ${JSON.stringify(probe.point)} hit no floating control — ` +
+            `the button is not where the test aimed, so nothing downstream is implicated. ` +
+            `Regions: ${JSON.stringify(probe.regions)}`,
+        ).not.toBeNull();
+        try {
+          await expect
+            .poll(async () => readCell(page, BTN_OUT_CELL.row, BTN_OUT_CELL.col), { timeout: 60_000 })
+            .toBe(ORIGINAL);
+        } catch (e) {
+          throw new Error(
+            `${e instanceof Error ? e.message : String(e)}\n` +
+              (await diagnoseSilentButton(page, macroId, probe)),
+          );
+        }
       });
 
       const editorPage = await openMacroInEditor(page, grid, macroName);
@@ -932,11 +1179,22 @@ test.describe("Live macro editing (the VBE model)", () => {
       await test.step("the SAME button now writes the EDITED value", async () => {
         await clearCells(page, [BTN_OUT_CELL]);
         expect(await readCell(page, BTN_OUT_CELL.row, BTN_OUT_CELL.col)).toBe("");
-        const point = await buttonCanvasPoint(page, BTN_CTRL.row, BTN_CTRL.col);
-        await grid.canvas.click({ position: point, force: true });
-        await expect
-          .poll(async () => readCell(page, BTN_OUT_CELL.row, BTN_OUT_CELL.col), { timeout: 60_000 })
-          .toBe(EDITED);
+        const probe = await clickButtonControl(page, grid, BTN_CTRL);
+        expect(
+          probe.hit,
+          `the click point ${JSON.stringify(probe.point)} hit no floating control — ` +
+            `the button is not where the test aimed. Regions: ${JSON.stringify(probe.regions)}`,
+        ).not.toBeNull();
+        try {
+          await expect
+            .poll(async () => readCell(page, BTN_OUT_CELL.row, BTN_OUT_CELL.col), { timeout: 60_000 })
+            .toBe(EDITED);
+        } catch (e) {
+          throw new Error(
+            `${e instanceof Error ? e.message : String(e)}\n` +
+              (await diagnoseSilentButton(page, macroId, probe)),
+          );
+        }
         expect(
           await readCell(page, BTN_OUT_CELL.row, BTN_OUT_CELL.col),
           "decisively not the pre-edit version",

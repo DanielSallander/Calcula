@@ -33,9 +33,22 @@ function ToastItem({ toast }: { toast: ToastItem }): React.ReactElement {
         border: `1px solid ${style.border}`,
         borderRadius: 6,
         boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-        // The toast ITSELF is interactive (its OK button) even though the
-        // container around it is click-through — see ToastContainer.
-        pointerEvents: "auto",
+        // CLICK-THROUGH, like the container — and for the same reason, which was
+        // only half-fixed there. The container comment below explains that a
+        // LAYOUT BOX at z-index 9999 over the grid swallows clicks; this box is
+        // 380px wide and ~58px tall and was doing exactly that for the 5 seconds
+        // a toast lives, in the bottom-right corner of every user's grid.
+        //
+        // MEASURED 2026-08-18, not theorised: `macro-live-edit.spec.ts` places a
+        // button at P63, the product shows "Button created at P63", and the click
+        // 312 ms later is EATEN. The product's own `hitTestOverlays` returns the
+        // button's region for that exact point while `document.elementFromPoint`
+        // returns a <div> inside the toast. A/B on that spec: without dismissing
+        // the toast 1 test fails, with it 5 pass.
+        //
+        // Only the OK button needs to be a surface, so only the OK button gets
+        // `pointerEvents: "auto"`. Everything else about the toast is text.
+        pointerEvents: "none",
         fontSize: 13,
         fontFamily: "system-ui, -apple-system, sans-serif",
         // Text stays literal-dark: the variant backgrounds above are fixed light
@@ -60,6 +73,9 @@ function ToastItem({ toast }: { toast: ToastItem }): React.ReactElement {
           padding: "2px 6px",
           borderRadius: 3,
           flexShrink: 0,
+          // The ONE surface in the toast. Its parent is click-through, so this
+          // must re-enable pointer events or the toast becomes undismissable.
+          pointerEvents: "auto",
         }}
         onMouseEnter={(e) => {
           (e.target as HTMLElement).style.backgroundColor = "#e0e0e0";

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 100,
+  "nextId": 103,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -3944,6 +3944,104 @@
         "digestDiffPaths": []
       },
       "notes": "Sibling of BUG-0086, same harm class, different spelling. As-built record: docs/design/open-item-1-6-calp-media-bound-2026-08-17.md. The generalisable lesson: when a host validates something another engine will parse, the host parser must accept AT LEAST everything that engine accepts, or the difference is a bypass."
+    },
+    {
+      "id": "BUG-0100",
+      "status": "fixed",
+      "discovered": "2026-08-18",
+      "source": {
+        "kind": "e2e",
+        "seed": null,
+        "runId": "macro-live-edit.spec.ts test 3 failed on a freshly launched app on 2026-08-18, having also failed at 07:07:35Z and 08:01:02Z in an earlier multi-spec session; instrumented and attributed the same day"
+      },
+      "violation": {
+        "oracleId": "toast-swallows-grid-click",
+        "message": "A TOAST NOTIFICATION IS A CLICK SURFACE OVER THE GRID, SO ANY ON-GRID CONTROL IN THE BOTTOM-RIGHT IS DEAD FOR THE 5 SECONDS THE TOAST LIVES. ToastContainer already sets pointerEvents:'none' on the container, and its comment explains why (a layout box at z-index 9999 over the grid swallows clicks). The fix was applied to the container only: each ToastItem re-enabled pointerEvents:'auto' on its whole 380x~58 box, so the same defect survived at a smaller size. WHAT WAS OBSERVED: the product announces 'Button created at P63'; a click on that button 312 ms later never reaches the grid, and the macro's output cell stays empty for a full 60-second poll. WHY IT WAS HARD TO ATTRIBUTE: the test observed only the cell, and an empty cell is equally consistent with 'the click never arrived', 'the click arrived and the run path broke', and 'the macro ran and wrote nothing'. Two separate investigations reconstructed the geometry from source rather than measuring it and reached opposite conclusions; one computed the toast's top border at y=705.6 against a click at y=705.0 and concluded the toast missed by 0.6 px. WHAT SETTLED IT: instrumenting the spec to ask the PRODUCT instead of arithmetic. hitTestOverlays (app/src/api/gridOverlays.ts:252), the same function the canvas click path consults, returns HIT button id=control-0-62-15 at r62c15 for the click point -- so the click was deliverable -- while document.elementFromPoint at the same page point returns a <div> inside [data-toast]. Blink's point hit test lands in the toast despite the 0.6 px arithmetic. CONTROLLED EXPERIMENT (same spec, same lever, only Toast.tsx changed between rows): before the fix, toast-dismissal OFF = 1 failed / 4 passed and ON = 5 passed; after the fix, toast-dismissal OFF = 5 passed. NOT A REGRESSION from any recent commit: the toast body has been a surface since the container-only fix, and nothing clicked that corner of the grid until this test did.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "app/e2e/tests/macro-live-edit.spec.ts:1063 -- '3. a linked button runs the LIVE-edited macro (no save, no reopen)', sub-step 'baseline: the button runs the ORIGINAL macro'. The spec anchors its button at P63, the bottom-right of the grid, which is exactly where ToastContainer is positioned (bottom:36, right:16). Any toast on screen at click time eats the click. Reproduces on a freshly launched app; NOT residue.",
+        "trace": "app/test-results/macro-live-edit-Live-macro-68537-ed-macro-no-save-no-reopen--functional/trace.zip",
+        "actionCount": 1
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "ToastItem set pointerEvents:'auto' on the toast body to keep its OK button clickable. Only the OK button needs to be a surface; the rest of the toast is text.",
+        "suggestedFixArea": "app/src/shell/Toast/Toast.tsx"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src/shell/Toast/Toast.tsx",
+          "app/src/shell/Toast/__tests__/toastClickThrough.test.tsx",
+          "app/e2e/tests/macro-live-edit.spec.ts"
+        ],
+        "diffSummary": "Toast body -> pointerEvents:'none'; the OK button re-enables 'auto' so the toast stays dismissable. New unit test asserts all three layers (body none / OK auto / container none), each sabotage-checked independently: reverting any one reds exactly its own assertion and no other. macro-live-edit.spec.ts additionally gained a delivery probe that asserts hitTestOverlays finds the control BEFORE the outcome poll, and attaches a diagnosis on failure -- so this class can never again cost a day of attribution.",
+        "validatedBy": [
+          "app/src/shell/Toast/__tests__/toastClickThrough.test.tsx",
+          "app/e2e/tests/macro-live-edit.spec.ts"
+        ]
+      },
+      "notes": "The generalisable lesson is about the TEST, not the toast: an assertion that observes only an end state cannot attribute a failure, and a 60-second poll on an empty cell is the most expensive possible way to learn nothing. Assert DELIVERY separately from OUTCOME whenever a gesture crosses a layer boundary. Note also that the click is dispatched with force:true, which skips Playwright's actionability checks -- a point landing on nothing dispatches into nothing and throws nothing, so the harness will not volunteer this."
+    },
+    {
+      "id": "BUG-0101",
+      "status": "fixed",
+      "discovered": "2026-08-18",
+      "source": {
+        "kind": "e2e",
+        "seed": null,
+        "runId": "vba-idioms-wave3.spec.ts:468 'renders edge-only' failed on a freshly launched app on 2026-08-18; diagnosed from the run's own Playwright trace, which stores the sampled pixels"
+      },
+      "violation": {
+        "oracleId": "manual-live-pixel",
+        "message": "EVERY CELL BORDER PAINTED AT HALF ITS NOMINAL WEIGHT, AND VERTICAL ONES SMEARED ACROSS TWO DEVICE PIXELS AT HALF ALPHA. Two stacked defects in app/src/core/lib/gridRenderer/rendering/cells.ts. (1) THE CLIP. The per-cell clip exists to cut overlong TEXT, and the border pass ran inside it. A 'medium' border is 2px centred on the boundary, so the clip discarded the outer half: borders rendered at half weight, wholly inside the cell, instead of straddling the boundary the way Excel draws them. (2) NO DEVICE-PIXEL SNAPPING. drawGridLines has always snapped its hairline (rendering/grid.ts:189-191); drawBorderLine never did. Row boundaries are integral (defaultCellHeight 20) but column boundaries are not (defaultCellWidth 64.29, core/types/types.ts:256), so horizontal borders happened to land on one whole device pixel while vertical ones split across two. WHAT WAS OBSERVED: the test sampled a 5x12 band on the right edge of a red 'medium' outline and got EXACTLY ZERO red pixels, while the TOP edge of the same outline passed its threshold. The trace's stored pixels show every one of the band's 12 rows as 255,255,255 | 255,107,107 | 238,131,131 | 255,255,255 | 255,255,255 -- one red line spread over two pixels at ~58%/42%, against a predicate needing >=64.7% coverage. WHY IT SURFACED ONLY NOW: at dpr 2 the surviving half-stroke is 2 device pixels, so one is always fully covered. The defect is LATENT, not a regression -- it became visible when the machine moved from a 200% display to 100% and the golden corpus followed. A THIRD PROBLEM THE FIX HAD TO SOLVE: once borders straddle the boundary, painting them in place is wrong regardless of the clip. The cell loop is row-major, so a RIGHT or BOTTOM border spilling forward is erased when the neighbour fills its background, while LEFT and TOP borders spill backwards and survive. The ordering is the defect, so the borders are now collected and stroked after every background in the viewport is down.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "app/e2e/tests/vba-idioms-wave3.spec.ts:468 -- '1. setRangeFormat {bold,textColor,numberFormat,borderOutline} on W61:X63 round-trips and renders edge-only', sub-step 'RENDERED: bold percent display + edge-only red outline'. The RIGHT-edge probe expects >0.15 red and receives exactly 0; the TOP-edge probe on the same outline passes. Requires dpr 1 -- at dpr 2 the assertion passes despite the defect.",
+        "trace": "app/test-results/vba-idioms-wave3-Wave-3-VB-1aeaf-trips-and-renders-edge-only-functional/trace.zip",
+        "actionCount": 1
+      },
+      "triage": {
+        "verdict": "product-bug",
+        "confidence": 1,
+        "behaviorIds": [],
+        "rootCauseHypothesis": "The border pass sits inside the per-cell text clip and strokes unsnapped raw coordinates, so half of every stroke is discarded and the remainder lands on a fractional device-pixel boundary on the horizontal axis.",
+        "suggestedFixArea": "app/src/core/lib/gridRenderer/rendering/cells.ts"
+      },
+      "fix": {
+        "status": "fixed",
+        "filesChanged": [
+          "app/src/core/lib/gridRenderer/rendering/cells.ts",
+          "app/src/core/lib/gridRenderer/rendering/cellBorders.test.ts"
+        ],
+        "diffSummary": "drawBorderLine now derives the device scale from the canvas transform and snaps by PARITY (odd device widths to a pixel centre, even to a pixel edge), matching what grid.ts has always done for the gridline hairline -- a thin border provably lands on the same device pixel as the gridline it replaces. Edge borders are queued during the cell pass and stroked in a single pass afterwards, so a border may straddle its boundary without the next cell's background erasing it. Contested boundaries collapse to ONE stroke (heavier wins, ties to the later cell), which is a deliberate behaviour change: at full weight the two halves are coincident rather than disjoint, so without dedupe a thin grey neighbour would punch a stripe through a thick black border and an rgba border would double-composite. The double-border ornament derives BOTH rules from ONE snapped boundary -- snapping each independently makes Math.round tie the same way and shifts the whole ornament off an already-crisp integral boundary. Diagonals stay inside the per-cell clip and are not snapped, since snapping one axis of a diagonal skews it.",
+        "validatedBy": [
+          "app/src/core/lib/gridRenderer/rendering/cellBorders.test.ts",
+          "app/e2e/tests/vba-idioms-wave3.spec.ts"
+        ],
+        "notes": "13 unit tests, four of them sabotage-checked independently: reverting the clip reds T1/T2/T8/T9, removing the dedupe reds T8/T9, snapping the double rules per-rule reds T10, and dropping the snapping reds 6. The live probe that reported 0 now passes."
+      },
+      "notes": "Two lessons worth keeping. First, the asymmetry WAS the clue: a defect that shows on one axis and not the other points at the difference between the axes, which here is that column widths are fractional (64.29) and row heights are not (20). Second, the fix was designed twice: an adversarial review caught that naive per-rule snapping REGRESSES the double border on the integral axis, and that removing the clip without deduping creates a new punch-through artefact that exists neither before the fix nor in Excel. Neither was visible from the failing test. See also [related] the same file's headers.ts sibling, which has the same unsnapped fractional-boundary problem and was deliberately NOT changed here because it moves 49 grid-bearing goldens."
+    },
+    {
+      "id": "BUG-0102",
+      "status": "open",
+      "discovered": "2026-08-18",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found by code inspection while fixing the border clip/snapping defect on 2026-08-18; verified independently by reading the render paths, NOT by running the app"
+      },
+      "violation": {
+        "oracleId": "frozen-pane-borders-absent",
+        "message": "WITH A FREEZE OR A SPLIT ACTIVE, NO CELL BORDER RENDERS AT ALL. UNVERIFIED AGAINST THE RUNNING APP -- filed for attribution from a code reading, not as a reproduced defect. WHAT WAS OBSERVED (statically): panes are painted by renderZone (app/src/core/lib/gridRenderer/core.ts:230), which calls drawCellTextZone (core.ts:340). That function's body contains no reference to borders at all -- confirmed by scanning its whole body for /border/i, which returns nothing -- whereas the non-frozen painter drawCellText (rendering/cells.ts) draws all six sides. renderZone is the path for BOTH split panes (core.ts:809, 816, 823, 829) and frozen panes (core.ts:880, 886, 893, 900). WHAT IS NOT CLAIMED: that this has been seen on screen; that it affects the unfrozen path (it does not -- that is the path the sibling entry fixes); that no other code supplies borders for these zones by some route not found. TO CLOSE THIS: freeze a pane over a bordered range in the running app and look, then either fix drawCellTextZone to share the border queue drawCellText now uses, or reclassify. An E2E probe modelled on vba-idioms-wave3.spec.ts:468 with a freeze applied would settle it in one run.",
+        "digestDiffPaths": []
+      },
+      "notes": "Deliberately filed WITHOUT triage or fix. The sibling entry's fix does not touch this path, so closing that one must not be read as closing this. Scope was stated honestly in the border fix's own design review rather than being quietly absorbed into it."
     }
   ]
 }
