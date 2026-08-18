@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 102 | Open: 2 | Triaged: 0 | Fixed: 100 | Other: 0
+Total: 104 | Open: 4 | Triaged: 0 | Fixed: 100 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1270,4 +1270,20 @@ EVERY CELL BORDER PAINTED AT HALF ITS NOMINAL WEIGHT, AND VERTICAL ONES SMEARED 
 **Oracle:** frozen-pane-borders-absent
 
 WITH A FREEZE OR A SPLIT ACTIVE, NO CELL BORDER RENDERS AT ALL. UNVERIFIED AGAINST THE RUNNING APP -- filed for attribution from a code reading, not as a reproduced defect. WHAT WAS OBSERVED (statically): panes are painted by renderZone (app/src/core/lib/gridRenderer/core.ts:230), which calls drawCellTextZone (core.ts:340). That function's body contains no reference to borders at all -- confirmed by scanning its whole body for /border/i, which returns nothing -- whereas the non-frozen painter drawCellText (rendering/cells.ts) draws all six sides. renderZone is the path for BOTH split panes (core.ts:809, 816, 823, 829) and frozen panes (core.ts:880, 886, 893, 900). WHAT IS NOT CLAIMED: that this has been seen on screen; that it affects the unfrozen path (it does not -- that is the path the sibling entry fixes); that no other code supplies borders for these zones by some route not found. TO CLOSE THIS: freeze a pane over a bordered range in the running app and look, then either fix drawCellTextZone to share the border queue drawCellText now uses, or reclassify. An E2E probe modelled on vba-idioms-wave3.spec.ts:468 with a freeze applied would settle it in one run.
+
+
+## BUG-0103 `[open]`
+
+**Found:** 2026-08-18 (review)
+**Oracle:** timeline-slicer-never-persisted
+
+A TIMELINE SLICER IS NEVER SAVED, HAS NO UNDO ARM, AND LEAKS INTO THE NEXT DOCUMENT. Insert Timeline is a shipped, one-click ribbon button on the PivotTable Analyze tab (app/extensions/Pivot/components/PivotAnalyzeSections.tsx:292-305 -> showDialog('timelineSlicer:insertDialog'); the extension is registered at app/extensions/manifest.ts:215), and TimelineSlicerState (managed at app/src-tauri/src/lib.rs:4839) reaches no save path at all. MEASURED with node: /timeline/i occurs ZERO times in app/src-tauri/src/persistence.rs and ZERO times in app/src-tauri/src/calp_commands.rs. THREE CONSEQUENCES, and only the first is named anywhere in the tree: (1) SILENT TOTAL LOSS. The user inserts a timeline, saves, reopens, and it is simply gone. assemble_workbook_for_save never reads the state. (2) NO UNDO RESTORE ARM, so a cascade delete records nothing to bring back (app/src-tauri/src/object_deps.rs:63-67 says so in a comment). (3) CROSS-DOCUMENT LEAK, which nobody has written down anywhere: reset_document_scoped_stores (app/src-tauri/src/persistence.rs:3803-3812) takes AppState, UserFilesState, SlicerState, RibbonFilterState, PaneControlState, ScriptState, PivotState and BiState -- TimelineSlicerState is NOT among them, and it is a separate managed Tauri state. So a timeline from document A survives File > New / Open into document B. That is the same class as the 2026-08-10 document-scoped-state defect, which was closed by adding exactly this function; this store was never enrolled in it. WHY IT WAS INVISIBLE: the gap is recorded ONLY in code comments (timeline_slicer/commands.rs:85-88, object_deps.rs:63-67) and in the 1.33 MB archive (docs/design/open-decisions-2026-08.md:8573-8576), which the project's own rules say must never be read as live status. docs/design/open-items.md does not mention it. A limitation documented only in a comment is invisible to the open-items list BY CONSTRUCTION.
+
+
+## BUG-0104 `[open]`
+
+**Found:** 2026-08-18 (review)
+**Oracle:** cf-icon-sort-and-filter-silent-noop
+
+SORTING AND FILTERING BY CONDITIONAL-FORMATTING ICON ARE SILENT NO-OPS THAT REPORT SUCCESS. Both arms are stubs that return the wrong answer without saying so, and one of them is offered to the user by name in a dialog. (1) SORT: `SortOn::Icon` (app/src-tauri/src/commands/data.rs:5729-5740) carries the comment "Icon sorting not yet implemented - fall back to value comparison" and does exactly that — it sorts by VALUE and returns Ok. The Sorting extension offers it explicitly: app/extensions/Sorting/components/SortLevelRow.tsx:183 renders `<option value="icon">Conditional Formatting Icon</option>`. So a user picks 'Conditional Formatting Icon', the rows reorder (by value), and nothing anywhere says the request was not honoured. A sort that silently sorts by the wrong key is worse than one that refuses. (2) FILTER: `FilterOn::Icon` (app/src-tauri/src/autofilter.rs:884-889) has an EMPTY arm whose comment ends "For now, icon-filtered rows are always shown" — the predicate falls through to true, so the filter hides nothing at all and the sheet looks unfiltered while reporting a filter is applied. WHY IT MATTERS BEYOND THE FEATURE: this is the class where the product returns a plausible WRONG answer rather than an error, which is the hardest kind for a user to catch — the rows did move, so the operation looks like it worked. RECORDED NOWHERE until now: neither arm appears in docs/design/open-items.md or the ledger; the only trace was the two code comments quoted above, which are invisible to any status read.
 

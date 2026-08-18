@@ -115,6 +115,7 @@ const RECEIVERS: &[(&str, &str)] = &[
     ("script_state", "ScriptState"),
     ("pivot_state", "PivotState"),
     ("bi_state", "BiState"),
+    ("timeline_slicer_state", "TimelineSlicerState"),
 ];
 
 /// THE ROOTS OF THE SAVE-SOURCE CENSUS — both of them.
@@ -217,6 +218,7 @@ const STATE_FIELD_SOURCES: &[(&str, &str, &str)] = &[
     ("ScriptState", "scripting/types.rs", "ScriptState"),
     ("PivotState", "pivot/types.rs", "PivotState"),
     ("BiState", "bi/types.rs", "BiState"),
+    ("TimelineSlicerState", "timeline_slicer/types.rs", "TimelineSlicerState"),
 ];
 
 /// Fields the reset clears through a call that is not `read`/`write`/`lock`.
@@ -2444,4 +2446,156 @@ fn every_store_the_save_path_reads_is_gated_by_a_document_effect() {
          weight that weakens the list:\n  {}",
         redundant.join("\n  ")
     );
+}
+
+
+// ============================================================================
+// INVARIANT 3 — the population of STATES is itself derived, not listed
+// ============================================================================
+// Invariants 1 and 2 both take the set of States as GIVEN. Invariant 1 asks
+// which stores the SAVE path reads; invariant 2 asks about every field of every
+// State `those paths reset`. Both populations are downstream of a list somebody
+// maintains by hand — `STATE_FIELD_SOURCES` — and a store that is in NEITHER the
+// save path NOR the reset function is outside both. It is therefore invisible to
+// this file, which is the one file whose whole job is to see it.
+//
+// That is not hypothetical. Measured 2026-08-18: `TimelineSlicerState` is managed
+// at `lib.rs:4839` and is
+//   - never saved      (/timeline/i occurs ZERO times in persistence.rs), so
+//                      invariant 1's save-source population cannot contain it, and
+//   - never reset      (it is not a parameter of `reset_document_scoped_stores`),
+//                      so invariant 2's field population cannot contain it either.
+// Consequence: a timeline slicer from document A survives File > New / Open into
+// document B — the exact data-INJECTION class this census was built to end, in a
+// store the census could not look at. Filed as BUG-0103.
+//
+// So the population comes from the one place that cannot omit a store: the
+// `.manage(...)` calls that hand a State to Tauri. Every managed State must be
+// either CENSUSED (it appears in `STATE_FIELD_SOURCES`, so invariant 2 walks its
+// fields) or NOT_DOCUMENT_SCOPED with a written reason. There is no third answer,
+// and adding a `.manage(...)` line without choosing one fails this test on the
+// commit that adds it.
+
+/// Managed States that are deliberately NOT the document's, each with the reason.
+///
+/// Getting an entry wrong here is dangerous in BOTH directions, exactly as with
+/// `SESSION_SCOPED`: wrongly listing a store here reopens the leak class, and
+/// wrongly omitting one forces a reset that throws away the user's own settings.
+const NOT_DOCUMENT_SCOPED: &[(&str, &str)] = &[
+    (
+        "FileState",
+        "the document's IDENTITY and dirty flag, not its content. It is what the          document-replacing paths SET (mark_saved / the DirtyFlag transition);          resetting it from inside the shared reset would be circular.",
+    ),
+    (
+        "CapabilityStore",
+        "the user's standing permission grants. Resetting it on File > Open would          silently RE-ARM capabilities the user turned off, which is the same          argument that keeps ScriptState.permission_grants out of the reset.",
+    ),
+    (
+        "EvalFormulaState",
+        "a per-call scratch buffer for the evaluate_formula command, refilled on          every invocation and read by nothing else. It carries no document state          between calls.",
+    ),
+    (
+        "McpState",
+        "the MCP server's own session: listeners, tool registration and transport.          Machine-scoped — it outlives any one document on purpose.",
+    ),
+    (
+        "ManagedAppearanceState",
+        "enterprise appearance POLICY, read from the machine at startup. It is the          administrator's, not the document's.",
+    ),
+];
+
+/// Every `.manage(...)` State is censused or explicitly not the document's.
+#[test]
+fn every_managed_state_is_classified() {
+    let lib = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+    )
+    .expect("lib.rs must be readable");
+
+    // The type name handed to `.manage(...)`, taken as the last path segment
+    // before the constructor call, so `slicer::SlicerState::new()` reads as
+    // `SlicerState` and `FileState::default()` reads as `FileState`.
+    let mut managed: Vec<String> = Vec::new();
+    for line in lib.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(".manage(") else {
+            continue;
+        };
+        // `create_app_state()` is a factory rather than a type path; it returns
+        // AppState, which is the name the rest of this file uses.
+        if rest.starts_with("create_app_state") {
+            managed.push("AppState".to_string());
+            continue;
+        }
+        let head: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+            .collect();
+        let name = head.rsplit("::").find(|s| !s.is_empty()).unwrap_or("");
+        // Skip the constructor segment when the spelling is `path::Type::new`.
+        let name = if name == "new" || name == "default" {
+            let parts: Vec<&str> = head
+                .split("::")
+                .filter(|s| !s.is_empty() && *s != "new" && *s != "default")
+                .collect();
+            parts.last().copied().unwrap_or("")
+        } else {
+            name
+        };
+        if !name.is_empty() {
+            managed.push(name.to_string());
+        }
+    }
+
+    // Non-vacuity: a parse that found nothing would make every assertion below
+    // pass while checking no store at all.
+    assert!(
+        managed.len() >= 10,
+        "only {} managed States were parsed out of lib.rs, so this census is          checking almost nothing — the `.manage(...)` spelling has probably          changed:\n  {}",
+        managed.len(),
+        managed.join("\n  ")
+    );
+
+    let censused: Vec<&str> = STATE_FIELD_SOURCES.iter().map(|(n, _, _)| *n).collect();
+    let unclassified: Vec<&String> = managed
+        .iter()
+        .filter(|m| {
+            !censused.contains(&m.as_str())
+                && !NOT_DOCUMENT_SCOPED.iter().any(|(n, _)| n == &m.as_str())
+        })
+        .collect();
+
+    assert!(
+        unclassified.is_empty(),
+        "these States are handed to Tauri by `.manage(...)` but are NEITHER          censused (STATE_FIELD_SOURCES, so invariant 2 walks their fields) NOR          listed in NOT_DOCUMENT_SCOPED with a reason:\n  {}\n\n         A store in neither set is invisible to this whole file: it is not a save          source, so invariant 1 cannot see it, and it is not reset, so invariant 2          cannot see it. That is how a timeline slicer came to survive File > New          into the next document (BUG-0103). Choose one — enrol it in          `reset_document_scoped_stores` and add it to STATE_FIELD_SOURCES, or write          down why it is not the document's.",
+        unclassified
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    // ...and the exemption list may not outlive its stores, the same rule
+    // SESSION_SCOPED carries: a stale entry is a hole nobody can see.
+    let stale: Vec<&str> = NOT_DOCUMENT_SCOPED
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| !managed.iter().any(|m| m == n))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "NOT_DOCUMENT_SCOPED names States that are no longer managed:\n  {}",
+        stale.join("\n  ")
+    );
+
+    // Every reason must be a reason, not a label.
+    for (name, reason) in NOT_DOCUMENT_SCOPED {
+        assert!(
+            reason.len() > 60,
+            "{name}'s exemption reason is too short to be an argument: {reason:?}"
+        );
+    }
 }

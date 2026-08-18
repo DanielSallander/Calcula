@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 103,
+  "nextId": 105,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4042,6 +4042,38 @@
         "digestDiffPaths": []
       },
       "notes": "Deliberately filed WITHOUT triage or fix. The sibling entry's fix does not touch this path, so closing that one must not be read as closing this. Scope was stated honestly in the border fix's own design review rather than being quietly absorbed into it."
+    },
+    {
+      "id": "BUG-0103",
+      "status": "open",
+      "discovered": "2026-08-18",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-18 by a sweep for open work recorded in NEITHER open-items.md NOR the ledger; every claim below re-verified by hand against the code, not run in the app"
+      },
+      "violation": {
+        "oracleId": "timeline-slicer-never-persisted",
+        "message": "A TIMELINE SLICER IS NEVER SAVED, HAS NO UNDO ARM, AND LEAKS INTO THE NEXT DOCUMENT. Insert Timeline is a shipped, one-click ribbon button on the PivotTable Analyze tab (app/extensions/Pivot/components/PivotAnalyzeSections.tsx:292-305 -> showDialog('timelineSlicer:insertDialog'); the extension is registered at app/extensions/manifest.ts:215), and TimelineSlicerState (managed at app/src-tauri/src/lib.rs:4839) reaches no save path at all. MEASURED with node: /timeline/i occurs ZERO times in app/src-tauri/src/persistence.rs and ZERO times in app/src-tauri/src/calp_commands.rs. THREE CONSEQUENCES, and only the first is named anywhere in the tree: (1) SILENT TOTAL LOSS. The user inserts a timeline, saves, reopens, and it is simply gone. assemble_workbook_for_save never reads the state. (2) NO UNDO RESTORE ARM, so a cascade delete records nothing to bring back (app/src-tauri/src/object_deps.rs:63-67 says so in a comment). (3) CROSS-DOCUMENT LEAK, which nobody has written down anywhere: reset_document_scoped_stores (app/src-tauri/src/persistence.rs:3803-3812) takes AppState, UserFilesState, SlicerState, RibbonFilterState, PaneControlState, ScriptState, PivotState and BiState -- TimelineSlicerState is NOT among them, and it is a separate managed Tauri state. So a timeline from document A survives File > New / Open into document B. That is the same class as the 2026-08-10 document-scoped-state defect, which was closed by adding exactly this function; this store was never enrolled in it. WHY IT WAS INVISIBLE: the gap is recorded ONLY in code comments (timeline_slicer/commands.rs:85-88, object_deps.rs:63-67) and in the 1.33 MB archive (docs/design/open-decisions-2026-08.md:8573-8576), which the project's own rules say must never be read as live status. docs/design/open-items.md does not mention it. A limitation documented only in a comment is invisible to the open-items list BY CONSTRUCTION.",
+        "digestDiffPaths": []
+      },
+      "notes": "Filed OPEN with no triage and no fix, deliberately: consequence (3) is a data-integrity bug that should be fixed immediately and cheaply (enrol TimelineSlicerState in reset_document_scoped_stores, the same one-line enrolment every other document-scoped store has), while (1) needs an owner call this repo's own .cala rules frame precisely: bump format_version to 8, or declare a manifest feature id with an unconditional read. The rule in CLAUDE.md points at the feature id -- an older reader that drops a timeline loses a filter control, which is VISIBLE loss rather than a misread document -- but that is the owner's call and it also needs a .calp carry decision. Do not close this entry when (3) lands; it covers all three."
+    },
+    {
+      "id": "BUG-0104",
+      "status": "open",
+      "discovered": "2026-08-18",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-18 by a sweep for open work recorded in neither open-items.md nor the ledger; both arms re-verified by hand against the code"
+      },
+      "violation": {
+        "oracleId": "cf-icon-sort-and-filter-silent-noop",
+        "message": "SORTING AND FILTERING BY CONDITIONAL-FORMATTING ICON ARE SILENT NO-OPS THAT REPORT SUCCESS. Both arms are stubs that return the wrong answer without saying so, and one of them is offered to the user by name in a dialog. (1) SORT: `SortOn::Icon` (app/src-tauri/src/commands/data.rs:5729-5740) carries the comment \"Icon sorting not yet implemented - fall back to value comparison\" and does exactly that — it sorts by VALUE and returns Ok. The Sorting extension offers it explicitly: app/extensions/Sorting/components/SortLevelRow.tsx:183 renders `<option value=\"icon\">Conditional Formatting Icon</option>`. So a user picks 'Conditional Formatting Icon', the rows reorder (by value), and nothing anywhere says the request was not honoured. A sort that silently sorts by the wrong key is worse than one that refuses. (2) FILTER: `FilterOn::Icon` (app/src-tauri/src/autofilter.rs:884-889) has an EMPTY arm whose comment ends \"For now, icon-filtered rows are always shown\" — the predicate falls through to true, so the filter hides nothing at all and the sheet looks unfiltered while reporting a filter is applied. WHY IT MATTERS BEYOND THE FEATURE: this is the class where the product returns a plausible WRONG answer rather than an error, which is the hardest kind for a user to catch — the rows did move, so the operation looks like it worked. RECORDED NOWHERE until now: neither arm appears in docs/design/open-items.md or the ledger; the only trace was the two code comments quoted above, which are invisible to any status read.",
+        "digestDiffPaths": []
+      },
+      "notes": "Two dispositions, and the cheap one should not wait for the expensive one. REFUSING LOUDLY is minutes: make `SortOn::Icon` and `FilterOn::Icon` return an explicit Err (or have the Sorting extension not offer the option) so the user learns the truth immediately. IMPLEMENTING is larger and needs the CF evaluation context at sort/filter time, which is what the filter's own comment says is missing. The owner's call is only on sequencing — whether to ship the refusal now and implement later — not on whether silence is acceptable."
     }
   ]
 }

@@ -2574,6 +2574,7 @@ pub fn save_file(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     path: String,
     // Optional passphrase. `Some` encrypts (and becomes the session password);
     // `None` falls back to the session password so a plain Ctrl+S keeps an
@@ -2706,6 +2707,7 @@ pub fn open_file(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     path: String,
     // Optional passphrase for an encrypted `.cala`. When the file is encrypted
     // and this is `None` (or wrong), the command returns a sentinel error string
@@ -2792,6 +2794,7 @@ pub fn open_file(
         script_state.inner(),
         pivot_state.inner(),
         bi_state.inner(),
+        timeline_slicer_state.inner(),
         &load_effect,
     )?;
 
@@ -3809,8 +3812,27 @@ pub(crate) fn reset_document_scoped_stores(
     script_state: &crate::scripting::types::ScriptState,
     pivot_state: &crate::pivot::types::PivotState,
     bi_state: &crate::bi::types::BiState,
+    timeline_slicer_state: &crate::timeline_slicer::TimelineSlicerState,
     effect: &crate::document_effect::DocumentEffect,
 ) -> Result<(), String> {
+    // ---- Timeline slicers --------------------------------------------------
+    // Enrolled 2026-08-18 (BUG-0103). This store was managed at `lib.rs` and
+    // reset by nothing: not a save source (it is never persisted at all), and
+    // not a parameter here, so it was invisible to BOTH census invariants. A
+    // timeline inserted in document A therefore survived File > New / Open into
+    // document B — the data-INJECTION class this function exists to end.
+    //
+    // It is a bare `Mutex`, not `Persisted<T>`, so the clear is `.lock()`: the
+    // store reaches no save path, so there is no saved state for the effect to
+    // gate. That is a statement about TODAY. When timeline persistence lands
+    // (the other half of BUG-0103), this becomes `Persisted<T>` and this line
+    // becomes `.write(effect)`.
+    timeline_slicer_state
+        .timelines
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clear();
+
     // ---- Grid, styles and per-sheet geometry -------------------------------
     *state.grid.write(effect).map_err(|e| e.to_string())? = engine::grid::Grid::new();
     *state.style_registry.write(effect).map_err(|e| e.to_string())? =
@@ -4212,6 +4234,7 @@ pub fn new_file(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     bi_state: State<crate::bi::types::BiState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -4235,6 +4258,7 @@ pub fn new_file(
         script_state.inner(),
         pivot_state.inner(),
         bi_state.inner(),
+        timeline_slicer_state.inner(),
         &reset_effect,
     )?;
 

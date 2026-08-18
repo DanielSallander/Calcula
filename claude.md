@@ -170,17 +170,16 @@ found 256 of the then-746 Tauri commands mutating without setting it, which is w
 enforced by the compiler, not by review.
 
 - **Persisted backend state is `Persisted<T>`, never a bare `Mutex<T>`.** `read()` is free;
-  `write(&effect)` requires a `DocumentEffect`. 59 of `AppState`'s 104 fields are converted
-  (counted 2026-08-16 by a bracket-aware split of the struct body; count the FIELDS, not one grep
-  spelling — that is how the previous two numbers here, 36 and 51, were both wrong). **Re-measured
-  2026-08-17, because this warning used to name the wrong pattern:**
-  `rg 'document_effect::Persisted<'` returns **59** and is correct — it is a substring of the
-  crate-qualified spelling, so it catches everything. The pattern that reads **51** is the one
-  anchored on the field prefix, `': document_effect::Persisted<'`; the 8 it misses are spelled
-  `crate::document_effect::Persisted<`, and 51 + 8 = 59. `grids` / `grid` are among them (a test in
-  `document_effect.rs` pins those two
-  declarations by their exact text, so a silent revert to a bare `Mutex` fails the build). The 43
-  still on a bare `Mutex`/`RwLock` are mid-migration and listed as a work item in
+  `write(&effect)` requires a `DocumentEffect`. **Do not count the fields by hand, and do not
+  quote a number from this file.** `the_appstate_lock_census_reconciles`
+  (`app/src-tauri/src/document_effect.rs`) parses the struct body and asserts the split, so the
+  build fails the moment it moves. As pinned today: **104 fields — 62 `Persisted<T>`, 40 bare
+  `Mutex`/`RwLock`, 2 neither** (`undo_stack`, `calc_cancel`). Three successive hand-counts in
+  this very paragraph were wrong before that test existed — 36, then 51, then 59, each from a
+  different grep spelling — which is why the number now lives in a test and this paragraph no
+  longer explains how to grep for it. `grids` / `grid` are additionally pinned by their exact
+  declaration text, so a silent revert to a bare `Mutex` fails the build. The bare ones are
+  mid-migration and listed as a work item in
   `docs/design/open-items.md`; they are overwhelmingly DERIVED caches (the dependency
   maps, the spill maps, `id_registry`, `gather_cache`) rather than persisted state, so a command
   touching only those can still mutate without deciding — but check the field before assuming it.

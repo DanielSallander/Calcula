@@ -14,10 +14,13 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**102 entries, 100 fixed, 2 open** as of
-2026-08-18 — recounted from the file, not carried forward). The two open are **BUG-0098**, the
-backend wedge in §2.5, which is unreproduced, and **BUG-0102**, cell borders not rendering at all
-inside a frozen or split pane, which is filed from a code reading and not yet seen on screen. BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
+reproduction live in `tests/regression/bug-ledger.json` (**104 entries, 100 fixed, 4 open** as of
+2026-08-18 — recounted from the file, not carried forward; it moved twice in one day). The four open
+are **BUG-0098** (the unreproduced backend wedge in §2.5), **BUG-0102** (no cell borders inside a
+frozen or split pane, filed from a code reading and not yet seen on screen), **BUG-0103** (timeline
+slicers are never saved and had no undo arm — the cross-document LEAK half is fixed, the persistence
+half needs an owner call) and **BUG-0104** (sorting and filtering by conditional-formatting icon are
+silent no-ops that report success). BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
 filed and fixed the same day, is the sibling of BUG-0086 — that fix turned out to be
 SPELLING-SPECIFIC, and a capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely.
 Nothing in this file duplicates a ledger entry. **Recount before restating**: the histogram is one line of node, and this figure has
@@ -242,27 +245,35 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 
 | item | verified at |
 |---|---|
+| **Column-header separators are not device-pixel snapped — the same defect just fixed for cell borders.** `headers.ts:168,330` stroke at a hand-rolled logical `+0.5` instead of snapping into DEVICE space the way `grid.ts:189-191` has always done for the gridline hairline. Column boundaries are `22 + k*64.29`, so at dpr 1 every column-header tick smears across two device pixels at partial alpha rather than landing on one. Row-header ticks are on the integral axis and are fine — the identical top-crisp/side-blurred asymmetry that BUG-0101 turned out to be. **Deliberately excluded from BUG-0101's fix**, which is why this row exists: the file has 18 stroke calls and NO unit tests, and the change moves grid-bearing goldens (BUG-0101's design review estimated 49; a later byte census said 51 — recount before scheduling, and note `headers.ts` is pure CRLF while `grid.ts` and `cellBorders.test.ts` are LF). The fix itself is the parity-snap helper from `cells.ts` applied three times. | `headers.ts:165-168,327-330,442-445`, `grid.ts:189-191`, BUG-0101 |
+| **`model-engine-lib` is run by no CI workflow at all.** 2,230 `#[test]`/`#[tokio::test]` functions across 145 files, executed by zero gates. `ci.yml`'s `rust-core` job sets `working-directory: core`, and `core/Cargo.toml` lists 11 members — `model-engine-lib` is not among them; `link-check.yml` builds the app crate (which COMPILES `bi-engine` through the path dependency but runs none of its tests); `release.yml` names the directory only as a cache path. So the entire BI/semantic-model engine — the thing every pivot, CUBE formula and measure evaluates through — has no automated correctness gate on any branch. Worse, **75 of those tests are `#[ignore]`d behind a live AdventureWorks database and they are the whole differential-vs-SQL corpus**, i.e. the engine's only ground truth for DAX semantics, so even a manual `cargo test` there proves less than it appears to. Adding the job is hours; deciding what to do about the DB-gated corpus is the owner's call. | `.github/workflows/ci.yml:58-72`, `core/Cargo.toml`, `model-engine-lib/` |
+| **Three E2E `test.fixme`s all disable the SAME assertion, and one would pass vacuously if re-enabled.** `workflow-invoice.spec.ts:144`, `workflow-gradebook.spec.ts:144` and `workflow-dashboard.spec.ts:231` each skip "edit a value, verify the cascade recalculated" — the single behaviour those three journeys exist to prove. Only the invoice one states a reason (cross-test data contamination, at `:142-143`); the other two give none. And gradebook's body sits inside `if (erikRow > 0)`, so simply un-fixme-ing it would pass WITHOUT asserting anything whenever the row is not found — re-enable the assertion and the guard together, or it re-enters the suite as decoration. | `workflow-invoice.spec.ts:144`, `workflow-gradebook.spec.ts:144`, `workflow-dashboard.spec.ts:231` |
+| **Four "not yet implemented" comments describe limitations that no longer exist.** Stale in the ALREADY-FIXED direction — the direction this project has measured as costing it most, because a reader trusts them and re-implements something that works, or routes around a path that is fine. `BorderTab.tsx:3-4` says "Border rendering is not yet supported in the Canvas renderer... apply is a no-op" (false — it applies, and BUG-0101 just fixed how it rasterizes); plus `knownIssues.ts:79-84`, `tables.rs:471`, and `api_types.rs:738` with `data.rs:4657`. Minutes to correct, and worth doing as a batch because the pattern is the point: **a limitation recorded only in a code comment is invisible to this file by construction**, and so is its expiry. | `BorderTab.tsx:3-4`, `knownIssues.ts:79-84`, `tables.rs:471`, `api_types.rs:738` |
 | **Excel's array literal `{1;2;3}` does not parse — SCOPED 2026-08-17, deliberately NOT started.** The lexer has no `;` arm (`;` falls to `Token::Illegal`) and `{…}` is a Python-style `ListLiteral`. The gap is worse than filed — `={1;2;3}` is stored as a TEXT CELL containing the literal string, with no error at all — and it is **not** "add a `;` arm". Three things make it a project, and the middle one is why a partial fix would be actively harmful:
 1. `{}` is a shipped List/Dict literal with different semantics (contained, does not spill, displays `[List(3)]`). Reclaiming it is cheap — `COLLECT()`/`DICT()` already exist as function forms and **nothing in the repo uses the brace form** — but it is an owner call.
 2. **`delocalize_formula` is a blind character rewrite** mapping `;`→`,` outside string literals with **no brace awareness**. On the owner's own sv-SE machine a 2-D constant would therefore FLATTEN INTO ONE ROW on any innocent re-entry, silently. Excel avoids the collision by using `\` as the COLUMN separator in `;`-list-separator locales. A lexer-only fix looks green on en-US and corrupts matrices on sv-SE — the exact class this register keeps cataloguing.
 3. 39 `ListLiteral` sites across 12 files, and a new variant is **not** fully compiler-caught: `bi/cube.rs` has 18 catch-alls, `formula_eval_plan.rs` 8, `evaluate_formula.rs` 6, `lib.rs:1333` is literally `_ => ast.clone()`.
 Good news for whoever takes it: `EvalResult::Array(Vec<EvalResult>)` **already expresses 2-D** as an Array of row-Arrays (`spill_dimensions`, `to_spill_values`, `SEQUENCE`, `RANDARRAY` all rely on it), so no new result variant is needed — but note a FLAT array spills as a COLUMN, so `{1,2,3}` must lower to `Array([Array([1,2,3])])`. Also verify Excel's `\` separator against a real sv-SE Excel first: it is one entry to confirm and the whole design rests on it. | `lexer.rs:76`, `parser.rs:526,566`, `formula_locale.rs:18-46,56-106` |
 | ~~**`#NULL!` is never produced.**~~ **CLOSED 2026-08-17, and the item pointed one layer above the defect.** It read as a missing match arm; the truth is that **the SPACE INTERSECTION OPERATOR WAS NOT PARSED AT ALL**. `skip_whitespace` consumed every space and emitted nothing, so `=A1:A5 C1:C5` could not reach an evaluator — the parse failed, the cell stored the formula anyway, and the user saw `#VALUE!` on a cell carrying **no dependency edges**, so it never recalculated either. There was no smaller honest fix: mapping the parse failure to `#NULL!` would be right for a disjoint pair and WRONG for `=A1:B5 B1:C5`, which Excel answers with the overlapping column. Implemented as `BinaryOperator::Intersect` on the existing `BinaryOp` (never a new `Expression` variant), one precedence level tighter than `^`, with `eval_intersect` working on the operand EXPRESSIONS — it cannot live in `eval_binary_op`, which collapses both sides to values and destroys the reference-ness it needs. `u32::MAX` sentinels let `A:A 2:2` be the single cell A2. 7 tests, each `#NULL!` case paired with an overlap control, plus a renderer round-trip (a dropped space would rewrite `A1:A3 A2:C2` into `A1:A3A2:C2`). **One named divergence:** `=A1 2` yields `#NULL!` where Excel rejects it at entry — single-token lookahead cannot tell `2` from `2:2`, and dropping `Number` as an operand start would lose whole-row intersection. | `ast.rs`, `parser.rs`, `lexer.rs`, `evaluator.rs`, `ast_render.rs`, `intersection_tests.rs` |
-| **`set_active_sheet` accepts a hidden sheet index.** Worth stating carefully, because it now *looks* guarded: `activate_sheet` does call `ensure_user_sheet` (`sheets.rs:917`), but that guard tests `is_user_sheet` (`sheets.rs:144-149`), which refuses **only** `OBJECT_SHEET_VISIBILITY` — floating-range backing sheets. A user-hidden sheet (`"hidden"`) passes straight through. Excel's `Activate` errors on a hidden sheet. Not tightened because scripts and E2E specs use it to reach hidden sheets. | `sheets.rs:144-168,917` |
+| ~~**`set_active_sheet` accepts a hidden sheet index.**~~ **CLOSED — verified fixed 2026-08-18, and the stated reason for leaving it open was FALSE.** The row said "not tightened because scripts and E2E specs use it to reach hidden sheets"; nothing depended on it, and `activate_sheet` now makes BOTH checks in a load-bearing order — `ensure_user_sheet` first, so the floating-range message survives for object-backed sheets, then `if !sheet_is_visible(...)` returning an error that names the escape hatch (`sheets.rs:937-942`). Excel parity: `Worksheets("x").Activate` raises run-time error 1004. Every premise the row stated was still true — `is_user_sheet` (`sheets.rs:144-149`) does refuse only `OBJECT_SHEET_VISIBILITY` — but the CONCLUSION had expired, because the guard it was missing had since been added one layer up. **This is the second justification-for-inaction in this file measured false in a single pass** (the other is the calamine row below), which is why every remaining code-fact row now carries a machine-checked predicate. | `sheets.rs:144-149,937-942` |
 | ~~**`default_row_height` / `default_column_width` announce no undo domain.**~~ **CLOSED 2026-08-17, and it was a real repaint bug rather than metadata tidiness.** The registry justified `NONE` with a comment saying the frontend re-reads these "through the dimension refresh it already runs" — **it does not**: `refreshDimensionsFromBackend` is gated on `structuralRestore \|\| mergeChanged \|\| hiddenChanged`, and a default-dimension restore sets none of the three. The renderer paints from Redux `config.defaultCellWidth/Height`, which nothing else updates, so undoing a default row height wrote the old value to the backend and left the new one **on screen** — grid and file disagreeing, silently. Fixed by adding `UiDomain::Dimensions` (Rust enum + `ALL` + wire name, TS union, and a `dimensions: ["dimensions:refresh"]` row in the shell fan-out, which is the bare event every FORWARD dimension route already fires). `pivot_col_widths` had the identical `NONE` and is fixed with it. Sabotage-verified through `crossLayerConstantDrift`. | `object_deps.rs`, `undo_commands.rs:1623-1642,4578`, `events.ts`, `bootstrap.ts` |
 
 ### 2.2 The `Persisted<T>` migration — the SAVE SOURCES are done (2026-08-17); the rest is not
 
-`AppState` has **104 fields**: **59** are `Persisted<T>`, **43** are still a bare
-`Mutex`/`RwLock`, and 2 are neither — `undo_stack` and `calc_cancel`. (Do not read "neither" as
+`AppState` has **104 fields**: **62** are `Persisted<T>`, **40** are still a bare
+`Mutex`/`RwLock`, and 2 are neither — `undo_stack` and `calc_cancel`. **These four numbers are
+PINNED by `the_appstate_lock_census_reconciles` (`document_effect.rs:1191-1228`), which parses the
+struct body and fails the build when the split moves.** Do not re-derive them by hand and do not
+edit them here without running that test — the figures above stood at 59/43 until 2026-08-18 while
+the test already said 62/40, which is exactly the drift this file exists to prevent. (Do not read "neither" as
 "unlocked": `undo_stack` is `undo_history::UndoHistory` (`lib.rs:392`), which holds its own
 `Mutex<UndoStack>` (`undo_history.rs:125-127`) precisely so every existing `.lock()` site stays
 unchanged. Only `calc_cancel` is genuinely lock-free — `CancelToken(Arc<AtomicBool>)`. An earlier
 wording said "unlocked", which invites someone to add a Mutex and double-lock it.) Only the
 `Persisted<T>` ones force a command to name a `DocumentEffect`, so a command touching only the
-remaining 43 can still mutate without deciding — the exact hole `DocumentEffect` was built to close.
+remaining 40 can still mutate without deciding — the exact hole `DocumentEffect` was built to close.
 
-**The 43 are not one population, and the previous summary of them was wrong in both directions.**
+**The 40 are not one population, and the previous summary of them was wrong in both directions.**
 Classified by opening each: roughly **22 are derived/rebuildable** (the 16 dependency maps
 `lib.rs:342-385`, `computed_prop_dependencies`/`dependents`, `spill_hosts`, `spill_blocks`,
 `gather_cache`, `writeback_index`, `id_registry`) — about half, not "overwhelmingly". And **11 are
@@ -271,7 +282,7 @@ application preferences that must NEVER become `Persisted<T>`**: `calculation_mo
 `precision_as_displayed`, `calculate_before_save`, `auto_recover_enabled`,
 `auto_recover_interval_ms`, `subscriber_identity`. Those are the USER's, not the document's, and
 `document_store_census_tests.rs`'s `SESSION_SCOPED` table records each with its reason. So the row
-overstated the backlog (11 of the 43 are permanent exemptions, not work) while understating the one
+overstated the backlog (11 of the 40 are permanent exemptions, not work) while understating the one
 real risk. Declare any NEW persisted store `Persisted<T>` from the start.
 
 **CLOSED for the part that could lose data (2026-08-17).** All three save sources named below were
@@ -303,7 +314,7 @@ Three incidental fixes fell out, each a guard that had gone quietly blind:
 
 **Still open:** the remaining 40 bare-lock fields, none of which the save path reads.
 
-**Two of the 43 are read by the SAVE path, and here they are by name** — "check the field before
+**Two of the 40 are read by the SAVE path, and here they are by name** — "check the field before
 assuming it" put the burden on a reader with no list, which is how these stayed invisible:
 
 - ~~**`spill_ranges`**~~ **PROMOTED.** `apply_spill_extents_to_sheet` calls itself "the only
@@ -321,7 +332,7 @@ assuming it" put the burden on a reader with no list, which is how these stayed 
 - ~~**`pending_recalc`**~~ **PROMOTED** — found by the census, not the audit. See the banner above.
 
 Also not derived caches, though not save sources: `protected_regions` (`:426`), `next_cf_rule_id`
-(`:452`), `next_computed_prop_id` (`:462`), and `scroll_areas` (`:556`, whose own comment documents a
+(`:452`), `next_computed_prop_id` (`:462`), and `scroll_areas` (`:573`, whose own comment documents a
 missing-persistence gap).
 
 **The guard that looked like it covered this did not** (open-items rule 4, again) — which is why the
@@ -333,8 +344,10 @@ on it. Neither save source appears in it. `document_store_census_tests.rs` cover
 gating, and both save sources *are* reset (`persistence.rs:4121`, `:3914`), so that census passes
 while saying nothing about this. The missing guard is the parse-don't-list one: derive the save
 sources by parsing `build_workbook_for_save` for `state.<field>.lock()` and fail if any is not
-`Persisted<`. Pin 104/59/43 at the same time — no test anywhere asserts those numbers, which is why
-they keep drifting.
+`Persisted<`. **DONE for the numbers, 2026-08-18:** `the_appstate_lock_census_reconciles`
+(`document_effect.rs:1191-1228`) now parses the struct body and asserts 104/62/40/2, so those
+figures cannot drift again without failing the build — which is exactly how the 59/43 above was
+caught. The parse-don't-list guard over the SAVE SOURCES is the part still outstanding.
 
 **Count the fields, not one grep spelling** — and note the pattern, because this warning previously
 named the wrong one. Measured on `app/src-tauri/src/lib.rs`: `document_effect::Persisted<` returns
@@ -348,14 +361,15 @@ was making one, and the pattern it blamed happens to give the right answer.
 
 **S7 — calamine expands only 1-D shared formulas.** An upstream limitation of the
 `calamine = "0.26"` dependency (`core/persistence/Cargo.toml:11`); `core/persistence/src/xlsx_reader.rs`
-carries no shared-formula expansion of its own to work around it. Still open, still without a
-reproduction fixture — which is the first thing anyone picking it up should build. §3bi, §35c.
+carries no shared-formula expansion of its own to work around it. Still open; the reproduction
+fixture EXISTS as of 2026-08-17 (see the next paragraph — this sentence said "still without a
+reproduction fixture" until 2026-08-18, three lines above the paragraph announcing it). §3bi, §35c.
 (The anchor here read `§7142` until 2026-08-17; that section does not exist — a line number into a
 1.33 MB append-only archive was never going to survive, so cite the §.)
 
 **STEP 1 DONE 2026-08-17: the fixture exists.** `a_two_dimensional_shared_formula_ref_loses_all_but_the_first_column` (`core/persistence/src/xlsx_writer.rs`) hand-builds a `.xlsx` whose `B2:D4` block is one shared formula with a 2-D `ref`, and pins exactly what is lost: the master survives, followers outside the ref's FIRST COLUMN lose their formula entirely, and the cached `<v>` values stay correct — which is what makes the loss silent, because the sheet looks right until something recalculates. The test says in its own failure message what to change when the loss is fixed.
 
-**STEP 2 IS STILL OPEN, and the archive's "not fixable inside Calcula" is wrong.** Calcula's own XML pass (`xlsx_style_reader::parse_sheet_xml`) already walks every `<c>` inside `<sheetData>` — verified, it reads the `s` attribute at `:1063` — so it could collect `<f t="shared" ref=… si=…>` itself and reconstruct the followers without calamine at all. What it would ALSO need is relative-reference translation, and **there is no reusable helper for that in the repo** (the structural-edit shifting is coupled to its own undo machinery). So step 2 is a new A1 translator plus a collection path plus reader wiring — real work, not a patch, and it should not be started without a slot.
+**STEP 2 IS STILL OPEN, and the archive's "not fixable inside Calcula" is wrong.** Calcula's own XML pass (`xlsx_style_reader::parse_sheet_xml`) already walks every `<c>` inside `<sheetData>` — verified, it reads the `s` attribute at `:1063` — so it could collect `<f t="shared" ref=… si=…>` itself and reconstruct the followers without calamine at all. It also needs relative-reference translation — and **the claim that no reusable helper exists for that was FALSE, measured 2026-08-18.** `shift_formula_internal(formula, row_delta, col_delta)` (`app/src-tauri/src/commands/structure.rs:2658`) is exactly that translator, and it is not coupled to the undo machinery: it takes a formula string and two deltas and returns a string. So step 2 is a collection path plus reader wiring plus a call into an existing shifter — **hours, not a project, and it does not need a reserved slot.** The one authoring call before starting is WHERE the translation runs: app-side after `load_xlsx` (no new dependencies, the records ride out on `Workbook`) versus lowering the pure shifter into `core/persistence`. Prefer the former unless the reader needs it standalone.
 
 **Build that fixture against the code, not against the archive's description of it.** Re-read
 2026-08-17 in `calamine-0.26.1/src/xlsx/cells_reader.rs:221-245`: the offset map is built in two

@@ -30,6 +30,7 @@ use crate::pivot::types::PivotState;
 use crate::ribbon_filter::RibbonFilterState;
 use crate::scripting::types::ScriptState;
 use crate::slicer::SlicerState;
+use crate::timeline_slicer::TimelineSlicerState;
 
 /// Everything `reset_document_scoped_stores` takes, built fresh.
 struct Stores {
@@ -41,6 +42,7 @@ struct Stores {
     scripts: ScriptState,
     pivots: PivotState,
     bi: BiState,
+    timelines: TimelineSlicerState,
 }
 
 impl Stores {
@@ -54,6 +56,7 @@ impl Stores {
             scripts: ScriptState::new(),
             pivots: PivotState::new(),
             bi: BiState::new(),
+            timelines: TimelineSlicerState::new(),
         }
     }
 
@@ -68,6 +71,7 @@ impl Stores {
             &self.scripts,
             &self.pivots,
             &self.bi,
+            &self.timelines,
             &seed(),
         )
         .expect("the reset must not fail on healthy stores");
@@ -1289,6 +1293,7 @@ fn the_reset_does_not_mark_the_document_modified() {
         &s.scripts,
         &s.pivots,
         &s.bi,
+        &s.timelines,
         &DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk),
     )
     .unwrap();
