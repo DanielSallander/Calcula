@@ -241,37 +241,49 @@ function parseReviewResults(output) {
   let concernCount = 0;
   let failCount = 0;
 
+  // A verdict is a line that DECLARES one, and the verdict is the token that
+  // follows "Verdict:". Anything looser counts the report's own prose.
+  //
+  // MEASURED 2026-08-18 on a clean corpus re-record: this loop used to accept
+  // any line containing "**fail**" or "**concern**", which matched the summary
+  // TABLE the review ends with --
+  //
+  //     | **CONCERN** | 1 |
+  //     | **FAIL**    | 0 |
+  //
+  // -- so a review whose own table said "FAIL 0" was tallied as "1 FAIL", on
+  // every clean run. `failCount` is what decides whether this script reports
+  // that baselines "need attention", so the validator cried wolf permanently,
+  // and a guard that reds a clean run is a guard that gets switched off.
+  //
+  // The second defect was order: `includes("pass")` was tested FIRST against
+  // the whole line, so a CONCERN or FAIL whose notes happened to contain the
+  // word "pass" (or "passes", "passed") was tallied as a PASS -- the failure
+  // direction that loses information silently.
+  const VERDICT_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?\s*verdict\s*(?:\*\*)?\s*:\s*(?:\*\*)?\s*(pass|concern|fail)\b/i;
+
   for (const line of lines) {
-    const lower = line.toLowerCase();
-    // Match various verdict formats Claude might use:
-    // "**Verdict:** PASS", "Verdict: PASS", "- PASS", "PASS -", etc.
-    if (
-      lower.includes("verdict") ||
-      lower.includes("**pass**") ||
-      lower.includes("**fail**") ||
-      lower.includes("**concern**")
-    ) {
-      if (lower.includes("pass")) passCount++;
-      else if (lower.includes("concern")) concernCount++;
-      else if (lower.includes("fail")) failCount++;
-    }
+    const m = VERDICT_LINE.exec(line);
+    if (!m) continue;
+    const verdict = m[1].toLowerCase();
+    if (verdict === "pass") passCount++;
+    else if (verdict === "concern") concernCount++;
+    else failCount++;
   }
 
-  // If structured parsing found nothing, try counting keywords in the full output
-  if (passCount === 0 && concernCount === 0 && failCount === 0) {
-    const fullLower = output.toLowerCase();
-    // Count occurrences of "pass" near screenshot names (rough heuristic)
-    const passMatches = fullLower.match(/\bpass\b/g);
-    const failMatches = fullLower.match(/\bfail\b/g);
-    const concernMatches = fullLower.match(/\bconcern\b/g);
-    passCount = passMatches ? passMatches.length : 0;
-    failCount = failMatches ? failMatches.length : 0;
-    concernCount = concernMatches ? concernMatches.length : 0;
-    // Subtract common false positives ("all pass", "passed")
-    // This is approximate but better than reporting 0/0/0
-  }
+  // If no line declared a verdict, the review did not answer in the format it
+  // was asked for, and this function does not know the result.
+  //
+  // What used to be here counted every occurrence of "pass" / "fail" /
+  // "concern" anywhere in the prose, with a comment conceding it was
+  // "approximate but better than reporting 0/0/0". It was not better: these
+  // counts DECIDE whether the run passes, and the review's instructions
+  // themselves contain the words ("Explain what needs to be fixed"), so the
+  // fallback could invent a verdict for a review that never gave one -- in
+  // either direction. Not knowing is a state worth reporting.
+  const parsed = passCount + concernCount + failCount > 0;
 
-  return { passCount, concernCount, failCount };
+  return { passCount, concernCount, failCount, parsed };
 }
 
 /**
@@ -326,7 +338,14 @@ async function main() {
       process.exit(1);
     }
 
-    const { passCount, concernCount, failCount } = parseReviewResults(result.output);
+    const { passCount, concernCount, failCount, parsed } = parseReviewResults(result.output);
+
+    if (!parsed) {
+      log("\nThe review returned no verdict line, so its result is UNKNOWN.");
+      log("Read baseline-review-result.md yourself - this script will not guess.");
+      process.exit(1);
+    }
+
     log(`\nResults: ${passCount} PASS, ${concernCount} CONCERN, ${failCount} FAIL`);
 
     if (failCount === 0) {

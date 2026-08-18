@@ -31,16 +31,54 @@
 // THIS FILE IS THE STATEMENT OF WHAT THE CORPUS ASSUMES. When the corpus is
 // re-recorded on a different display, update it IN THE SAME COMMIT — that is the
 // whole mechanism.
+//
+// ---------------------------------------------------------------------------
+// MEASURED 2026-08-18: THESE TWO ASSUMPTIONS CANNOT BOTH HOLD ON A 2560x1440
+// PANEL, so on that hardware the corpus is unreproducible and EVERY grid golden
+// fails before a pixel is compared.
+// ---------------------------------------------------------------------------
+// `devicePixelRatio: 2` requires 200% scaling. Scaling divides the LOGICAL
+// desktop, and Tauri sizes its window in logical units — so the two demands pull
+// against each other on a panel that is not tall enough:
+//
+//   100%  dpr 1  screen 2560x1440  viewport 1280x800  grid 1218x542  <- SIZE ok, DPR wrong
+//   200%  dpr 2  screen 1280x720   viewport 1280x700  grid 1218x442  <- DPR ok, SIZE wrong
+//
+// At 200% the whole logical desktop is 720 tall (672 after the taskbar) and the
+// corpus needs an 800-tall viewport. Note the WIDTH is exactly 1280 in both
+// modes: this is not a window-config problem that can be tuned around, it is the
+// panel. The corpus was recorded somewhere with more logical height at 200% —
+// 3840x2160 gives 1920x1080, which fits easily.
+//
+// So a machine like this has exactly two honest options: record on a panel that
+// can host 1280x800 at 200%, or re-record the corpus at dpr 1 and change the
+// `devicePixelRatio` below to 1 in the same commit. There is no third setting
+// that satisfies the current values.
 
 /** The display configuration every committed golden was captured under. */
 export const CAPTURE_ENVIRONMENT = {
   /**
    * `window.devicePixelRatio` at capture time.
    *
-   * 2 = the machine's 200% display. The `e2e/tests` and `e2e/scenarios` corpora
-   * hold the dpr-2 hairline (241,241,241).
+   * **1 as of 2026-08-18**, when the whole corpus was re-recorded at 100%.
+   *
+   * WHY IT MOVED, because "we changed machines" is not the reason and the real
+   * one constrains any future change. The previous value, 2, came from a display
+   * whose 200% logical desktop was 1472x920 (GDI DESKTOPHORZRES 2944 / HORZRES
+   * 1472) — tall enough to host the 1280x800 window the corpus also assumes. On a
+   * 2560x1440 panel, 200% gives a logical desktop of 1280x720, so `dpr: 2` and
+   * `viewport: 1280x800` became MUTUALLY EXCLUSIVE and every grid golden failed
+   * before a pixel was compared. See the block at the top of this file for the
+   * measurement.
+   *
+   * So the corpus now holds the dpr-1 hairline (226,226,226) rather than the
+   * dpr-2 one (241,241,241), across all three trees. The GEOMETRY is unchanged —
+   * 1280x800 / 1218x542 are identical at either scaling, because Tauri sizes its
+   * window in logical units — which is what made this a safe move to make: the
+   * only thing that legitimately differs between the old corpus and the new is
+   * the hairline.
    */
-  devicePixelRatio: 2,
+  devicePixelRatio: 1,
   /**
    * The CSS size of `[data-grid-canvas-layer]`, i.e. the frame of every
    * `takeGridScreenshot` golden. Scale-independent (Tauri sizes logically), so a
@@ -135,7 +173,7 @@ export function describeCaptureEnvironmentMismatch(
         `paints ${hairline} here against ${expected} in the goldens — about 39,400 pixels of ` +
         `every grid capture, against a 200-pixel budget.\n` +
         `    EVERY GRID GOLDEN WILL FAIL, and none of those failures is about the product. ` +
-        `Move the app back to a ${CAPTURE_ENVIRONMENT.devicePixelRatio === 2 ? "200%" : "100%"} ` +
+        `Move the app back to a ${CAPTURE_ENVIRONMENT.devicePixelRatio * 100}% ` +
         `display, or re-record the corpus and update e2e/captureEnvironment.ts in the same change.`,
     );
   }

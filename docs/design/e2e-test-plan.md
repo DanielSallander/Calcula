@@ -692,6 +692,27 @@ These are not style preferences. Each was measured.
    only, and Vite binds "localhost" which resolves to `::1` here, so the listener
    that actually blocks a restart shows up as `[::1]:5173` under TCPv6 and a
    `-p TCP` scan never sees it. `CALCULA_SKIP_KILL=1` disables it.
+9c. **A THIRD launcher existed, and it was recording goldens through the
+   display.** `webview2Args.mjs` names two launch paths and says the drift
+   between them "cost the whole golden corpus its meaning twice over" — but
+   `e2e/launch-with-cdp.ps1`, the one the manual instructions point at, carried
+   its own stale copy setting `--remote-debugging-port` and NOTHING ELSE. Found
+   2026-08-18, while about to re-record two baselines through it. Anything
+   recorded that way captures through the DISPLAY's colour profile (a hard-coded
+   `#217346` lands as rgb(63,112,75), not rgb(33,115,70)) and with an
+   ACCELERATED 2D canvas, which decides whether DOM overlay text rasterizes LCD
+   or grayscale — ~2,900 differing pixels against a 200-pixel budget, with
+   nothing about the product changed. The launcher now sets only the PORT and
+   hands off to `e2e/launch-app.mjs`, which imports the shared definition and
+   PRINTS the arguments the WebView actually gets; read that line before
+   recording. `e2e/__tests__/webview2ArgsSingleSource.test.ts` now fails any file
+   under `app/` that spells `--remote-debugging-port=` in code rather than
+   calling `webview2BrowserArguments()`, so a fourth launcher cannot drift the
+   same way. It also sets the BUILD environment (MSVC via
+   `core/setup-rust-env.ps1`, and an out-of-repo `CARGO_TARGET_DIR` when unset),
+   because until now which binary a manual run exercised was a function of
+   ambient shell state.
+
 9b. **The teardown now PROVES its kill, and the run-start check lives in
    global-setup.** `global-teardown` used to fire one `taskkill /F /T /PID` with
    `stdio: "ignore"` inside a bare `catch {}` and print "[e2e] Tauri stopped."

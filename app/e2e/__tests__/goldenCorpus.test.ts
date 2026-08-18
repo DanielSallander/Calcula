@@ -204,10 +204,18 @@ describe("the corpus-split detector actually fires", () => {
   // profile reader would abstain on them, and that is the honest shape for a
   // grid capture. Spelling it out keeps the two axes independent here as well
   // as in the production code.
-  const noChrome = { srgbPixels: 0, displayPixels: 0, profileVerdict: "no-chrome" as const };
+  // ...and `span: 1` because they are GRID captures: gridlines run the full
+  // height and width, which is exactly what separates them from a patch of
+  // chrome that happens to share the hairline colour.
+  const gridOnly = {
+    srgbPixels: 0,
+    displayPixels: 0,
+    profileVerdict: "no-chrome" as const,
+    span: 1,
+  };
   const clean: GoldenReading[] = [
-    { file: "tests/__screenshots__/a.spec.ts/one.png", dpr1Pixels: 0, dpr2Pixels: 39000, verdict: "dpr2", devicePixelRatio: 2, ...noChrome },
-    { file: "tests/__screenshots__/a.spec.ts/two.png", dpr1Pixels: 0, dpr2Pixels: 38000, verdict: "dpr2", devicePixelRatio: 2, ...noChrome },
+    { file: "tests/__screenshots__/a.spec.ts/one.png", dpr1Pixels: 0, dpr2Pixels: 39000, verdict: "dpr2", devicePixelRatio: 2, ...gridOnly },
+    { file: "tests/__screenshots__/a.spec.ts/two.png", dpr1Pixels: 0, dpr2Pixels: 38000, verdict: "dpr2", devicePixelRatio: 2, ...gridOnly },
   ];
 
   it("says nothing when the whole corpus is on one path", () => {
@@ -217,7 +225,7 @@ describe("the corpus-split detector actually fires", () => {
   it("names the stray FILE, both hairline constants, and the re-record trap", () => {
     const strayed: GoldenReading[] = [
       ...clean,
-      { file: "tests/__screenshots__/a.spec.ts/three.png", dpr1Pixels: 39961, dpr2Pixels: 0, verdict: "dpr1", devicePixelRatio: 1, ...noChrome },
+      { file: "tests/__screenshots__/a.spec.ts/three.png", dpr1Pixels: 39961, dpr2Pixels: 0, verdict: "dpr1", devicePixelRatio: 1, ...gridOnly },
     ];
     const msg = describeCorpusSplit(strayed, 2, []);
     expect(msg).not.toBeNull();
@@ -233,8 +241,8 @@ describe("the corpus-split detector actually fires", () => {
 
   it("goes quiet for a stray that a quarantine names, and only for that one", () => {
     const strayed: GoldenReading[] = [
-      { file: "visual/__screenshots__/v.spec.ts/known.png", dpr1Pixels: 39961, dpr2Pixels: 0, verdict: "dpr1", devicePixelRatio: 1, ...noChrome },
-      { file: "visual/__screenshots__/v.spec.ts/fresh.png", dpr1Pixels: 39961, dpr2Pixels: 0, verdict: "dpr1", devicePixelRatio: 1, ...noChrome },
+      { file: "visual/__screenshots__/v.spec.ts/known.png", dpr1Pixels: 39961, dpr2Pixels: 0, verdict: "dpr1", devicePixelRatio: 1, ...gridOnly },
+      { file: "visual/__screenshots__/v.spec.ts/fresh.png", dpr1Pixels: 39961, dpr2Pixels: 0, verdict: "dpr1", devicePixelRatio: 1, ...gridOnly },
     ];
     const quarantine: MisRecordedCorpus[] = [
       {
@@ -258,7 +266,7 @@ describe("the colour-profile detector actually fires", () => {
   // Same discipline as the dpr detector above: the real corpus is (by
   // construction) always in the state the census accepts, so every arm is
   // driven to failure against synthetic readings.
-  const base = { dpr1Pixels: 0, dpr2Pixels: 39000, verdict: "dpr2" as const, devicePixelRatio: 2 };
+  const base = { dpr1Pixels: 0, dpr2Pixels: 39000, verdict: "dpr2" as const, devicePixelRatio: 2, span: 1 };
   const pinned: GoldenReading[] = [
     { file: "tests/__screenshots__/a.spec.ts/one.png", ...base, srgbPixels: 29569, displayPixels: 0, profileVerdict: "srgb" },
     { file: "tests/__screenshots__/a.spec.ts/two.png", ...base, srgbPixels: 1200, displayPixels: 0, profileVerdict: "srgb" },
@@ -376,6 +384,71 @@ describe("the hairline reader", () => {
     expect(img.rgb[2]).toBe(226);
     expect(readHairline(img).verdict).toBe("no-grid");
   });
+
+  // --------------------------------------------------------------------------
+  // The chrome-blob false positive, which a pixel COUNT cannot exclude.
+  // --------------------------------------------------------------------------
+  /** Paint an axis-aligned rectangle of `rgbTriple` into `img`. */
+  function fill(
+    img: { width: number; height: number; rgb: Uint8Array },
+    x0: number,
+    y0: number,
+    w: number,
+    h: number,
+    rgbTriple: [number, number, number],
+  ): void {
+    for (let y = y0; y < y0 + h; y++) {
+      for (let x = x0; x < x0 + w; x++) {
+        const p = (y * img.width + x) * 3;
+        img.rgb[p] = rgbTriple[0];
+        img.rgb[p + 1] = rgbTriple[1];
+        img.rgb[p + 2] = rgbTriple[2];
+      }
+    }
+  }
+
+  it("abstains on a BLOB of chrome in the hairline colour, however many pixels it is", () => {
+    // This is `ribbon-ribbon-tab-insert.png` and `autocomplete-dropdown-visible.png`
+    // in miniature: #F1F1F1 is the app's chrome grey as well as the dpr-2
+    // hairline, so a ribbon band clears any sane pixel floor while containing
+    // no gridline at all. 900 pixels here -- eighteen times the floor.
+    const img = solid(200, 200, [255, 255, 255]);
+    fill(img, 10, 10, 30, 30, [241, 241, 241]);
+    const r = readHairline(img);
+    expect(r.dpr2Pixels).toBe(900);
+    expect(r.span).toBeLessThan(0.25);
+    expect(r.verdict).toBe("no-grid");
+    expect(r.devicePixelRatio).toBeNull();
+  });
+
+  it("classifies a SPARSE genuine grid that holds fewer pixels than that blob", () => {
+    // The other half of the trap, and the reason the floor could not simply be
+    // raised: `grid-comments-cell-with-indicator.png` is a real grid capture
+    // holding 108 hairline pixels -- fewer than the 172-pixel false positive it
+    // sits next to. Count cannot separate these two populations in EITHER
+    // direction; structure separates them completely.
+    const img = solid(100, 100, [255, 255, 255]);
+    for (let x = 0; x < 100; x += 50) fill(img, x, 0, 1, 100, [226, 226, 226]);
+    for (let y = 0; y < 100; y += 50) fill(img, 0, y, 100, 1, [226, 226, 226]);
+    const r = readHairline(img);
+    expect(r.dpr1Pixels).toBeLessThan(900); // sparser than the blob above
+    expect(r.span).toBeGreaterThan(0.9); // ...but it SPANS the image
+    expect(r.verdict).toBe("dpr1");
+  });
+
+  it("reports span on the WINNING side, not on both constants mixed together", () => {
+    // A full grid in one constant, plus a chrome blob in the other. The blob
+    // must not be able to drag the winner's span down and disqualify a genuine
+    // capture -- which a single shared row/column set would let it do.
+    const img = solid(100, 100, [255, 255, 255]);
+    for (let x = 0; x < 100; x += 25) fill(img, x, 0, 1, 100, [226, 226, 226]);
+    for (let y = 0; y < 100; y += 25) fill(img, 0, y, 100, 1, [226, 226, 226]);
+    fill(img, 80, 80, 5, 5, [241, 241, 241]);
+    const r = readHairline(img);
+    expect(r.dpr2Pixels).toBe(25);
+    expect(r.verdict).toBe("dpr1");
+    expect(r.span).toBeGreaterThan(0.9);
+  });
 });
 
 describe("the PNG decoder", () => {
@@ -392,9 +465,15 @@ describe("the PNG decoder", () => {
     expect(img.width).toBe(bytes.readUInt32BE(16));
     expect(img.height).toBe(bytes.readUInt32BE(20));
     expect(img.rgb.length).toBe(img.width * img.height * 3);
-    // And the file it is measured against really does hold the dpr-2 hairline,
-    // in the quantity the mechanism predicts.
-    expect(readHairline(img).dpr2Pixels).toBeGreaterThan(30_000);
+    // And the file it is measured against really does hold a hairline, in the
+    // quantity the mechanism predicts -- on whichever side the corpus is
+    // currently recorded at. Naming a side here hard-codes the very thing this
+    // module exists to READ, and the 2026-08-18 re-record duly rotted the
+    // assertion that did.
+    const reading = readHairline(img);
+    const dominant = Math.max(reading.dpr1Pixels, reading.dpr2Pixels);
+    expect(dominant).toBeGreaterThan(30_000);
+    expect(reading.devicePixelRatio).toBe(CAPTURE_ENVIRONMENT.devicePixelRatio);
   });
 
   it("refuses bytes that are not a PNG instead of returning garbage", () => {

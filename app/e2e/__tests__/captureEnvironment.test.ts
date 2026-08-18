@@ -27,10 +27,16 @@ describe("capture environment guard", () => {
   });
 
   it("names the DEVICE PIXEL RATIO, the hairline, and the scale to go back to", () => {
-    const msg = describeCaptureEnvironmentMismatch({ ...matching, devicePixelRatio: 1 });
+    // DERIVED from the constant, never hard-coded to one side. The corpus moved
+    // from dpr 2 to dpr 1 on 2026-08-18 and this test had `devicePixelRatio: 1`
+    // written in — which silently became a MATCHING reading, so the guard
+    // correctly returned null and the test failed for the wrong reason. Whichever
+    // side the corpus is on, the wrong reading is the other one.
+    const wrong = CAPTURE_ENVIRONMENT.devicePixelRatio === 1 ? 2 : 1;
+    const msg = describeCaptureEnvironmentMismatch({ ...matching, devicePixelRatio: wrong });
     expect(msg).not.toBeNull();
     // The number that is wrong, and the number it should be.
-    expect(msg).toContain("devicePixelRatio is 1");
+    expect(msg).toContain(`devicePixelRatio is ${wrong}`);
     expect(msg).toContain(String(CAPTURE_ENVIRONMENT.devicePixelRatio));
     // The MECHANISM, so the reader does not have to rediscover it.
     expect(msg).toContain("hairline");
@@ -38,8 +44,8 @@ describe("capture environment guard", () => {
     expect(msg).toContain("241,241,241");
     // The consequence, stated so the failures are not mistaken for regressions.
     expect(msg).toContain("EVERY GRID GOLDEN WILL FAIL");
-    // The two ways out.
-    expect(msg).toContain("200%");
+    // The two ways out. The scale is derived, so this survives the next flip.
+    expect(msg).toContain(`${CAPTURE_ENVIRONMENT.devicePixelRatio * 100}%`);
     expect(msg).toContain("e2e/captureEnvironment.ts");
   });
 
@@ -61,12 +67,15 @@ describe("capture environment guard", () => {
   });
 
   it("reports BOTH when both are wrong, rather than stopping at the first", () => {
+    // Same reasoning as above: the WRONG dpr is whichever side the corpus is not
+    // on, derived rather than written in.
+    const wrong = CAPTURE_ENVIRONMENT.devicePixelRatio === 1 ? 2 : 1;
     const msg = describeCaptureEnvironmentMismatch({
-      devicePixelRatio: 1,
+      devicePixelRatio: wrong,
       gridCanvasLayer: { width: 2498, height: 1342 },
       viewport: { width: 2560, height: 1600 },
     });
-    expect(msg).toContain("devicePixelRatio is 1");
+    expect(msg).toContain(`devicePixelRatio is ${wrong}`);
     expect(msg).toContain("2498x1342");
   });
 

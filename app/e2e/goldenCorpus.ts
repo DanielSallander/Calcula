@@ -11,16 +11,26 @@
 //            Nothing compares the CORPUS to that constant.
 //
 //          So the corpus can quietly stop being a single corpus. Measured
-//          2026-08-11 by decoding all 71 committed goldens: 44 hold the dpr-2
-//          hairline and 27 -- the whole `e2e/visual` tree, every one of them
-//          re-recorded that afternoon -- hold the dpr-1 hairline. The display
-//          this machine actually runs is 200% (GDI DESKTOPHORZRES 2944 /
-//          HORZRES 1472 = 2), so dpr 2 is the truth and the visual corpus was
-//          re-recorded against an environment that does not exist here.
-//          `captureEnvironment.ts` says devicePixelRatio 2 and describes itself
-//          as "the display configuration EVERY committed golden was captured
-//          under". For 27 of 71 files that sentence is false, and no test could
-//          say so, because no test ever looked at a golden.
+//          2026-08-11 by decoding all 71 committed goldens: 44 held the dpr-2
+//          hairline and 27 -- the whole `e2e/visual` tree, re-recorded that
+//          afternoon -- held the dpr-1 hairline. `captureEnvironment.ts` said
+//          devicePixelRatio 2 and described itself as "the display configuration
+//          EVERY committed golden was captured under". For 27 of 71 files that
+//          sentence was false, and no test could say so, because no test ever
+//          looked at a golden.
+//
+//          RE-MEASURED 2026-08-18, after the corpus was re-recorded at dpr 1
+//          (72 files): 58 classifiable, ALL dpr-1, none dpr-2. The numbers above
+//          are kept because they are why this module exists, but do not quote
+//          any of them as current -- read the bytes, which is the whole point of
+//          the module. The remaining 14 are strips and bands carrying no
+//          gridlines to classify, which is reported rather than guessed.
+//
+//          Why the corpus moved to dpr 1 rather than back to dpr 2: at 200%
+//          scaling this display reports dpr 2 but shrinks the logical desktop to
+//          1280x720, and the corpus needs an 800-tall viewport. The width is
+//          exactly 1280 in both modes, so it is the panel, not the config, and
+//          no setting recovers dpr 2 at the required size.
 //
 //          A bulk re-record is the single highest-risk operation in a visual
 //          suite: it accepts whatever the app rendered that day as the new
@@ -59,6 +69,37 @@ export const HAIRLINE_DPR2 = "241,241,241";
  * such rather than guessed at.
  */
 const MIN_HAIRLINE_PIXELS = 50;
+
+/**
+ * ...and a COUNT alone cannot make that call, which this module learned by
+ * getting it wrong. After the 2026-08-18 re-record, two files still read as
+ * dpr-2 in a corpus that was now uniformly dpr-1, and the guard reported the
+ * corpus had "split across two capture paths". Both were false alarms:
+ *
+ *     ribbon-ribbon-tab-insert.png       172 px of 241,241,241, no grid at all
+ *     autocomplete-dropdown-visible.png  916 px of 241,241,241, no grid at all
+ *
+ * `#F1F1F1` is ALSO the app's UI chrome grey, so a ribbon band and a dropdown
+ * crop clear a 50-pixel floor without containing one gridline. Raising the
+ * floor cannot fix it either, and that is the useful part: a genuine small
+ * crop, `grid-comments-cell-with-indicator.png`, holds only 108 hairline
+ * pixels -- FEWER than the 172-pixel false positive. The populations are not
+ * separable by count in either direction.
+ *
+ * They separate completely by STRUCTURE, because a gridline is a LINE. Vertical
+ * rules put the constant in nearly every row; horizontal rules put it in nearly
+ * every column. Chrome painted in the same grey is a BLOB. Measured over all 60
+ * goldens holding either constant -- the fraction of rows, and of columns, that
+ * contain it, whichever is smaller:
+ *
+ *     0.2%   ribbon-ribbon-tab-insert.png          <- chrome
+ *     2.4%   autocomplete-dropdown-visible.png     <- chrome
+ *    65.1%   the lowest genuine grid capture
+ *    96.1%   the typical full-grid capture
+ *
+ * A 27x gap with nothing in it. This threshold sits in the middle of that gap.
+ */
+const MIN_HAIRLINE_SPAN = 0.25;
 
 /**
  * The dominant constant must beat the other by this factor. Menus and editor
@@ -207,27 +248,57 @@ export interface HairlineReading {
   verdict: CaptureVerdict;
   /** The device pixel ratio this file was recorded at, when it can be read. */
   devicePixelRatio: number | null;
+  /**
+   * How much of the image the dominant constant actually SPANS: the fraction of
+   * rows, and of columns, containing it, whichever is smaller. Near 1 for
+   * gridlines, near 0 for a patch of chrome that happens to share the colour.
+   */
+  span: number;
 }
 
 /** Read the capture path off a decoded golden. PURE. */
 export function readHairline(image: DecodedPng): HairlineReading {
   let dpr1Pixels = 0;
   let dpr2Pixels = 0;
-  const count = image.width * image.height;
-  for (let p = 0; p < count; p++) {
-    const r = image.rgb[p * 3];
-    const g = image.rgb[p * 3 + 1];
-    const b = image.rgb[p * 3 + 2];
-    if (r === g && g === b) {
-      if (r === 226) dpr1Pixels++;
-      else if (r === 241) dpr2Pixels++;
+  // Which rows / columns the dominant constant touches. Tracked per constant so
+  // the span belongs to the WINNING side rather than to both mixed together.
+  const rowsHit = [new Uint8Array(image.height), new Uint8Array(image.height)];
+  const colsHit = [new Uint8Array(image.width), new Uint8Array(image.width)];
+
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const p = (y * image.width + x) * 3;
+      const r = image.rgb[p];
+      const g = image.rgb[p + 1];
+      const b = image.rgb[p + 2];
+      if (r !== g || g !== b) continue;
+      let side = -1;
+      if (r === 226) {
+        dpr1Pixels++;
+        side = 0;
+      } else if (r === 241) {
+        dpr2Pixels++;
+        side = 1;
+      }
+      if (side >= 0) {
+        rowsHit[side][y] = 1;
+        colsHit[side][x] = 1;
+      }
     }
   }
 
   const hi = Math.max(dpr1Pixels, dpr2Pixels);
   const lo = Math.min(dpr1Pixels, dpr2Pixels);
+  const winner = dpr2Pixels > dpr1Pixels ? 1 : 0;
+  const covered = (flags: Uint8Array): number => {
+    let n = 0;
+    for (let i = 0; i < flags.length; i++) n += flags[i];
+    return flags.length === 0 ? 0 : n / flags.length;
+  };
+  const span = Math.min(covered(rowsHit[winner]), covered(colsHit[winner]));
+
   let verdict: CaptureVerdict;
-  if (hi < MIN_HAIRLINE_PIXELS) verdict = "no-grid";
+  if (hi < MIN_HAIRLINE_PIXELS || span < MIN_HAIRLINE_SPAN) verdict = "no-grid";
   else if (lo * DOMINANCE_MARGIN > hi) verdict = "ambiguous";
   else verdict = dpr2Pixels > dpr1Pixels ? "dpr2" : "dpr1";
 
@@ -236,6 +307,7 @@ export function readHairline(image: DecodedPng): HairlineReading {
     dpr2Pixels,
     verdict,
     devicePixelRatio: verdict === "dpr1" ? 1 : verdict === "dpr2" ? 2 : null,
+    span,
   };
 }
 
