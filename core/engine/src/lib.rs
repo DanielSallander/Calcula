@@ -11,6 +11,13 @@ pub mod ast_render;
 /// contradiction between `A1:A3` and `A:A` survived unnoticed.
 #[cfg(test)]
 mod blank_semantics_tests;
+
+/// Excel's SPACE intersection operator and the `#NULL!` it produces. Its own file
+/// for the same reason `blank_semantics_tests` has one: the rule spans the lexer,
+/// the parser, the renderer and the evaluator, so a failure needs to say WHICH
+/// layer moved.
+#[cfg(test)]
+mod intersection_tests;
 pub mod budget;
 pub mod cell;
 pub mod control_values;

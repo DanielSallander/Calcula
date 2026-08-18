@@ -15,18 +15,31 @@ use std::str::Chars;
 
 pub struct Lexer<'a> {
     input: Peekable<Chars<'a>>,
+    /// Whether the token most recently returned by `next_token` had whitespace
+    /// in front of it.
+    ///
+    /// WHY A FLAG AND NOT A `Token::Whitespace`. Excel's INTERSECTION operator is
+    /// a SPACE between two references (`=SUM(A1:A5 A3:C3)`), so the parser has to
+    /// know that a space was there — but `skip_whitespace` had already consumed it
+    /// and emitted nothing, making it unrecoverable. A token variant would be the
+    /// obvious fix and is the wrong one: every other rule in this grammar is
+    /// whitespace-insensitive, so a real token would have to be skipped explicitly
+    /// at dozens of sites and would break the moment one was missed. A flag leaves
+    /// the token stream exactly as it was and adds the one bit the parser needs.
+    had_leading_ws: bool,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Lexer {
             input: input.chars().peekable(),
+            had_leading_ws: false,
         }
     }
 
     /// Advances the lexer and returns the next token.
     pub fn next_token(&mut self) -> Token {
-        self.skip_whitespace();
+        self.had_leading_ws = self.skip_whitespace();
 
         match self.input.next() {
             Some('+') => Token::Plus,
@@ -77,13 +90,25 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn skip_whitespace(&mut self) {
+    /// Consumes whitespace and reports whether there was any.
+    fn skip_whitespace(&mut self) -> bool {
+        let mut saw_any = false;
         while let Some(&ch) = self.input.peek() {
             if !ch.is_whitespace() {
                 break;
             }
+            saw_any = true;
             self.input.next();
         }
+        saw_any
+    }
+
+    /// True when the token most recently returned by [`Lexer::next_token`] was
+    /// preceded by whitespace. The parser reads this to recognise Excel's space
+    /// INTERSECTION operator, which is otherwise indistinguishable from two
+    /// adjacent operands.
+    pub fn last_token_had_leading_whitespace(&self) -> bool {
+        self.had_leading_ws
     }
 
     /// Handles operators starting with '<': <, <=, <>

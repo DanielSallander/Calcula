@@ -13,7 +13,7 @@ import { getWorkbookDigest } from "./digest";
 import type { CellDigestJson, SheetDigestJson } from "./digest";
 import type { OracleViolation } from "./types";
 
-const VOLATILE_FORMULA =
+export const VOLATILE_FORMULA =
   /\b(NOW|TODAY|RAND|RANDBETWEEN|RANDARRAY|INDIRECT|OFFSET)\s*\(/i;
 
 export async function checkRecalcConsistency(

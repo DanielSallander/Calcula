@@ -21,7 +21,7 @@
 use crate::budget::{BudgetPolicy, CancelToken, EvalBudget, LAMBDA_CALL_FUEL, MAX_ARRAY_ELEMENTS, MAX_TEXT_LEN};
 use crate::cell::{CellError, CellValue, DictKey};
 use crate::control_values::ControlValue;
-use crate::coord::col_to_index;
+use crate::coord::{col_to_index, index_to_col};
 use crate::cube::{cube_call_key, CubeBinding, CubeCallResult, CubePrefetch, CubeResolver};
 use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
@@ -671,6 +671,27 @@ pub struct GatherSubmission {
     pub value: EvalResult,
 }
 
+/// A reference's rectangle for INTERSECTION. Rows are 1-BASED (matching
+/// `CellRef.row` / `RowRef.start_row`), columns 0-based (matching `col_to_index`),
+/// and `u32::MAX` marks an axis the reference does not bound — which is how a
+/// whole-column `A:A` and a whole-row `1:1` intersect to the single cell `A1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefRect {
+    sheet: Option<String>,
+    r1: u32,
+    r2: u32,
+    c1: u32,
+    c2: u32,
+}
+
+/// `(row, col)` of a `CellRef` node: row 1-based, col 0-based.
+fn cell_ref_coords(expr: &Expression) -> Option<(u32, u32)> {
+    match expr {
+        Expression::CellRef { col, row, .. } => Some((*row, col_to_index(col))),
+        _ => None,
+    }
+}
+
 /// The formula evaluator.
 /// Holds a reference to the grid for cell lookups.
 pub struct Evaluator<'a> {
@@ -1080,6 +1101,12 @@ impl<'a> Evaluator<'a> {
             }
             Expression::RowRef { sheet, start_row, end_row, .. } => {
                 self.eval_row_ref(sheet, *start_row, *end_row)
+            }
+            // INTERSECTION FIRST, and it must be before the generic arm: it is a
+            // REFERENCE operator, and `eval_binary_op` opens by collapsing both
+            // operands to values, which destroys exactly what it needs.
+            Expression::BinaryOp { left, op: BinaryOperator::Intersect, right } => {
+                self.eval_intersect(left, right)
             }
             Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
             Expression::UnaryOp { op, operand } => self.eval_unary_op(op, operand),
@@ -1693,6 +1720,142 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Evaluates a binary operation.
+
+    /// The rectangle a reference covers, in the AST's own units: rows 1-BASED (as
+    /// `CellRef.row` and `RowRef.start_row` are), columns 0-based (as
+    /// `col_to_index` returns). `u32::MAX` marks an unbounded axis.
+    fn reference_rect(&self, expr: &Expression) -> Option<RefRect> {
+        match expr {
+            Expression::CellRef { sheet, col, row, .. } => {
+                let c = col_to_index(col);
+                Some(RefRect { sheet: sheet.clone(), r1: *row, r2: *row, c1: c, c2: c })
+            }
+            Expression::Range { sheet, start, end, .. } => {
+                let (sr, sc) = cell_ref_coords(start)?;
+                let (er, ec) = cell_ref_coords(end)?;
+                Some(RefRect {
+                    sheet: sheet.clone(),
+                    r1: sr.min(er),
+                    r2: sr.max(er),
+                    c1: sc.min(ec),
+                    c2: sc.max(ec),
+                })
+            }
+            Expression::ColumnRef { sheet, start_col, end_col, .. } => {
+                let a = col_to_index(start_col);
+                let b = col_to_index(end_col);
+                Some(RefRect {
+                    sheet: sheet.clone(),
+                    // Rows 1..MAX: 1-based, so the low bound is 1, not 0.
+                    r1: 1,
+                    r2: u32::MAX,
+                    c1: a.min(b),
+                    c2: a.max(b),
+                })
+            }
+            Expression::RowRef { sheet, start_row, end_row, .. } => Some(RefRect {
+                sheet: sheet.clone(),
+                r1: (*start_row).min(*end_row),
+                r2: (*start_row).max(*end_row),
+                c1: 0,
+                c2: u32::MAX,
+            }),
+            // An intersection of intersections is itself a reference, so recursing
+            // keeps `A1:C3 B1:B9 B2:B2` working left-associatively.
+            Expression::BinaryOp { left, op: BinaryOperator::Intersect, right } => {
+                let a = self.reference_rect(left)?;
+                let b = self.reference_rect(right)?;
+                if a.sheet != b.sheet {
+                    return None;
+                }
+                let rect = RefRect {
+                    sheet: a.sheet,
+                    r1: a.r1.max(b.r1),
+                    r2: a.r2.min(b.r2),
+                    c1: a.c1.max(b.c1),
+                    c2: a.c2.min(b.c2),
+                };
+                if rect.r1 > rect.r2 || rect.c1 > rect.c2 {
+                    return None;
+                }
+                Some(rect)
+            }
+            _ => None,
+        }
+    }
+
+    /// Excel's INTERSECTION operator: the rectangle two references have in common.
+    ///
+    /// `=SUM(A1:A5 A3:C3)` is `A3`. A pair with NO overlap is `#NULL!` — the only
+    /// thing in Excel that produces that error, and the reason Calcula could never
+    /// produce it: the operator was not parsed at all, so `=A1:A5 C1:C5` was a hard
+    /// parse error surfacing as `#VALUE!` with no dependency edges (a cell that
+    /// therefore also never recalculated).
+    ///
+    /// IT TAKES EXPRESSIONS, NOT VALUES, AND THAT IS THE POINT. It cannot live in
+    /// `eval_binary_op`, which opens by collapsing both operands with
+    /// `self.evaluate(...)`. Intersection is a REFERENCE operator: it needs the
+    /// operands' rectangles, and once they are values the reference-ness is gone.
+    /// So `eval_node` dispatches this arm BEFORE `eval_binary_op` is reached.
+    fn eval_intersect(&self, left: &Expression, right: &Expression) -> EvalResult {
+        let (Some(a), Some(b)) = (self.reference_rect(left), self.reference_rect(right)) else {
+            // One side is not a reference. Excel answers #NULL! rather than
+            // inventing a value: there is nothing for the two to have in common.
+            return EvalResult::Error(CellError::Null);
+        };
+        // A `None` sheet means "this sheet", so it matches another `None`. Two
+        // different sheets have no cells in common at all.
+        if a.sheet != b.sheet {
+            return EvalResult::Error(CellError::Null);
+        }
+
+        let r1 = a.r1.max(b.r1);
+        let r2 = a.r2.min(b.r2);
+        let c1 = a.c1.max(b.c1);
+        let c2 = a.c2.min(b.c2);
+        if r1 > r2 || c1 > c2 {
+            return EvalResult::Error(CellError::Null);
+        }
+
+        // SYNTHESIZE the overlapping reference and evaluate it through the existing
+        // paths, rather than reimplementing cell gathering. Which node to build
+        // depends on which axes are still unbounded, so a column-by-row
+        // intersection stays a single cell instead of becoming a million-row range.
+        match (r2 == u32::MAX, c2 == u32::MAX) {
+            // Two whole-sheet references: Excel has no notation for this and
+            // neither does the grid.
+            (true, true) => EvalResult::Error(CellError::Null),
+            (true, false) => {
+                self.eval_column_ref(&a.sheet, &index_to_col(c1), &index_to_col(c2))
+            }
+            (false, true) => self.eval_row_ref(&a.sheet, r1, r2),
+            (false, false) => {
+                if r1 == r2 && c1 == c2 {
+                    self.eval_cell_ref(&a.sheet, &index_to_col(c1), r1)
+                } else {
+                    // `eval_range` takes CellRef EXPRESSIONS, so build them.
+                    let start = Expression::CellRef {
+                        sheet: None,
+                        col: index_to_col(c1),
+                        row: r1,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
+                    };
+                    let end = Expression::CellRef {
+                        sheet: None,
+                        col: index_to_col(c2),
+                        row: r2,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
+                    };
+                    self.eval_range(&a.sheet, &start, &end)
+                }
+            }
+        }
+    }
+
     fn eval_binary_op(
         &self,
         left: &Expression,
@@ -1717,6 +1880,13 @@ impl<'a> Evaluator<'a> {
             BinaryOperator::Multiply => self.eval_multiply(&left_val, &right_val),
             BinaryOperator::Divide => self.eval_divide(&left_val, &right_val),
             BinaryOperator::Power => self.eval_power(&left_val, &right_val),
+
+            // UNREACHABLE BY CONSTRUCTION: `eval_node` intercepts Intersect above,
+            // because by the time control reaches here both operands have been
+            // collapsed to VALUES and the rectangles it needs are gone. Answering
+            // #NULL! rather than `unreachable!()` keeps a future caller that reaches
+            // this function directly from panicking in the renderer's process.
+            BinaryOperator::Intersect => EvalResult::Error(CellError::Null),
 
             // String concatenation
             BinaryOperator::Concat => self.eval_concat(&left_val, &right_val),

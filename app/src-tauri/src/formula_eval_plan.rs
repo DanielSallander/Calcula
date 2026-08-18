@@ -391,6 +391,10 @@ fn binary_op_str(op: &BinaryOperator) -> &'static str {
         BinaryOperator::GreaterThan => ">",
         BinaryOperator::LessEqual => "<=",
         BinaryOperator::GreaterEqual => ">=",
+        // A single SPACE: Excel's intersection operator. Rendering it as "" would
+        // turn `A1:A5 C1:C5` into `A1:A5C1:C5` in the step-by-step evaluator's
+        // display, which is a different formula and does not parse back.
+        BinaryOperator::Intersect => " ",
     }
 }
 

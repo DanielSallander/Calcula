@@ -75,6 +75,15 @@ pub enum CellError {
     /// variant of its own, or silent rewriting to `#VALUE!` on the way in.
     /// Excel parity settles it -- they are two different errors that send a
     /// user to two different places.
+    ///
+    /// THE EVALUATOR PRODUCES THIS NOW (2026-08-17). Until then the variant only
+    /// ever round-tripped an imported value, and the reason sat one layer below
+    /// where anyone had looked: the SPACE INTERSECTION OPERATOR WAS NOT PARSED.
+    /// The lexer discarded whitespace and emitted nothing, so `=A1:A5 C1:C5`
+    /// failed to parse, surfaced as `#VALUE!`, and left the cell with NO
+    /// dependency edges — so it never recalculated either.
+    /// `BinaryOperator::Intersect` and `Evaluator::eval_intersect` close that;
+    /// see `intersection_tests`.
     Null,
     /// Excel's `#NUM!`: a numeric argument is outside the function's domain
     /// (`SQRT(-1)`, `LOG(0)`) or the result is too large to represent.

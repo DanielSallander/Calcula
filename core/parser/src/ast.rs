@@ -2582,7 +2582,22 @@ pub enum BinaryOperator {
     Subtract, // -
     Multiply, // *
     Divide,   // /
-    Power,    // ^ (highest precedence among binary ops)
+    Power,    // ^
+
+    /// Excel's INTERSECTION operator: a SPACE between two references.
+    ///
+    /// `=SUM(A1:A5 A3:C3)` is the overlap (A3), and when the rectangles do not
+    /// overlap the result is `#NULL!` — the only thing in Excel that produces that
+    /// error, and the reason Calcula could never produce it either.
+    ///
+    /// HIGHEST PRECEDENCE among binary operators, tighter than `Power`: in Excel
+    /// the reference operators bind before arithmetic, so `A1:A5 B1:B5^2` raises
+    /// the INTERSECTION to a power, not `B1:B5`.
+    ///
+    /// Not to be confused with `Expression::ImplicitIntersection` (the `@` prefix),
+    /// which is a UNARY node and a different Excel feature entirely — a naive
+    /// search for 'intersect' finds that one and nothing here.
+    Intersect,
 }
 
 /// Unary operators.
@@ -2606,6 +2621,10 @@ impl std::fmt::Display for BinaryOperator {
             BinaryOperator::GreaterThan => write!(f, ">"),
             BinaryOperator::LessEqual => write!(f, "<="),
             BinaryOperator::GreaterEqual => write!(f, ">="),
+            // A single SPACE, not the empty string: rendering it away would turn
+            // `A1:A5 C1:C5` into `A1:A5C1:C5`, which is a different formula and
+            // does not parse back.
+            BinaryOperator::Intersect => write!(f, " "),
         }
     }
 }

@@ -125,14 +125,59 @@ const CELL_REFS = [
   "F3", "G4", "H5", "A30", "B30",
 ] as const;
 
-// Formulas use ';' argument separators (sv-SE locale, see header note).
-const FORMULAS = [
+/**
+ * The walker's formula alphabet.
+ *
+ * WIDENED 2026-08-17 from six entries. The reason it had stayed at six — "it
+ * changes what the committed seeds mean" — turned out to be false in both halves:
+ * there is no committed seed and no seed-derived baseline anywhere in the repo
+ * (seeds default to `Date.now()`, every walk artefact under `e2e/results/` is
+ * gitignored, and the committed replayables are inline `ActionTrace` literals with
+ * EXPLICIT recorded params that replay never re-picks). And `pick` consumes
+ * exactly ONE rng draw whatever the list length, so for a fixed seed the action
+ * sequence and every other parameter are byte-identical; only the formula text
+ * landing in G10:G12 moves.
+ *
+ * FOUR CONSTRAINTS ON ANY NEW ENTRY, each of which has a live enforcement in
+ * `__tests__/walkerFormulaAlphabet.test.ts` — read them before adding one:
+ *
+ *  1. **';' argument separators, never ','.** The suite runs under sv-SE, where
+ *     ',' silently mis-parses (see this file's header).
+ *  2. **No volatile function.** `recalcConsistency` excludes cells that ARE
+ *     volatile but NOT cells that merely depend on one, so a single volatile
+ *     entry makes that oracle fire on legitimate change for anything the walker
+ *     later builds on G10:G12.
+ *  3. **Nothing that spills.** The five write targets are a 2x3 block, so SORT /
+ *     UNIQUE / SEQUENCE / FILTER would spill into their neighbours and produce
+ *     #SPILL! depending on which target was drawn first.
+ *  4. **Must not contain the literal "Test".** `replace.all` rewrites
+ *     "Test" -> "Tst" across the workbook, which would silently corrupt the
+ *     formula text mid-walk.
+ *
+ * Exported so the guard test reads THIS list rather than a copy of it.
+ */
+export const FORMULAS = [
   "=SUM(A1:A10)",
   "=A1&B2",
   "=IF(A1>0;1;0)",
   "=AVERAGE(B1:B10)",
   "=COUNT(A1:A30)",
   "=MAX(A1:E5)",
+  // --- added 2026-08-17 -------------------------------------------------
+  // Chosen to widen the SHAPES the walker exercises, not merely the count:
+  // nesting, a text function, a lookup, a conditional aggregate, a rounding
+  // function and a division that can legitimately produce a #DIV/0! the
+  // oracles must tolerate.
+  "=MIN(A1:E5)",
+  "=ROUND(AVERAGE(A1:A10);2)",
+  "=IF(SUM(A1:A10)>100;MAX(A1:E5);MIN(A1:E5))",
+  "=COUNTIF(A1:A30;\">0\")",
+  "=SUMIF(A1:A30;\">0\";B1:B30)",
+  "=LEN(A1&B2)",
+  "=ABS(A1-B2)",
+  "=A1/B2",
+  "=IFERROR(A1/B2;0)",
+  "=CONCATENATE(A1;B2)",
 ] as const;
 
 // Safe areas (0-based coordinates) — keep features from trampling each other:

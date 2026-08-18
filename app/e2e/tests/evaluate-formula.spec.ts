@@ -6,7 +6,7 @@
  * Uses cells in columns AI-AJ, rows 1-10 to avoid conflicts with other tests.
  */
 import { test, expect } from "../fixtures";
-import { takeGridScreenshot, softly } from "../helpers/screenshots";
+import { takeGridRegionScreenshot, softly } from "../helpers/screenshots";
 
 test.describe("Evaluate Formula", () => {
   test("initialize evaluation session for a formula cell", async ({ appPage, grid }) => {
@@ -34,8 +34,21 @@ test.describe("Evaluate Formula", () => {
       await tauri.core.invoke("eval_formula_close", { sessionId: sid });
     }, state.sessionId);
 
-    await grid.navigateTo("AI1");
-    await softly(takeGridScreenshot(appPage, "evaluate-formula-init"));
+    // A REGION CAPTURE OF THIS TEST'S OWN CELLS, not a whole-grid shot.
+    //
+    // These two goldens used to be full-grid captures framed by `navigateTo`, and
+    // 26 of the 27 columns in frame belonged to OTHER specs — the visible content
+    // (AF/AG/AH) and even the percent format on AI2 are `edge-cases.spec.ts`'s
+    // residue. So the picture was stable, named after this feature, and asserting
+    // almost nothing about it: any change to an unrelated spec's leftovers moved
+    // it, and a real change to THIS feature could hide in one column of 27.
+    //
+    // `takeGridRegionScreenshot` frames the range itself and parks the selection
+    // away from it, so the `navigateTo` is not only unnecessary, it was part of
+    // the problem.
+    await softly(
+      takeGridRegionScreenshot(appPage, "evaluate-formula-init", { from: "AI1", to: "AI3" }),
+    );
   });
 
   test("step through evaluation to completion", async ({ grid }) => {
@@ -152,7 +165,10 @@ test.describe("Evaluate Formula", () => {
       }, state.sessionId);
     }
 
-    await grid.navigateTo("AI1");
-    await softly(takeGridScreenshot(appPage, "evaluate-formula-constant"));
+    // Same reasoning as `evaluate-formula-init` above: frame the cell this test
+    // actually writes (AI9 = 42), not 27 columns of other specs' residue.
+    await softly(
+      takeGridRegionScreenshot(appPage, "evaluate-formula-constant", { from: "AI9", to: "AI9" }),
+    );
   });
 });

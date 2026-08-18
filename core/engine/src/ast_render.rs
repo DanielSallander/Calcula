@@ -38,8 +38,15 @@ const PREC_ADD: u8 = 3;
 const PREC_MUL: u8 = 4;
 const PREC_UNARY: u8 = 5;
 const PREC_POWER: u8 = 6;
+/// Excel's SPACE intersection operator, which binds tighter than `^` because the
+/// reference operators bind before arithmetic. Renumbered `PREC_ATOM` when this
+/// was added — the header states these mirror the parser's descent chain, so they
+/// move with it, and leaving intersection sharing `PREC_ATOM` would render a
+/// programmatically-built `Intersect(A1, Add(B1, C1))` without the parentheses it
+/// needs to parse back the same way.
+const PREC_INTERSECT: u8 = 7;
 /// Anything that parses as a primary and can never need guarding.
-const PREC_ATOM: u8 = 7;
+const PREC_ATOM: u8 = 8;
 
 fn binding_power(op: &BinaryOperator) -> u8 {
     match op {
@@ -53,6 +60,7 @@ fn binding_power(op: &BinaryOperator) -> u8 {
         BinaryOperator::Add | BinaryOperator::Subtract => PREC_ADD,
         BinaryOperator::Multiply | BinaryOperator::Divide => PREC_MUL,
         BinaryOperator::Power => PREC_POWER,
+        BinaryOperator::Intersect => PREC_INTERSECT,
     }
 }
 

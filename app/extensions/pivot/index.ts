@@ -27,7 +27,8 @@ import {
 import type { AutoFitColumnContribution, AutoFitRowContribution } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
-import { hasObjectScript, drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
+import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
+import { decideDrillDispatch, diagnoseScriptDrill } from "./lib/drillDispatch";
 
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 import type { PivotProgressEvent } from "../_shared/lib/pivotEvents";
@@ -1729,21 +1730,52 @@ function activate(context: ExtensionContext): void {
             void (async () => {
               try {
                 const behavior = await getPivotDrillBehavior(pivotId);
-                // Dispatch to the pivot's script ONLY if one is attached; a
-                // "script" mode with no script attached falls through to the
-                // built-in drill so a double-click is never a silent no-op.
-                if (behavior?.kind === "script" && hasObjectScript("pivot", pivotId)) {
-                  // Resolve the drilled cell to (table, column, value) pairs and
-                  // dispatch the hook; the pivot's script handles the rest.
-                  const resolved = await getPivotDataFormula(row, col);
-                  const drillCell = (resolved?.fieldItemPairs ?? []).map(([fn, value]) => {
-                    const dot = fn.lastIndexOf(".");
-                    return dot >= 0
-                      ? { table: fn.slice(0, dot), column: fn.slice(dot + 1), value }
-                      : { table: "", column: fn, value };
-                  });
-                  emitAppEvent("pivot:drillThrough", { pivotId, cell: drillCell });
-                  return;
+                // Dispatch to the pivot's script only when a MOUNTED script has
+                // actually REGISTERED a drill handler. "Does this pivot have a
+                // script" answers the wrong question: the handler side is opt-in
+                // (the forwarder exists only once the script calls
+                // `pivot.onDrillThrough`), so a script that hooks only, say,
+                // `onRefresh` left the emitted event with no subscriber — and
+                // because this branch had already returned, the user got no
+                // drill, no fallback and no message at all (BUG-0096). Every
+                // other case falls through to the built-in drill below, which is
+                // what makes "a double-click is never a silent no-op" true rather
+                // than merely intended.
+                if (behavior?.kind === "script") {
+                  // Dynamic, matching the ObjectScriptManager use in Controls:
+                  // the script host pulls in the worker bootstrap, and Pivot
+                  // activates long before any script does.
+                  const { ObjectScriptManager, mountedScriptHasHook } = await import("@api");
+                  const script = ObjectScriptManager.getScript("pivot", pivotId);
+                  const mounted = script ? ObjectScriptManager.isScriptMounted(script.id) : false;
+                  const facts = {
+                    kind: behavior.kind,
+                    script: script ? { id: script.id, name: script.name } : null,
+                    mounted,
+                    handlesDrill:
+                      script && mounted
+                        ? mountedScriptHasHook(script.id, "pivot.onDrillThrough")
+                        : false,
+                  };
+
+                  if (decideDrillDispatch(facts) === "script") {
+                    // Resolve the drilled cell to (table, column, value) pairs and
+                    // dispatch the hook; the pivot's script handles the rest.
+                    // `getPivotDataFormula` stays INSIDE this branch: it is an
+                    // extra IPC round trip that only the script path needs.
+                    const resolved = await getPivotDataFormula(row, col);
+                    const drillCell = (resolved?.fieldItemPairs ?? []).map(([fn, value]) => {
+                      const dot = fn.lastIndexOf(".");
+                      return dot >= 0
+                        ? { table: fn.slice(0, dot), column: fn.slice(dot + 1), value }
+                        : { table: "", column: fn, value };
+                    });
+                    emitAppEvent("pivot:drillThrough", { pivotId, cell: drillCell });
+                    return;
+                  }
+
+                  const diagnosis = diagnoseScriptDrill(facts);
+                  if (diagnosis) showToast(diagnosis.message, { type: diagnosis.variant });
                 }
                 const resp = await drillThroughToSheet({ pivotId, groupPath });
                 try {

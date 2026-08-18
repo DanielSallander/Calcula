@@ -282,6 +282,12 @@ pub struct MediaMigration {
     /// deliberately applies no such ceiling. Open-item 1.6; see
     /// `clamp_oversized_distributed_values` for why the two paths differ.
     pub oversized: usize,
+    /// Total serialized bytes of the admitted payload, measured AFTER images
+    /// became handles and after the per-property clamp — i.e. what would actually
+    /// land in the subscriber's document. Compared against
+    /// `MAX_DISTRIBUTED_CONTROL_BYTES`; see it for why per-value caps cannot
+    /// answer this question.
+    pub total_bytes: usize,
 }
 
 /// What should become of one inline `data:image/...` payload.
@@ -527,6 +533,27 @@ fn rewrite_inline_images(
     }
 }
 
+/// The TOTAL a distributed control payload may occupy after admission.
+///
+/// THE LIMITATION THE PER-PROPERTY CAPS CANNOT REACH. Every ceiling in this module
+/// is per-value, so 5,000 controls of 63 KiB each is ~315 MB in which every single
+/// value is legal — and all of it lands verbatim in the subscriber's own `.cala`,
+/// where the media GC can never reclaim it because an inline string is not in the
+/// media store. Open-item 1.6 named this as accepted-and-uncaught; this is the
+/// budget that catches it.
+///
+/// WHY 32 MiB. It is 4x `MAX_MEDIA_BYTES`, measured AFTER admissible images have
+/// become ~70-character handles — so a report carrying four full-size
+/// policy-refused pictures still fits, and anything past it is not a report. For
+/// scale, the per-property cap is 64 KiB, so this is ~512 maximal properties.
+///
+/// WHY IT REFUSES RATHER THAN TRIMS. Trimming would have to pick victims, and
+/// every rule for picking them is arbitrary in a way the subscriber cannot see:
+/// silently dropping content is how a report becomes quietly wrong. A refusal is
+/// loud, names the number, and is fixable by the publisher — the party that
+/// actually caused it.
+pub const MAX_DISTRIBUTED_CONTROL_BYTES: usize = 32 * 1024 * 1024;
+
 /// Clear any string in a DISTRIBUTED payload that exceeds what a locally-created
 /// control property is allowed to be (open-item 1.6).
 ///
@@ -601,6 +628,30 @@ fn clamp_oversized_distributed_values(
     }
 }
 
+/// The aggregate-budget decision, as a pure function.
+///
+/// Separate from `admit_distributed_controls` for one reason: that function needs
+/// an `&AppState` and a `&DocumentEffect`, so a test exercising the LIMIT would
+/// have to build a live app state to ask a question about arithmetic. Splitting it
+/// keeps the product and the test on the same definition of the line — the failure
+/// mode when they drift is a limit that is tested at one value and enforced at
+/// another.
+pub fn refuse_if_over_aggregate_budget(report: &MediaMigration) -> Result<(), String> {
+    if report.total_bytes <= MAX_DISTRIBUTED_CONTROL_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "This package's on-grid controls would add {:.1} MB to your workbook, and the \
+         limit is {} MB. Every individual value may be legal - the limit is on the TOTAL, \
+         because what lands here is written into your own file on the next save and nothing \
+         ever reclaims it (the media GC prunes the media store; an inline value is not in \
+         it). Nothing was imported. Ask the publisher to put large content in the package's \
+         media store rather than inlining it into control properties.",
+        report.total_bytes as f64 / (1024.0 * 1024.0),
+        MAX_DISTRIBUTED_CONTROL_BYTES / (1024 * 1024),
+    ))
+}
+
 /// The pure half of `admit_distributed_controls`: sanitize the payload, rewrite
 /// its legacy inline images, and bound what is left, returning the rewritten
 /// controls, the bytes they now reference, and what happened. No locks, no state
@@ -620,6 +671,15 @@ pub fn migrate_distributed_inline_images(
         rewrite_inline_images(&mut sheet_controls.controls, &mut bytes, &mut report);
         clamp_oversized_distributed_values(&mut sheet_controls.controls, &mut report);
     }
+    // Measured LAST, on the payload as it will actually be stored: admissible
+    // images are handles by now and oversized values are cleared, so this is the
+    // volume the subscriber's own `.cala` inherits — not the volume the package
+    // shipped. The two differ by orders of magnitude on a legacy package, and it
+    // is the former that has to be bounded.
+    report.total_bytes = admitted
+        .iter()
+        .map(|sc| serde_json::to_string(&sc.controls).map(|s| s.len()).unwrap_or(0))
+        .sum();
     (admitted, bytes, report)
 }
 
@@ -667,6 +727,12 @@ pub fn admit_distributed_controls(
     saved: &[persistence::SavedSheetControls],
 ) -> Result<Vec<persistence::SavedSheetControls>, String> {
     let (admitted, bytes, report) = migrate_distributed_inline_images(saved);
+
+    // THE AGGREGATE BUDGET. Enforced here because this is the boundary that HAS an
+    // error channel; the decision itself lives in one pure function so the test
+    // and the product cannot disagree about where the line is.
+    refuse_if_over_aggregate_budget(&report)?;
+
     if !bytes.is_empty() {
         // Through the ONE admission point, so package-carried and legacy-inline
         // bytes cannot diverge on what counts as an admissible image.
@@ -679,6 +745,11 @@ pub fn admit_distributed_controls(
             report.refused,
             report.dropped,
             report.oversized
+        );
+        log::info!(
+            "[media] distributed controls: {} byte(s) admitted (budget {})",
+            report.total_bytes,
+            MAX_DISTRIBUTED_CONTROL_BYTES
         );
     }
     Ok(admitted)
@@ -959,7 +1030,7 @@ mod tests {
         let mut media = MediaStore::new();
 
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
-        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0, oversized: 0 });
+        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0, oversized: 0, total_bytes: report.total_bytes });
         assert_eq!(media.get(&hash), Some(&bytes));
         assert_eq!(
             controls[&(0, 1, 1)].properties["src"].value,
@@ -1001,7 +1072,7 @@ mod tests {
         let mut media = MediaStore::new();
 
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
-        assert_eq!(report, MediaMigration { migrated: 0, refused: 1, dropped: 0, oversized: 0 });
+        assert_eq!(report, MediaMigration { migrated: 0, refused: 1, dropped: 0, oversized: 0, total_bytes: report.total_bytes });
         assert!(media.is_empty());
         assert_eq!(controls[&(0, 1, 1)].properties["src"].value, svg);
     }
@@ -1100,7 +1171,7 @@ mod tests {
         let report = migrate_legacy_data_urls(&mut controls, &mut media);
 
         // 3. The picture is preserved, byte for byte, and no longer inline.
-        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0, oversized: 0 });
+        assert_eq!(report, MediaMigration { migrated: 1, refused: 0, dropped: 0, oversized: 0, total_bytes: report.total_bytes });
         assert_eq!(media.get(&hash), Some(&logo));
         let src = &controls[&(0, 0, 0)].properties["src"].value;
         assert_eq!(src, &media_ref(&hash));
@@ -1368,6 +1439,117 @@ mod tests {
         assert_eq!(
             report.oversized, 0,
             "and the ceiling is still not applied on the local path"
+        );
+    }
+
+
+    // --- the AGGREGATE budget (open-item 1.6's named, uncaught limitation) ----
+    //
+    // Every ceiling in this module is per-value, so a hostile publisher never has
+    // to exceed one: 5,000 controls of 63 KiB each is ~315 MB of individually
+    // legal values, and all of it lands verbatim in the subscriber's own .cala
+    // where the media GC cannot reclaim it (an inline string is not in the media
+    // store — it IS the document).
+
+    /// Many individually-legal properties still cannot add unbounded volume.
+    #[test]
+    fn a_pull_whose_properties_are_each_legal_is_still_bounded_in_total() {
+        // Just under the per-property cap, so NOTHING here is individually
+        // refusable — which is the whole point of the scenario.
+        let value = "x".repeat(MAX_CONTROL_PROPERTY_CHARS - 1);
+        let needed = MAX_DISTRIBUTED_CONTROL_BYTES / value.len() + 8;
+        let props: Vec<(String, String)> = (0..needed)
+            .map(|i| (format!("p{}", i), value.clone()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            props.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let payload = distributed_payload(&borrowed);
+
+        let (_, _, report) = migrate_distributed_inline_images(&payload);
+        assert_eq!(
+            report.oversized, 0,
+            "precondition: every value is under the per-property cap, so the \
+             per-value clamp must NOT be what catches this"
+        );
+        assert!(
+            report.total_bytes > MAX_DISTRIBUTED_CONTROL_BYTES,
+            "precondition: the payload is over the aggregate budget ({} bytes)",
+            report.total_bytes
+        );
+
+        // The pure helper still returns it — it has no error channel, and tests
+        // use it to inspect payloads without admitting them. The REFUSAL lives at
+        // the admission boundary, which is what `calp_commands` calls.
+        let refusal = refuse_if_over_aggregate_budget(&report).expect_err("the pull must be refused");
+        assert!(
+            refusal.contains("limit is 32 MB"),
+            "the refusal must name the number so a publisher can act on it: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("Nothing was imported"),
+            "and it must say the pull did not partially apply: {}",
+            refusal
+        );
+    }
+
+    /// The budget must not fire on a legitimately large REPORT.
+    ///
+    /// Without this the previous test could be satisfied by a budget of zero. The
+    /// measurement is taken AFTER images become ~70-character handles, so four
+    /// full-size pictures cost a few hundred bytes here, not 32 MB.
+    #[test]
+    fn a_legitimate_package_with_large_pictures_is_not_refused() {
+        let mut logo = png_bytes(300, 300);
+        logo.extend(std::iter::repeat(0x5A).take(MAX_MEDIA_BYTES / 2));
+        assert!(inspect_media(&logo).is_ok(), "precondition: admissible");
+        let url = data_url(&logo);
+        assert!(
+            url.len() > MAX_MEDIA_BYTES / 2,
+            "precondition: the data URL alone is megabytes"
+        );
+
+        let payload = distributed_payload(&[("src", &url), ("text", "Quarterly report")]);
+        let (_, _, report) = migrate_distributed_inline_images(&payload);
+
+        assert_eq!(report.migrated, 1, "the picture was admitted: {:?}", report);
+        assert!(
+            report.total_bytes < 4096,
+            "measured AFTER the rewrite, a handle is ~70 chars — so a multi-megabyte \
+             picture must cost almost nothing against the aggregate budget, or the \
+             budget would refuse ordinary reports. Got {} bytes.",
+            report.total_bytes
+        );
+        assert!(refuse_if_over_aggregate_budget(&report).is_ok(), "a real report must still pull");
+    }
+
+    /// The budget is measured on what PERSISTS, not on what the package shipped.
+    ///
+    /// A legacy package can carry megabytes inline and still be well under budget
+    /// once those bytes have moved to the media store. Getting this backwards
+    /// would refuse exactly the corpus `admit_distributed_controls` exists to
+    /// keep working.
+    #[test]
+    fn the_budget_measures_the_admitted_payload_not_the_shipped_one() {
+        let mut logo = png_bytes(200, 200);
+        logo.extend(std::iter::repeat(0x11).take(MAX_MEDIA_BYTES / 3));
+        let url = data_url(&logo);
+        let shipped = url.len();
+        let payload = distributed_payload(&[("src", &url)]);
+
+        let (_, _, report) = migrate_distributed_inline_images(&payload);
+
+        assert!(
+            shipped > 100_000,
+            "precondition: the package shipped {} bytes inline",
+            shipped
+        );
+        assert!(
+            report.total_bytes * 50 < shipped,
+            "the admitted payload ({}) must be orders of magnitude smaller than the \
+             shipped one ({}) — otherwise the budget is measuring the wrong thing",
+            report.total_bytes,
+            shipped
         );
     }
 
@@ -1727,9 +1909,23 @@ mod tests {
         assert_eq!(report.migrated, 0);
         assert_eq!(report.refused, 0);
         assert!(bytes.is_empty(), "a handle names bytes the package shipped separately");
+        let first_total = report.total_bytes;
 
         let (twice, _, second) = migrate_distributed_inline_images(&once);
-        assert_eq!(second, MediaMigration::default());
+        // The four CHANGE counters must all be zero on a second pass. `total_bytes`
+        // is deliberately excluded: it is a MEASUREMENT of the payload, not a count
+        // of what this pass did, so it is non-zero on any non-empty payload and
+        // comparing against `default()` would assert the payload is empty.
+        assert_eq!(
+            (second.migrated, second.refused, second.dropped, second.oversized),
+            (0, 0, 0, 0),
+            "a second admission must change nothing: {:?}",
+            second
+        );
+        assert_eq!(
+            second.total_bytes, first_total,
+            "and it must measure the same payload it was given"
+        );
         assert_eq!(admitted_value(&once), admitted_value(&twice));
     }
 

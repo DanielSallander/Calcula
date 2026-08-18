@@ -408,3 +408,81 @@ fn delete_sheet_asks_both_questions() {
          a delete next to a hidden sheet leaves the user on a sheet with no tab."
     );
 }
+
+// ---------------------------------------------------------------------------
+// THE OTHER DIRECTION: a hidden sheet must not be ACTIVATABLE either
+// ---------------------------------------------------------------------------
+//
+// BUG-0046 fixed "hiding the active sheet leaves it active". This is the same
+// invariant approached from the opposite side: nothing may make an ALREADY-hidden
+// sheet active. Excel agrees and says so first — `Worksheets("x").Activate` on a
+// hidden sheet raises run-time error 1004.
+//
+// It was left open for a stated reason that turned out to be FALSE: "scripts and
+// E2E specs use it to reach hidden sheets". Every `set_active_sheet` /
+// `setActiveSheet` call under app/e2e targets a sheet that is visible at the
+// moment of the call. Recorded here because a rationale that is not true is worse
+// than no rationale — the next reader would have trusted it.
+
+#[test]
+fn a_hidden_sheet_cannot_be_activated() {
+    let state = workbook_with_sheets(3);
+    let file = crate::persistence::FileState::default();
+
+    crate::sheets::hide_sheet_inner(&state, &file, 1, None).expect("hide Sheet2");
+    assert_ne!(visibility(&state, 1), "visible", "precondition: Sheet2 is hidden");
+
+    let err = crate::sheets::activate_sheet(&state, 1)
+        .expect_err("activating a hidden sheet must be refused, as Excel refuses it");
+
+    assert!(
+        err.contains("hidden"),
+        "the refusal must say WHY, or a caller cannot act on it: {}",
+        err
+    );
+    assert!(
+        err.contains("Unhide") || err.contains("setSheetVisibility"),
+        "and it must name the escape hatch — VBA's own move is to make it visible          first, and Calcula ships the same: {}",
+        err
+    );
+    assert_ne!(
+        *state.active_sheet.read().unwrap(),
+        1,
+        "a refused activation must not have half-applied"
+    );
+}
+
+#[test]
+fn a_visible_sheet_still_activates_and_the_object_message_is_unchanged() {
+    // The negative control. Without this the guard could be satisfied by refusing
+    // EVERY activation, which would be a far worse bug than the one being fixed.
+    let state = workbook_with_sheets(3);
+    let file = crate::persistence::FileState::default();
+
+    crate::sheets::activate_sheet(&state, 2).expect("a visible sheet activates");
+    assert_eq!(*state.active_sheet.read().unwrap(), 2);
+
+    // ...and ORDER: `OBJECT_SHEET_VISIBILITY` is also not "visible", so a
+    // visibility check placed BEFORE `ensure_user_sheet` would swallow the
+    // floating-range case and return the wrong message. Prove the object arm
+    // still wins for an object-backed sheet.
+    {
+        let mut vis = state
+            .sheet_visibility
+            .write(&crate::document_effect::test_seed_effect())
+            .unwrap();
+        // PAD THROUGH THE SANCTIONED HELPER. The vector is grown lazily, so a
+        // fresh workbook can have fewer entries than sheets — `sheet_is_visible`
+        // ends in `.unwrap_or(true)` precisely so a short vector reads as visible.
+        // Indexing straight into it panics, which is how this test failed first.
+        crate::sheets::ensure_visibility_len(&mut vis, 3);
+        vis[1] = crate::sheets::OBJECT_SHEET_VISIBILITY.to_string();
+    }
+    let err = crate::sheets::activate_sheet(&state, 1)
+        .expect_err("an object-backed sheet is still refused");
+    assert!(
+        err.to_lowercase().contains("floating range"),
+        "the OBJECT message must survive the new hidden check placed after it: {}",
+        err
+    );
+}

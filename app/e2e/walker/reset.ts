@@ -1,13 +1,24 @@
 //! FILENAME: app/e2e/walker/reset.ts
 // PURPOSE: Thorough workbook reset for walks and trace replays.
 //
-// Plain resetToNewWorkbook (Tauri new_file) is NOT sufficient: new_file
-// leaves sparkline groups behind and frontend object stores are not
-// notified, so contextual ribbon tabs and object caches leak into the next
-// walk (ledgered as BUG-0004). Leaked state breaks replay fidelity — the
-// generator's context-aware weighting and trace replays both depend on a
-// deterministic starting state — so walks explicitly tear down all objects
-// through their own APIs first, then new_file, then clear undo history.
+// Plain resetToNewWorkbook (Tauri new_file) is NOT sufficient — the conclusion
+// is right and the MECHANISM in the original sentence was not, so it is restated
+// here rather than deleted (corrected 2026-08-17).
+//
+// `new_file` DOES clear the backend, sparklines included
+// (`reset_document_scoped_stores`). What it does not do is ANNOUNCE, so every
+// FRONTEND object store keeps the outgoing document's objects — and worse, the
+// teardown ABOVE announces `objects` / `slicer` / `ribbonFilter` a few hundred ms
+// BEFORE new_file, so four stores are actively repopulated from the outgoing
+// document and then stranded when the backend empties (BUG-0075, and BUG-0004
+// before it). Contextual ribbon tabs and object caches therefore leak into the
+// next walk.
+//
+// Leaked state breaks replay fidelity — the generator's context-aware weighting
+// and trace replays both depend on a deterministic starting state — so walks tear
+// down all objects through their own APIs first, then new_file, then RE-SYNC the
+// frontend stores against the new document (the last read must be taken against
+// the NEW document or the race is only narrowed), then clear undo history.
 
 import type { Page } from "@playwright/test";
 import { resetToNewWorkbook } from "../helpers/screenshots";
@@ -240,6 +251,7 @@ async function resetBody(page: Page): Promise<void> {
   await page.waitForTimeout(200);
 
   await resyncChartStoreToBackend(page);
+  await resyncObjectStoresToBackend(page);
 }
 
 /**
@@ -312,3 +324,132 @@ async function resyncChartStoreToBackend(page: Page): Promise<void> {
       `the product cannot produce.`,
   );
 }
+
+/**
+ * THE SAME DEFECT, THREE MORE OBJECT TYPES.
+ *
+ * `resyncChartStoreToBackend` above documents the mechanism (BUG-0075). It is not
+ * specific to charts: the reset's OWN table teardown, a few lines above, calls
+ * `deleteTableAsync`, which announces the `objects`, `slicer` and `ribbonFilter`
+ * domains — and the Shell fans `objects` out to `sparklines:refresh` as well as
+ * `charts:refresh`, and `slicer` out to BOTH `slicers:refresh` and
+ * `timelineslicers:refresh`. So four more frontend stores are repopulated from the
+ * OUTGOING document ~500 ms before `new_file` empties the backend, by exactly the
+ * mechanism the chart comment describes. Only charts were re-synced afterwards.
+ *
+ * WHY SPARKLINES ARE THE WORST OF THEM, and why this is not merely cosmetic:
+ * `stateSnapshot.ts` reads sparkline groups from the STORE while it reads charts
+ * and slicers from the BACKEND. So a stale sparkline store does not just paint —
+ * it satisfies the walker's `sparkline.delete` and `sparkline.select-into`
+ * preconditions, and `removeSparklineGroup` then calls `saveToBackend`, WRITING
+ * THE PREVIOUS DOCUMENT'S GROUPS INTO THE NEW ONE. That is corruption authored by
+ * the harness, reported as a product finding.
+ *
+ * PANE CONTROLS ARE A LEAK RATHER THAN A RACE: nothing in the reset reaches them
+ * at all. Their only other trigger is a `sheet:activated` listener that no code in
+ * `app/` dispatches — recorded in open-items as a product question, because if
+ * that listener is genuinely dead then a pane control's cached value can outlive a
+ * sheet switch in the PRODUCT, not only in this harness.
+ */
+async function resyncObjectStoresToBackend(page: Page): Promise<void> {
+  await resyncOneStore(page, {
+    label: "sparkline",
+    event: "sparklines:refresh",
+    invoke: "get_sparklines",
+    // The walker reads sparkline groups from the STORE, so a stale one is not
+    // cosmetic: it makes delete/select-into act on the previous document.
+    countStore: `(window.__CALCULA_SPARKLINES__?.getAllGroups?.() ?? []).length`,
+    consequence:
+      "the walker reads sparkline groups from the STORE, so a stale one satisfies " +
+      "sparkline.delete / select-into and saveToBackend then writes the PREVIOUS " +
+      "document's groups into the new one",
+  });
+
+  await resyncOneStore(page, {
+    label: "slicer",
+    event: "slicers:refresh",
+    invoke: "get_all_slicers",
+    countStore: `(window.__CALCULA_SLICER__?.getAllSlicers?.() ?? []).length`,
+    // `refreshCache` is the ANNOUNCER: it diffs, prunes itemsCache, emits
+    // SLICER_DELETED per vanished slicer and calls syncSlicerRegions, which is
+    // what actually takes the ghost overlay off the grid. Do NOT shortcut it with
+    // a resetStore() — that clears the cache without the diff, so nothing tells
+    // the ribbon its contextual tab is dead, which is the BUG-0026 shape.
+    consequence:
+      "a stale slicer paints a ghost overlay and keeps its contextual ribbon tab " +
+      "alive over a document that has no slicer",
+  });
+
+  // Timeline slicers share the `slicer` domain but are a SECOND extension with a
+  // SECOND cache, which is why the domain fans out to two events.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("timelineslicers:refresh"));
+  });
+
+  // Pane controls: no window bridge exists for this extension, so there is no
+  // store to count. Dispatch the product's own INPUT event and let its
+  // `refreshControlsCache` re-read the backend and diff.
+  //
+  // THE NAME IS A TRAP. The input is "controlspane:controls-refreshed"; the
+  // extension's own `ControlsPaneEvents.CONTROLS_REFRESHED` is
+  // "paneControl:refreshed", which is what `refreshControlsCache` EMITS. They
+  // differ by one word, and dispatching the output name is a silent no-op.
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("controlspane:controls-refreshed"));
+  });
+  await page.waitForTimeout(150);
+}
+
+/** One store's re-sync: dispatch the product's refresh event, poll, assert. */
+async function resyncOneStore(
+  page: Page,
+  spec: {
+    label: string;
+    event: string;
+    invoke: string;
+    countStore: string;
+    consequence: string;
+  },
+): Promise<void> {
+  const DEADLINE_MS = 5_000;
+  const started = Date.now();
+  let last = { backend: -1, store: -1 };
+
+  while (Date.now() - started < DEADLINE_MS) {
+    last = await page.evaluate(
+      async (s: { event: string; invoke: string; countStore: string }) => {
+        const w = window as any;
+        window.dispatchEvent(new Event(s.event));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        let backend = -1;
+        try {
+          backend = ((await w.__TAURI__.core.invoke(s.invoke)) as unknown[]).length;
+        } catch {
+          /* no Tauri runtime — leave it at -1 */
+        }
+        let store = -1;
+        try {
+          // eslint-disable-next-line no-eval
+          store = Number(eval(s.countStore));
+        } catch {
+          store = -1;
+        }
+        return { backend, store };
+      },
+      { event: spec.event, invoke: spec.invoke, countStore: spec.countStore },
+    );
+    // store === -1 means the extension exposes no bridge in this build; that is
+    // not a failure, it is an absence of evidence, and the dispatch still ran.
+    if ((last.store === 0 || last.store === -1) && last.backend <= 0) return;
+    await page.waitForTimeout(150);
+  }
+
+  throw new Error(
+    `deepResetForWalk: the ${spec.label} store still holds ${last.store} item(s) ` +
+      `after new_file (backend reports ${last.backend}) and ${DEADLINE_MS / 1000}s ` +
+      `of re-syncing. Consequence: ${spec.consequence}. This is the BUG-0075 shape ` +
+      `for ${spec.label}s — the reset's own table teardown repopulates the store ` +
+      `from the OUTGOING document before new_file empties the backend.`,
+  );
+}
+

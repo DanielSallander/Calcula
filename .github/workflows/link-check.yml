@@ -1,20 +1,22 @@
-# Link gate: prove on every PR that the application can actually be LINKED.
+# The Windows gate: prove on every PR that the app crate COMPILES, LINKS and its
+# unit tests PASS.
 #
 # WHY THIS EXISTS AS ITS OWN WORKFLOW.
 #
 # `ci.yml`'s rust-core job runs with `working-directory: core`, and that
 # workspace's 11 members do not include `app/src-tauri` — so `cargo test
 # --workspace` there structurally cannot reach the app crate. `cargo check`
-# never invokes the linker at all. Before this gate, the first thing in the whole
-# tree that tried to link `app_lib.dll` was either a release build
+# never invokes the linker at all. Before this workflow, the first thing in the
+# whole tree that tried to link `app_lib.dll` was either a release build
 # (`release.yml`, tag or manual dispatch only) or the nightly E2E launcher
 # (`e2e-nightly.yml`, on a SELF-HOSTED runner). Neither gates a PR.
 #
 # So a green CI was compatible with an app that cannot start — and that is not
 # hypothetical: four tracks changed Rust in one week, CI stayed green, and the
 # first thing to exercise the link was a developer's E2E launcher, which failed
-# with ~40 `LNK2001 unresolved external symbol` errors out of libcalp. See
-# `docs/design/open-items.md` section 2.6.
+# with ~40 `LNK2001 unresolved external symbol` errors out of libcalp. The app
+# crate's ~1,700 unit tests were ungated on a PR for the same reason.
+# See `docs/design/open-items.md` section 2.6.
 #
 # WINDOWS IS NOT A PREFERENCE HERE. `app/src-tauri` imports
 # `windows::Win32::Security::Credentials` with NO cfg gate
@@ -22,17 +24,12 @@
 # so the crate cannot compile on Linux at all. This can never be folded into
 # `ci.yml`'s ubuntu jobs; it needs its own windows runner.
 #
-# WHAT IT DOES AND DOES NOT DO. It LINKS the app's library and binary. It does
-# not bundle an installer (no WiX/NSIS), does not run tests, and does not launch
-# the app — all of which are covered elsewhere and none of which is what this
-# gate is for. `cargo build` is the minimum that invokes `link.exe`.
-#
 # CARGO_TARGET_DIR IS DELIBERATELY UNSET. The standing rule to point it outside
 # the repo exists because the dev box keeps the repo in Dropbox, which locks
 # `target/` mid-build (os error 32). A CI checkout has no such problem, and
 # setting it would silently defeat the actions/cache key below.
 
-name: Link check
+name: App crate (Windows)
 
 on:
   push:
@@ -46,36 +43,37 @@ on:
 # that reports success — not a workflow-level paths filter.
 
 jobs:
-  link:
-    name: app_lib.dll links
+  link-and-test:
+    name: links, and its unit tests pass
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Keyed on the app crate's lockfile: this job builds only that crate tree.
+      # Keyed on the app crate's tree: this job builds only that.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             app/src-tauri -> target
-          key: link-check
+          key: app-crate-windows
 
+      # ---- THE LINK ------------------------------------------------------
       # The frontend is NOT built. `tauri build` would demand `dist/`, but
-      # `cargo build` inside src-tauri does not — and the question this gate asks
-      # is about the Rust link, not the bundle.
-      - name: Build (this is the step that invokes link.exe)
+      # `cargo build` inside src-tauri does not — and the question this step asks
+      # is about the Rust link, not the bundle. `cargo build` is the minimum that
+      # invokes `link.exe`.
+      - name: Build the library and binaries (this invokes link.exe)
         working-directory: app/src-tauri
         run: cargo build --lib --bins
 
-      # PROVE IT, rather than trusting the exit code. `cargo build` can succeed
-      # having done nothing if the artefacts were fully cached, and a missing
-      # `app_lib.dll` is exactly the failure this gate exists to catch — so the
-      # artefact has to be on disk at the end.
+      # PROVE IT, rather than trusting the exit code: a fully-cached `cargo build`
+      # can report success having produced nothing, and a missing `app_lib.dll` is
+      # exactly the failure this gate exists to catch.
       #
-      # `shell: pwsh` is required: the default on windows runners is PowerShell
+      # `shell: pwsh` is required — the default on windows runners is PowerShell
       # 5.1, where `$LASTEXITCODE` propagation and `throw` behaviour differ.
       - name: Verify the linked artefacts exist
         shell: pwsh
@@ -88,3 +86,42 @@ jobs:
             exit 1
           }
           Write-Host "[OK] $($lib.FullName) - $([math]::Round($lib.Length/1MB,1)) MB"
+
+      # ---- THE TESTS -----------------------------------------------------
+      #
+      # THREE STEPS, AND THE ORDER IS LOAD-BEARING. A plain `cargo test --lib`
+      # cannot work here: cargo TEST executables do not get tauri-build's embedded
+      # Windows manifest, a manifest-less exe binds comctl32 v5, and the app's link
+      # graph imports v6-only exports (TaskDialogIndirect, via the tauri
+      # dialog/menu stack) — so the binary fails to LOAD with
+      # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before running a single test.
+      #
+      # `fix-test-manifest.ps1` embeds the common-controls v6 dependency with
+      # mt.exe into the ALREADY-LINKED exe, which means ANY subsequent link throws
+      # it away. So: build with --no-run, patch, then run the exe directly. Cargo
+      # cannot relink what it is not invoked for.
+      - name: Build the test executable (no run)
+        working-directory: app/src-tauri
+        run: cargo test --lib --no-run
+
+      - name: Embed the comctl32 v6 manifest
+        shell: pwsh
+        working-directory: app/src-tauri
+        run: ./fix-test-manifest.ps1
+
+      - name: Run the app crate unit tests
+        shell: pwsh
+        working-directory: app/src-tauri
+        run: |
+          $exe = Get-ChildItem -Path target/debug/deps -Filter "app_lib-*.exe" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "no app_lib-*.exe under target/debug/deps - `cargo test --no-run` produced nothing to run."
+            exit 1
+          }
+          Write-Host "[run] $($exe.Name)"
+          & $exe.FullName --test-threads 4
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "app crate unit tests failed (exit $LASTEXITCODE)."
+            exit $LASTEXITCODE
+          }

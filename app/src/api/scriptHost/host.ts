@@ -9774,6 +9774,26 @@ async function reprotectHeldSheet(
 ): Promise<void> {
   const activeNow = await lib.getActiveSheet();
   const mustHop = activeNow !== hold.sheet;
+
+  // A HIDDEN HELD SHEET STILL HAS TO BE RE-PROTECTED.
+  //
+  // `protect_sheet` addresses only the ACTIVE sheet, and as of 2026-08-17 a
+  // hidden sheet can no longer BE active (Excel parity: `Activate` raises 1004).
+  // So a script that hid its own held sheet inside `fn` would leave that sheet
+  // permanently UNPROTECTED — a security regression introduced by a correctness
+  // fix, which is the worst way to acquire one.
+  //
+  // The envelope is VBA's own move: make it visible, do the work, put the
+  // visibility back. It is net-zero exactly like the sheet hop around it —
+  // same visibility before and after, nothing repaints in between.
+  const sheetsBefore = mustHop ? await lib.getSheets() : null;
+  const heldWasHidden =
+    sheetsBefore?.sheets?.[hold.sheet]?.visibility &&
+    sheetsBefore.sheets[hold.sheet].visibility !== "visible"
+      ? (sheetsBefore.sheets[hold.sheet].visibility as "hidden" | "veryHidden")
+      : null;
+  if (heldWasHidden) await lib.unhideSheet(hold.sheet);
+
   if (mustHop) await lib.setActiveSheet(hold.sheet);
   try {
     const result = await lib.protectSheet({
@@ -9788,6 +9808,10 @@ async function reprotectHeldSheet(
     }
   } finally {
     if (mustHop) await lib.setActiveSheet(activeNow);
+    // Re-hide AFTER hopping away, never before: the sheet cannot be hidden while
+    // it is the active one, which is the same rule that made this envelope
+    // necessary in the first place.
+    if (heldWasHidden) await lib.hideSheet(hold.sheet, heldWasHidden);
   }
 }
 

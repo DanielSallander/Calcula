@@ -2201,4 +2201,161 @@ mod tests {
             );
         }
     }
+
+    // =======================================================================
+    // S7 — SHARED FORMULAS, and what a 2-D `ref` actually loses
+    // =======================================================================
+    //
+    // WHAT A SHARED FORMULA IS. Excel stores a block of identical-modulo-offset
+    // formulas ONCE: the first cell carries `<f t="shared" ref="B2:D4" si="0">`
+    // with the text, and every other cell in `ref` carries only
+    // `<f t="shared" si="0"/>` — no text at all. The reader is expected to
+    // reconstruct each follower by translating the master's RELATIVE references by
+    // the follower's offset from the master.
+    //
+    // WHAT CALAMINE DOES, read out of `cells_reader.rs` rather than assumed: it
+    // builds the offset map in two MUTUALLY EXCLUSIVE branches — if the `ref`
+    // spans rows it walks rows only, at the fixed start COLUMN; else if it spans
+    // columns it walks columns only, at the fixed start ROW. So for a RECTANGULAR
+    // ref the first branch fires and only the range's FIRST COLUMN is reconstructed.
+    // Every other column's follower looks itself up in the map, misses, and is left
+    // with no formula at all.
+    //
+    // THE ARCHIVE GOT THIS WRONG IN THE OTHER DIRECTION, and the wrong version is
+    // the dangerous one for whoever fixes this: `open-decisions-2026-08.md` says a
+    // 2-D ref "yields an empty map and every follower gets no formula". It does not.
+    // A test written to that description would fail on the surviving first column
+    // and be misread as proof the bug was fixed. Hence this fixture: PARTIAL
+    // survival, pinned.
+    //
+    // THIS TEST DOCUMENTS A LOSS RATHER THAN ASSERTING CORRECTNESS. That is
+    // deliberate and is what `docs/design/open-items.md` asks for as the first step:
+    // there is no fix here yet, and a fix cannot be proved without a fixture that
+    // shows exactly what is lost today.
+
+    /// Write a .xlsx whose B2:D4 block is ONE shared formula with a 2-D `ref`.
+    ///
+    /// Layout: A2:A4 hold 1,2,3. B2 is the master `=$A2*10` with `ref="B2:D4"`;
+    /// B3, B4, C2..C4 and D2..D4 are text-less followers. In Excel every cell in
+    /// B2:D4 shows a number.
+    fn write_shared_formula_xlsx(path: &std::path::Path) {
+        use std::io::Write;
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+
+        zw.start_file("[Content_Types].xml", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#).unwrap();
+
+        zw.start_file("_rels/.rels", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#).unwrap();
+
+        zw.start_file("xl/workbook.xml", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#).unwrap();
+
+        zw.start_file("xl/_rels/workbook.xml.rels", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#).unwrap();
+
+        // The cached <v> values are what Excel last computed, and they are correct
+        // for every cell — so a reader that drops the FORMULA still shows the right
+        // NUMBER until something recalculates. That is what makes this loss quiet.
+        zw.start_file("xl/worksheets/sheet1.xml", o).unwrap();
+        zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="2"><c r="A2"><v>1</v></c><c r="B2"><f t="shared" ref="B2:D4" si="0">$A2*10</f><v>10</v></c><c r="C2"><f t="shared" si="0"/><v>10</v></c><c r="D2"><f t="shared" si="0"/><v>10</v></c></row>
+<row r="3"><c r="A3"><v>2</v></c><c r="B3"><f t="shared" si="0"/><v>20</v></c><c r="C3"><f t="shared" si="0"/><v>20</v></c><c r="D3"><f t="shared" si="0"/><v>20</v></c></row>
+<row r="4"><c r="A4"><v>3</v></c><c r="B4"><f t="shared" si="0"/><v>30</v></c><c r="C4"><f t="shared" si="0"/><v>30</v></c><c r="D4"><f t="shared" si="0"/><v>30</v></c></row>
+</sheetData>
+</worksheet>"#).unwrap();
+
+        zw.finish().unwrap();
+    }
+
+    /// The 2-D shared-formula `ref` loses formulas — PARTIALLY, and this pins which.
+    #[test]
+    fn a_two_dimensional_shared_formula_ref_loses_all_but_the_first_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared-2d.xlsx");
+        write_shared_formula_xlsx(&path);
+
+        let wb = crate::xlsx_reader::load_xlsx(&path).expect("the fixture opens");
+        let sheet = &wb.sheets[0];
+
+        // A1 -> (row, col), both 0-based. Local to the test: the reader exposes no
+        // such helper and this fixture is the only caller.
+        fn a1(s: &str) -> (u32, u32) {
+            let split = s.find(|c: char| c.is_ascii_digit()).expect("an A1 ref has a digit");
+            let (letters, digits) = s.split_at(split);
+            let col = letters
+                .bytes()
+                .fold(0u32, |acc, b| acc * 26 + u32::from(b - b'A' + 1))
+                - 1;
+            let row: u32 = digits.parse().expect("a row number");
+            (row - 1, col)
+        }
+        let formula_at = |ref_: &str| -> Option<String> {
+            let (row, col) = a1(ref_);
+            sheet.cells.get(&(row, col)).and_then(|c| c.formula.clone())
+        };
+
+        // THE MASTER always survives: it carries its own text.
+        assert!(
+            formula_at("B2").is_some(),
+            "the master cell carries the formula text inline and must always survive"
+        );
+
+        // Record what is TRUE today, cell by cell, so a future fix has something to
+        // change. Followers in the FIRST COLUMN of the ref may survive (calamine's
+        // row-walking branch); every other column is the documented loss.
+        let first_col_followers = ["B3", "B4"].iter().filter(|a| formula_at(a).is_some()).count();
+        let other_col_followers = ["C2", "C3", "C4", "D2", "D3", "D4"]
+            .iter()
+            .filter(|a| formula_at(a).is_some())
+            .count();
+
+        assert_eq!(
+            other_col_followers, 0,
+            "DOCUMENTING TODAY'S LOSS: every follower outside the ref's first column \
+             should have no formula. If this now reports 6, the loss is FIXED — \
+             update this test to assert correctness (each cell equals the master \
+             translated by its offset) and strike S7 from open-items.md."
+        );
+
+        // The values are intact either way, which is why the loss is quiet: the
+        // sheet LOOKS right until something recalculates and the formula-less cells
+        // stay frozen at Excel's last answer.
+        for (ref_, expected) in [("C2", 10.0), ("D4", 30.0)] {
+            let (row, col) = a1(ref_);
+            let cell = sheet.cells.get(&(row, col)).expect("the cell exists");
+            assert!(
+                matches!(cell.value, crate::SavedCellValue::Number(n) if (n - expected).abs() < 1e-9),
+                "{} should still hold Excel's cached value {} — the VALUE survives, \
+                 the FORMULA does not, and that is what makes this silent",
+                ref_,
+                expected
+            );
+        }
+
+        // Stated rather than asserted, because it is calamine's choice and not
+        // Calcula's: the first-column count is 0 or 2 depending on the dependency's
+        // branch, and either way the OTHER columns are the defect.
+        println!(
+            "[S7] first-column followers with a formula: {} of 2; other columns: {} of 6",
+            first_col_followers, other_col_followers
+        );
+    }
 }

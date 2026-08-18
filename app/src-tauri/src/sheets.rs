@@ -916,6 +916,31 @@ pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsRes
     // `grids[backing]` directly and never activate it.
     ensure_user_sheet(&sheet_visibility, index, "activate")?;
 
+    // ...and a USER-HIDDEN sheet can never be active either. Excel says so first:
+    // `Worksheets("x").Activate` on a hidden sheet raises run-time error 1004.
+    //
+    // ORDER IS LOAD-BEARING. `OBJECT_SHEET_VISIBILITY` is "object", which is also
+    // not "visible", so a visibility check placed BEFORE `ensure_user_sheet` would
+    // swallow the floating-range case and hand back the wrong message
+    // (`object_sheet_tests.rs` asserts the error names "floating range").
+    //
+    // WHY IT MATTERS BEYOND PARITY: the tab strip cannot show a hidden sheet, so
+    // an activation that succeeded would leave the canvas painting a sheet with no
+    // tab while every keystroke wrote into it — the torn state from the other
+    // direction. Five callers had already hand-rolled this rule (`activation_target`,
+    // the sheet-tab-state restore, the open path's `nearest_visible_sheet`,
+    // `delete_sheet`'s landing, `hide_sheet_inner`'s `switch_to`); this is the one
+    // place that enforces it.
+    //
+    // The escape hatch is VBA's own, and Calcula ships it: make the sheet visible
+    // first (Unhide, or `api.setSheetVisibility`).
+    if !sheet_is_visible(&sheet_visibility, index) {
+        return Err(format!(
+            "Sheet '{}' is hidden and cannot be activated. Unhide it first              (Format > Sheet > Unhide, or api.setSheetVisibility).",
+            sheet_names.get(index).map(|s| s.as_str()).unwrap_or("?")
+        ));
+    }
+
     while grids.len() <= index {
         grids.push(engine::grid::Grid::new());
     }

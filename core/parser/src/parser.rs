@@ -236,11 +236,7 @@ impl<'a> Parser<'a> {
 
     /// Parses power/exponentiation expressions (^).
     fn parse_power(&mut self) -> ParseResult<Expression> {
-        let left = self.parse_primary()?;
-
-        // Handle postfix subscript access: expr[index]
-        // Only valid after CellRef, FunctionCall, NamedRef, IndexAccess
-        let left = self.parse_index_access_chain(left)?;
+        let left = self.parse_intersection()?;
 
         if self.current_token == Token::Caret {
             self.advance();
@@ -254,6 +250,78 @@ impl<'a> Parser<'a> {
         }
 
         Ok(left)
+    }
+
+    /// Excel's INTERSECTION operator: a SPACE between two references.
+    ///
+    /// ONE LEVEL TIGHTER THAN POWER, because Excel's reference operators bind
+    /// before arithmetic.
+    ///
+    /// `=SUM(A1:A5 A3:C3)` is the overlap (A3); a NON-overlapping pair is the only
+    /// thing in Excel that produces `#NULL!` — which is why Calcula could never
+    /// produce that error: it did not parse the operator at all. `=A1:A5 C1:C5` was
+    /// a hard parse error surfacing as `#VALUE!` with NO dependency edges, so the
+    /// cell also never recalculated.
+    ///
+    /// The lexer discards whitespace, so "was there a space here" is not in the
+    /// token stream at all; `last_token_had_leading_whitespace` is the single bit it
+    /// now keeps for this. Requiring it is what stops two merely-adjacent operands
+    /// from intersecting and changing what existing formulas mean.
+    fn parse_intersection(&mut self) -> ParseResult<Expression> {
+        let mut left = self.parse_intersection_operand()?;
+
+        // Left-associative, like every other binary level in this parser.
+        while self.at_intersection_operand() {
+            let right = self.parse_intersection_operand()?;
+            left = Expression::BinaryOp {
+                left: Box::new(left),
+                op: BinaryOperator::Intersect,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    /// True when the CURRENT token could begin a second reference operand AND had
+    /// whitespace in front of it.
+    ///
+    /// Both halves are load-bearing. Without the token check, `A1 +B1` would try to
+    /// intersect with `+`; without the whitespace check, any two adjacent operands
+    /// would intersect.
+    fn at_intersection_operand(&self) -> bool {
+        if !self.lexer.last_token_had_leading_whitespace() {
+            return false;
+        }
+        matches!(
+            self.current_token,
+            Token::Identifier(_)
+                | Token::QuotedIdentifier(_)
+                | Token::Dollar
+                // A ROW reference begins with a NUMBER (`2:2`), so this is
+                // required for `A:A 2:2` to parse at all.
+                //
+                // NAMED DIVERGENCE, accepted: it also makes `=A1 2` parse, and
+                // evaluate to #NULL! because a bare number is not a reference
+                // (`reference_rect` returns None). Excel rejects that at entry
+                // with a syntax error instead. Single-token lookahead cannot tell
+                // `2` from `2:2` here, and the alternative — dropping Number —
+                // loses whole-row intersection, which is a real Excel feature.
+                // An invalid formula giving #NULL! rather than a syntax error is
+                // the cheaper of the two wrongs.
+                | Token::Number(_)
+        )
+    }
+
+    /// ONE operand of an intersection, with its subscripts and invocations.
+    ///
+    /// `parse_index_access_chain` must run PER OPERAND rather than once over the
+    /// whole intersection: it handles `expr[index]` and LAMBDA invocation
+    /// `myLambda(10)`, so attaching it to the intersection RESULT would change what
+    /// `=A1[0] B1` and every existing subscript formula mean.
+    fn parse_intersection_operand(&mut self) -> ParseResult<Expression> {
+        let operand = self.parse_primary()?;
+        self.parse_index_access_chain(operand)
     }
 
     /// Parses zero or more trailing [index] subscript accesses and (args) invocations.
