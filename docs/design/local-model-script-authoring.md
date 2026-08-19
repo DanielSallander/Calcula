@@ -94,7 +94,8 @@ entries. The extraction one-liners are in the git history of this document's int
 | Tool dispatcher | [ai_chat.rs:219](../../app/src-tauri/src/ai_chat.rs#L219) | Dispatches into `mcp::tools` — **already vendor-neutral** |
 | Draft-and-review flow | [mcp/drafts.rs:238](../../app/src-tauri/src/mcp/drafts.rs#L238) | `draft_object_script`; the exact flow this design needs |
 | Draft review UI | `ScriptableObjects/ObjectScriptEditorApp.tsx` | Has a draft path (`objectScriptEditorDraft.test.tsx`) |
-| Op manifest | [manifest.rs](../../core/script-engine/src/manifest.rs) | **130 entries** (115 `op()` + 15 `gated()`) — machine-readable ground truth for what a script may call |
+| **Object-script policy** | `api/scriptHost/allowlist.ts` | **The ground truth for what this feature drafts.** 237 methods, **54 capability-bearing**, mapped to the 16 ids. Its own header: consumed by broker dispatch, the transparency panel, and consent-dialog text, "so drift is impossible" |
+| QuickJS op manifest | [manifest.rs](../../core/script-engine/src/manifest.rs) | **130 entries** (115 `op()` + 15 `gated()`). Governs `notebook-cell`, `one-off-script`, `mcp-tool` — **NOT object scripts**; see §5a |
 | Capability vocabulary | `api/scriptHost/capabilityIds.ts` | **16 ids**: `net.fetch`, `bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`, `bi.model`, `bi.connector`, `ui.dialog`, `distribution.writeback`, `schedule`, `file.picker`, `ui.shortcut`, `grid.read`, `distribution.publish`, `distribution.subscribe` |
 | Typings generator | `app/scripts/gen-script-typings.mjs` + `scriptTypings/declarations.ts` | AST-based, lockstep-tested against the runtime shim. The slicing work in §6 extends this rather than inventing it |
 | Script API surface | `_shared/lib/calcula.d.ts` — 35,599 bytes | Fits a mid-size context whole (~10k tokens, estimate) |
@@ -105,7 +106,11 @@ MCP server uses**, inheriting the main-window guard, `check_script_security`, un
 of that cares which model authored the call. A local model inherits the entire safety envelope for
 free — this design adds no new privileged reach whatsoever.
 
-### 3b. The gap that blocks the feature outright
+### 3b. The gap that blocked the feature outright — CLOSED 2026-08-19 (M1)
+
+**Fixed the same day this was written; the description below is the BEFORE state**, kept because it
+is why the draft flow needs wiring at all. The chat now declares and dispatches 24 tools including
+all three draft tools.
 
 `draft_object_script`, `list_script_drafts`, and `get_script_draft` are registered on the MCP server
 ([server.rs:1069, :1098, :1110](../../app/src-tauri/src/mcp/server.rs#L1069)) — the MCP surface
@@ -251,17 +256,50 @@ This is what actually makes the design model-agnostic, and it gets its own secti
 | Level | Check | Inference cost | Catches |
 |---|---|---|---|
 | L0 | Parses as JS (QuickJS parse-only) | **zero**, ~1 ms | truncated / malformed output |
-| L1 | **Calls only ops present in `OP_MANIFEST`** | **zero**, ~1 ms | **hallucinated APIs — the dominant small-model failure** |
-| L2 | `// @capability` pragmas reconcile with ops actually called | **zero**, ~1 ms | under- and over-declared ceilings |
+| L1 | **Calls only methods present in the policy for its surface** (§5a) | **zero**, ~1 ms | **hallucinated APIs — the dominant small-model failure** |
+| L2 | `// @capability` pragmas reconcile with the methods actually called | **zero**, ~1 ms | a ceiling that will deny the script at runtime (§5b) |
 | L3 | Dry run over cloned grid state, fuel-budgeted | ~100 ms | runtime errors, runaway loops |
 | L4 | Diff rendered for the user | — | wrong-but-valid behaviour |
 | L5 | Human reads, edits, mounts in `ObjectScriptEditorApp` | — | everything else |
 
 **L0–L2 cost no inference and catch the failure mode that actually dominates**: a weak model
-confidently emitting `Calcula.formatRange()`, or drifting into VBA or Office.js idiom. The ground
-truth already exists — `manifest.rs` enumerates the realm's 130 entries and its own test boots a
-real QuickJS runtime to prove the manifest matches what gets registered. That test infrastructure
-does double duty here at no cost.
+confidently emitting `Calcula.formatRange()`, or drifting into VBA or Office.js idiom.
+
+### 5a. Which policy is the ground truth — and it is NOT `OP_MANIFEST`
+
+This document's first draft said L1 checks against `OP_MANIFEST`. **That is wrong for the surface
+this feature actually targets**, and the error is worth recording because it is easy to repeat: the
+project has two sandboxes with two separate policies.
+
+| Surface | Realm | Policy / ground truth |
+|---|---|---|
+| **Object scripts** — what `draft_object_script` produces | per-script hardened **Worker** | **`api/scriptHost/allowlist.ts`** (237 methods, 54 capability-bearing) |
+| notebook-cell, one-off-script, mcp-tool | Rust **QuickJS** | `core/script-engine/src/manifest.rs` (`OP_MANIFEST`, 130 entries) |
+
+`SURFACE_PROFILES` in `manifest.rs` names its three surfaces explicitly, and `object-script` is not
+one of them. So **M2's L1/L2 must read `allowlist.ts`** — and its self-description is exactly the
+property the checker needs: one object consumed by broker dispatch, the transparency panel, and the
+consent-dialog text, so what the checker validates against is what the broker will actually enforce.
+
+`OP_MANIFEST` still matters if the chat ever drafts a notebook cell, and the QuickJS round-trip test
+remains the stronger guarantee of the two (it boots a real runtime and diffs both directions).
+Neither is a substitute for the other.
+
+### 5b. Under-declaration is a runtime denial, not a prompt
+
+The consequence of getting L2 wrong is sharper than "the user sees an extra consent dialog".
+`broker.ts:162` denies any capability outside the script's declared R19 ceiling **before the grant
+check, so it is never JIT-prompted at all** — the call throws `PermissionDenied` naming the missing
+capability.
+
+So an under-declared script passes review, mounts cleanly, and then fails at runtime — possibly deep
+in a workflow, possibly on a schedule, possibly inside a distributed report. The reviewer had no way
+to see it coming. That is what makes L2 a correctness check rather than metadata hygiene.
+
+**The resolved policy is §11.2**, decided 2026-08-19: the model writes its own pragmas, a missing one
+is a hard reject with a repair round, and a declared-but-unobserved one is shown to the reviewer
+rather than rejected. Read §11.2 before implementing L2 — the asymmetry is deliberate and rests on
+the fact that a source scan can miss indirectly-dispatched calls.
 
 **Repair prompts must be compiler-quality, not "try again".** A rejection at L1 should read:
 
@@ -303,7 +341,8 @@ output, so the slices cannot drift from the surface either.
 |---|---|---|
 | `ChatProvider` trait, `anthropic.rs`, `openai_compat.rs` | `app/src-tauri/src/ai/` | Provider translation is backend concern; keeps vendor wire formats out of extensions |
 | Runtime discovery + capability probe | `app/src-tauri/src/ai/` | Talks to localhost HTTP; not extension business |
-| L0/L1/L2 static validation | `core/script-engine/` | It owns `OP_MANIFEST`; the check belongs next to its ground truth |
+| L0/L1/L2 static validation for **object scripts** | `app/src/api/scriptHost/` | Its ground truth is `allowlist.ts` (§5a), which lives here. A Bridge concern — "validate this source against the policy" is generic, and the transparency panel wants the same answer |
+| L0/L1 for QuickJS surfaces, if ever needed | `core/script-engine/` | It owns `OP_MANIFEST` |
 | L3 dry-run entry point | `core/script-engine/` + a Tauri command | Same realm, new non-applying entry |
 | Chunked typings emission | `app/scripts/scriptTypings/` | Extends the existing generator |
 | Generation pipeline orchestration, tier strategies, prompt assembly | AIChat extension | Business logic — Feature, per the Decision Matrix |
@@ -346,14 +385,23 @@ Two consequences for storage:
 
 Sequenced so each milestone is independently useful and nothing is blocked on model selection.
 
-**M1 — Wire the draft tools into the in-app chat.** Three arms in `ai_chat_run_tool`, three
-declarations in `ChatView.TOOLS`. Closes §3b. **Correct with Claude today; do it first and
-independently of everything below.**
+**M1 — Wire the draft tools into the in-app chat. SHIPPED 2026-08-19.** 21/21 -> 24/24. The tool
+surface moved to `AIChat/lib/chatTools.ts` so `__tests__/chatToolSurface.test.ts` can read
+`ai_chat.rs` at test time and diff both directions; sabotage-checked three ways. It also caught a
+defect M1 would have introduced — the transcript printed `name(JSON.stringify(input))`, which for a
+draft dumps an entire macro into a chat bubble. Closes §3b.
 
-**M2 — L0/L1/L2 static validation in `core/script-engine`.** Parse-only, reach check against
-`OP_MANIFEST`, capability-pragma reconciliation, plus nearest-neighbour suggestions for repair
-messages. The highest-leverage item in the document; immediately useful for cloud-authored and
-hand-written scripts too, not just local ones.
+**M2 — L0/L1/L2 static validation, in `app/src/api/scriptHost/`.** Parse-only, reach check, and
+capability-pragma reconciliation per the asymmetric policy in **§11.2**, plus nearest-neighbour
+suggestions for repair messages. The highest-leverage item in the document, and immediately useful
+for cloud-authored and hand-written scripts too, not just local ones.
+
+**Two things about M2 changed after the first draft, both from §5a.** Its ground truth is
+`allowlist.ts` (237 methods, 54 capability-bearing), **not** `OP_MANIFEST` — object scripts run in
+the Worker realm, and `SURFACE_PROFILES` does not list `object-script` among the three QuickJS
+surfaces. So M2 is mostly **TypeScript in `@api/scriptHost`** rather than Rust in
+`core/script-engine`: a smaller and better-tested surface than first assumed, and the transparency
+panel wants the same answer the checker computes.
 
 **M3 — Provider registry, model picker, and runtime discovery.** The `ChatProvider` trait;
 `openai_compat.rs` first (§7a — it covers the most ground per line written), then `anthropic.rs`
@@ -430,13 +478,71 @@ close macro", "normalise these headers". It will not handle "review this financi
 what is structurally wrong". Keeping cloud selectable is what prevents that ceiling from becoming
 the product's ceiling.
 
-## 11. Open questions for the owner
+## 11. Owner decisions — DECIDED 2026-08-19
 
-1. **Default posture when no runtime is found.** Offer cloud immediately, or lead with instructions
-   for installing a local runtime? Bears directly on how the privacy story reads on first run.
-2. **Does a generated script get its capability pragmas auto-declared** (from L2's reconciliation),
-   or must the model declare them and be rejected on mismatch? Auto-declaring is friendlier;
-   requiring declaration keeps the model's intent visible to the reviewer. The transparency pillar
-   arguably favours the stricter option.
-3. **Should the eval set ship in-repo** (`tests/`) so users can run it against their own model, or
-   stay a development artifact? Shipping it is a strong transparency statement and a support burden.
+All three were open questions in this document's first draft. They are settled; the reasoning is
+kept because each has an obvious-looking simplification that is wrong.
+
+### 11.1 First-run posture: lead with local, never block on it — DECIDED
+
+1. **A runtime already running is the silent happy path.** Probe the four known ports, offer its
+   models, say nothing else.
+2. **Nothing found: show both routes, local first, reason in one line.** *"No local model found.
+   Calcula can run one so your workbook never leaves this machine — [Set up a local model] ·
+   [Connect a cloud provider]."* One line, not a setup wall.
+3. **Never interrupt a working setup.** A user with a stored key gets their key, and discovers local
+   in the picker. A privacy explainer in front of an already-configured feature is pure friction.
+
+Cloud-first would waste the one moment where the privacy claim lands. Local-only would gate the
+feature behind a multi-gigabyte download before anyone has seen it work, and contradicts the
+any-model principle in this document's header.
+
+### 11.2 Capability pragmas: the model declares, the checker verifies — DECIDED
+
+**The model must write its own `// @capability` lines. We do not write them for it.** But its
+mistakes are caught mechanically rather than reaching the user.
+
+**Why not auto-declare, which is friendlier and was the tempting option.** It assumes a scanner can
+always see which capabilities a script uses. It cannot — JavaScript reaches methods indirectly:
+
+```js
+const method = useBackup ? "fetch" : "log";
+await context.caps[method](url);          // no `caps.fetch` appears anywhere
+```
+
+Auto-declaring off a scan of that source writes *no* pragma, and per §5b the script then dies at
+runtime with `PermissionDenied` the first time `useBackup` is true — after review, after mounting,
+possibly on a schedule or inside a distributed report.
+
+**The scanner's reliability is lopsided, and the policy follows the asymmetry:**
+
+| Finding | Treatment | Why it is safe |
+|---|---|---|
+| Calls something it did **not** declare | **Reject; repair loop** | The scanner saw a real call. No false positives possible. One local round-trip, and the message writes itself: *"line 34 calls `caps.fetch` — add `// @capability net.fetch`"* |
+| Declared something the scanner did **not** find | **Never reject. Show the reviewer** | Could be the indirect-call case (correct), could be over-broad (should be trimmed). A machine cannot tell; a person can |
+
+**The reviewer sees the claim next to the evidence**, which is strictly more than either alone:
+
+> **Declared:** `net.fetch`, `storage`
+> **Found in the code:** `storage`
+> ⚠️ `net.fetch` is declared but no call to it was found.
+
+That warning is not an error — it is the one line worth a human's attention. **This is the actual
+argument against auto-declaring:** a generated list always *looks* right, which removes the
+reviewer's ability to notice when it is not. Transparency here is not strictness, it is the visible
+gap between what was claimed and what was found.
+
+**Do not simplify this back to auto-declaration.** The indirect-call case is the whole reason, it is
+easy to forget, and the failure it causes is silent and late.
+
+### 11.3 The eval set ships, in two tiers — DECIDED
+
+- **Full corpus in `tests/`** — a developer/CI artifact, public, no UI and no support promise, the
+  same standing as any other suite in the repo. It has to live there for M5 anyway, and withholding
+  it would make every compatibility claim unfalsifiable, which is a poor look for a project whose
+  pitch is auditability.
+- **A small subset is the in-app probe's `canaryScore`** (M7): a handful of tasks, ~2 minutes,
+  against whatever model the user selected.
+
+**Both read the same task definitions**, so the number a user sees in the picker and the number CI
+reports cannot diverge.
