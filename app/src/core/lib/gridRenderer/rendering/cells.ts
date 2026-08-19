@@ -500,6 +500,84 @@ export function borderLineWidth(style: string): number {
   return 1;
 }
 
+/**
+ * The four EDGE borders a cell actually shows, after conditional formatting has
+ * had its say. Exported because TWO painters need it and a copy would drift:
+ * `drawCellText` (the ordinary grid) and `drawCellTextZone` (every frozen or
+ * split pane). The second one drew no borders at all until 2026-08-19 — BUG-0102.
+ *
+ * Diagonals are deliberately NOT included: they are interior lines, they stay
+ * inside the per-cell clip, and only the four edges participate in the
+ * straddle/dedupe pass.
+ */
+export function resolveEdgeBorders(
+  effectiveStyle: {
+    borderTopColor?: string; borderTopStyle?: string;
+    borderRightColor?: string; borderRightStyle?: string;
+    borderBottomColor?: string; borderBottomStyle?: string;
+    borderLeftColor?: string; borderLeftStyle?: string;
+  },
+  baseCellStyle: {
+    borderTop?: { style: string; color: string; width: number };
+    borderRight?: { style: string; color: string; width: number };
+    borderBottom?: { style: string; color: string; width: number };
+    borderLeft?: { style: string; color: string; width: number };
+  },
+): {
+  top?: { style: string; color: string; width: number };
+  right?: { style: string; color: string; width: number };
+  bottom?: { style: string; color: string; width: number };
+  left?: { style: string; color: string; width: number };
+} {
+  const visible = (b?: { style: string; color: string; width: number }) =>
+    b && b.style !== "none" && b.width > 0 ? b : undefined;
+  return {
+    top: visible(
+      effectiveStyle.borderTopColor
+        ? { style: effectiveStyle.borderTopStyle || "solid", color: effectiveStyle.borderTopColor, width: 1 }
+        : baseCellStyle.borderTop,
+    ),
+    right: visible(
+      effectiveStyle.borderRightColor
+        ? { style: effectiveStyle.borderRightStyle || "solid", color: effectiveStyle.borderRightColor, width: 1 }
+        : baseCellStyle.borderRight,
+    ),
+    bottom: visible(
+      effectiveStyle.borderBottomColor
+        ? { style: effectiveStyle.borderBottomStyle || "solid", color: effectiveStyle.borderBottomColor, width: 1 }
+        : baseCellStyle.borderBottom,
+    ),
+    left: visible(
+      effectiveStyle.borderLeftColor
+        ? { style: effectiveStyle.borderLeftStyle || "solid", color: effectiveStyle.borderLeftColor, width: 1 }
+        : baseCellStyle.borderLeft,
+    ),
+  };
+}
+
+/**
+ * Stroke a cell's four EDGE borders directly.
+ *
+ * Used by the PANE painter, which has no frame-wide deferred queue: a pane is
+ * clipped to itself and repainted as a unit, so the straddle-and-dedupe pass the
+ * ordinary grid runs has nothing to attach to. Borders inside a pane are
+ * therefore drawn in place — they can still be clipped at the pane edge, which
+ * is correct, because that is where the pane ends.
+ */
+export function strokeEdgeBorders(
+  ctx: CanvasRenderingContext2D,
+  edges: ReturnType<typeof resolveEdgeBorders>,
+  cellLeft: number,
+  cellTop: number,
+  cellRight: number,
+  cellBottom: number,
+): void {
+  if (edges.top) drawBorderLine(ctx, cellLeft, cellTop, cellRight, cellTop, edges.top);
+  if (edges.bottom) drawBorderLine(ctx, cellLeft, cellBottom, cellRight, cellBottom, edges.bottom);
+  if (edges.left) drawBorderLine(ctx, cellLeft, cellTop, cellLeft, cellBottom, edges.left);
+  if (edges.right) drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, edges.right);
+}
+
 /** One cell EDGE border, captured during the cell pass and stroked afterwards. */
 interface QueuedBorder {
   x1: number;

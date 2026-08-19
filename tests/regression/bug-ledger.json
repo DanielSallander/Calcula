@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 105,
+  "nextId": 106,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4029,7 +4029,7 @@
     },
     {
       "id": "BUG-0102",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-08-18",
       "source": {
         "kind": "review",
@@ -4041,7 +4041,7 @@
         "message": "WITH A FREEZE OR A SPLIT ACTIVE, NO CELL BORDER RENDERS AT ALL. UNVERIFIED AGAINST THE RUNNING APP -- filed for attribution from a code reading, not as a reproduced defect. WHAT WAS OBSERVED (statically): panes are painted by renderZone (app/src/core/lib/gridRenderer/core.ts:230), which calls drawCellTextZone (core.ts:340). That function's body contains no reference to borders at all -- confirmed by scanning its whole body for /border/i, which returns nothing -- whereas the non-frozen painter drawCellText (rendering/cells.ts) draws all six sides. renderZone is the path for BOTH split panes (core.ts:809, 816, 823, 829) and frozen panes (core.ts:880, 886, 893, 900). WHAT IS NOT CLAIMED: that this has been seen on screen; that it affects the unfrozen path (it does not -- that is the path the sibling entry fixes); that no other code supplies borders for these zones by some route not found. TO CLOSE THIS: freeze a pane over a bordered range in the running app and look, then either fix drawCellTextZone to share the border queue drawCellText now uses, or reclassify. An E2E probe modelled on vba-idioms-wave3.spec.ts:468 with a freeze applied would settle it in one run.",
         "digestDiffPaths": []
       },
-      "notes": "Deliberately filed WITHOUT triage or fix. The sibling entry's fix does not touch this path, so closing that one must not be read as closing this. Scope was stated honestly in the border fix's own design review rather than being quietly absorbed into it."
+      "notes": "Deliberately filed WITHOUT triage or fix. The sibling entry's fix does not touch this path, so closing that one must not be read as closing this. Scope was stated honestly in the border fix's own design review rather than being quietly absorbed into it.  — CLOSED 2026-08-19, and it was CONFIRMED before it was fixed. The entry was filed from a code reading with 'never seen on screen' stated as a limit; a unit test now demonstrates it: the same bordered-cell fixture draws 4 border strokes unfrozen and 0 with a freeze active. FIX: the pane painter draws the four edge borders in BOTH of its branches, using an edge resolution EXTRACTED from `drawCellText` (`resolveEdgeBorders`/`strokeEdgeBorders` in cells.ts) rather than copied — a second copy of a formatting rule drifts on the first default change, which this repo has already paid for once with the Macro Recorder's button recipe. TWO BRANCHES, and that mattered: the pane painter handles empty and non-empty cells on separate paths, and a bordered EMPTY cell (the ordinary 'draw a box' case) returned before any border work. The first version of the test used only an empty cell, so sabotaging the content branch PASSED all three cases — the gap was found by the sabotage, not by review. Five tests now, and each branch reds exactly its own two. SIBLING DEFECT FOUND AND FILED SEPARATELY (BUG-0105): the pane painter runs NO style interceptors at all, so CONDITIONAL FORMATTING never reaches a frozen or split pane — not its fills, not its fonts, and so not its borders either. That is strictly bigger than this entry and is NOT fixed here; the empty `{}` passed to resolveEdgeBorders is the honest spelling of 'no CF available at this point', with a comment saying so."
     },
     {
       "id": "BUG-0103",
@@ -4074,6 +4074,22 @@
         "digestDiffPaths": []
       },
       "notes": "Two dispositions, and the cheap one should not wait for the expensive one. REFUSING LOUDLY is minutes: make `SortOn::Icon` and `FilterOn::Icon` return an explicit Err (or have the Sorting extension not offer the option) so the user learns the truth immediately. IMPLEMENTING is larger and needs the CF evaluation context at sort/filter time, which is what the filter's own comment says is missing. The owner's call is only on sequencing — whether to ship the refusal now and implement later — not on whether silence is acceptable. — UPDATE 2026-08-18: the REFUSAL half has landed. reject_unimplemented_sort_on (commands/data.rs) refuses at BOTH sort entry points (sort_range and sort_range_off_sheet) and inspects EVERY level, not just the first — a guard reading only fields[0] would have mis-sorted level 2 silently, the same defect one level down. apply_auto_filter_inner refuses an icon criteria before any gate. Five tests in commands/icon_refusal_tests.rs, including two that pin the REACHABILITY claims the guards rest on (filterOn/sortOn still deserialize as \"icon\" over IPC) so a wire rename retires the guard rather than silently disarming it. Sabotage-checked: disabling the sort guard reds exactly its two tests. THE ENTRY STAYS OPEN — icon sort and icon filter are still not implemented; only the lying is fixed."
+    },
+    {
+      "id": "BUG-0105",
+      "status": "open",
+      "discovered": "2026-08-19",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-19 while fixing BUG-0102; verified by reading the pane painter, not by running the app"
+      },
+      "violation": {
+        "oracleId": "conditional-formatting-absent-in-panes",
+        "message": "CONDITIONAL FORMATTING DOES NOT REACH A FROZEN OR SPLIT PANE AT ALL. `renderZone` -> `drawCellTextZone` (app/src/core/lib/gridRenderer/core.ts) paints every cell of every pane INSTEAD of `drawCellText`, and it runs NO style interceptors: a repo-wide grep of core.ts for hasStyleInterceptors/applyStyleInterceptors/useInterceptors returns NOTHING, while `drawCellText` consults them per cell. So the moment a user freezes a pane or splits the window, every conditional-formatting fill, font colour, data bar and icon stops being drawn in that pane — the cell reverts to its static style. STRICTLY BIGGER THAN BUG-0102, which was the same painter missing plain cell BORDERS and is fixed. That fix passes an empty `{}` where the main painter passes the interceptor-resolved style, with a comment saying why — so CF-driven borders are still missing in panes along with everything else CF does. NOT SEEN ON SCREEN. Verified by reading the two painters and by the absence of any interceptor call in the zone path; no app run was made. To confirm: apply a conditional format to a range, freeze a pane above it, and look.",
+        "digestDiffPaths": []
+      },
+      "notes": "The fix is not simply 'call the interceptors here too': the main painter resolves an effective style per cell and the zone painter has no equivalent plumbing, so this needs the same extraction treatment BUG-0102's borders got — one resolver both painters share, rather than a second interceptor call site that can drift. Worth checking at the same time whether the pane painter is missing anything else the main one does; borders and CF were both found by reading it, which suggests nobody has diffed the two painters end to end."
     }
   ]
 }

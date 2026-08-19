@@ -29,6 +29,8 @@ import {
   drawDeferredCellDecorations,
   collectChromeRects,
   isCoveredByChrome,
+  resolveEdgeBorders,
+  strokeEdgeBorders,
   type DeferredCellDecoration,
 } from "./rendering/cells";
 import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
@@ -459,6 +461,18 @@ function drawCellTextZone(
             });
           }
         }
+        // BORDERS ON AN EMPTY CELL (BUG-0102). A bordered empty cell is the
+        // ordinary "draw a box" case, and this branch used to return before any
+        // border work — so freezing a pane erased every such box.
+        {
+          const emptyStyle = styleCache.get(cell?.styleIndex ?? 0) ?? styleCache.get(0);
+          if (emptyStyle) {
+            const edges = resolveEdgeBorders({}, emptyStyle);
+            if (edges.top || edges.right || edges.bottom || edges.left) {
+              strokeEdgeBorders(ctx, edges, baseX, baseY, baseX + colWidth, baseY + rowHeight);
+            }
+          }
+        }
         baseX += colWidth;
         continue;
       }
@@ -512,6 +526,24 @@ function drawCellTextZone(
           cellStyle.backgroundColor !== "transparent") {
         ctx.fillStyle = cellStyle.backgroundColor;
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+      }
+
+      // BORDERS (BUG-0102). Between background and content, as in the main
+      // painter. The edge RESOLUTION is shared with `drawCellText` rather than
+      // copied — a second copy of a formatting rule drifts on the owner's first
+      // default change, which this repo has already paid for once.
+      //
+      // KNOWN NARROWER THAN THE MAIN PAINTER, and deliberately not papered over:
+      // this painter runs NO style interceptors, so CONDITIONAL FORMATTING does
+      // not reach a frozen or split pane at all — not its fills, not its fonts,
+      // and so not its borders either. That is a bigger sibling defect than the
+      // one fixed here; the empty `{}` below is the honest spelling of "no CF
+      // available at this point", not an oversight. Filed separately.
+      if (cellStyle) {
+        const edges = resolveEdgeBorders({}, cellStyle);
+        if (edges.top || edges.right || edges.bottom || edges.left) {
+          strokeEdgeBorders(ctx, edges, cellLeft, cellTop, cellRight, cellBottom);
+        }
       }
 
       // Draw cell decorations (e.g., sparklines) between background and text,
