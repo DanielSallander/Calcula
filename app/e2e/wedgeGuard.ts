@@ -54,10 +54,42 @@ import * as path from "node:path";
 import type { Page } from "@playwright/test";
 import { APP_WEDGED_MARKER, WEDGE_PROBE_COUNT_FILE } from "./wedgeMarker";
 
+/**
+ * Read a millisecond budget from the environment, REFUSING a value that would
+ * make the guard lie.
+ *
+ * `Number(process.env.X ?? 5_000)` — what this used to be — has two ways to
+ * produce a budget that fires instantly, and an instant budget latches a
+ * perfectly HEALTHY run as wedged:
+ *
+ *   E2E_WEDGE_BACKEND_MS=""      `??` does NOT catch an empty string (it is not
+ *                                nullish), so `Number("")` is 0.
+ *   E2E_WEDGE_BACKEND_MS="5s"    `Number("5s")` is NaN, and `setTimeout(fn, NaN)`
+ *                                fires on the next tick.
+ *
+ * Either one turns this guard from a wedge detector into a wedge fabricator —
+ * and the marker it writes is exactly the artefact somebody would later trust.
+ * So a malformed value falls back to the default and SAYS SO.
+ */
+function budgetMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[wedge-guard] ignoring ${name}=${JSON.stringify(raw)} — not a positive ` +
+        `number of milliseconds; using ${fallback}ms. A zero or NaN budget would ` +
+        `latch a healthy run as wedged.`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 /** How long the BACKEND gets to answer one trivial read, inside the page. */
-const BACKEND_BUDGET_MS = Number(process.env.E2E_WEDGE_BACKEND_MS ?? 5_000);
+const BACKEND_BUDGET_MS = budgetMs("E2E_WEDGE_BACKEND_MS", 5_000);
 /** How long the whole probe gets in Node, bounding the unbounded `evaluate`. */
-const PROBE_BUDGET_MS = Number(process.env.E2E_WEDGE_PROBE_MS ?? 15_000);
+const PROBE_BUDGET_MS = budgetMs("E2E_WEDGE_PROBE_MS", 15_000);
 
 export type WedgeVerdict = "ok" | "backend-wedged" | "renderer-wedged";
 

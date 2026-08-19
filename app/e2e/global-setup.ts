@@ -76,6 +76,13 @@ function waitForCDP(port: number, timeoutMs: number): Promise<void> {
 }
 
 export default async function globalSetup(config: FullConfig) {
+  // WHEN THIS RUN BEGAN. Read by global-teardown to decide whether
+  // `results/app-dev.log` was written by THIS run before archiving it — under
+  // `E2E_MANUAL=1` the app is launched separately and the live log can be a
+  // leftover, which would otherwise be filed under this run's timestamp as if it
+  // were evidence. Set first, so no later step can be mistaken for the start.
+  process.env.E2E_RUN_STARTED_AT = String(Date.now());
+
   // REFUSE a run whose resolved reporter list lost the collection guard (a CLI
   // --reporter flag replaces the config's reporters). Without the guard, a run
   // that silently collects fewer tests than `--list` reports can produce a

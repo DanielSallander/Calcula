@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 105 | Open: 3 | Triaged: 0 | Fixed: 102 | Other: 0
+Total: 106 | Open: 4 | Triaged: 0 | Fixed: 102 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1294,4 +1294,12 @@ SORTING AND FILTERING BY CONDITIONAL-FORMATTING ICON ARE SILENT NO-OPS THAT REPO
 **Oracle:** conditional-formatting-absent-in-panes
 
 CONDITIONAL FORMATTING DOES NOT REACH A FROZEN OR SPLIT PANE AT ALL. `renderZone` -> `drawCellTextZone` (app/src/core/lib/gridRenderer/core.ts) paints every cell of every pane INSTEAD of `drawCellText`, and it runs NO style interceptors: a repo-wide grep of core.ts for hasStyleInterceptors/applyStyleInterceptors/useInterceptors returns NOTHING, while `drawCellText` consults them per cell. So the moment a user freezes a pane or splits the window, every conditional-formatting fill, font colour, data bar and icon stops being drawn in that pane — the cell reverts to its static style. STRICTLY BIGGER THAN BUG-0102, which was the same painter missing plain cell BORDERS and is fixed. That fix passes an empty `{}` where the main painter passes the interceptor-resolved style, with a comment saying why — so CF-driven borders are still missing in panes along with everything else CF does. NOT SEEN ON SCREEN. Verified by reading the two painters and by the absence of any interceptor call in the zone path; no app run was made. To confirm: apply a conditional format to a range, freeze a pane above it, and look.
+
+
+## BUG-0106 `[open]`
+
+**Found:** 2026-08-19 (review)
+**Oracle:** autofilter-silently-wiped-on-deserialize-error
+
+A MALFORMED autofilters.json SILENTLY DELETES EVERY AUTOFILTER IN THE WORKBOOK, AND THE NEXT SAVE MAKES THE LOSS PERMANENT. app/src-tauri/src/persistence.rs:3688-3697, on the .cala load path: if the section is present but `serde_json::from_slice::<AutoFilterStorage>` fails, the `else` arm runs `auto_filters.clear()`. No error is returned, nothing is logged, and the user is not told. The document opens looking fine, with every filter gone; saving then writes the empty state back over the file that still had them. THIS IS THE CLASS THE .cala RULES CALL OUT BY NAME: the test for whether a section deserves a version link is whether an older reader would MISHANDLE the document or merely lose something, and 'a stale workbook that comes back looking calculated' is the example of a drop that is a LIE. A silent clear on a PARSE FAILURE is the same lie without even a version mismatch to explain it. NOTE the two arms are not equivalent and only one is wrong: the outer `else` (no autofilters.json at all) clearing is CORRECT -- a document with no filters has none. It is the inner one, where the section EXISTS and could not be read, that destroys data. WHY IT MATTERS NOW: any change to the serialized shape of a filter makes this reachable. BUG-0104's icon-filter work adds a field to FilterCriteria, so a file written by one build and opened by another is exactly the scenario that trips it.
 

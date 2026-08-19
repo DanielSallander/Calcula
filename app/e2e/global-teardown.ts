@@ -72,7 +72,17 @@ export default async function globalTeardown() {
   // copy and is the difference between "unexplainable again" and a log to read.
   try {
     const live = path.join(__dirname, "results", "app-dev.log");
-    if (fs.existsSync(live)) {
+    // ARCHIVE ONLY A LOG THIS RUN COULD HAVE WRITTEN. Existence alone is not
+    // enough: under `E2E_MANUAL=1` the app is launched separately, so
+    // `results/app-dev.log` may be left over from an EARLIER run — and copying
+    // it under this run's timestamp files the wrong evidence under the right
+    // name. For a defect whose whole difficulty is that its evidence was
+    // destroyed, a plausible-looking log from the wrong run is worse than no
+    // log: the first thing anyone would do with it is trust it.
+    const runStartedAt = Number(process.env.E2E_RUN_STARTED_AT ?? 0);
+    const liveMtime = fs.existsSync(live) ? fs.statSync(live).mtimeMs : 0;
+    const staleByRunStart = runStartedAt > 0 && liveMtime > 0 && liveMtime < runStartedAt;
+    if (fs.existsSync(live) && !staleByRunStart) {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const archiveDir = path.join(__dirname, "results", "app-logs");
       fs.mkdirSync(archiveDir, { recursive: true });

@@ -23,6 +23,20 @@ import { SCREENSHOT_DEFAULTS } from "./e2e/helpers/screenshotGates";
  */
 export default defineConfig({
   testDir: "./e2e",
+  // A CEILING ON THE WHOLE RUN. On 2026-08-16 a journey run spent 5.4 HOURS
+  // failing 64 consecutive tests on timeout (BUG-0098) before anyone could stop
+  // it. The wedge guard now latches early for the shape it can detect, but it
+  // detects a wedged BACKEND — a renderer-side hang happens above it and pays
+  // full price per test with no latch and no marker.
+  //
+  // 2 hours against a journey project that passes in ~28 minutes is a 4x margin,
+  // so this can only fire on a run that has already gone wrong. Teardown's
+  // banners and log archive are synchronous and run before its first `await`, so
+  // they still produce their artefacts when this trips; the surviving side
+  // effect is that the kill/verify may not run and `app.exe` can outlive the run
+  // — recover with `scripts/kill-stale-dev.mjs`. A live wedged app is worth more
+  // attached to than dead, so that trade is the right way round.
+  globalTimeout: 2 * 60 * 60 * 1000,
   timeout: 30_000,
   expect: {
     timeout: 10_000,
