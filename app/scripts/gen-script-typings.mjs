@@ -26,6 +26,7 @@ const OUTPUT = path.join(appRoot, "extensions", "ScriptableObjects", "objectCont
 // The same probe, as DATA for the running app — see the banner in the generated
 // file. Emitted in the same pass as the .d.ts so the two cannot disagree.
 const POLICY_OUTPUT = path.join(appRoot, "src", "api", "scriptHost", "generated", "scriptSurfacePolicy.ts");
+const SLICE_OUTPUT = path.join(appRoot, "src", "api", "scriptHost", "generated", "scriptSurfaceSlices.ts");
 const ENTRY = path.join(here, "scriptTypings", "generateObjectContexts.ts");
 
 const checkOnly = process.argv.includes("--check");
@@ -88,6 +89,7 @@ function readOrNull(file) {
 const ARTIFACTS = [
   { file: OUTPUT, text: result.output, label: "typings" },
   { file: POLICY_OUTPUT, text: result.policyOutput, label: "surface policy" },
+  { file: SLICE_OUTPUT, text: result.sliceOutput, label: "prompt slices" },
 ];
 
 let stale = false;
@@ -114,7 +116,7 @@ if (stale) process.exit(1);
 
 console.log(
   `[OK] ${result.stats.interfaces} interfaces verified, ${result.stats.members} members probed, ` +
-    `${result.stats.documented} carry generated broker policy, ${result.stats.policyRows} surface rows emitted.`,
+    `${result.stats.documented} carry generated broker policy, ${result.stats.policyRows} surface rows, ${result.stats.sliceEntries} prompt entries.`,
 );
 
 // The probe arms RPC deadline timers inside the shim; they are cleared, but a

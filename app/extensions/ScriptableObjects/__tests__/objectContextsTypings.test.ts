@@ -27,6 +27,7 @@ import { ALLOWLIST } from "@api/scriptHost/allowlist";
 const TEMPLATE_PATH = path.resolve(__dirname, "../../../scripts/scriptTypings/objectContexts.template.d.ts");
 const GENERATED_PATH = path.resolve(__dirname, "../objectContexts.d.ts");
 const POLICY_PATH = path.resolve(__dirname, "../../../src/api/scriptHost/generated/scriptSurfacePolicy.ts");
+const SLICE_PATH = path.resolve(__dirname, "../../../src/api/scriptHost/generated/scriptSurfaceSlices.ts");
 
 function readTemplate(): string {
   return fs.readFileSync(TEMPLATE_PATH, "utf8");
@@ -67,6 +68,44 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
       committed === result.policyOutput,
       "src/api/scriptHost/generated/scriptSurfacePolicy.ts is stale — run `npm run gen:script-typings`.",
     ).toBe(true);
+  });
+
+  it("matches the committed scriptSurfaceSlices.ts byte for byte", () => {
+    // The THIRD artifact of the same pass: signature-only, per object type,
+    // priced in tokens, for injecting into a script-authoring prompt. Same
+    // reasoning as the policy map above — one probe, so they cannot disagree.
+    // Design: docs/design/local-model-script-authoring.md §6.
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    expect(result.problems).toEqual([]);
+    const committed = fs.readFileSync(SLICE_PATH, "utf8");
+    expect(
+      committed === result.sliceOutput,
+      "src/api/scriptHost/generated/scriptSurfaceSlices.ts is stale — run `npm run gen:script-typings`.",
+    ).toBe(true);
+  });
+
+  it("keeps the prompt slices free of the prose that made the .d.ts unusable", () => {
+    // The whole reason the slices exist: objectContexts.d.ts is ~96,800 estimated
+    // tokens and roughly 85% of that is prose, worked examples and the generated
+    // policy paragraphs. If any of it leaks back in, the slices stop fitting a
+    // context window and M4 has silently undone itself.
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    expect(result.sliceOutput).not.toContain("Calcula policy (generated)");
+    expect(result.sliceOutput).not.toContain("```");
+    // No JSDoc block may survive inside a signature. A member whose type is a
+    // nested type literal carries that literal's own comments, which is how
+    // `api.text` dragged 200+ characters of CSV prose into what was meant to be
+    // a declaration. Asserted on `/**` rather than on newlines, because a
+    // signature legitimately CAN contain the characters backslash-n: `toCsv`
+    // takes `lineEnding?: "\r\n" | "\n" | "\r"`, and an earlier version of this
+    // test read those string-literal types as multi-line signatures.
+    const sigs = [...result.sliceOutput.matchAll(/signature: "((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+    expect(sigs.length).toBeGreaterThan(500);
+    expect(sigs.filter((s) => s.includes("/**"))).toEqual([]);
+    // And the whole thing must stay far under the .d.ts it came from.
+    expect(result.sliceOutput.length).toBeLessThan(
+      fs.readFileSync(GENERATED_PATH, "utf8").length / 2,
+    );
   });
 
   it("gives the validator a surface with the capability-bearing members on it", () => {

@@ -322,6 +322,9 @@ exists. The new work is an entry point that runs and reports **without applying 
 `calcula.d.ts` (35,599 bytes, ~10k tokens estimated) fits a 32k-context model whole but blows an 8k
 one. `objectContexts.d.ts` (348,501 bytes) fits nothing.
 
+**SHIPPED 2026-08-19 as M4** — see the build order for the measured numbers and the four things that
+came out of building it.
+
 **No vector store and no embedding model are required.** `draft_object_script` already takes
 `object_type`, validated against 16 types (`workbook`, `sheet`, `cell`, `row`, `column`, `slicer`,
 `chart`, `pivot`, `button`, `textbox`, `timeline`, `shape`, `table`, `namedRange`, `panel`,
@@ -463,7 +466,39 @@ caught it. And the `credentials` denylist in `backendCommands.ts` had never list
 commands at all; the new ones are there now, along with `ai_chat_complete`, which is not a key write
 but is the path that SPENDS one.
 
-**M4 — Sliceable typings** from the existing generator, with the lockstep test extended (§6).
+**M4 — Sliceable typings. SHIPPED 2026-08-19.** A third generated artifact,
+`scriptHost/generated/scriptSurfaceSlices.ts` (**667 entries**), emitted by the same generator pass
+and pinned byte-for-byte by the lockstep test; plus `api/scriptHost/scriptPrompt/`, the budget-aware
+assembler from §4d.
+
+**Measured, which is what justified the work:**
+
+| | est. tokens | |
+|---|---|---|
+| `objectContexts.d.ts` | ~96,800 | unusable in any context window |
+| signature slices | ~29,000 | **70% smaller** — fits 32k+ |
+| one object type | ~24,000 | still too big for an 8k model |
+
+So slicing alone was never going to be enough; something has to **choose**. `buildSurfacePrompt`
+ranks by group (`context` → `grid` → `capability` → `other`), promotes hint-matched members ahead of
+their group, and fills to the budget. A 4k budget still carries `caps.fetch` when the request says
+"download".
+
+Four things worth carrying forward:
+
+- **Truncation is announced.** A silently partial surface is worse than a small one: the model cannot
+  tell "Calcula has no such method" from "I was not shown it", so it invents one, L1 rejects the
+  invention, and the repair loop burns its rounds rediscovering the gap. The prompt names the number
+  omitted and says what to do instead.
+- **The fill prices the RENDERED entry**, not the generated `cost`. The latter omits the `context.`
+  prefix, comment markers and separators — an ~8% overrun, and a budget exceeded by any margin is
+  exactly the truncate-at-a-random-byte failure the module exists to prevent.
+- **Signatures must strip comments.** A member whose type is a nested type literal carries that
+  literal's own JSDoc: `api.text` dragged 200+ characters of CSV prose into what was meant to be a
+  declaration.
+- **The artifact emits shared + per-type delta.** Listing all ~530 chains once per object type made
+  the file 343 KB — as large as the `.d.ts` it exists to shrink — because ~520 are identical across
+  all 17 types.
 
 **M5 — The eval set.** 30–50 golden tasks: intent in, sandbox assertions out. This is the asset that
 makes the whole design durable — **when a new model lands we run the eval, we do not redesign.** It

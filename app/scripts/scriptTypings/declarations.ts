@@ -26,6 +26,16 @@ export interface DeclaredMember {
   fullStart: number;
   /** Start of the member's own text (after leading trivia). */
   start: number;
+  /**
+   * End of the member's own text, so `source.slice(start, end)` is exactly its
+   * DECLARATION and nothing else.
+   *
+   * Added for the prompt-surface slices: injecting objectContexts.d.ts into a
+   * model's context is impossible at 348 KB, and ~85% of that is prose, worked
+   * examples and generated policy paragraphs. The signature alone is what a
+   * model needs in order to call a method correctly.
+   */
+  end: number;
   /** Existing JSDoc block for this member, if it has one. */
   jsDoc?: { start: number; end: number; text: string };
   /** Indentation of the member's line, for emitting a matching comment. */
@@ -146,6 +156,7 @@ function collectTypeElements(
       inherited,
       fullStart: node.getFullStart(),
       start,
+      end: node.getEnd(),
       jsDoc: jsDocOf(model.source, node),
       indent: indentOf(model.source, start),
     });

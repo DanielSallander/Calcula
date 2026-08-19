@@ -53,11 +53,16 @@ export interface GenerateResult {
    * wrong map is worse than no map.
    */
   policyOutput: string;
+  /**
+   * The finished `scriptSurfaceSlices.ts` text -- signature-only, per object
+   * type, priced in tokens. Empty when `problems` is non-empty.
+   */
+  sliceOutput: string;
   /** Human-readable drift reports; a non-empty list must fail the build. */
   problems: string[];
   /** Interfaces the probe reached but the template never declares. */
   unverified: string[];
-  stats: { interfaces: number; members: number; documented: number; policyRows: number };
+  stats: { interfaces: number; members: number; documented: number; policyRows: number; sliceEntries: number };
 }
 
 // ============================================================================
@@ -373,6 +378,257 @@ function surfacePolicyModule(rows: SurfaceMemberRow[]): string {
 }
 
 // ============================================================================
+// The prompt surface (signature-only slices, per object type)
+// ============================================================================
+
+const SLICE_BANNER = `// =============================================================================
+// GENERATED FILE - DO NOT EDIT.
+// =============================================================================
+// Produced by:  npm run gen:script-typings
+// Generator:    app/scripts/scriptTypings/generateObjectContexts.ts
+//
+// WHAT THIS IS: the object-script API as SIGNATURES, sliced by object type and
+// priced in tokens, for injecting into a script-authoring prompt.
+//
+// WHY IT EXISTS: a model that does not know Calcula's API invents Excel VBA or
+// Office.js, and the fix is to put the real surface in front of it. But
+// objectContexts.d.ts is 348 KB and fits no context window worth having --
+// roughly 85% of it is prose, worked examples and generated policy paragraphs,
+// all of which a human reading IntelliSense wants and a model composing a call
+// does not. What is left after stripping them is the declaration itself, which
+// is the part that makes the call correct.
+//
+// Design: docs/design/local-model-script-authoring.md §4d, §6.
+// Consumed by: app/src/api/scriptHost/scriptPrompt/ (budget-aware assembly).
+// =============================================================================
+`;
+
+/** Rough token count. Deliberately cheap and slightly pessimistic. */
+function estimateTokens(text: string): number {
+  // ~3.6 chars/token holds well for dense TypeScript signatures; rounding up
+  // keeps the assembler from overrunning a budget it promised to respect.
+  return Math.max(1, Math.ceil(text.length / 3.6));
+}
+
+/**
+ * Collapse a declaration to one line: no comments, no newlines, no double
+ * spaces.
+ *
+ * STRIPPING COMMENTS IS NOT COSMETIC. A member whose type is a nested type
+ * literal carries that literal's OWN JSDoc inside its declaration — `api.text`
+ * dragged 200+ characters of CSV prose into what was supposed to be a
+ * signature, which is precisely the bulk this artifact exists to remove. The
+ * summary field already carries one sentence of prose deliberately; anything
+ * else is the .d.ts leaking back in.
+ */
+function oneLine(text: string): string {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/[^\n]*/g, " ")
+    .replace(/\s*\n\s*/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/;\s*$/, "")
+    .trim();
+}
+
+/**
+ * The first sentence of the hand-written prose, with the generated policy
+ * paragraph excluded.
+ *
+ * `policyLines()` appends "Calcula policy (generated): ..." and "Reach: ..." to
+ * every documented member. Those two are for a human hovering in Monaco; the
+ * capability a call needs is already a FIELD here, so repeating it as prose
+ * would spend the model's budget restating what the schema says.
+ */
+function summaryOf(decl: DeclaredMember): string {
+  if (!decl.jsDoc) return "";
+  const body = decl.jsDoc.text
+    .replace(/^\/\*\*/, "")
+    .replace(/\*\/$/, "")
+    .split("\n")
+    .map((l) => l.replace(/^\s*\*/, "").trim())
+    .filter((l) => l && !l.startsWith("Calcula policy (generated):") && !l.startsWith("Reach:"))
+    .join(" ");
+  // Stop at the first code fence: a worked example is exactly the bulk we are
+  // here to strip.
+  const beforeExample = body.split("```")[0];
+  const firstSentence = beforeExample.split(/(?<=\.)\s/)[0] ?? "";
+  return firstSentence.trim().slice(0, 160);
+}
+
+/**
+ * How a member is grouped, which is what decides what SURVIVES a tight budget.
+ *
+ * The order is a claim about what a script author reaches for: the members
+ * specific to the object being scripted, then reading and writing the grid,
+ * then the privileged extras, then everything else.
+ */
+export type SurfaceGroup = "context" | "grid" | "capability" | "other";
+
+function groupOf(chain: string, capability: string | undefined, ownMember: boolean): SurfaceGroup {
+  if (capability) return "capability";
+  if (ownMember) return "context";
+  if (chain.startsWith("api.") || chain.startsWith("range.") || chain.startsWith("cell.")) return "grid";
+  return "other";
+}
+
+export interface SurfaceEntryRow {
+  chain: string;
+  signature: string;
+  summary: string;
+  capability?: string;
+  group: SurfaceGroup;
+  cost: number;
+}
+
+export interface SliceModel {
+  entries: SurfaceEntryRow[];
+  /**
+   * Chains every object type can reach (BaseObjectContext plus every named
+   * subtree: caps, api, range, the handles).
+   *
+   * Emitted separately from the per-type extras because listing the full set
+   * once per object type made the artifact 343 KB — as large as the .d.ts it
+   * exists to shrink. ~520 of the ~530 chains are identical across all 17
+   * types, so the shared set plus a handful of extras says the same thing in a
+   * fraction of the bytes.
+   */
+  sharedChains: string[];
+  /** objectType -> only the chains its OWN root context adds. */
+  ownByObjectType: Map<string, string[]>;
+}
+
+/**
+ * Build the slices from the probe (what exists + its broker policy) and the
+ * template (what it is DECLARED as, which is where the signature lives).
+ */
+export function collectSlices(probe: ProbeResult, model: TemplateModel, source: string): SliceModel {
+  const rows = collectSurfaceRows(probe);
+  const capabilityByChain = new Map<string, string>();
+  const ifaceByChain = new Map<string, string>();
+  for (const r of rows) {
+    if (r.capability) capabilityByChain.set(r.chain, r.capability);
+    if (!ifaceByChain.has(r.chain)) ifaceByChain.set(r.chain, r.iface);
+  }
+
+  // Root context interfaces, so a member's "own vs shared" status is known.
+  const rootIfaces = new Set(OBJECT_TYPE_INTERFACES.map(([, iface]) => iface).filter(Boolean));
+
+  const entries: SurfaceEntryRow[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    if (seen.has(r.chain)) continue;
+    const declared = model.interfaces.get(r.iface)?.members.get(r.path);
+    if (!declared) continue; // probed but undeclared: the generator already fails on this
+    seen.add(r.chain);
+    const signature = oneLine(source.slice(declared.start, declared.end));
+    const summary = summaryOf(declared);
+    const capability = capabilityByChain.get(r.chain);
+    const group = groupOf(r.chain, capability, rootIfaces.has(r.iface));
+    entries.push({
+      chain: r.chain,
+      signature,
+      summary,
+      ...(capability ? { capability } : {}),
+      group,
+      cost: estimateTokens(`${r.chain} ${signature} ${summary}`),
+    });
+  }
+  entries.sort((a, b) => a.chain.localeCompare(b.chain));
+
+  // Which chains each object type can reach. A root context contributes its OWN
+  // members; BaseObjectContext and every NAMED_SUBTREES interface are reachable
+  // from any context, so those are shared. Derived from the same two tables the
+  // probe uses, not restated.
+  const sharedIfaces = new Set(NAMED_SUBTREES.map(([, iface]) => iface));
+  const isShared = (chain: string): boolean => {
+    const owner = ifaceByChain.get(chain)!;
+    return owner === "BaseObjectContext" || sharedIfaces.has(owner);
+  };
+
+  const sharedChains = entries.filter((e) => isShared(e.chain)).map((e) => e.chain);
+  const ownByObjectType = new Map<string, string[]>();
+  for (const [objectType, iface] of OBJECT_TYPE_INTERFACES) {
+    if (!iface) continue;
+    const own = entries
+      .filter((e) => !isShared(e.chain) && ifaceByChain.get(e.chain) === iface)
+      .map((e) => e.chain);
+    ownByObjectType.set(objectType, own);
+  }
+
+  return { entries, sharedChains, ownByObjectType };
+}
+
+function surfaceSliceModule(slices: SliceModel): string {
+  const entryLines = slices.entries.map((e) => {
+    const bits = [
+      `chain: ${JSON.stringify(e.chain)}`,
+      `signature: ${JSON.stringify(e.signature)}`,
+      `summary: ${JSON.stringify(e.summary)}`,
+    ];
+    if (e.capability) bits.push(`capability: ${JSON.stringify(e.capability)}`);
+    bits.push(`group: ${JSON.stringify(e.group)}`, `cost: ${e.cost}`);
+    return `  { ${bits.join(", ")} },`;
+  });
+  const typeLines = [...slices.ownByObjectType]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([objectType, chains]) => `  ${JSON.stringify(objectType)}: ${JSON.stringify(chains)},`);
+
+  return [
+    SLICE_BANNER,
+    'import type { CapabilityId } from "../capabilityIds";',
+    "",
+    '/** What decides which members survive a tight token budget. */',
+    'export type SurfaceGroup = "context" | "grid" | "capability" | "other";',
+    "",
+    "/** One callable member, as a model needs to see it. */",
+    "export interface SurfaceEntry {",
+    "  /** The member-name sequence an author writes, e.g. \"caps.storage.get\". */",
+    "  readonly chain: string;",
+    "  /** The declaration, collapsed to one line. */",
+    "  readonly signature: string;",
+    "  /** First sentence of the hand-written prose; generated policy excluded. */",
+    "  readonly summary: string;",
+    "  readonly capability?: CapabilityId;",
+    "  readonly group: SurfaceGroup;",
+    "  /** Estimated tokens for chain + signature + summary. */",
+    "  readonly cost: number;",
+    "}",
+    "",
+    "export const SURFACE_ENTRIES: readonly SurfaceEntry[] = [",
+    ...entryLines,
+    "];",
+    "",
+    "/**",
+    " * Chains EVERY object type can reach: BaseObjectContext plus every named",
+    " * subtree (caps, api, range, the handles).",
+    " *",
+    " * Held separately from the per-type extras because listing the full set once",
+    " * per object type made this file as large as the .d.ts it exists to shrink --",
+    " * ~520 of ~530 chains are identical across all 17 types.",
+    " */",
+    "export const SHARED_CHAINS: readonly string[] = " + JSON.stringify(slices.sharedChains) + ";",
+    "",
+    "/** objectType -> only the chains its OWN root context adds on top of SHARED_CHAINS. */",
+    "export const OWN_CHAINS_BY_OBJECT_TYPE: Readonly<Record<string, readonly string[]>> = {",
+    ...typeLines,
+    "};",
+    "",
+    "/** Everything a script attached to `objectType` can reach. */",
+    "export function chainsForObjectType(objectType: string): readonly string[] {",
+    "  const own = OWN_CHAINS_BY_OBJECT_TYPE[objectType];",
+    "  return own ? [...SHARED_CHAINS, ...own] : SHARED_CHAINS;",
+    "}",
+    "",
+    "/** True when the object type has a slice at all (an unknown one has none). */",
+    "export function isKnownObjectType(objectType: string): boolean {",
+    "  return Object.prototype.hasOwnProperty.call(OWN_CHAINS_BY_OBJECT_TYPE, objectType);",
+    "}",
+    "",
+  ].join("\n");
+}
+
+// ============================================================================
 // Entry point
 // ============================================================================
 
@@ -457,7 +713,7 @@ export function generateObjectContexts(templateSource: string, templateName = "o
   }
 
   if (problems.length) {
-    return { output: "", policyOutput: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0 } };
+    return { output: "", policyOutput: "", sliceOutput: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0, sliceEntries: 0 } };
   }
 
   let body = applyEdits(templateSource, edits);
@@ -471,7 +727,7 @@ export function generateObjectContexts(templateSource: string, templateName = "o
     problems.push(`template is missing the ${CONTEXT_MAP_MARKER} marker`);
   }
   if (problems.length) {
-    return { output: "", policyOutput: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0 } };
+    return { output: "", policyOutput: "", sliceOutput: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0, sliceEntries: 0 } };
   }
   body = body.replace(OBJECT_TYPE_MARKER, objectTypeTable(probe));
   body = body.replace(CAPABILITY_MARKER, capabilityTable());
@@ -482,11 +738,13 @@ export function generateObjectContexts(templateSource: string, templateName = "o
 
   const output = `${BANNER}\n${body.replace(/\s*$/, "")}\n`;
   const rows = collectSurfaceRows(probe);
+  const slices = collectSlices(probe, model, templateSource);
   return {
     output,
     policyOutput: surfacePolicyModule(rows),
+    sliceOutput: surfaceSliceModule(slices),
     problems,
     unverified,
-    stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: rows.length },
+    stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: rows.length, sliceEntries: slices.entries.length },
   };
 }
