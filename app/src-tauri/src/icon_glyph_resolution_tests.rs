@@ -192,3 +192,168 @@ fn the_rule_id_identifies_the_producing_rule() {
         "the result is attributed to the wrong rule — 7 is the DISABLED one"
     );
 }
+
+// ==========================================================================
+// resolve_icons — the value sort and filter key on (BUG-0104 Stage 1)
+// ==========================================================================
+
+/// Resolve icons for a column of rows, at the surface a SORT would use.
+fn resolved(
+    grid: &Grid,
+    rules: &[ConditionalFormatDefinition],
+    cells: &[(u32, u32)],
+) -> std::collections::HashMap<(u32, u32), Option<IconRef>> {
+    let grids = vec![grid.clone()];
+    let names = vec!["Sheet1".to_string()];
+    resolve_icons(
+        grid,
+        &grids,
+        &names,
+        0,
+        rules,
+        cells,
+        crate::eval_budget::EvalSurface::Interactive,
+    )
+}
+
+#[test]
+fn resolve_icons_returns_an_entry_for_EVERY_requested_cell() {
+    // Totality is load-bearing: a caller must never have to tell a missing key
+    // from an empty value, because guessing wrong silently mis-orders a sort.
+    // Rows 0..2 are inside the rule's range; rows 3..4 are outside it.
+    let grid = grid_with_column(&[1.0, 50.0, 99.0, 5.0, 6.0]);
+    let rules = vec![definition(
+        1,
+        0,
+        true,
+        icon_rule(IconSetType::ThreeArrows, vec![33.0, 66.0]),
+        2,
+    )];
+    let cells: Vec<(u32, u32)> = (0..5).map(|r| (r, 0)).collect();
+    let map = resolved(&grid, &rules, &cells);
+
+    assert_eq!(map.len(), 5, "the map must be TOTAL over the requested cells");
+    for r in 0..3 {
+        assert!(
+            map[&(r, 0)].is_some(),
+            "row {r} is in range and should have an icon"
+        );
+    }
+    for r in 3..5 {
+        assert!(
+            map[&(r, 0)].is_none(),
+            "row {r} is out of range, so its entry must be None rather than absent"
+        );
+    }
+}
+
+#[test]
+fn resolve_icons_obeys_PRIORITY_not_vec_order() {
+    // The .cala restore extends the rule store without re-sorting, so trusting
+    // vec order would make a workbook's icons depend on whether it had just been
+    // loaded. Here the LOWER priority number (higher precedence) is listed LAST,
+    // so vec order and priority order disagree.
+    let grid = grid_with_column(&[50.0]);
+    let rules = vec![
+        definition(
+            1,
+            5,
+            true,
+            icon_rule(IconSetType::FiveArrows, vec![20.0, 40.0, 60.0, 80.0]),
+            0,
+        ),
+        definition(
+            2,
+            1,
+            true,
+            icon_rule(IconSetType::ThreeArrows, vec![33.0, 66.0]),
+            0,
+        ),
+    ];
+    let map = resolved(&grid, &rules, &[(0, 0)]);
+    assert_eq!(
+        map[&(0, 0)].expect("an icon should resolve").icon_set,
+        IconSetType::ThreeArrows,
+        "priority was ignored and vec order won"
+    );
+}
+
+#[test]
+fn resolve_icons_skips_disabled_rules() {
+    // A disabled rule draws nothing, so there is nothing to sort on. Sorting on
+    // it would order rows by something invisible.
+    let grid = grid_with_column(&[50.0]);
+    let rules = vec![definition(
+        1,
+        0,
+        false,
+        icon_rule(IconSetType::ThreeArrows, vec![33.0, 66.0]),
+        0,
+    )];
+    let map = resolved(&grid, &rules, &[(0, 0)]);
+    assert!(
+        map[&(0, 0)].is_none(),
+        "a DISABLED rule produced an icon to sort on, but the cell shows none"
+    );
+}
+
+#[test]
+fn resolve_icons_clamps_the_index_to_the_sets_own_size() {
+    // Nothing validates that a rule's threshold list matches its set size, and
+    // only the frontend clamped — so an over-long list would sort on an icon
+    // nobody ever saw. FIVE thresholds on a THREE-icon set.
+    let grid = grid_with_column(&[100.0]);
+    let rules = vec![definition(
+        1,
+        0,
+        true,
+        icon_rule(IconSetType::ThreeArrows, vec![10.0, 20.0, 30.0, 40.0, 50.0]),
+        0,
+    )];
+    let map = resolved(&grid, &rules, &[(0, 0)]);
+    let icon = map[&(0, 0)].expect("an icon should resolve");
+    assert!(
+        icon.icon_index <= 2,
+        "index {} is outside a three-icon set, so the clamp is missing",
+        icon.icon_index
+    );
+}
+
+#[test]
+fn resolve_icons_agrees_with_the_renderer_on_the_same_rules() {
+    // The whole premise of icon sorting is "order by what I can SEE". This pins
+    // the two paths together: whatever `evaluate_conditional_formats_for` reports
+    // as the displayed icon, `resolve_icons` must key on the same value.
+    let grid = grid_with_column(&[1.0, 50.0, 99.0]);
+    let rules = vec![
+        definition(
+            1,
+            0,
+            false,
+            icon_rule(IconSetType::FiveArrows, vec![20.0, 40.0, 60.0, 80.0]),
+            2,
+        ),
+        definition(
+            2,
+            1,
+            true,
+            icon_rule(IconSetType::ThreeArrows, vec![33.0, 66.0]),
+            2,
+        ),
+    ];
+    let cells: Vec<(u32, u32)> = (0..3).map(|r| (r, 0)).collect();
+    let map = resolved(&grid, &rules, &cells);
+
+    let grids = vec![grid.clone()];
+    let names = vec!["Sheet1".to_string()];
+    let drawn = evaluate_conditional_formats_for(&grid, &grids, &names, 0, &rules, 0, 2, 0, 0);
+    for cf in drawn.into_iter().filter(|c| c.icon_index.is_some()) {
+        let keyed = map[&(cf.row, cf.col)].expect("the renderer drew an icon here");
+        assert_eq!(
+            (keyed.icon_set, keyed.icon_index),
+            (cf.icon_set.unwrap(), cf.icon_index.unwrap()),
+            "row {}: the sort key disagrees with the drawn icon",
+            cf.row
+        );
+    }
+}

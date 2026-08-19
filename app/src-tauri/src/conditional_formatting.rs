@@ -880,6 +880,129 @@ pub fn get_all_conditional_formats(
         .unwrap_or_default())
 }
 
+/// WHICH icon a cell displays: the set it belongs to and the index within it.
+///
+/// The value sorting and filtering compare. Both halves are needed — an index
+/// alone is meaningless across sets, which is the mistake BUG-0107 was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IconRef {
+    pub icon_set: IconSetType,
+    pub icon_index: u32,
+}
+
+/// A snapshot of one sheet's conditional-format rules, taken and released in a
+/// single expression.
+///
+/// Exists to kill a whole class of lock-ordering question rather than to answer
+/// it. Sorting holds the grid guards for its entire two-phase pass, and undo
+/// restore takes `conditional_formats.write(effect)`; a CF guard held across
+/// either is a deadlock waiting for the right interleaving. Callers take this
+/// BEFORE any long-lived guard, the same way `sheet_names` is cloned before the
+/// sort's own locks.
+pub(crate) fn rules_snapshot(state: &AppState, sheet: usize) -> Vec<ConditionalFormatDefinition> {
+    state
+        .conditional_formats
+        .read()
+        .ok()
+        .and_then(|store| store.get(&sheet).cloned())
+        .unwrap_or_default()
+}
+
+/// The icon each requested cell DISPLAYS, or `None` where it displays none.
+///
+/// Used by sort and filter, which must agree with the screen: "sort by the icon
+/// I can see" is only meaningful if this returns exactly what the renderer draws.
+///
+/// FOUR THINGS THIS GETS RIGHT that a naive loop would not:
+///
+/// 1. THE MAP IS TOTAL. Every requested cell has an entry, and `None` means
+///    "genuinely no icon" rather than "not computed". A caller that had to
+///    distinguish a missing key from an empty value would eventually get it
+///    wrong, and the wrong answer is a silently mis-ordered sort.
+/// 2. PRIORITY IS EXPLICIT, not inherited from vec order. `add` and `reorder`
+///    keep the store sorted, but the `.cala` restore `extend`s without
+///    re-sorting — so trusting the order would make a document's icon order
+///    depend on whether it had just been loaded.
+/// 3. THE CASCADE, not one rule: `enabled` is honoured, `stop_if_true` stops, and
+///    the FIRST icon produced wins — the same answer the renderer takes.
+/// 4. THE INDEX IS CLAMPED to the set's own icon count. Nothing validates that a
+///    rule's threshold list matches its set size, and only the frontend clamped,
+///    so an over-long list would otherwise sort on an icon nobody ever saw.
+///
+/// The `surface` parameter is load-bearing and NOT cosmetic: repainting installs
+/// `Transient`, where a tripped fuel budget costs a highlight. On a sort it would
+/// cost a wrong ORDER, so sort/filter pass `Interactive` — the user typed this
+/// and is waiting.
+pub(crate) fn resolve_icons(
+    grid: &Grid,
+    grids: &[Grid],
+    sheet_names: &[String],
+    sheet_index: usize,
+    rules: &[ConditionalFormatDefinition],
+    cells: &[(u32, u32)],
+    surface: crate::eval_budget::EvalSurface,
+) -> HashMap<(u32, u32), Option<IconRef>> {
+    let _governor = crate::eval_budget::install(surface);
+
+    // Priority order, explicitly. Lower priority value = higher precedence.
+    let mut ordered: Vec<&ConditionalFormatDefinition> =
+        rules.iter().filter(|r| r.enabled).collect();
+    ordered.sort_by_key(|r| r.priority);
+
+    // One RangeStats per rule for the whole pass — a property of the rule's
+    // ranges, not of the cell being asked about.
+    let stats: Vec<Option<RangeStats>> = ordered
+        .iter()
+        .map(|r| {
+            if needs_range_stats(&r.rule) {
+                Some(collect_range_stats(grid, &r.ranges))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut out: HashMap<(u32, u32), Option<IconRef>> = HashMap::with_capacity(cells.len());
+    for &(row, col) in cells {
+        // Every requested cell gets an entry, whatever happens below.
+        let mut found: Option<IconRef> = None;
+        for (idx, rule_def) in ordered.iter().enumerate() {
+            if !rule_def.ranges.iter().any(|r| r.contains(row, col)) {
+                continue;
+            }
+            if let Some(cf) = evaluate_rule(
+                grid,
+                grids,
+                sheet_names,
+                sheet_index,
+                &rule_def.rule,
+                &rule_def.format,
+                row,
+                col,
+                stats[idx].as_ref(),
+            ) {
+                if let (Some(set), Some(index)) = (cf.icon_set, cf.icon_index) {
+                    let limit = get_icon_count(&set).saturating_sub(1);
+                    found = Some(IconRef {
+                        icon_set: set,
+                        icon_index: index.min(limit),
+                    });
+                    break;
+                }
+                // A non-icon rule matched. `stop_if_true` still applies: the
+                // renderer would stop here too, so an icon rule below it does
+                // NOT draw, and must not sort as though it did.
+                if rule_def.stop_if_true {
+                    break;
+                }
+            }
+        }
+        out.insert((row, col), found);
+    }
+    out
+}
+
 /// Evaluate conditional formats over a rectangle, for an EXPLICITLY NAMED sheet
 /// and an explicit rule list.
 ///
