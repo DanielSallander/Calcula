@@ -18,8 +18,13 @@ reproduction live in `tests/regression/bug-ledger.json` (**106 entries, 104 fixe
 2026-08-19 — recounted from the file, not carried forward; it moved three times in two days). The
 two open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open deliberately — the
 guards now make a recurrence diagnosable, and it is explicitly not closeable by a speculative fix)
-and **BUG-0104** (sorting and filtering by conditional-formatting icon are not implemented; both now
-REFUSE loudly instead of silently doing something else, so nothing lies to a user while it waits). BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
+and **BUG-0104** (sort and filter by conditional-formatting icon). Its ENGINES both work as of
+2026-08-19 — the sort keys on the icon that was on screen when it was invoked, the filter resolves
+once per pass — and both are reachable over IPC. What is left is the SURFACE: the script validator
+has a closed allowlist so a script can say `sortOn:"icon"` but can never name the icon, and neither
+the Sort dialog nor the AutoFilter dropdown can express an icon choice yet, so both still refuse.
+Nothing lies to a user in the meantime; the remaining refusals are validations naming what is
+missing. BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
 filed and fixed the same day, is the sibling of BUG-0086 — that fix turned out to be
 SPELLING-SPECIFIC, and a capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely.
 Nothing in this file duplicates a ledger entry. **Recount before restating**: the histogram is one line of node, and this figure has
