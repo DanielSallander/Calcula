@@ -68,6 +68,21 @@ export interface ProviderStatus {
   hasKey: boolean;
 }
 
+/** Mirrors `StreamEvent` + the envelope's `streamId` (serde `flatten`). */
+export type StreamEvent =
+  | { streamId: string; type: "textDelta"; text: string }
+  | { streamId: string; type: "toolCallStarted"; id: string; name: string }
+  | { streamId: string; type: "done"; response: ChatResponse }
+  /**
+   * The stream broke part-way. DISTINCT from `done` on purpose: a partial answer
+   * must never be mistaken for a finished one and fed back to the model as if
+   * the turn had completed.
+   */
+  | { streamId: string; type: "failed"; message: string };
+
+/** The Tauri event every stream chunk arrives on, correlated by `streamId`. */
+export const AI_STREAM_EVENT = "ai:chat-stream";
+
 export interface DiscoveredRuntime {
   providerId: string;
   label: string;

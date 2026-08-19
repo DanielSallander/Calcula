@@ -4997,6 +4997,7 @@ pub fn run() {
             ai::ai_discover_local_runtimes,
             ai::ai_list_models,
             ai::ai_chat_complete,
+            ai::ai_chat_complete_stream,
             ai::tools::ai_chat_run_tool,
             persistence::list_virtual_files,
             persistence::read_virtual_file,

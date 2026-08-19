@@ -539,10 +539,32 @@ the vacuous-pass fix and **0.550 after**, on the same 12 canary tasks (0/12 pass
 below the bar for this work, which is a legitimate finding rather than a disappointment — it is
 precisely the number the picker needs to be able to show.
 
-**M6 — Streaming.** `ai_chat_complete` is one blocking POST with a 120 s timeout
-([ai_chat.rs:170](../../app/src-tauri/src/ai_chat.rs#L170)). Cloud latency hides that; a local model
-generating a 60-line script does not. Watching code get written is also a genuinely better
-experience than a spinner.
+**M6 — Streaming. SHIPPED 2026-08-19.** `ai/stream.rs` — an incremental SSE decoder plus an
+accumulator for both wire formats — and `ai_chat_complete_stream`, which emits deltas on
+`ai:chat-stream` (one event, correlated by `streamId`, rather than a listener per turn).
+
+**Streaming stayed a transport detail.** The command returns the same `ChatResponse` the blocking
+one does, and the agentic loop is byte-for-byte unchanged; the deltas are for the eye. A provider
+that cannot stream therefore changes nothing about how a conversation behaves.
+
+**The hard part is tool calls, not text.** Arguments arrive as JSON FRAGMENTS — Anthropic's
+`input_json_delta.partial_json`, OpenAI's `tool_calls[].function.arguments` — and `{"start_ro` is
+not parseable on its own. Getting this wrong does not error; it silently hands the tool `{}` while
+the model's real arguments are discarded. Two traps, each with a test that reds when reverted:
+
+- **Accumulate by `index`, never by `id`.** Only the FIRST fragment carries an id, so keying on it
+  loses every fragment after the first.
+- **The SSE decoder must buffer across network chunks.** A boundary falls wherever it falls —
+  mid-line, mid-JSON, mid-UTF-8. Parsing per chunk works on a fast local socket and truncates over a
+  real network, which is exactly the case streaming exists for.
+
+**Verified against a real server, not just against my model of one.** A stream captured from Ollama
+(`qwen2.5-coder:3b`) is pinned verbatim in the test file, and it corrected three assumptions:
+`finish_reason` is `null` rather than absent on intermediate chunks, `delta.content` is an EMPTY
+STRING alongside a tool call rather than omitted (so it must not become a text block), and Ollama
+sends the whole `arguments` in one chunk rather than fragmenting. The same recorded bytes are then
+driven through the decoder at chunk sizes 1, 2, 3, 7, 13, 64, 255 and 1024 and must produce an
+identical result.
 
 **M7 — Capability probe, tiered strategies, repair loop.** The adaptive machinery from §4b/§4c,
 built last because M2 and M5 are what make it measurable.

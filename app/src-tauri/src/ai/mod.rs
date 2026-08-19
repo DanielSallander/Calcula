@@ -20,6 +20,7 @@
 
 pub mod discovery;
 pub mod providers;
+pub mod stream;
 pub mod tools;
 pub mod wire;
 
@@ -27,6 +28,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 use serde_json::Value;
 use windows::core::PWSTR;
 use windows::Win32::Security::Credentials::{
@@ -282,9 +284,174 @@ pub async fn ai_chat_complete(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Command: streaming completion
+// ---------------------------------------------------------------------------
+
+/// The event name every stream chunk is emitted on.
+///
+/// One channel with a `streamId` rather than a per-stream event name: Tauri
+/// listeners are global, so a name-per-stream would leak a listener per turn and
+/// the frontend would have to unregister precisely. A correlation id in the
+/// payload is the same information with none of that.
+pub const AI_STREAM_EVENT: &str = "ai:chat-stream";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamEnvelope<'a> {
+    stream_id: &'a str,
+    #[serde(flatten)]
+    event: &'a stream::StreamEvent,
+}
+
+/// Stream one turn, emitting deltas as they arrive and returning the same
+/// `ChatResponse` the non-streaming command returns.
+///
+/// The RETURN VALUE is what the agentic loop uses; the events are for the eye.
+/// That split is deliberate: it keeps streaming a transport detail rather than a
+/// second conversation implementation, so a provider that cannot stream (or a
+/// user who turns it off) changes nothing about how the loop behaves.
+#[tauri::command]
+pub async fn ai_chat_complete_stream(
+    app: AppHandle,
+    request: ChatRequest,
+    stream_id: String,
+    base_url_override: Option<String>,
+    window: tauri::Window,
+) -> Result<ChatResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    let def = providers::find(&request.provider_id)
+        .ok_or_else(|| format!("Unknown provider '{}'.", request.provider_id))?;
+    let base = resolve_base(&def, base_url_override.as_deref())?;
+    if request.model.trim().is_empty() {
+        return Err(format!("No model selected for {}.", def.label));
+    }
+    let key = get_key(&providers::credential_target(&def.id));
+    if def.requires_key && key.is_none() {
+        return Err(format!(
+            "No API key stored for {}. Add one in the AI Chat panel.",
+            def.label
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let (url, mut body) = match def.kind {
+        ProviderKind::Anthropic => (
+            format!("{}/v1/messages", base),
+            wire::anthropic_request_body(&request),
+        ),
+        ProviderKind::OpenAiCompat => (
+            format!("{}/chat/completions", base),
+            wire::openai_request_body(&request),
+        ),
+    };
+    body["stream"] = Value::Bool(true);
+
+    let mut req = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream");
+    req = match def.kind {
+        ProviderKind::Anthropic => {
+            let k = key.expect("checked above: anthropic requires a key");
+            req.header("anthropic-version", ANTHROPIC_VERSION).header("x-api-key", k)
+        }
+        ProviderKind::OpenAiCompat => match key {
+            Some(k) => req.header("authorization", format!("Bearer {}", k)),
+            None => req,
+        },
+    };
+
+    let mut resp = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request to {} failed: {}", def.label, e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} error {}: {}", def.label, status.as_u16(), text));
+    }
+
+    let mut decoder = stream::SseDecoder::new();
+    let mut acc = stream::StreamAccumulator::new();
+    let mut failure: Option<String> = None;
+
+    let emit = |event: &stream::StreamEvent| {
+        let _ = app.emit(
+            AI_STREAM_EVENT,
+            StreamEnvelope { stream_id: &stream_id, event },
+        );
+    };
+
+    // `Response::chunk` rather than `bytes_stream()`, matching net_commands.rs:
+    // it is an inherent reqwest method, so no external Stream trait and no
+    // futures-util (not a direct dependency of this crate).
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                for frame in decoder.push(&bytes) {
+                    if stream::is_done_sentinel(&frame.data) {
+                        continue;
+                    }
+                    let Some(payload) = stream::frame_json(&frame.data) else {
+                        continue;
+                    };
+                    let events = match def.kind {
+                        ProviderKind::Anthropic => {
+                            stream::push_anthropic(&mut acc, &frame.event, &payload)
+                        }
+                        ProviderKind::OpenAiCompat => stream::push_openai(&mut acc, &payload),
+                    };
+                    for event in &events {
+                        if let stream::StreamEvent::Failed { message } = event {
+                            failure = Some(message.clone());
+                        }
+                        emit(event);
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                // A mid-stream transport failure must NOT be reported as a
+                // finished turn: the partial answer would be fed back to the
+                // model as if it were complete.
+                let message = format!("Stream from {} failed: {}", def.label, e);
+                emit(&stream::StreamEvent::Failed { message: message.clone() });
+                return Err(message);
+            }
+        }
+    }
+
+    if let Some(message) = failure {
+        return Err(message);
+    }
+
+    let response = acc.finish();
+    emit(&stream::StreamEvent::Done { response: response.clone() });
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stream_envelope_carries_the_correlation_id_beside_the_event() {
+        // Flattened, so the frontend reads `{ streamId, type, text }` rather
+        // than having to unwrap a nested event object.
+        let event = stream::StreamEvent::TextDelta { text: "hi".into() };
+        let v = serde_json::to_value(StreamEnvelope { stream_id: "s1", event: &event }).unwrap();
+        assert_eq!(v["streamId"], serde_json::json!("s1"));
+        assert_eq!(v["type"], serde_json::json!("textDelta"));
+        assert_eq!(v["text"], serde_json::json!("hi"));
+    }
 
     #[test]
     fn a_base_url_override_wins_and_trailing_slashes_are_trimmed() {
