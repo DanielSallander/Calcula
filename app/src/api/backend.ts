@@ -600,6 +600,13 @@ export interface SortField {
   sortOn?: SortOn;
   /** Color for color-based sorting */
   color?: string;
+  /**
+   * Which icon to bring to the top when `sortOn` is "icon".
+   *
+   * Both halves are required: an index is meaningless without the set it indexes
+   * into, which is the mistake BUG-0107 was.
+   */
+  icon?: { iconSet: IconSetType; iconIndex: number };
   /** Data option (default: "normal") */
   dataOption?: SortDataOption;
   /** Subfield for rich values */

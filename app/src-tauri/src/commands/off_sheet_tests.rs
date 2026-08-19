@@ -528,6 +528,7 @@ fn sort_params() -> SortRangeParams {
             ascending: true,
             sort_on: Default::default(),
             color: None,
+            icon: None,
             data_option: Default::default(),
             sub_field: None,
             custom_order: None,

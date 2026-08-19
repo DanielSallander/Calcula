@@ -4786,7 +4786,10 @@ pub(crate) fn sort_range_off_sheet(
     target: usize,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
-    reject_unimplemented_sort_on(&params.fields)?;
+    {
+        let rules = crate::conditional_formatting::rules_snapshot(state, target);
+        validate_sort_fields(&params.fields, &rules)?;
+    }
     crate::protection::check_sheet_action(state, target, "sort", "sort")?;
     crate::protection::check_sheet_protection_range(
         state, target,
@@ -4860,6 +4863,11 @@ pub(crate) fn sort_range_off_sheet(
         });
     }
 
+    // Taken BEFORE any grids guard. This path never read sheet names before, and
+    // an icon sort needs both them and the rules while the grid guard is held.
+    let sheet_names_for_icons = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let cf_rules_for_sort = crate::conditional_formatting::rules_snapshot(state, target);
+
     let sorted_count = {
         // Bounds check under a read-only view; the effect is built only once it
         // has passed, so a bad sheet index cannot leave the document dirty. One
@@ -4872,6 +4880,53 @@ pub(crate) fn sort_range_off_sheet(
         let mut grids = grids.authorize(&effect);
         let styles = state.style_registry.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
+
+        // BEFORE the mutable borrow below: `resolve_icons` needs `&Grid` AND
+        // `&[Grid]` at once, which `&mut grids[target]` makes impossible. The row
+        // list is the sort range itself, so it is known without extracting yet.
+        let icon_sets = {
+            // Same header rule the row extraction applies below; computed here
+            // because that binding does not exist yet at this point.
+            let first_data_row = if has_headers { min_row + 1 } else { min_row };
+            let lines: Vec<u32> = if first_data_row > max_row {
+                Vec::new()
+            } else {
+                (first_data_row..=max_row).collect()
+            };
+            build_icon_match_sets(
+                &fields,
+                &grids[target],
+                &grids,
+                &sheet_names_for_icons,
+                target,
+                &cf_rules_for_sort,
+                &lines,
+                true,
+                min_col,
+            )
+        };
+
+        // The column orientation keys on the OTHER axis, so it needs its own set.
+        let icon_sets_cols = {
+            let first_data_col = if has_headers { min_col + 1 } else { min_col };
+            let lines: Vec<u32> = if first_data_col > max_col {
+                Vec::new()
+            } else {
+                (first_data_col..=max_col).collect()
+            };
+            build_icon_match_sets(
+                &fields,
+                &grids[target],
+                &grids,
+                &sheet_names_for_icons,
+                target,
+                &cf_rules_for_sort,
+                &lines,
+                false,
+                min_row,
+            )
+        };
+
         let grid = &mut grids[target];
 
         let color_sort = fields
@@ -4913,7 +4968,9 @@ pub(crate) fn sort_range_off_sheet(
                 }
 
                 rows.sort_by(|a, b| {
-                    compare_rows_by_fields(&a.1, &b.1, &fields, min_col, match_case, &styles)
+                    compare_rows_by_fields(
+                        &a.1, &b.1, a.0, b.0, &icon_sets, &fields, min_col, match_case, &styles,
+                    )
                 });
 
                 // Capture the whole data range for undo BEFORE rewriting.
@@ -4979,7 +5036,10 @@ pub(crate) fn sort_range_off_sheet(
                 }
 
                 cols.sort_by(|a, b| {
-                    compare_cols_by_fields(&a.1, &b.1, &fields, min_row, match_case, &styles)
+                    compare_cols_by_fields(
+                        &a.1, &b.1, a.0, b.0, &icon_sets_cols, &fields, min_row, match_case,
+                        &styles,
+                    )
                 });
 
                 for row in min_row..=max_row {
@@ -5054,27 +5114,137 @@ pub(crate) fn sort_range_off_sheet(
     })
 }
 
-/// Refuse a sort the engine cannot actually perform, instead of performing a
-/// DIFFERENT one and reporting success.
+/// Which lines show the icon a given sort field asks for.
 ///
-/// `SortOn::Icon` (sort by conditional-formatting icon) has never been
-/// implemented: its comparator arm falls back to comparing VALUES. The Sorting
-/// extension nevertheless offers it by name —
-/// `<option value="icon">Conditional Formatting Icon</option>`
-/// (`app/extensions/Sorting/components/SortLevelRow.tsx:183`) — so a user could
-/// pick it, watch the rows reorder by value, and be told it worked. A plausible
-/// WRONG answer is harder to catch than an error, which is why this refuses.
+/// One entry per sort field, in the SAME order as `fields`, so the comparator can
+/// index the two together. `None` means "not an icon sort"; for an icon sort the
+/// set holds the ORIGINAL row (or column) indices whose cell displays that icon.
 ///
-/// Filed as BUG-0104. Delete this guard when icon sorting is implemented; the
-/// test `icon_sort_is_refused_rather_than_silently_sorted_by_value` will fail and
-/// tell you to.
-fn reject_unimplemented_sort_on(fields: &[SortField]) -> Result<(), String> {
-    if fields.iter().any(|f| f.sort_on == SortOn::Icon) {
-        return Err(
-            "Sorting by conditional-formatting icon is not implemented yet. \
-             Sort by cell value, cell colour or font colour instead."
-                .to_string(),
-        );
+/// Keying on the ORIGINAL index is what gives Excel's semantics: the sort orders
+/// by the icon that was on screen when the sort was invoked. It cannot be
+/// otherwise — a sort permutes the rows a percentile rule is computed over, so
+/// "the icon after sorting" is not a fixed target.
+type IconMatchSets = Vec<Option<std::collections::HashSet<u32>>>;
+
+/// Build the per-level icon key: which lines display the icon each level asks for.
+///
+/// Resolved ONCE, before the permutation, for exactly the cells the sort keys on.
+/// Doing it per comparison would be both slow and wrong — a comparator is called
+/// O(n log n) times, and by the time the permutation is under way the rows a
+/// percentile rule is computed over have moved.
+///
+/// Returns one entry per field so the comparator can index the two together;
+/// `None` for levels that are not icon sorts.
+fn build_icon_match_sets(
+    fields: &[SortField],
+    grid: &engine::Grid,
+    grids: &[engine::Grid],
+    sheet_names: &[String],
+    sheet_index: usize,
+    rules: &[crate::conditional_formatting::ConditionalFormatDefinition],
+    // The lines being sorted, and how to turn (line, field.key) into a cell.
+    lines: &[u32],
+    by_row: bool,
+    base: u32,
+) -> IconMatchSets {
+    fields
+        .iter()
+        .map(|field| {
+            let wanted = match (field.sort_on, field.icon) {
+                (SortOn::Icon, Some(icon)) => icon,
+                // Not an icon level. `validate_sort_fields` has already refused an
+                // icon level with no icon, so the second arm cannot be an icon
+                // sort that lost its icon.
+                _ => return None,
+            };
+            // For a ROW sort, field.key selects a COLUMN offset; for a column sort
+            // it selects a row offset. The line index supplies the other axis.
+            let cells: Vec<(u32, u32)> = lines
+                .iter()
+                .map(|&line| {
+                    if by_row {
+                        (line, base + field.key)
+                    } else {
+                        (base + field.key, line)
+                    }
+                })
+                .collect();
+            let resolved = crate::conditional_formatting::resolve_icons(
+                grid,
+                grids,
+                sheet_names,
+                sheet_index,
+                rules,
+                &cells,
+                // INTERACTIVE, not Transient: on a repaint a tripped fuel budget
+                // costs a highlight, here it would cost a wrong ORDER.
+                crate::eval_budget::EvalSurface::Interactive,
+            );
+            let mut set = std::collections::HashSet::new();
+            for (&line, cell) in lines.iter().zip(cells.iter()) {
+                if resolved.get(cell).copied().flatten() == Some(wanted) {
+                    set.insert(line);
+                }
+            }
+            Some(set)
+        })
+        .collect()
+}
+
+/// Refuse a sort the engine cannot HONOUR, rather than performing a different one
+/// and reporting success.
+///
+/// Replaces the blanket `SortOn::Icon` refusal that shipped while icon sorting was
+/// unimplemented (BUG-0104). Icon sorting now works, so what remains are three
+/// cases that are genuinely unanswerable — and each REFUSES rather than guessing,
+/// because a sort that silently orders by the wrong key is harder for a user to
+/// catch than an error: the rows really did move.
+///
+/// Checks EVERY level, not just the first. Excel sorts on up to 64, and a guard
+/// reading `fields[0]` would honour level 1 and silently mis-sort level 2 — the
+/// same defect one level down.
+fn validate_sort_fields(
+    fields: &[SortField],
+    rules: &[crate::conditional_formatting::ConditionalFormatDefinition],
+) -> Result<(), String> {
+    let any_icon_rule = rules.iter().any(|r| {
+        r.enabled && matches!(r.rule, crate::conditional_formatting::ConditionalFormatRule::IconSet(_))
+    });
+
+    for (level, field) in fields.iter().enumerate() {
+        if field.sort_on != SortOn::Icon {
+            continue;
+        }
+        // 1. No icon named. There is no default: "sort by icon" without saying
+        //    WHICH icon has no meaning, and picking one for the user would be a
+        //    guess presented as an answer.
+        if field.icon.is_none() {
+            return Err(format!(
+                "Sort level {} asks to sort by conditional-formatting icon but names no icon. \
+                 Choose which icon to bring to the top.",
+                level + 1
+            ));
+        }
+        // 2. A custom order cannot apply to an icon. The Sort dialog lets both be
+        //    chosen today, and silently ignoring one of them is the defect class
+        //    this whole entry is about.
+        if field.custom_order.is_some() {
+            return Err(format!(
+                "Sort level {} combines a conditional-formatting icon with a custom order. \
+                 Choose one.",
+                level + 1
+            ));
+        }
+        // 3. Nothing in range can produce an icon. A sort that legitimately cannot
+        //    move anything is indistinguishable from the silent no-op this entry
+        //    replaced, so it has to speak.
+        if !any_icon_rule {
+            return Err(format!(
+                "Sort level {} sorts by conditional-formatting icon, but no enabled icon-set rule \
+                 applies here, so no cell shows an icon.",
+                level + 1
+            ));
+        }
     }
     Ok(())
 }
@@ -5089,7 +5259,17 @@ pub fn sort_range(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
-    reject_unimplemented_sort_on(&params.fields)?;
+    // The rule snapshot is taken and released here, BEFORE any long-lived guard.
+    // Sorting holds the grid guards for its whole two-phase pass and undo restore
+    // writes the CF store, so a CF guard held across either is a deadlock waiting
+    // for the right interleaving.
+    {
+        let target = params
+            .sheet_index
+            .unwrap_or_else(|| *state.active_sheet.read().unwrap());
+        let rules = crate::conditional_formatting::rules_snapshot(&state, target);
+        validate_sort_fields(&params.fields, &rules)?;
+    }
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
@@ -5157,6 +5337,13 @@ pub fn sort_range(
     // Cloned before the long-lived locks: the dependency rebuild below needs
     // the official sheet names to canonicalise cross-sheet keys.
     let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
+    // Cloned HERE, next to sheet_names and before the grid guards, for the same
+    // reason: an icon sort needs the rules while it holds those guards, and undo
+    // restore writes the CF store -- so the guard must not still be held.
+    let cf_rules_for_sort = {
+        let sheet = params.sheet_index.unwrap_or(*state.active_sheet.read().unwrap());
+        crate::conditional_formatting::rules_snapshot(&state, sheet)
+    };
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
@@ -5265,9 +5452,26 @@ pub fn sort_range(
                 rows.push((row, row_data));
             }
 
+            // Resolve the icon key ONCE, before the permutation, over exactly the
+            // cells the sort keys on. Excel semantics: order by the icon that was on
+            // screen when the sort was invoked.
+            let icon_sets = build_icon_match_sets(
+                &fields,
+                &grid,
+                &grids,
+                &sheet_names_for_rebuild,
+                active_sheet,
+                &cf_rules_for_sort,
+                &rows.iter().map(|(r, _)| *r).collect::<Vec<u32>>(),
+                true,
+                min_col,
+            );
+
             // Sort the rows using the sort fields
             rows.sort_by(|a, b| {
-                compare_rows_by_fields(&a.1, &b.1, &fields, min_col, match_case, &styles)
+                compare_rows_by_fields(
+                    &a.1, &b.1, a.0, b.0, &icon_sets, &fields, min_col, match_case, &styles,
+                )
             });
 
             // Begin undo transaction
@@ -5425,8 +5629,24 @@ pub fn sort_range(
             }
 
             // Sort the columns using the sort fields (treating rows as keys)
+            let icon_sets = build_icon_match_sets(
+                &fields,
+                &grid,
+                &grids,
+                &sheet_names_for_rebuild,
+                active_sheet,
+                &cf_rules_for_sort,
+                &cols.iter().map(|(c, _)| *c).collect::<Vec<u32>>(),
+                // by_row = false: for a column sort `field.key` selects a ROW
+                // offset, and the line index supplies the column.
+                false,
+                min_row,
+            );
+
             cols.sort_by(|a, b| {
-                compare_cols_by_fields(&a.1, &b.1, &fields, min_row, match_case, &styles)
+                compare_cols_by_fields(
+                    &a.1, &b.1, a.0, b.0, &icon_sets, &fields, min_row, match_case, &styles,
+                )
             });
 
             // Begin undo transaction
@@ -5593,12 +5813,26 @@ pub fn sort_range(
 fn compare_rows_by_fields(
     row_a: &[Option<engine::Cell>],
     row_b: &[Option<engine::Cell>],
+    // The ORIGINAL row indices, which are the snapshot key an icon sort reads.
+    // Required rather than optional so that every call site had to be updated
+    // when icon sorting landed — a comparator silently missing the key would
+    // order every row Equal and look like a stable sort that did nothing.
+    orig_a: u32,
+    orig_b: u32,
+    icon_sets: &IconMatchSets,
     fields: &[SortField],
     _min_col: u32,
     match_case: bool,
     styles: &StyleRegistry,
 ) -> std::cmp::Ordering {
-    for field in fields {
+    for (level, field) in fields.iter().enumerate() {
+        if field.sort_on == SortOn::Icon {
+            let ordering = compare_by_icon(icon_sets, level, orig_a, orig_b);
+            if ordering != std::cmp::Ordering::Equal {
+                return if field.ascending { ordering } else { ordering.reverse() };
+            }
+            continue;
+        }
         let col_idx = field.key as usize;
         if col_idx >= row_a.len() || col_idx >= row_b.len() {
             continue;
@@ -5621,15 +5855,57 @@ fn compare_rows_by_fields(
 }
 
 /// Compare two columns by the given sort fields.
+/// Order two lines by whether each shows the icon a level asks for.
+///
+/// `Match` sorts BEFORE `Other` — which under `ascending` (Excel's "On Top")
+/// brings the chosen icon to the top, and the existing `.reverse()` gives "On
+/// Bottom" for free.
+///
+/// Two lines that both match, or both do not, compare Equal: the next sort level
+/// decides, and if none does, `sort_by`'s stability preserves the original order.
+/// That is Excel's residue behaviour, and it is why this must NOT fall back to
+/// comparing values — the old `SortOn::Icon` arm did exactly that and silently
+/// produced a value sort labelled as an icon sort (BUG-0104).
+fn compare_by_icon(
+    icon_sets: &IconMatchSets,
+    level: usize,
+    orig_a: u32,
+    orig_b: u32,
+) -> std::cmp::Ordering {
+    let Some(Some(set)) = icon_sets.get(level) else {
+        // Unreachable: `validate_sort_fields` refuses an icon level with no icon,
+        // and the key builder emits one entry per field. Loud in tests, inert in
+        // release, and never a value comparison.
+        debug_assert!(false, "icon sort level {level} has no precomputed key");
+        return std::cmp::Ordering::Equal;
+    };
+    match (set.contains(&orig_a), set.contains(&orig_b)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
 fn compare_cols_by_fields(
     col_a: &[Option<engine::Cell>],
     col_b: &[Option<engine::Cell>],
+    // The ORIGINAL column indices — the snapshot key, exactly as for rows.
+    orig_a: u32,
+    orig_b: u32,
+    icon_sets: &IconMatchSets,
     fields: &[SortField],
     _min_row: u32,
     match_case: bool,
     styles: &StyleRegistry,
 ) -> std::cmp::Ordering {
-    for field in fields {
+    for (level, field) in fields.iter().enumerate() {
+        if field.sort_on == SortOn::Icon {
+            let ordering = compare_by_icon(icon_sets, level, orig_a, orig_b);
+            if ordering != std::cmp::Ordering::Equal {
+                return if field.ascending { ordering } else { ordering.reverse() };
+            }
+            continue;
+        }
         let row_idx = field.key as usize;
         if row_idx >= col_a.len() || row_idx >= col_b.len() {
             continue;
@@ -5754,22 +6030,23 @@ fn compare_cells(
             }
         }
         SortOn::Icon => {
-            // UNREACHABLE in practice: `reject_unimplemented_sort_on` refuses the
-            // whole operation at both entry points before any comparison runs, so
-            // this arm exists only to keep the match total. It deliberately keeps
-            // the old value-comparison body rather than panicking — a comparator
-            // that panics would take the process down if a future entry point
-            // forgot the guard, whereas this merely orders by value while the
-            // guard is what guarantees the user never gets here silently.
-            let val_a = cell_a.as_ref().map(|c| &c.value);
-            let val_b = cell_b.as_ref().map(|c| &c.value);
-
-            match (val_a, val_b) {
-                (None, None) => std::cmp::Ordering::Equal,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (Some(a), Some(b)) => compare_cell_values(a, b, match_case, field.data_option),
-            }
+            // NEVER A VALUE COMPARISON. An icon level is handled by
+            // `compare_by_icon` from a key precomputed before the permutation, so
+            // both row and column comparators `continue` past this function for
+            // `SortOn::Icon` and this arm exists only to keep the match total.
+            //
+            // It used to hold the value-comparison body, which WAS the defect
+            // (BUG-0104): the user asked for an icon sort, the rows reordered by
+            // value, and success was reported. Reaching it now means a level was
+            // not keyed — loud in tests, and Equal in release so the sort merely
+            // leaves that level's order alone instead of inventing one from the
+            // wrong column.
+            debug_assert!(
+                false,
+                "SortOn::Icon reached compare_cells: the level was not keyed by \
+                 build_icon_match_sets, so the icon key is missing"
+            );
+            std::cmp::Ordering::Equal
         }
     }
 }
@@ -8198,9 +8475,9 @@ mod d8_structural_recalc_tests;
 #[path = "pivot_structural_delete_tests.rs"]
 mod pivot_structural_delete_tests;
 
-/// BUG-0104 — sorting or filtering by conditional-formatting ICON must refuse
-/// rather than quietly doing something else and reporting success. A CHILD
-/// module of `data` so it can reach `reject_unimplemented_sort_on`.
+/// BUG-0104 — sorting by conditional-formatting ICON orders by the icon on
+/// screen, and refuses the three cases it cannot answer. A CHILD module of
+/// `data` so it can reach `validate_sort_fields`.
 #[cfg(test)]
-#[path = "icon_refusal_tests.rs"]
-mod icon_refusal_tests;
+#[path = "icon_sort_tests.rs"]
+mod icon_sort_tests;

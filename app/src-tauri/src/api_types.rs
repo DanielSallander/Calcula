@@ -849,6 +849,12 @@ pub struct SortField {
     pub sort_on: SortOn,
     /// The color to sort by when sort_on is CellColor or FontColor (CSS color string).
     pub color: Option<String>,
+    /// Which icon to bring to the top when sort_on is Icon.
+    ///
+    /// Mirrors `color` above: colour sorting names the colour to hoist, icon
+    /// sorting names the icon. Both halves of the icon are needed — an index is
+    /// meaningless without the set it indexes into.
+    pub icon: Option<crate::conditional_formatting::IconRef>,
     /// Additional data options (e.g., treat text as numbers).
     #[serde(default)]
     pub data_option: SortDataOption,
