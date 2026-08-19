@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/AIChat/lib/chatTools.ts
 // PURPOSE: The in-app AI chat's TOOL SURFACE and system prompt, in one place.
 //          Every entry here must have a matching arm in `ai_chat_run_tool`
-//          (app/src-tauri/src/ai_chat.rs) — a tool declared on one side only is
+//          (app/src-tauri/src/ai/tools.rs) — a tool declared on one side only is
 //          either an unreachable promise to the model or a dead dispatcher arm.
 //          `__tests__/chatToolSurface.test.ts` reads the Rust file at test time
 //          and diffs both directions, so the two cannot drift in silence.
@@ -9,29 +9,23 @@
 //          schema around ~170 lines of component. Splitting it is what makes the
 //          drift guard possible without parsing a .tsx file for an inline const.
 //
-//          WHY THE SCHEMAS ARE snake_case: these are MCP tool parameters, not the
-//          Tauri api_types boundary. The param structs they deserialize into
-//          (crate::mcp::server::*Params) carry NO `#[serde(rename_all)]`, so the
-//          wire names are the Rust field names verbatim. The project's camelCase
-//          golden rule governs api_types.rs <-> types.ts and does not apply here.
+//          WHY THE SCHEMAS ARE snake_case INSIDE `properties`: those are MCP tool
+//          PARAMETERS, not the Tauri api_types boundary. The param structs they
+//          deserialize into (crate::mcp::server::*Params) carry NO
+//          `#[serde(rename_all)]`, so the wire names are the Rust field names
+//          verbatim. The camelCase golden rule governs api_types.rs <-> types.ts
+//          and does not reach inside a JSON Schema.
 //
-//          WIRE FORMAT NOTE: `input_schema` is Anthropic's spelling. This is one
-//          of the five things pinning the chat to a single vendor
-//          (docs/design/local-model-script-authoring.md §3c); when the provider
-//          registry lands (M3), this array becomes provider-neutral and each
-//          provider impl renders it into its own shape. Kept as-is for now so M1
-//          changes behaviour and nothing else.
+//          `inputSchema` itself IS camelCase, because that key crosses the Tauri
+//          boundary as part of Calcula's own `ChatToolDef` (ai/wire.rs). It was
+//          `input_schema` — Anthropic's spelling — until M3, which is exactly the
+//          kind of vendor detail that had no business in an extension. A provider
+//          now relocates it: Anthropic wants `input_schema`, OpenAI-compatible
+//          servers want `function.parameters`, and neither spelling appears here.
 
-/** One tool offered to the model. Anthropic wire shape — see the header note. */
-export interface ChatToolDef {
-  name: string;
-  description: string;
-  input_schema: {
-    type: "object";
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-}
+/** One tool offered to the model, in Calcula's shape (mirrors `ChatToolDef`). */
+export type { ChatToolDef } from "./aiTypes";
+import type { ChatToolDef } from "./aiTypes";
 
 /**
  * Object types a drafted script may target.
@@ -68,7 +62,7 @@ export const TOOLS: ChatToolDef[] = [
     name: "get_sheet_summary",
     description:
       "Get an AI-optimized summary of the workbook: sheet dimensions, column types, formula patterns, sample data, and inventories of charts, named ranges, tables, and pivots. Call this first to understand the workbook.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: { max_chars: { type: "number", description: "Max summary length (default 8000)." } },
     },
@@ -76,7 +70,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "read_cell_range",
     description: "Read the values of a rectangular cell range (0-based, inclusive).",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         start_row: { type: "number" }, start_col: { type: "number" },
@@ -88,7 +82,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "set_cell_value",
     description: "Set a single cell's value or formula (use '=' prefix for formulas). Undoable.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         row: { type: "number", description: "0-based row" },
@@ -98,14 +92,14 @@ export const TOOLS: ChatToolDef[] = [
       required: ["row", "col", "value"],
     },
   },
-  { name: "list_charts", description: "List every chart in the workbook.", input_schema: { type: "object", properties: {} } },
-  { name: "list_named_ranges", description: "List every named range.", input_schema: { type: "object", properties: {} } },
-  { name: "list_tables", description: "List every structured table.", input_schema: { type: "object", properties: {} } },
-  { name: "list_pivots", description: "List every pivot table with its fields.", input_schema: { type: "object", properties: {} } },
+  { name: "list_charts", description: "List every chart in the workbook.", inputSchema: { type: "object", properties: {} } },
+  { name: "list_named_ranges", description: "List every named range.", inputSchema: { type: "object", properties: {} } },
+  { name: "list_tables", description: "List every structured table.", inputSchema: { type: "object", properties: {} } },
+  { name: "list_pivots", description: "List every pivot table with its fields.", inputSchema: { type: "object", properties: {} } },
   {
     name: "create_named_range",
     description: "Create a workbook-defined name. Undoable.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         name: { type: "string" },
@@ -119,7 +113,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "create_table",
     description: "Create a structured table over a cell range (0-based, inclusive). Undoable.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         start_row: { type: "number" }, start_col: { type: "number" },
@@ -132,7 +126,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "set_cell_range",
     description: "Set values/formulas for multiple cells at once (more efficient than repeated set_cell_value). Undoable.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         cells: {
@@ -150,7 +144,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "apply_formatting",
     description: "Apply formatting to a cell range (0-based, inclusive): bold, italic, text/background color (hex), number format, text alignment. Undoable. Requires Script Security to allow execution.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         start_row: { type: "number" }, start_col: { type: "number" },
@@ -167,7 +161,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "run_script",
     description: "Execute a JavaScript script in the script engine RIGHT NOW (Calcula.getCellValue/setCellValue/getRange/setRange). Undoable + recalc-tracked. Requires Script Security to allow execution. Use this ONLY for a one-off transformation the user wants applied immediately — if the user wants automation they will keep, re-run, or attach to something, use draft_object_script instead so they can review and mount it.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: { code: { type: "string" } },
       required: ["code"],
@@ -178,7 +172,7 @@ export const TOOLS: ChatToolDef[] = [
     name: "draft_object_script",
     description:
       "DRAFT an object script (a macro attached to a button, chart, sheet, workbook, ...) and hand it to the USER for review. This does NOT save the script into the workbook, does NOT mount it, and does NOT run it — the user reads it in the Object Script Editor and decides whether to mount it. PREFER THIS over run_script whenever the user wants automation that should persist, be re-run, or hang off an object. Declare any privileged capability the script needs with a `// @capability <id>` line comment (bi.query, bi.sql, net.fetch, storage, ui.html, ui.dialog, formula.udf, bi.model, bi.connector, distribution.writeback) — the reviewer is shown the declared set before they mount it.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Display name for the script, e.g. \"Refresh Sales\"" },
@@ -200,12 +194,12 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "list_script_drafts",
     description: "List the object scripts drafted in this session and awaiting the user's review (id, name, target object, line count, declared capabilities). None of them are mounted or running. Read-only.",
-    input_schema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "get_script_draft",
     description: "Get one drafted object script's full record (source, target, declared capabilities) so you can iterate on what you wrote. Read-only; the draft is still not mounted.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: { draft_id: { type: "string", description: "The draft id from draft_object_script / list_script_drafts" } },
       required: ["draft_id"],
@@ -214,7 +208,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "get_chart",
     description: "Get a single chart's full definition + ChartSpec as JSON. Pass a chart_id from list_charts.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: { chart_id: { type: "string" } },
       required: ["chart_id"],
@@ -223,7 +217,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "create_chart_from_spec",
     description: "Create a NEW chart from a ChartSpec JSON object. Call list_charts/get_chart for spec examples and get_sheet_summary for the data layout first. Requires Script Security to allow execution.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         spec: { type: "object", description: "A ChartSpec JSON object (mark, data range, series)." },
@@ -235,7 +229,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "create_pivot",
     description: "Create a NEW pivot with row + value fields. Field names come from the source header row (call get_sheet_summary first). Undoable. Requires Script Security to allow execution.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         source_range: { type: "string", description: "A1, e.g. A1:D100" },
@@ -262,12 +256,12 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "list_bi_connections",
     description: "List every BI/cube connection in the workbook (id, name, type, connected state, table/measure counts). Use this to discover BI models before describe_bi_model or run_bi_query.",
-    input_schema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "describe_bi_model",
     description: "Describe a BI/cube model's schema (tables, columns, measures, KPIs, relationships) for a connection_id from list_bi_connections. Call this before run_bi_query to learn valid measure/column names.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: { connection_id: { type: "string", description: "Connection id from list_bi_connections" } },
       required: ["connection_id"],
@@ -276,7 +270,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "run_bi_query",
     description: "Run a READ-ONLY structured BI/cube query: aggregate measures grouped by [table, column] dimensions, with optional filters. Returns a result table. Call describe_bi_model first for valid names.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         connection_id: { type: "string", description: "Connection id from list_bi_connections" },
@@ -298,7 +292,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "cube_value",
     description: "Resolve a CUBEVALUE: a measure expression plus optional member filters, against a BI model. Read-only.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         connection: { type: "string", description: "Connection name or id" },
@@ -310,7 +304,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "cube_kpi",
     description: "Resolve a KPI value (1), goal (2), or status (3) for a BI model. Read-only.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         connection: { type: "string", description: "Connection name or id" },
@@ -323,7 +317,7 @@ export const TOOLS: ChatToolDef[] = [
   {
     name: "cube_members",
     description: "List the distinct members of a level (a Table[Column] expression) in a BI model. Read-only.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         connection: { type: "string", description: "Connection name or id" },

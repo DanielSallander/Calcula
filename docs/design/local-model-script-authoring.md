@@ -426,12 +426,42 @@ Four things worth carrying forward:
 parse with). Hand-rolling was rejected for the reason `declarations.ts` gives about regex parsing,
 and the stakes are higher here: a false positive rejects the user's script.
 
-**M3 — Provider registry, model picker, and runtime discovery.** The `ChatProvider` trait;
-`openai_compat.rs` first (§7a — it covers the most ground per line written), then `anthropic.rs`
-native; per-provider credential slots; local runtime discovery; and **the model picker UI**, which is
-the user-visible half and today does not exist in any form (§3c). Move the Anthropic wire format out
-of the extension in the same pass — leaving it there while adding a second provider would mean two
-places that know a vendor's schema instead of zero.
+**M3 — Provider registry, model picker, and runtime discovery. SHIPPED 2026-08-19.**
+`ai_chat.rs` is gone; `app/src-tauri/src/ai/` replaces it with `wire.rs` (Calcula's own chat shape
+plus both translations), `providers.rs` (the registry), `discovery.rs`, and `tools.rs` (the
+dispatcher, moved verbatim). The extension speaks `lib/aiTypes.ts` and no longer knows any vendor's
+schema — `input_schema` became `inputSchema`, and a provider now relocates it (Anthropic wants
+`input_schema`, OpenAI-compatible servers want `function.parameters`).
+
+**Eight providers, one native impl.** `openai_compat` reaches Ollama, LM Studio, `llama-server`,
+vLLM, OpenAI, OpenRouter and any custom endpoint; only Anthropic needs its own wire, for
+thinking-block fidelity. A test pins that — if a second native provider ever appears, §7a's claim
+needs revisiting.
+
+**The four differences that actually bite**, each with a test that fails when it is reverted:
+
+| | Anthropic | OpenAI-compatible |
+|---|---|---|
+| System prompt | top-level `system` field | a leading message with role `system` |
+| Tool arguments | `input`, a JSON **object** | `function.arguments`, a JSON **string** |
+| Tool results | blocks inside ONE user message | ONE message each, role `tool` — so the translation fans out |
+| Stop reason | `end_turn` / `tool_use` | `stop` / `tool_calls` |
+
+The last one has a wrinkle worth keeping: **several OpenAI-compatible servers report
+`finish_reason: "stop"` while still emitting `tool_calls`.** Trusting the label ends the agentic loop
+with the call never run, which reads to the user as the model ignoring them — so the parser consults
+whether tool-use blocks are actually present.
+
+**The selection is an application preference**, held in extension settings
+(`ext.calcula.ai-chat.*`) and named on every request, so the backend keeps no selected-model state at
+all: no `AppState` field, no reset-on-open question, no `Persisted<T>` decision to get wrong, and no
+way for a model id to reach a `.cala`.
+
+Two things the move turned up. `ai_provider_delete_key` had to be re-declared in the
+object-dependency census — the rename broke the row for `ai_chat_delete_api_key`, and the census
+caught it. And the `credentials` denylist in `backendCommands.ts` had never listed the AI key
+commands at all; the new ones are there now, along with `ai_chat_complete`, which is not a key write
+but is the path that SPENDS one.
 
 **M4 — Sliceable typings** from the existing generator, with the lockstep test extended (§6).
 

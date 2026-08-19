@@ -1,25 +1,26 @@
 //! FILENAME: app/extensions/AIChat/components/ChatView.tsx
-// PURPOSE: A REAL in-app Claude chat (C1). Talks to the Anthropic Messages API
-//          via the ai_chat_complete backend command, and runs an agentic
-//          TOOL-USE LOOP: when Claude returns tool_use blocks, each is executed
-//          through ai_chat_run_tool (the same workbook tools the MCP server
-//          exposes — undoable, gated) and the tool_result is fed back until the
-//          model finishes (stop_reason: end_turn).
-// SECURITY: the API key is stored in the OS keychain by the backend and is never
-//          handled here beyond the one-time "save key" input.
-// CONTEXT: The tool surface and system prompt live in ../lib/chatTools, which is
-//          diffed against the Rust dispatcher by a test. This file owns the loop
-//          and the rendering only.
+// PURPOSE: The in-app AI chat. Runs an agentic TOOL-USE LOOP against WHICHEVER
+//          model the user picked — local or cloud, any vendor — and executes each
+//          tool call through ai_chat_run_tool (the same workbook tools the MCP
+//          server exposes: undoable, gated, audited).
+// CONTEXT: This file used to speak Anthropic's wire format directly. It now
+//          speaks Calcula's own shape (lib/aiTypes.ts, mirroring ai/wire.rs) and
+//          a Rust provider renders it per vendor. That is what turned "use a
+//          different model" from a rewrite into a dropdown.
+// SECURITY: keys live in the OS keychain, one slot per provider, and are never
+//          handled here — the picker posts one to the backend and never reads it
+//          back. Selecting a local provider means nothing leaves the machine.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
 import { TOOLS, SYSTEM_PROMPT } from "../lib/chatTools";
+import type { ChatBlock, ChatMessage, ChatResponse } from "../lib/aiTypes";
+import { isComplete, readSelection } from "../lib/providerSelection";
+import { ModelPicker } from "./ModelPicker";
 
 const MAX_TOOL_TURNS = 8;
 
-type AnyBlock = { type: string; text?: string; id?: string; name?: string; input?: unknown };
-type RawMsg = { role: "user" | "assistant"; content: string | AnyBlock[] };
 type Bubble = { kind: "user" | "assistant" | "tool" | "error"; text: string };
 
 /**
@@ -27,10 +28,8 @@ type Bubble = { kind: "user" | "assistant" | "tool" | "error"; text: string };
  *
  * Most tools take small arguments and reading them verbatim is useful. Script
  * drafting does not: `source` is an entire macro, and dumping it JSON-escaped
- * into a chat bubble buries the conversation in a wall of `\n`-laden text —
- * while the readable copy is already opening in the Object Script Editor, which
- * is where the user is meant to review it. So the draft tools are summarised by
- * intent and everything else is shown as-is.
+ * into a chat bubble buries the conversation — while the readable copy is
+ * already opening in the Object Script Editor, which is where review belongs.
  */
 function summarizeToolCall(name: string, input: unknown): string {
   const args = (input ?? {}) as Record<string, unknown>;
@@ -50,6 +49,8 @@ const log: React.CSSProperties = { flex: 1, overflowY: "auto", padding: 12, disp
 const inputRow: React.CSSProperties = { display: "flex", gap: 6, padding: 8, borderTop: "1px solid #E0E0E0" };
 const textArea: React.CSSProperties = { flex: 1, resize: "none", padding: 6, border: "1px solid #CCC", borderRadius: 4, fontFamily: "inherit", fontSize: 12 };
 const btn: React.CSSProperties = { padding: "6px 14px", border: "none", borderRadius: 4, background: "#0078D4", color: "#FFF", cursor: "pointer" };
+const bar: React.CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "4px 8px", borderBottom: "1px solid #E0E0E0", background: "#F3F3F3", color: "#555" };
+const linkBtn: React.CSSProperties = { background: "none", border: "none", color: "#0078D4", cursor: "pointer", padding: 0, fontSize: 11, textDecoration: "underline" };
 
 function bubbleStyle(kind: Bubble["kind"]): React.CSSProperties {
   const base: React.CSSProperties = { padding: "6px 10px", borderRadius: 8, maxWidth: "90%", whiteSpace: "pre-wrap", wordBreak: "break-word" };
@@ -64,17 +65,13 @@ function bubbleStyle(kind: Bubble["kind"]): React.CSSProperties {
 const h = React.createElement;
 
 export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
-  const [hasKey, setHasKey] = useState<boolean | null>(null);
-  const [keyInput, setKeyInput] = useState("");
+  const [selection, setSelection] = useState(readSelection);
+  const [picking, setPicking] = useState(false);
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const rawRef = useRef<RawMsg[]>([]);
+  const rawRef = useRef<ChatMessage[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    aiChatBackend.invoke<boolean>("ai_chat_has_api_key").then(setHasKey).catch(() => setHasKey(false));
-  }, []);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -82,15 +79,10 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
 
   const addBubble = useCallback((b: Bubble) => setBubbles((prev) => [...prev, b]), []);
 
-  const saveKey = useCallback(async () => {
-    try {
-      await aiChatBackend.invoke("ai_chat_set_api_key", { key: keyInput.trim() });
-      setKeyInput("");
-      setHasKey(true);
-    } catch (e) {
-      addBubble({ kind: "error", text: `Could not save key: ${e}` });
-    }
-  }, [keyInput, addBubble]);
+  const closePicker = useCallback(() => {
+    setSelection(readSelection());
+    setPicking(false);
+  }, []);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -99,74 +91,84 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     addBubble({ kind: "user", text });
     setBusy(true);
 
-    let raw: RawMsg[] = [...rawRef.current, { role: "user", content: text }];
+    let messages: ChatMessage[] = [
+      ...rawRef.current,
+      { role: "user", content: [{ type: "text", text }] },
+    ];
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-        const resp = await aiChatBackend.invoke<any>("ai_chat_complete", {
-          messages: raw,
-          tools: TOOLS,
-          system: SYSTEM_PROMPT,
+        const resp = await aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
+          request: {
+            providerId: selection.providerId,
+            model: selection.model,
+            system: SYSTEM_PROMPT,
+            messages,
+            tools: TOOLS,
+          },
+          baseUrlOverride: selection.baseUrl || null,
         });
-        const content: AnyBlock[] = Array.isArray(resp?.content) ? resp.content : [];
-        raw = [...raw, { role: "assistant", content }];
 
-        const say = content.filter((b) => b.type === "text" && b.text).map((b) => b.text).join("\n").trim();
+        messages = [...messages, { role: "assistant", content: resp.blocks }];
+
+        const say = resp.blocks
+          .filter((b): b is Extract<ChatBlock, { type: "text" }> => b.type === "text")
+          .map((b) => b.text)
+          .join("\n")
+          .trim();
         if (say) addBubble({ kind: "assistant", text: say });
 
-        const toolUses = content.filter((b) => b.type === "tool_use");
-        if (resp?.stop_reason !== "tool_use" || toolUses.length === 0) break;
+        const toolUses = resp.blocks.filter(
+          (b): b is Extract<ChatBlock, { type: "toolUse" }> => b.type === "toolUse",
+        );
+        if (resp.stopReason !== "toolUse" || toolUses.length === 0) break;
 
-        const toolResults: AnyBlock[] = [];
+        const results: ChatBlock[] = [];
         for (const tu of toolUses) {
-          addBubble({ kind: "tool", text: summarizeToolCall(tu.name ?? "", tu.input) });
-          let result: string;
+          addBubble({ kind: "tool", text: summarizeToolCall(tu.name, tu.input) });
           try {
-            result = await aiChatBackend.invoke<string>("ai_chat_run_tool", { name: tu.name, input: tu.input ?? {} });
+            const result = await aiChatBackend.invoke<string>("ai_chat_run_tool", {
+              name: tu.name,
+              input: tu.input ?? {},
+            });
+            results.push({ type: "toolResult", toolUseId: tu.id, content: result, isError: false });
           } catch (e) {
-            result = `Error: ${e}`;
+            // Flagged as an error rather than passed off as a normal result, so
+            // the model can tell "the tool refused" from "the tool answered".
+            results.push({ type: "toolResult", toolUseId: tu.id, content: `Error: ${e}`, isError: true });
           }
-          toolResults.push({ type: "tool_result", id: tu.id, text: result } as AnyBlock);
         }
-        // Anthropic tool_result blocks: { type, tool_use_id, content }.
-        raw = [...raw, {
-          role: "user",
-          content: toolResults.map((t) => ({ type: "tool_result", tool_use_id: t.id, content: t.text })) as AnyBlock[],
-        }];
+        messages = [...messages, { role: "user", content: results }];
       }
     } catch (e) {
       addBubble({ kind: "error", text: `${e}` });
     } finally {
-      rawRef.current = raw;
+      rawRef.current = messages;
       setBusy(false);
     }
-  }, [input, busy, addBubble]);
+  }, [input, busy, addBubble, selection]);
 
-  // --- API-key setup gate ---
-  if (hasKey === false) {
-    return h("div", { style: { ...container, padding: 16, gap: 10, justifyContent: "center" } },
-      h("h3", { key: "t", style: { margin: 0 } }, "Connect Claude"),
-      h("p", { key: "d", style: { color: "#666", margin: 0 } },
-        "Paste an Anthropic API key to chat with Claude about this workbook. The key is stored in your OS keychain and never leaves this machine."),
-      h("input", {
-        key: "i", type: "password", value: keyInput, placeholder: "sk-ant-...",
-        style: { ...textArea, height: 28 },
-        onChange: (e: React.ChangeEvent<HTMLInputElement>) => setKeyInput(e.target.value),
-      }),
-      h("button", { key: "b", style: btn, disabled: !keyInput.trim(), onClick: saveKey }, "Save key"),
+  // --- First run, or the user asked to change model ---
+  if (picking || !isComplete(selection)) {
+    return h("div", { style: container },
+      h(ModelPicker, { key: "picker", onDone: closePicker, embedded: picking }),
     );
   }
 
   return h("div", { style: container },
+    h("div", { key: "bar", style: bar },
+      h("span", { key: "m" }, selection.model),
+      h("button", { key: "c", style: linkBtn, onClick: () => setPicking(true) }, "Change model"),
+    ),
     h("div", { key: "log", ref: logRef, style: log },
       bubbles.length === 0
         ? h("div", { key: "empty", style: { color: "#999", textAlign: "center", marginTop: 20 } },
-            "Ask Claude about your workbook — it can read cells, summarize data, make undoable edits, and draft scripts for you to review.")
+            "Ask about your workbook — it can read cells, summarize data, make undoable edits, and draft scripts for you to review.")
         : bubbles.map((b, i) => h("div", { key: i, style: bubbleStyle(b.kind) }, b.text)),
       busy ? h("div", { key: "busy", style: { ...bubbleStyle("assistant"), color: "#999" } }, "…") : null,
     ),
     h("div", { key: "in", style: inputRow },
       h("textarea", {
-        key: "ta", style: textArea, rows: 2, value: input, placeholder: "Message Claude…", disabled: busy,
+        key: "ta", style: textArea, rows: 2, value: input, placeholder: "Message…", disabled: busy,
         onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setInput(e.target.value),
         onKeyDown: (e: React.KeyboardEvent) => {
           if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); }

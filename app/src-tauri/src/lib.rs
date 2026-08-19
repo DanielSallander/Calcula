@@ -142,7 +142,7 @@ pub mod state_digest;
 pub mod security;
 pub mod net_commands;
 pub mod file_keychain;
-pub mod ai_chat;
+pub mod ai;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -4990,11 +4990,14 @@ pub fn run() {
             file_keychain::keychain_get_password,
             file_keychain::keychain_delete_password,
             file_keychain::keychain_has_password,
-            ai_chat::ai_chat_set_api_key,
-            ai_chat::ai_chat_has_api_key,
-            ai_chat::ai_chat_delete_api_key,
-            ai_chat::ai_chat_complete,
-            ai_chat::ai_chat_run_tool,
+            ai::ai_providers_list,
+            ai::ai_provider_set_key,
+            ai::ai_provider_has_key,
+            ai::ai_provider_delete_key,
+            ai::ai_discover_local_runtimes,
+            ai::ai_list_models,
+            ai::ai_chat_complete,
+            ai::tools::ai_chat_run_tool,
             persistence::list_virtual_files,
             persistence::read_virtual_file,
             persistence::create_virtual_file,

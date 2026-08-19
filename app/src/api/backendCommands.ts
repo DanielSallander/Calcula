@@ -79,6 +79,19 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     // write/delete-only from the frontend; the resolve path lives inside the
     // Rust net-fetch gate and never returns a value to any caller.
     "connector_secrets",
+    // AI provider keys, one Credential Manager slot per provider. Same shape as
+    // the keychain_* family above and denylisted for the same reason: a stored
+    // secret must never be reachable through a governed third-party door.
+    // (The single-vendor predecessor, `ai_chat_set_api_key`, was missing from
+    // this list entirely — the gap is closed here rather than carried forward.)
+    "ai_provider_set_key",
+    "ai_provider_delete_key",
+    "ai_provider_has_key",
+    // Not a key WRITE, but the path that SPENDS one: it posts caller-supplied
+    // content to a remote endpoint authenticated with the user's stored key. A
+    // third-party extension reaching this could exfiltrate workbook content on
+    // the user's own credential, which is the whole reason the door is governed.
+    "ai_chat_complete",
   ],
   // Installing / removing / scanning extensions from disk.
   extensionManagement: [

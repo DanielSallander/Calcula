@@ -27,7 +27,7 @@ import * as path from "path";
 import { TOOLS, DRAFT_OBJECT_TYPES } from "../lib/chatTools";
 
 const REPO = path.resolve(__dirname, "../../../..");
-const AI_CHAT_RS = path.join(REPO, "app/src-tauri/src/ai_chat.rs");
+const AI_CHAT_RS = path.join(REPO, "app/src-tauri/src/ai/tools.rs");
 const DRAFTS_RS = path.join(REPO, "app/src-tauri/src/mcp/drafts.rs");
 
 const aiChatSrc = fs.readFileSync(AI_CHAT_RS, "utf8");
@@ -36,7 +36,7 @@ const draftsSrc = fs.readFileSync(DRAFTS_RS, "utf8");
 const FIX =
   "FIX: add the tool to BOTH sides — a `name` entry in " +
   "app/extensions/AIChat/lib/chatTools.ts (TOOLS) and a matching match arm in " +
-  "`ai_chat_run_tool` (app/src-tauri/src/ai_chat.rs). Neither side can serve a " +
+  "`ai_chat_run_tool` (app/src-tauri/src/ai/tools.rs). Neither side can serve a " +
   "tool the other has never heard of.";
 
 // ---------------------------------------------------------------------------
@@ -48,13 +48,13 @@ const FIX =
  *
  * Bounded to the `match name.as_str()` block and stopped at the `other =>`
  * catch-all, rather than grepping the whole file for quoted strings: the file
- * also contains error-message literals, a credential target and a model id, and
+ * also contains error-message literals, and
  * a looser parse would silently admit them as "tools".
  */
 function dispatcherArms(): string[] {
   const marker = "match name.as_str() {";
   const start = aiChatSrc.indexOf(marker);
-  expect(start, `\`${marker}\` not found in ai_chat.rs — the dispatcher was restructured; update this parser`).toBeGreaterThan(-1);
+  expect(start, `\`${marker}\` not found in ai/tools.rs — the dispatcher was restructured; update this parser`).toBeGreaterThan(-1);
 
   const rest = aiChatSrc.slice(start + marker.length);
   const endIdx = rest.indexOf("other =>");
@@ -105,7 +105,7 @@ describe("in-app chat tool surface", () => {
   it("gives every tool a description and an object schema", () => {
     for (const t of TOOLS) {
       expect(t.description.length, `${t.name} has no description`).toBeGreaterThan(20);
-      expect(t.input_schema.type, `${t.name} schema is not an object`).toBe("object");
+      expect(t.inputSchema.type, `${t.name} schema is not an object`).toBe("object");
     }
   });
 });
@@ -149,12 +149,12 @@ describe("the chat can hand the user a script to review (M1)", () => {
   it("requires the arguments drafts.rs refuses to do without", () => {
     const draft = TOOLS.find((t) => t.name === "draft_object_script")!;
     // validate_draft rejects an empty name, an unknown type and empty source.
-    expect(draft.input_schema.required).toEqual(
+    expect(draft.inputSchema.required).toEqual(
       expect.arrayContaining(["name", "object_type", "source"]),
     );
     // instance_id and description are genuinely optional (serde `default`).
-    expect(draft.input_schema.required).not.toContain("instance_id");
-    expect(draft.input_schema.required).not.toContain("description");
+    expect(draft.inputSchema.required).not.toContain("instance_id");
+    expect(draft.inputSchema.required).not.toContain("description");
   });
 });
 
@@ -173,7 +173,7 @@ describe("draft object types mirror the Rust validator", () => {
 
   it("is offered to the model as a closed enum, not prose", () => {
     const draft = TOOLS.find((t) => t.name === "draft_object_script")!;
-    const objectType = draft.input_schema.properties.object_type as { enum?: string[] };
+    const objectType = draft.inputSchema.properties.object_type as { enum?: string[] };
     expect(objectType.enum, "object_type must constrain the model to the valid set").toEqual([
       ...DRAFT_OBJECT_TYPES,
     ]);

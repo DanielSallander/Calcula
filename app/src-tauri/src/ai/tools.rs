@@ -1,206 +1,23 @@
-//! FILENAME: app/src-tauri/src/ai_chat.rs
-//! PURPOSE: In-app Claude chat (C1) — three backend pieces:
-//!   L1  API-key storage in the Windows Credential Manager (DPAPI), keyed by a
-//!       fixed target. Never returned to the frontend, never logged.
-//!   L2  ai_chat_complete: a NON-streaming POST to the Anthropic Messages API.
-//!       Messages/tools/response are passed through as JSON (the frontend speaks
-//!       the Anthropic wire format), so the Tauri layer stays thin.
-//!   L4  ai_chat_run_tool: maps a Claude tool_use call to the EXISTING
-//!       mcp::tools helpers (same tool surface as the MCP server) — so AI writes
-//!       are undoable + emit refresh events, gated by check_script_security.
-//!       It also reaches mcp::drafts, so the chat can AUTHOR an object script for
-//!       the user to review instead of only executing one. Until 2026-08-19 it
-//!       could not: the three draft tools were registered on the MCP server and
-//!       absent here, so an external MCP client could hand the user a script to
-//!       read while the built-in chat's only route was run_script — which runs
-//!       immediately, the inverse of the review-then-mount invariant.
-//! SECURITY: the API key is stored in the OS keychain (DPAPI, login-bound),
-//!   never surfaced to JS, never logged, never written to the workbook. The
-//!   Anthropic call is a dedicated reqwest path (NOT the sandboxed
-//!   script_http_fetch, which strips auth headers).
+//! FILENAME: app/src-tauri/src/ai/tools.rs
+//! PURPOSE: Map one model-requested tool call to the EXISTING mcp::tools helpers,
+//!          so the in-app chat and the MCP server expose ONE tool surface with one
+//!          set of invariants -- undoable writes, refresh events, and the same
+//!          check_script_security gate.
+//! CONTEXT: Moved verbatim out of ai_chat.rs when that module became the
+//!          multi-provider `ai` module. Nothing here is vendor-specific and
+//!          nothing here changed: a tool call is a tool call whichever model
+//!          authored it, which is exactly why a local model inherits the entire
+//!          safety envelope for free and this design adds no new privileged reach.
+//!
+//!          The draft arms (draft_object_script / list_script_drafts /
+//!          get_script_draft) are the review path: they store source, count its
+//!          lines and parse its capability pragmas, and reach no script runtime.
+//!          `run_script` above them EXECUTES. The pair is deliberately adjacent.
 
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-
-use serde_json::{json, Value};
+use serde_json::Value;
 use tauri::AppHandle;
-use windows::core::PWSTR;
-use windows::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS,
-    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-};
 
 use crate::mcp::{drafts, tools};
-
-/// Fixed Credential Manager target for the Anthropic API key.
-const TARGET: &str = "Calcula:aikey|anthropic";
-/// Default model (the latest/most-capable Claude, per the app's guidance).
-const DEFAULT_MODEL: &str = "claude-opus-4-8";
-const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-// Raised from 4096: adaptive extended thinking counts toward output, so a tight
-// budget could truncate a reasoning+tool-use turn mid-thought.
-const DEFAULT_MAX_TOKENS: u32 = 16000;
-
-fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
-}
-
-// ---------------------------------------------------------------------------
-// L1: API-key storage (Windows Credential Manager)
-// ---------------------------------------------------------------------------
-
-fn set_key(key: &str) -> Result<(), String> {
-    let secret = key.as_bytes();
-    let mut target_wide = to_wide(TARGET);
-    let mut user_wide = to_wide("calcula-anthropic"); // label only, never the key
-    let cred = CREDENTIALW {
-        Flags: CRED_FLAGS(0),
-        Type: CRED_TYPE_GENERIC,
-        TargetName: PWSTR(target_wide.as_mut_ptr()),
-        Comment: PWSTR::null(),
-        LastWritten: Default::default(),
-        CredentialBlobSize: secret.len() as u32,
-        CredentialBlob: secret.as_ptr() as *mut u8,
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        AttributeCount: 0,
-        Attributes: std::ptr::null_mut(),
-        TargetAlias: PWSTR::null(),
-        UserName: PWSTR(user_wide.as_mut_ptr()),
-    };
-    unsafe { CredWriteW(&cred, 0) }.map_err(|e| format!("CredWriteW failed: {}", e))
-}
-
-fn get_key() -> Option<String> {
-    let target_wide = to_wide(TARGET);
-    unsafe {
-        let mut cred_ptr: *mut CREDENTIALW = std::ptr::null_mut();
-        match CredReadW(
-            windows::core::PCWSTR(target_wide.as_ptr()),
-            CRED_TYPE_GENERIC,
-            None,
-            &mut cred_ptr,
-        ) {
-            Ok(()) => {
-                let cred = &*cred_ptr;
-                let blob = std::slice::from_raw_parts(
-                    cred.CredentialBlob,
-                    cred.CredentialBlobSize as usize,
-                );
-                let secret = String::from_utf8_lossy(blob).to_string();
-                CredFree(cred_ptr as *const std::ffi::c_void);
-                Some(secret)
-            }
-            Err(_) => None,
-        }
-    }
-}
-
-fn delete_key() {
-    let target_wide = to_wide(TARGET);
-    unsafe {
-        let _ = CredDeleteW(
-            windows::core::PCWSTR(target_wide.as_ptr()),
-            CRED_TYPE_GENERIC,
-            None,
-        );
-    }
-}
-
-/// Store the Anthropic API key for this machine. Refuses an empty key.
-#[tauri::command]
-pub fn ai_chat_set_api_key(key: String) -> Result<(), String> {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return Err("API key is empty.".to_string());
-    }
-    set_key(trimmed)
-}
-
-/// Whether an API key is stored (the key itself is never returned to the UI).
-#[tauri::command]
-pub fn ai_chat_has_api_key() -> bool {
-    get_key().is_some()
-}
-
-/// Forget the stored API key.
-#[tauri::command]
-pub fn ai_chat_delete_api_key() {
-    delete_key();
-}
-
-// ---------------------------------------------------------------------------
-// L2: Anthropic Messages API call (non-streaming)
-// ---------------------------------------------------------------------------
-
-/// Call the Anthropic Messages API once. `messages` and `tools` are passed
-/// through verbatim (the frontend builds them in Anthropic wire format), and the
-/// raw response JSON is returned for the frontend to interpret (text / tool_use
-/// blocks, stop_reason). Errors carry the API status + body for display.
-#[tauri::command]
-pub async fn ai_chat_complete(
-    messages: Vec<Value>,
-    system: Option<String>,
-    tools: Option<Value>,
-    model: Option<String>,
-    max_tokens: Option<u32>,
-) -> Result<Value, String> {
-    let key = get_key()
-        .ok_or_else(|| "No Anthropic API key set. Add one in the AI Chat panel.".to_string())?;
-
-    let resolved_model = model
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    // Adaptive extended thinking — supported on the Opus 4.x family (budget_tokens /
-    // temperature would 400 on Opus 4.8, so adaptive only). Gated on the model family
-    // so a future non-Opus model picker can't send an unsupported param. ChatView
-    // preserves the full assistant `content` array (incl. thinking blocks) across
-    // tool-use turns, so thinking round-trips correctly through the agentic loop.
-    let supports_adaptive_thinking = resolved_model.starts_with("claude-opus-4");
-    let mut body = json!({
-        "model": resolved_model,
-        "max_tokens": max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        "messages": messages,
-    });
-    if supports_adaptive_thinking {
-        body["thinking"] = json!({ "type": "adaptive" });
-    }
-    if let Some(sys) = system.filter(|s| !s.trim().is_empty()) {
-        body["system"] = json!(sys);
-    }
-    if let Some(t) = tools {
-        body["tools"] = t;
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
-    let resp = client
-        .post(ANTHROPIC_URL)
-        .header("content-type", "application/json")
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("x-api-key", key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request to Anthropic failed: {}", e))?;
-
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("Reading Anthropic response failed: {}", e))?;
-    if !status.is_success() {
-        return Err(format!("Anthropic API error {}: {}", status.as_u16(), text));
-    }
-    serde_json::from_str(&text).map_err(|e| format!("Parsing Anthropic response failed: {}", e))
-}
-
-// ---------------------------------------------------------------------------
-// L4: tool dispatcher — Claude tool_use -> existing mcp::tools helpers
-// ---------------------------------------------------------------------------
 
 fn arg_u32(input: &Value, key: &str) -> Result<u32, String> {
     input
@@ -384,6 +201,7 @@ pub async fn ai_chat_run_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn arg_helpers_parse_and_error() {

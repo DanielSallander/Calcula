@@ -177,8 +177,11 @@ const OUT_OF_SCOPE: &[(&str, &str)] = &[
         "A credential in the OS keychain.",
     ),
     (
-        "ai_chat_delete_api_key",
-        "A credential.",
+        "ai_provider_delete_key",
+        "A credential in the OS keychain — one slot per AI provider. Nothing in \
+         the document points at it, and forgetting a key only means the user is \
+         asked for it again. (Was `ai_chat_delete_api_key` until M3 made key \
+         storage per-provider; this census is what caught the rename.)",
     ),
 ];
 
