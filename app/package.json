@@ -17,6 +17,8 @@
     "check-types:watch": "tsc --noEmit -p tsconfig.check.json --watch",
     "gen:script-typings": "node scripts/gen-script-typings.mjs",
     "check:script-typings": "node scripts/gen-script-typings.mjs --check",
+    "gen:canary-tasks": "node scripts/gen-canary-tasks.mjs",
+    "check:canary-tasks": "node scripts/gen-canary-tasks.mjs --check",
     "lint": "eslint .",
     "lint:boundaries": "eslint --no-config-lookup -c eslint.config.boundaries.js .",
     "check:line-endings": "node scripts/check-line-endings.mjs",

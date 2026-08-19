@@ -48,6 +48,10 @@ const canaryOnly = Boolean(arg("canary", false));
 const jsonOut = arg("json");
 const budgetTokens = Number(arg("budget", 8000));
 const baseUrl = arg("base-url", "");
+// --repair N runs the M7 authoring loop (generate -> validate -> correct) instead
+// of scoring a single shot. It is what the product actually does; the one-shot
+// mode remains the default so the two can be compared.
+const repairRounds = Number(arg("repair", 0));
 
 if (!providerId || !model) {
   console.error("Usage: node tests/eval/run-eval.mjs --provider <id> --model <name> [--canary] [--budget N] [--json out.json]");
@@ -81,6 +85,7 @@ async function loadAppModules() {
     [
       `export * from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptEval/index.ts").replace(/\\/g, "/"))};`,
       `export { buildSurfacePrompt } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptPrompt/index.ts").replace(/\\/g, "/"))};`,
+      `export { authorScript } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptAuthoring/index.ts").replace(/\\/g, "/"))};`,
     ].join("\n"),
     "utf8",
   );
@@ -98,7 +103,7 @@ async function loadAppModules() {
   return mod;
 }
 
-const { scoreCandidate, extractScript, summarize, referenceSource, buildSurfacePrompt } =
+const { scoreCandidate, extractScript, summarize, referenceSource, buildSurfacePrompt, authorScript } =
   await loadAppModules();
 
 const corpus = JSON.parse(readFileSync(path.join(here, "tasks.json"), "utf8"));
@@ -179,9 +184,23 @@ for (const task of tasks) {
 
   let score;
   let candidate = "";
+  let rounds = 0;
   try {
-    const reply = await complete(SYSTEM, userPrompt);
-    candidate = extractScript(reply);
+    if (repairRounds > 0) {
+      // The product path: generate, validate, hand the errors back.
+      const authored = await authorScript({
+        intent: task.intent,
+        objectType: task.objectType,
+        hints: task.hints,
+        plan: { tier: "standard", surfaceBudgetTokens: budgetTokens, repairRounds, rationale: "" },
+        complete: (system, user) => complete(system, user),
+      });
+      candidate = authored.source;
+      rounds = authored.attempts.length - 1;
+    } else {
+      const reply = await complete(SYSTEM, userPrompt);
+      candidate = extractScript(reply);
+    }
     score = scoreCandidate(task, candidate);
   } catch (err) {
     // A transport failure is NOT a zero for the model — recording it as one
@@ -195,6 +214,7 @@ for (const task of tasks) {
   // rather than the model.
   scores.push(score.passed ? score : { ...score, candidate });
   const mark = score.passed ? "PASS" : "FAIL";
+  const fixes = rounds > 0 ? ` [+${rounds} repair${rounds === 1 ? "" : "s"}]` : "";
   const why = score.passed
     ? ""
     : `  (${[
@@ -206,7 +226,7 @@ for (const task of tasks) {
       ]
         .filter(Boolean)
         .join("; ")})`;
-  console.log(`  ${mark} ${task.id} ${score.score.toFixed(2)}${why}`);
+  console.log(`  ${mark} ${task.id} ${score.score.toFixed(2)}${fixes}${why}`);
 }
 
 const summary = summarize(scores);

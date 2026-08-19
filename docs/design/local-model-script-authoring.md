@@ -1,7 +1,12 @@
 # Local-model script authoring — hardware-independent AI that writes Calcula scripts
 
-**Status:** DESIGN. Nothing in this document is implemented. Written 2026-08-19, code
-inventory verified against the tree the same day.
+**Status:** **M1–M7 ALL SHIPPED 2026-08-19.** Written and built the same day; every milestone's
+as-built notes are in §8, including the things that turned out differently from the design.
+
+The pipeline now runs end to end: pick any model (local or cloud, any vendor) → probe it against the
+built-in tasks → author a script at the tier that measurement implies → validate it → correct it →
+hand the user a draft to review and mount. Nothing in it is vendor-specific, and nothing in it
+assumes a particular machine.
 
 **Owner decisions that shaped it** (2026-08-19):
 
@@ -566,8 +571,67 @@ sends the whole `arguments` in one chunk rather than fragmenting. The same recor
 driven through the decoder at chunk sizes 1, 2, 3, 7, 13, 64, 255 and 1024 and must produce an
 identical result.
 
-**M7 — Capability probe, tiered strategies, repair loop.** The adaptive machinery from §4b/§4c,
-built last because M2 and M5 are what make it measurable.
+**M7 — Capability probe, tiered strategies, repair loop. SHIPPED 2026-08-19.** Built last, exactly
+because M2 and M5 are what make it measurable.
+
+- **`modelProfile/`** — `probeModel` runs the canary tasks through the real scorer and returns a
+  `ModelProfile`; `planFor` derives the strategy from the measurement, never from the model's name.
+- **`scriptAuthoring/`** — `authorScript`: build the prompt, generate, validate, hand the errors
+  back, repeat. This is where M2, M4 and M7 stop being separate pieces and become the feature.
+- **`generated/canaryTasks.ts`** — the 12 canary tasks, generated from `tests/eval/tasks.json` and
+  pinned by a lockstep test that calls the GENERATOR's own renderer. Vite cannot import across the
+  project root, so the subset is generated in rather than imported; §11.3's "both read the same
+  definitions" is now a fact rather than a comment.
+
+**Repair rounds go UP as the model gets weaker** — 1 / 3 / 6 across the three tiers. That is
+backwards only if you are paying per token; locally a round costs electricity and a few seconds, and
+spending them where they are needed is the whole reason a modest machine can produce a usable script
+(§1a).
+
+**Two properties the loop must never lose**, each sabotage-verified:
+
+- **Running out of rounds is a FAILURE**, reported with the last draft and the outstanding findings
+  so the user can see how far it got. Returning the final attempt as though it had succeeded would
+  hand a broken script to the reviewer with a clean bill of health.
+- **The repair prompt carries ERRORS ONLY.** Feeding the notices back would teach the model to strip
+  capability declarations it cannot prove it needs — the exact opposite of §11.2.
+
+### Measured: what the repair loop does and does not fix
+
+`qwen2.5-coder:3b`, 12 canary tasks, 4,000-token surface budget:
+
+| | one-shot | 4 repair rounds |
+|---|---|---|
+| passed | 0/12 | **1/12** |
+| mean score | 0.550 | **0.646** |
+
+It works — `trap-browser-fetch` went 0.65 to **1.00** after a single repair, the model having forgotten
+the `net.fetch` pragma and been told exactly what to add. But the shape of the residual failures
+matters more than the +0.096:
+
+- **Six of eleven failures were VALID scripts that did not do the job.** They parse, invent nothing,
+  and declare their capabilities correctly — they simply do not call what the task needs. The loop
+  stopped after one round in each case because `validateScriptSource` reported `ok: true`, which was
+  the honest answer: **L0–L2 cannot see "correct but useless".**
+- **Five were still invalid after exhausting all four rounds** — one never parsed at all. More
+  rounds do not rescue a model that cannot hold the API in its head.
+
+**This is the empirical case for L3, the dry-run diff.** §5 lists it and M2 did not build it: the
+verification ladder currently ends at static checks, and static checks are structurally blind to the
+larger half of what actually goes wrong. A script executed against a cloned workbook, with the diff
+compared to what the task expected, is the only thing that catches this class — and it is the piece
+that would let the repair loop correct behaviour rather than only syntax and policy.
+
+**A 3B model remains below the bar** either way, which is a legitimate finding rather than a
+disappointment: it is exactly the number the picker needs to be able to show.
+
+### One correction to §4b
+
+That section described `contextTokens` as "measured, not what the card claims". **It is not
+measured**, and the profile documents it as declared. Establishing a real context limit means
+binary-searching with very long prompts: slow locally, and metered on a cloud endpoint. It is a
+setting with a conservative 8192 default. Everything else in the profile — `canaryScore`,
+`decodeTokensPerSec`, `emitsFencedCode` — is genuinely measured.
 
 `MAX_TOOL_TURNS = 8` ([ChatView.tsx:261](../../app/extensions/AIChat/components/ChatView.tsx#L261))
 is sized for Claude and likely too tight for a local model that spends turns re-orienting; revisit
