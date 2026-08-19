@@ -36,6 +36,11 @@ export interface DynamicAccess {
 }
 
 export interface AnalyzedScript {
+  /**
+   * The source defines a function named `setup`. When false the script MOUNTS
+   * AND DOES NOTHING -- the wrapper tail calls setup only if it exists.
+   */
+  hasSetup: boolean;
   /** L0: the source parsed. When false, everything else is empty. */
   parsed: boolean;
   /** The parse failure, when `parsed` is false. */
@@ -189,7 +194,53 @@ function collectContextBindings(program: Node): Set<string> {
       if (n.type === "FunctionDeclaration" && n.id?.name === "setup") noteFirstParam(n);
     });
   }
+
+  // LAST RESORT: a bare `context.` root, wherever it appears.
+  //
+  // Without this the reach and capability checks PASS VACUOUSLY on a script that
+  // has no recognisable entry point — nothing is rooted, so nothing is examined,
+  // and a script calling `context.caps.fetch(...)` reports zero findings. Found
+  // by the eval corpus (M5) on a real 3B model's answer, which wrote a top-level
+  // `onClick(() => { context.cell('A1').getValue(); })` with no `setup` at all
+  // and scored a clean bill of health from both checks.
+  //
+  // Conservative: it only ever ADDS detection, and only for the two identifiers
+  // the typings actually teach.
+  if (bindings.size === 0) {
+    walk(program, (n) => {
+      if (n.type !== "MemberExpression") return;
+      const root = unwrap(n.object);
+      if (root.type === "Identifier" && (root.name === "context" || root.name === "ctx")) {
+        bindings.add(root.name);
+      }
+    });
+  }
   return bindings;
+}
+
+/**
+ * Does the source define a function named `setup`?
+ *
+ * The wrapper's tail is `typeof setup === "function" ? setup(context) : undefined`
+ * (worker/debugWrapper.ts), so a script without one MOUNTS AND DOES NOTHING. The
+ * module body still runs, which is why this is not caught by anything else: no
+ * error, no output, no effect. It is the quietest possible failure and a model
+ * that answers with a bare handler call produces it every time.
+ */
+export function hasSetupEntryPoint(program: Node): boolean {
+  let found = false;
+  const isSetupFn = (node: Node | null | undefined): boolean =>
+    Boolean(node) &&
+    (node!.type === "FunctionDeclaration" || node!.type === "FunctionExpression" ||
+      node!.type === "ArrowFunctionExpression");
+  walk(program, (n) => {
+    if (found) return;
+    if (n.type === "FunctionDeclaration" && n.id?.name === "setup") found = true;
+    if (n.type === "VariableDeclarator" && n.id?.type === "Identifier" && n.id.name === "setup" && isSetupFn(n.init)) {
+      found = true;
+    }
+  });
+  return found;
 }
 
 /**
@@ -251,6 +302,7 @@ export function analyzeScript(source: string): AnalyzedScript {
       parsed: false,
       parseError: { message: err.message ?? String(e), line: err.loc?.line },
       declaredCapabilities,
+      hasSetup: false,
       calls: [],
       dynamicAccesses: [],
       contextBindings: [],
@@ -300,6 +352,7 @@ export function analyzeScript(source: string): AnalyzedScript {
   return {
     parsed: true,
     declaredCapabilities,
+    hasSetup: hasSetupEntryPoint(program),
     calls,
     dynamicAccesses,
     contextBindings: [...bindings],

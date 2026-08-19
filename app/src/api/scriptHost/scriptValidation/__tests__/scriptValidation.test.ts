@@ -51,6 +51,55 @@ describe("L0 - parsing", () => {
   });
 });
 
+describe("the entry point, and the vacuous pass it used to allow", () => {
+  // Found by the M5 eval corpus on a real 3B model's first answer. The model
+  // replied with a bare top-level handler and no `setup`, and BOTH the reach
+  // check and the capability check reported a clean bill of health -- because
+  // with no recognisable entry point nothing was rooted, so nothing was
+  // examined. A script like that mounts and does nothing: the wrapper tail is
+  // `typeof setup === "function" ? setup(context) : undefined`.
+  const noSetup = [
+    "onClick(() => {",
+    "  const v = context.api.getCellValue(0, 0);",
+    "  context.api.setCellValue(0, 1, v);",
+    "});",
+  ].join("\n");
+
+  it("rejects a script with no setup function", () => {
+    const r = validateScriptSource(noSetup);
+    expect(r.ok).toBe(false);
+    const f = r.findings.find((x) => x.code === "no-entry-point")!;
+    expect(f.severity).toBe("error");
+    expect(f.message).toMatch(/nothing would run/);
+  });
+
+  it("still examines the calls in it, instead of passing vacuously", () => {
+    // The bare-`context` fallback. Without it the analysis found no bindings and
+    // reported no calls at all, so an undeclared capability in a script like
+    // this would have gone unnoticed.
+    const r = validateScriptSource(noSetup);
+    expect(r.analysis.calls.map((c) => c.chain)).toEqual(
+      expect.arrayContaining(["api.getCellValue", "api.setCellValue"]),
+    );
+  });
+
+  it("catches an undeclared capability even without an entry point", () => {
+    const r = validateScriptSource("context.caps.fetch('https://example.com');\n");
+    expect(r.findings.some((f) => f.code === "undeclared-capability")).toBe(true);
+    expect(r.findings.some((f) => f.code === "no-entry-point")).toBe(true);
+  });
+
+  it("accepts setup declared as a const arrow, not only as a function", () => {
+    const r = validateScriptSource("export const setup = (context) => { context.log('x'); };\n");
+    expect(r.findings.some((f) => f.code === "no-entry-point")).toBe(false);
+  });
+
+  it("accepts a plain (unexported) setup declaration", () => {
+    const r = validateScriptSource("function setup(context) { context.log('x'); }\n");
+    expect(r.findings.some((f) => f.code === "no-entry-point")).toBe(false);
+  });
+});
+
 describe("L1 - reach", () => {
   it("accepts a script that only calls real members", () => {
     const src = [

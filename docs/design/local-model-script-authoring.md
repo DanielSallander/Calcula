@@ -500,10 +500,44 @@ Four things worth carrying forward:
   the file 343 KB — as large as the `.d.ts` it exists to shrink — because ~520 are identical across
   all 17 types.
 
-**M5 — The eval set.** 30–50 golden tasks: intent in, sandbox assertions out. This is the asset that
-makes the whole design durable — **when a new model lands we run the eval, we do not redesign.** It
-is also what gives `canaryScore` its meaning and what lets us publish an honest known-good model
-table instead of vibes.
+**M5 — The eval set. SHIPPED 2026-08-19.** **36 tasks** at `tests/eval/tasks.json`, in two layers.
+
+**Layer A needs no model and runs in CI.** Every task carries a `reference` solution, and
+`scriptEval/__tests__/corpus.test.ts` puts each one through the real validator. A task whose own
+answer does not validate is not a hard task, it is a broken one — it would mark every model wrong for
+refusing to reproduce a mistake. Because the references are checked against the LIVE surface, a task
+also rots the moment the API moves under it.
+
+**Layer B is `tests/eval/run-eval.mjs`** — opt-in, needs a provider. It bundles the app's OWN scorer
+and prompt assembler rather than reimplementing them, so the number describes the pipeline that
+actually ships.
+
+### What it found in its first hour
+
+**Two real defects, both in already-"finished" milestones. This is the whole argument for the
+milestone.**
+
+1. **M4's ranker put `api.setCellValue` outside a 4k budget.** Ranking was group-then-alphabetical,
+   so the most basic operation there is lost to a hundred alphabetically earlier and far more
+   obscure members; nine canary tasks were unanswerable by construction. Fixed with an explicit core
+   set, tiered hint matching, stopwords (an innocuous "and" in a request tier-0 matched
+   `executeCommand` and hoisted junk to the very top), stemming (`"store"` is **not** a substring of
+   `"storage"` — that one miss ranked both storage methods 517th of 528), and a **capability index**:
+   one representative member per capability, always shown, because lexical matching cannot be relied
+   on to surface `caps.fetch` for a request that says "Get JSON from https://…".
+
+2. **M2 passed VACUOUSLY on a script with no `setup` function.** With no recognisable entry point
+   nothing was rooted, so the reach check examined nothing and the capability check derived nothing —
+   a script calling `context.caps.fetch(...)` reported a clean bill of health. Found on a real 3B
+   model's very first answer, which wrote a bare top-level `onClick(...)`. Such a script also mounts
+   and does **nothing**: the wrapper tail is
+   `typeof setup === "function" ? setup(context) : undefined`. Now a `no-entry-point` error, plus a
+   bare-`context` binding fallback so the calls are examined regardless.
+
+**The measured score got WORSE as it got more honest**: `qwen2.5-coder:3b` scored 0.700 mean before
+the vacuous-pass fix and **0.550 after**, on the same 12 canary tasks (0/12 passed). A 3B model is
+below the bar for this work, which is a legitimate finding rather than a disappointment — it is
+precisely the number the picker needs to be able to show.
 
 **M6 — Streaming.** `ai_chat_complete` is one blocking POST with a 120 s timeout
 ([ai_chat.rs:170](../../app/src-tauri/src/ai_chat.rs#L170)). Cloud latency hides that; a local model

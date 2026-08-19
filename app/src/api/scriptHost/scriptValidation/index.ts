@@ -48,6 +48,7 @@ export interface ValidationFinding {
   /** Stable machine code, for tests and for the repair prompt builder. */
   code:
     | "parse-error"
+    | "no-entry-point"
     | "unknown-member"
     | "undeclared-capability"
     | "unknown-capability-id"
@@ -117,6 +118,25 @@ export function validateScriptSource(source: string): ValidationReport {
       hasDynamicAccess: false,
       analysis,
     };
+  }
+
+  // ---- Entry point --------------------------------------------------------
+  // The wrapper's tail is `typeof setup === "function" ? setup(context) : undefined`
+  // (worker/debugWrapper.ts), so a script without one MOUNTS AND DOES NOTHING:
+  // the module body runs, no error is raised, and nothing happens. It is the
+  // quietest failure the system has.
+  //
+  // Found by the eval corpus (M5): a real 3B model answered with a bare
+  // top-level `onClick(() => { ... })` and no `setup`, and every check passed.
+  if (!analysis.hasSetup) {
+    findings.push({
+      severity: "error",
+      code: "no-entry-point",
+      message:
+        "The script defines no `setup` function, so nothing would run when it is mounted. " +
+        "Wrap the logic in `export function setup(context) { ... }` and register handlers " +
+        "with `context.expose(name, handler)`.",
+    });
   }
 
   // ---- L1 -----------------------------------------------------------------

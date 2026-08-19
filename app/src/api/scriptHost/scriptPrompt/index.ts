@@ -71,23 +71,145 @@ export interface SurfacePromptResult {
   truncated: boolean;
 }
 
-/** Normalize a hint list into lowercase word stems worth matching on. */
-function hintTerms(hints: readonly string[] | undefined): string[] {
+/**
+ * The methods a script author reaches for whatever the task is.
+ *
+ * WHY THIS LIST EXISTS, and why it is not derived: ranking by group then
+ * alphabetically put `api.setCellValue` — the single most basic operation there
+ * is — outside a 4,000-token budget, behind a hundred alphabetically earlier and
+ * far more obscure members. Nothing in the generated surface distinguishes
+ * "fundamental" from "niche"; that is a product judgement, so it is written down
+ * as one rather than faked out of chain depth.
+ *
+ * Capability members are deliberately ABSENT. All 58 of them cost ~2,400 tokens,
+ * which is most of a small budget, and a task that never touches the network
+ * should not pay for the network API. They arrive through hints instead.
+ *
+ * GUARDED TWO WAYS, so it cannot rot into a lie:
+ *   1. every chain here must exist in the generated surface (a rename fails a
+ *      test rather than silently dropping the method from every prompt);
+ *   2. the eval corpus's canary tasks must be answerable at a 4k budget, which
+ *      is what proves the list is SUFFICIENT and not merely well-intentioned.
+ */
+export const PROMPT_CORE_CHAINS: readonly string[] = [
+  // Talking to the user and registering handlers.
+  "log",
+  "notify",
+  "expose",
+  // Reading and writing cells — the floor of almost every script.
+  "api.getCellValue",
+  "api.setCellValue",
+  "api.getCellFormula",
+  "api.setCellFormula",
+  "api.getRangeValues",
+  "api.getCellFormat",
+  "api.setRangeFormat",
+  "api.clearRange",
+  // Finding out what is there.
+  "api.getUsedRange",
+  "api.selection",
+  // The handful of whole-range operations a script is repeatedly asked for.
+  "api.sortRange",
+  "api.findAll",
+  "api.replaceAll",
+  "api.recalculate",
+  "api.addSheet",
+  "api.createTable",
+];
+
+const CORE = new Set(PROMPT_CORE_CHAINS);
+
+/**
+ * One representative member per capability — the shortest chain that needs it.
+ *
+ * WHY: lexical hint matching cannot be relied on to surface a capability. The
+ * task "Get JSON from https://api.example.com/data" matches nothing in
+ * `caps.fetch`'s chain OR its prose, so it ranked 468th of 528 and fell outside
+ * every small budget — leaving a model that was asked to download something with
+ * no evidence that downloading is possible at all. It then either invents
+ * `fetch()` or refuses.
+ *
+ * Showing ONE member of each of the 14 capabilities costs ~600 tokens and
+ * removes that whole failure class: the model can always see that the namespace
+ * exists, and the truncation note already tells it to ask rather than guess when
+ * the specific method is missing. Derived from the surface (shortest chain per
+ * capability), so a new capability joins the index automatically.
+ */
+const CAPABILITY_INDEX: ReadonlySet<string> = (() => {
+  const shortest = new Map<string, SurfaceEntry>();
+  for (const e of SURFACE_ENTRIES) {
+    if (!e.capability) continue;
+    const held = shortest.get(e.capability);
+    if (!held || e.chain.length < held.chain.length) shortest.set(e.capability, e);
+  }
+  return new Set([...shortest.values()].map((e) => e.chain));
+})();
+
+/**
+ * Function words, dropped from hints.
+ *
+ * These are matched as SUBSTRINGS, so an innocuous "and" in a user's sentence
+ * hits `executeCommand` (comm-AND) and hoists it above every context member.
+ * Measured: the intent "Count how many times this button has been clicked..."
+ * put `api.executeCommand`, `api.getThemePalette` and `api.scenarioShow` at the
+ * very top of the ranking, ahead of `log` and `expose`.
+ */
+const STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "that", "this", "these", "those", "into",
+  "has", "have", "had", "been", "was", "were", "are", "its", "our", "your",
+  "how", "what", "when", "where", "which", "who", "why", "any", "all", "each",
+  "will", "would", "can", "could", "should", "must", "may", "might",
+  "many", "much", "more", "most", "some", "one", "two", "then", "than",
+  "but", "not", "only", "also", "just", "here", "there", "them", "they",
+  "use", "using", "make", "makes", "want", "wants", "need", "needs",
+  "please", "user", "users", "script", "workbook", "sheet",
+]);
+
+/**
+ * Normalize a hint list into lowercase terms worth matching on.
+ *
+ * Note the STEM: a term of five characters or more also matches on its first
+ * four. This is not tidiness — plain substring matching missed `caps.storage`
+ * for the term "store", because "storage" does not contain "store" (the fifth
+ * letter differs). That single miss ranked both storage methods 517th of 528
+ * and made every "remember this across sessions" task unanswerable inside a
+ * small budget.
+ */
+export function hintTerms(hints: readonly string[] | undefined): string[] {
   if (!hints?.length) return [];
   const out = new Set<string>();
   for (const raw of hints) {
     for (const word of raw.toLowerCase().split(/[^a-z0-9]+/)) {
       // Two-letter words match everything and teach the ranker nothing.
-      if (word.length >= 3) out.add(word);
+      if (word.length < 3 || STOPWORDS.has(word)) continue;
+      out.add(word);
+      if (word.length >= 5) out.add(word.slice(0, 4));
     }
   }
   return [...out];
 }
 
-function matchesHint(entry: SurfaceEntry, terms: readonly string[]): boolean {
-  if (terms.length === 0) return false;
-  const hay = `${entry.chain} ${entry.summary}`.toLowerCase();
-  return terms.some((t) => hay.includes(t));
+/**
+ * How specifically a hint matched, lower being stronger.
+ *
+ * Tiering matters because a flat substring test over chain+summary marks half
+ * the surface as "relevant" — "cell" alone hits ~100 members — and a signal that
+ * fires everywhere ranks nothing. Matching the LAST SEGMENT is the strong
+ * signal: a user asking to "sort" wants `sortRange`, not the twelve members
+ * whose prose happens to mention sorting.
+ */
+function hintTier(entry: SurfaceEntry, terms: readonly string[]): number {
+  if (terms.length === 0) return 3;
+  const tail = (entry.chain.split(".").pop() ?? "").toLowerCase();
+  if (terms.some((t) => tail.includes(t))) return 0;
+  if (terms.some((t) => entry.chain.toLowerCase().includes(t))) return 1;
+  if (terms.some((t) => entry.summary.toLowerCase().includes(t))) return 2;
+  return 3;
+}
+
+/** Dotted depth: `api.setCellValue` (2) is more central than `api.table.range.autoFill` (4). */
+function depthOf(chain: string): number {
+  return chain.split(".").length;
 }
 
 /**
@@ -107,12 +229,62 @@ export function rankSurface(objectType: string, hints?: readonly string[]): Surf
     : [...SURFACE_ENTRIES];
 
   const terms = hintTerms(hints);
-  const rank = (e: SurfaceEntry): number => {
+  // Ordered comparison rather than one blended number: each key is a separate
+  // claim, and blending them into a score made it impossible to say why a member
+  // had been dropped.
+  const keys = (e: SurfaceEntry): number[] => {
     const group = GROUP_ORDER.indexOf(e.group);
-    const groupRank = group === -1 ? GROUP_ORDER.length : group;
-    return (matchesHint(e, terms) ? 0 : 1) * GROUP_ORDER.length + groupRank;
+    return [
+      // 1. What must be present for the task to be answerable at all:
+      //      * the object's OWN members and the core set, always;
+      //      * anything the request named precisely (a last-segment match);
+      //      * a CAPABILITY member the request gestured at in any way.
+      //
+      //    The capability clause is the one that needed widening. A task saying
+      //    "Get JSON from https://..." names `caps.fetch` nowhere -- the only
+      //    link is the word "https" appearing in its summary -- and a task
+      //    saying "remember the count across sessions" reaches `caps.storage`
+      //    only through "store" inside "storage". Both were ranked below a
+      //    hundred grid members and fell outside a 4k budget, which made them
+      //    unanswerable by construction. There are only 58 capability members in
+      //    total, so admitting the hinted ones early is cheap; admitting none of
+      //    them makes every capability task impossible on a small model.
+      e.group === "context" ||
+      CORE.has(e.chain) ||
+      CAPABILITY_INDEX.has(e.chain) ||
+      hintTier(e, terms) === 0 ||
+      (e.capability !== undefined && hintTier(e, terms) <= 2)
+        ? 0
+        : 1,
+      // 2. Within that, a HINTED CAPABILITY member leads.
+      //
+      //    Not favouritism — scarcity. A generic verb like "get" tier-0 matches
+      //    every `api.get*` member, so a bucket ordered purely by hint strength
+      //    buries `caps.fetch` behind forty getters and drops it at 4k. A grid
+      //    task whose exact method is missing can often be expressed another
+      //    way; a capability task cannot be expressed at all. There are only 58
+      //    capability members in total, so leading with the hinted ones is
+      //    cheap insurance against an impossible prompt.
+      e.capability !== undefined && (CAPABILITY_INDEX.has(e.chain) || hintTier(e, terms) <= 2)
+        ? 0
+        : 1,
+      // 3. Then how specifically the request pointed at it.
+      hintTier(e, terms),
+      // 3. Then the group's own priority.
+      group === -1 ? GROUP_ORDER.length : group,
+      // 4. Then centrality: a shallower chain is a more fundamental operation.
+      depthOf(e.chain),
+    ];
   };
-  return [...pool].sort((a, b) => rank(a) - rank(b) || a.chain.localeCompare(b.chain));
+  return [...pool].sort((a, b) => {
+    const ka = keys(a);
+    const kb = keys(b);
+    for (let i = 0; i < ka.length; i++) {
+      if (ka[i] !== kb[i]) return ka[i] - kb[i];
+    }
+    // Alphabetical last, so the order is total and the prompt is reproducible.
+    return a.chain.localeCompare(b.chain);
+  });
 }
 
 function renderEntry(e: SurfaceEntry): string {

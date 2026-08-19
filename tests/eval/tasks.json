@@ -1,0 +1,682 @@
+{
+  "$comment": [
+    "THE SCRIPT-AUTHORING EVAL CORPUS.",
+    "",
+    "WHAT IT IS: the tasks a model must handle for Calcula's AI to be useful, each",
+    "with a REFERENCE solution that really works. Owner decision 2026-08-19 (design",
+    "doc §11.3): this ships in-repo as a developer/CI artifact -- public, no UI, no",
+    "support promise -- because withholding it would make every compatibility claim",
+    "unfalsifiable, which is a poor look for a project whose pitch is auditability.",
+    "",
+    "TWO LAYERS, AND THE FIRST NEEDS NO MODEL AT ALL:",
+    "  A. Every `reference` is validated by the real M2 validator in CI. A corpus",
+    "     whose reference solutions do not pass is measuring nothing -- it would",
+    "     score models against an API that does not exist. This is the layer that",
+    "     keeps the corpus honest as the surface changes underneath it.",
+    "  B. `tests/eval/run-eval.mjs` runs the intents through a real provider and",
+    "     scores the output. That is what gives M7's `canaryScore` its meaning.",
+    "",
+    "`canary: true` marks the in-app probe subset. Both layers read THIS file, so",
+    "the number a user sees in the model picker and the number CI reports cannot",
+    "diverge.",
+    "",
+    "ADDING A TASK: write the reference FIRST and run `npm test`. If it fails L1 you",
+    "invented a method; if it fails L2 your pragmas are wrong. Either way the task",
+    "was not yet a fair test of anything."
+  ],
+  "version": 1,
+  "tasks": [
+    {
+      "id": "grid-read-write-cell",
+      "canary": true,
+      "objectType": "button",
+      "intent": "When this button is clicked, copy the value in A1 into B1.",
+      "hints": ["cell", "copy", "value"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getCellValue", "api.setCellValue"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const value = await context.api.getCellValue(0, 0);",
+        "    await context.api.setCellValue(0, 1, value);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-sum-column",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Sum the numbers in column B rows 2 to 100 and put the total in B101.",
+      "hints": ["sum", "column", "total"],
+      "expectCapabilities": [],
+      "mustCall": ["api.setCellFormula"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.setCellFormula(100, 1, '=SUM(B2:B100)');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-sum-in-script",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Add up column B from row 2 to row 100 in the script itself (not with a formula) and write the number into B101.",
+      "hints": ["sum", "add up", "range"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getRangeValues", "api.setCellValue"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const cells = await context.api.getRangeValues(1, 1, 99, 1);",
+        "    let total = 0;",
+        "    for (const row of cells) {",
+        "      for (const cell of row) {",
+        "        const n = Number(cell.value);",
+        "        if (!Number.isNaN(n)) total += n;",
+        "      }",
+        "    }",
+        "    await context.api.setCellValue(100, 1, total);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-bold-header-row",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Make the header row (row 1, columns A to F) bold with a light grey background.",
+      "hints": ["bold", "header", "background", "format"],
+      "expectCapabilities": [],
+      "mustCall": ["api.setRangeFormat"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.setRangeFormat(0, 0, 0, 5, {",
+        "      bold: true,",
+        "      backgroundColor: '#EEEEEE',",
+        "    });",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-used-range-report",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Tell me how big the data on this sheet is.",
+      "hints": ["used range", "size", "how big"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getUsedRange", "notify"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const used = await context.api.getUsedRange();",
+        "    context.notify('Data spans ' + JSON.stringify(used), 'info');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-sort-by-first-column",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Sort rows 2 to 500, columns A to E, by column A ascending. Row 1 is a header.",
+      "hints": ["sort", "ascending", "header"],
+      "expectCapabilities": [],
+      "mustCall": ["api.sortRange"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.sortRange(0, 0, 499, 4, [{ column: 0, ascending: true }], {",
+        "      hasHeaders: true,",
+        "    });",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-find-and-replace",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Replace every occurrence of 'N/A' with an empty cell on this sheet.",
+      "hints": ["replace", "occurrence"],
+      "expectCapabilities": [],
+      "mustCall": ["api.replaceAll"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const result = await context.api.replaceAll('N/A', '', { matchEntireCell: true });",
+        "    context.log('replaced', result.replacementCount);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-count-matches",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Count how many cells contain the word 'overdue' and report the number.",
+      "hints": ["count", "contain", "find"],
+      "expectCapabilities": [],
+      "mustCall": ["api.findAll", "notify"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const found = await context.api.findAll('overdue');",
+        "    context.notify(found.totalCount + ' overdue cells', 'info');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-add-sheet",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Create a new sheet called 'Summary'.",
+      "hints": ["sheet", "create", "new"],
+      "expectCapabilities": [],
+      "mustCall": ["api.addSheet"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.addSheet('Summary');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-create-table",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Turn A1:D50 into a structured table named Orders. The first row is headers.",
+      "hints": ["table", "structured", "headers"],
+      "expectCapabilities": [],
+      "mustCall": ["api.createTable"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.createTable(0, 0, 49, 3, { name: 'Orders', hasHeaders: true });",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-recalculate",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Force a full recalculation of the workbook.",
+      "hints": ["recalculate", "refresh"],
+      "expectCapabilities": [],
+      "mustCall": ["api.recalculate"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const result = await context.api.recalculate({ full: true });",
+        "    context.log('recalculated', result.cellsUpdated);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "grid-act-on-selection",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Bold whatever the user currently has selected.",
+      "hints": ["selection", "selected", "bold"],
+      "expectCapabilities": [],
+      "mustCall": ["api.selection"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const sel = await context.api.selection();",
+        "    if (!sel) return;",
+        "    await context.api.setRangeFormat(sel.startRow, sel.startCol, sel.endRow, sel.endCol, {",
+        "      bold: true,",
+        "    });",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "cap-storage-counter",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Count how many times this button has been clicked, remembering the count across sessions, and show it in A1.",
+      "hints": ["remember", "count", "store", "across sessions"],
+      "expectCapabilities": ["storage"],
+      "mustCall": ["caps.storage.get", "caps.storage.set", "api.setCellValue"],
+      "reference": [
+        "// @capability storage",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const previous = await context.caps.storage.get('clicks');",
+        "    const next = Number(previous ?? '0') + 1;",
+        "    await context.caps.storage.set('clicks', String(next));",
+        "    await context.api.setCellValue(0, 0, next);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "cap-fetch-rate",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Download the current USD rate from https://api.example.com/rates and put it in B2.",
+      "hints": ["download", "fetch", "url", "rate"],
+      "expectCapabilities": ["net.fetch"],
+      "mustCall": ["caps.fetch", "api.setCellValue"],
+      "reference": [
+        "// @capability net.fetch",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const res = await context.caps.fetch('https://api.example.com/rates');",
+        "    const data = res.json();",
+        "    await context.api.setCellValue(1, 1, String(data.usd));",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "cap-schedule-refresh",
+      "canary": false,
+      "objectType": "workbook",
+      "intent": "Refresh the totals every 15 minutes, and keep doing it after the workbook is reopened.",
+      "hints": ["every", "minutes", "schedule", "repeat"],
+      "expectCapabilities": ["schedule"],
+      "mustCall": ["caps.schedule.every", "expose"],
+      "reference": [
+        "// @capability schedule",
+        "export function setup(context) {",
+        "  context.expose('refreshTotals', async () => {",
+        "    await context.api.recalculate();",
+        "  });",
+        "  context.caps.schedule.every(900, 'refreshTotals', { label: 'Refresh totals' });",
+        "}"
+      ]
+    },
+    {
+      "id": "cap-dialog-confirm-before-clearing",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Ask the user to confirm before clearing A1:D100, and only clear it if they say yes.",
+      "hints": ["confirm", "ask", "clear"],
+      "expectCapabilities": ["ui.dialog"],
+      "mustCall": ["caps.dialog.confirm", "api.clearRange"],
+      "reference": [
+        "// @capability ui.dialog",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const ok = await context.caps.dialog.confirm('Clear A1:D100?');",
+        "    if (!ok) return;",
+        "    await context.api.clearRange(0, 0, 99, 3);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "cap-dialog-prompt-for-name",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Ask the user for a report title and write it into A1.",
+      "hints": ["ask", "prompt", "title"],
+      "expectCapabilities": ["ui.dialog"],
+      "mustCall": ["caps.dialog.prompt", "api.setCellValue"],
+      "reference": [
+        "// @capability ui.dialog",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const title = await context.caps.dialog.prompt('Report title?');",
+        "    if (title === null) return;",
+        "    await context.api.setCellValue(0, 0, title);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "cap-two-capabilities",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Download the daily figures and remember when we last did it, so we can show the age of the data.",
+      "hints": ["download", "remember", "last", "fetch", "store"],
+      "expectCapabilities": ["net.fetch", "storage"],
+      "mustCall": ["caps.fetch", "caps.storage.set"],
+      "reference": [
+        "// @capability net.fetch",
+        "// @capability storage",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const res = await context.caps.fetch('https://api.example.com/daily');",
+        "    await context.api.setCellValue(0, 0, String(res.json().total));",
+        "    await context.caps.storage.set('lastFetch', String(Date.now()));",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "obj-sheet-context",
+      "canary": false,
+      "objectType": "sheet",
+      "intent": "Whenever this sheet is used, log its name once at setup.",
+      "hints": ["sheet", "name", "log"],
+      "expectCapabilities": [],
+      "mustCall": ["log"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.log('sheet script mounted for', context.objectType);",
+        "}"
+      ]
+    },
+    {
+      "id": "obj-workbook-context",
+      "canary": false,
+      "objectType": "workbook",
+      "intent": "Expose a command that recalculates everything and tells the user it is done.",
+      "hints": ["recalculate", "command", "tell"],
+      "expectCapabilities": [],
+      "mustCall": ["expose", "api.recalculate", "notify"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('recalcAll', async () => {",
+        "    await context.api.recalculate({ full: true });",
+        "    context.notify('Recalculated', 'success');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "obj-named-range-values",
+      "canary": false,
+      "objectType": "namedRange",
+      "intent": "Read the values in this named range and log how many rows it has.",
+      "hints": ["named range", "values", "rows"],
+      "expectCapabilities": [],
+      "mustCall": ["getValues", "log"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('report', async () => {",
+        "    const values = await context.getValues();",
+        "    context.log('rows', values.length);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "trap-vba-cells-idiom",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Set cell A1 to Hello. Do it the simplest way.",
+      "hints": ["set", "cell"],
+      "expectCapabilities": [],
+      "mustCall": ["api.setCellValue"],
+      "notes": "Trap: a model reaching for VBA writes Cells(1,1).Value or Range('A1').Value. Neither exists.",
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.setCellValue(0, 0, 'Hello');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "trap-office-js-idiom",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Read A1 and show it to the user in a message.",
+      "hints": ["read", "message", "show"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getCellValue", "notify"],
+      "notes": "Trap: Office.js habits produce Excel.run(ctx => ...) and getRange('A1').load('values'). Calcula has neither.",
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const value = await context.api.getCellValue(0, 0);",
+        "    context.notify('A1 is ' + value, 'info');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "trap-console-log",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Log the value of A1 for debugging.",
+      "hints": ["log", "debug"],
+      "expectCapabilities": [],
+      "mustCall": ["log", "api.getCellValue"],
+      "notes": "Trap: the reflex is console.log. The script surface exposes context.log.",
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    context.log(await context.api.getCellValue(0, 0));",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "trap-undeclared-capability",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Save a note in the workbook that survives reopening, then read it back.",
+      "hints": ["save", "survives", "read back", "store"],
+      "expectCapabilities": ["storage"],
+      "mustCall": ["caps.storage.set", "caps.storage.get"],
+      "notes": "Trap: the capability pragma is the thing a model forgets. Without it the broker refuses at run time and the reviewer never sees it coming.",
+      "reference": [
+        "// @capability storage",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.caps.storage.set('note', 'hello');",
+        "    context.log(await context.caps.storage.get('note'));",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "trap-browser-fetch",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Get JSON from https://api.example.com/data and put the count in A1.",
+      "hints": ["get", "json", "url"],
+      "expectCapabilities": ["net.fetch"],
+      "mustCall": ["caps.fetch"],
+      "notes": "Trap: bare fetch() is a global the sandbox does not provide. The gated one is context.caps.fetch, and it needs a pragma.",
+      "reference": [
+        "// @capability net.fetch",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const res = await context.caps.fetch('https://api.example.com/data');",
+        "    await context.api.setCellValue(0, 0, String(res.json().count));",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "trap-window-alert",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Pop up a message saying the import finished.",
+      "hints": ["message", "pop up", "alert"],
+      "expectCapabilities": ["ui.dialog"],
+      "mustCall": ["caps.dialog.alert"],
+      "notes": "Trap: window.alert / alert() do not exist in the realm, and are banned repo-wide besides.",
+      "reference": [
+        "// @capability ui.dialog",
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.caps.dialog.alert('Import finished');",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-multi-step-report",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Build a small summary: put a Totals header in A1, sum column C into B1, and bold both.",
+      "hints": ["summary", "header", "sum", "bold"],
+      "expectCapabilities": [],
+      "mustCall": ["api.setCellValue", "api.setCellFormula", "api.setRangeFormat"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.setCellValue(0, 0, 'Totals');",
+        "    await context.api.setCellFormula(0, 1, '=SUM(C:C)');",
+        "    await context.api.setRangeFormat(0, 0, 0, 1, { bold: true });",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-guard-empty-input",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Copy A1 into B1, but do nothing if A1 is empty.",
+      "hints": ["copy", "empty", "skip"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getCellValue", "api.setCellValue"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const value = await context.api.getCellValue(0, 0);",
+        "    if (value === '') return;",
+        "    await context.api.setCellValue(0, 1, value);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-loop-over-rows",
+      "canary": false,
+      "objectType": "button",
+      "intent": "For rows 2 to 50, if column C is greater than 100 write 'HIGH' in column D, otherwise leave it alone.",
+      "hints": ["rows", "greater than", "write"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getRangeValues", "api.setCellValue"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const cells = await context.api.getRangeValues(1, 2, 49, 2);",
+        "    for (let i = 0; i < cells.length; i++) {",
+        "      const value = Number(cells[i][0].value);",
+        "      if (value > 100) {",
+        "        await context.api.setCellValue(1 + i, 3, 'HIGH');",
+        "      }",
+        "    }",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-format-number-columns",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Format B2:B200 as currency with two decimals.",
+      "hints": ["currency", "format", "decimals"],
+      "expectCapabilities": [],
+      "mustCall": ["api.setRangeFormat"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.setRangeFormat(1, 1, 199, 1, { numberFormat: '$#,##0.00' });",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-named-handler",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Expose two commands: one that clears A1:A10 and one that fills it with the numbers 1 to 10.",
+      "hints": ["two", "commands", "clear", "fill"],
+      "expectCapabilities": [],
+      "mustCall": ["expose", "api.clearRange", "api.setCellValue"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('clearIt', async () => {",
+        "    await context.api.clearRange(0, 0, 9, 0);",
+        "  });",
+        "  context.expose('fillIt', async () => {",
+        "    for (let i = 0; i < 10; i++) {",
+        "      await context.api.setCellValue(i, 0, i + 1);",
+        "    }",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-report-errors",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Copy A1 to B1 and tell the user if something goes wrong.",
+      "hints": ["error", "wrong", "tell"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getCellValue", "notify"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    try {",
+        "      const value = await context.api.getCellValue(0, 0);",
+        "      await context.api.setCellValue(0, 1, value);",
+        "    } catch (err) {",
+        "      context.notify('Could not copy: ' + err, 'error');",
+        "    }",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-read-format-back",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Check whether A1 is bold and log the answer.",
+      "hints": ["bold", "check", "format"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getCellFormat", "log"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const format = await context.api.getCellFormat(0, 0);",
+        "    context.log('bold?', format.bold);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-formula-read",
+      "canary": false,
+      "objectType": "button",
+      "intent": "Read the formula in C10 and copy the same formula into C11.",
+      "hints": ["formula", "copy"],
+      "expectCapabilities": [],
+      "mustCall": ["api.getCellFormula", "api.setCellFormula"],
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    const formula = await context.api.getCellFormula(9, 2);",
+        "    if (formula) await context.api.setCellFormula(10, 2, formula);",
+        "  });",
+        "}"
+      ]
+    },
+    {
+      "id": "shape-no-capability-needed",
+      "canary": true,
+      "objectType": "button",
+      "intent": "Write today's date into A1. Do not use any privileged capability.",
+      "hints": ["date", "today", "write"],
+      "expectCapabilities": [],
+      "mustCall": ["api.setCellValue"],
+      "notes": "Scores the opposite failure from trap-undeclared-capability: a model that declares capabilities it does not need produces a scarier ceiling than the script warrants.",
+      "reference": [
+        "export function setup(context) {",
+        "  context.expose('onClick', async () => {",
+        "    await context.api.setCellValue(0, 0, new Date().toISOString().slice(0, 10));",
+        "  });",
+        "}"
+      ]
+    }
+  ]
+}

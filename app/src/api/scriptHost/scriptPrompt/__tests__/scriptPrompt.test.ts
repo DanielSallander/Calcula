@@ -11,6 +11,7 @@ import {
   buildSurfacePrompt,
   fullSurfaceCost,
   rankSurface,
+  hintTerms,
   SURFACE_ENTRIES,
   chainsForObjectType,
 } from "../index";
@@ -89,22 +90,48 @@ describe("truncation is announced, never silent", () => {
 });
 
 describe("priority decides what survives", () => {
-  it("keeps the object's own members ahead of the rest", () => {
-    const ranked = rankSurface("button");
-    const firstOther = ranked.findIndex((e) => e.group !== "context");
-    const lastContext = ranked.map((e) => e.group).lastIndexOf("context");
-    expect(lastContext).toBeLessThan(firstOther);
+  it("never drops the object's own members, even at a tight budget", () => {
+    // They are the reason the script is attached to this object at all. Asserted
+    // as "all present" rather than "strictly first": the top bucket also holds
+    // the core set and the capability index, and their relative order inside it
+    // does not matter to a model.
+    const own = rankSurface("button").filter((e) => e.group === "context").map((e) => e.chain);
+    expect(own.length).toBeGreaterThan(5);
+    const r = buildSurfacePrompt({ objectType: "button", budgetTokens: 2_000 });
+    expect(own.filter((c) => !r.includedChains.includes(c))).toEqual([]);
   });
 
-  it("promotes a hinted member ahead of its group", () => {
-    // The property that lets a small budget still carry the one method the task
-    // actually needs. Without hints, `caps.fetch` is deep in the capability
-    // group and a 2k budget would never reach it.
+  it("always shows that each capability namespace EXISTS, even unhinted", () => {
+    // The failure this prevents, measured: a task saying "Get JSON from
+    // https://..." matches nothing in `caps.fetch`'s chain or prose, so it
+    // ranked 468th of 528 and a model asked to download something was given no
+    // evidence that downloading is possible. It then invents `fetch()`.
+    const r = buildSurfacePrompt({ objectType: "button", budgetTokens: 2_000 });
+    expect(r.includedChains).toContain("caps.fetch");
+    expect(r.includedChains).toContain("caps.storage.get");
+  });
+
+  it("promotes a hinted member that is NOT the capability's representative", () => {
+    // `caps.storage.get` is always present as storage's index entry; `set` is
+    // not, so it is what actually tests the hint path.
     const tight = 2_000;
     const without = buildSurfacePrompt({ objectType: "button", budgetTokens: tight });
-    const withHint = buildSurfacePrompt({ objectType: "button", budgetTokens: tight, hints: ["fetch"] });
-    expect(without.includedChains).not.toContain("caps.fetch");
-    expect(withHint.includedChains).toContain("caps.fetch");
+    const withHint = buildSurfacePrompt({ objectType: "button", budgetTokens: tight, hints: ["storage"] });
+    expect(without.includedChains).not.toContain("caps.storage.set");
+    expect(withHint.includedChains).toContain("caps.storage.set");
+  });
+
+  it("drops function words so an innocuous 'and' cannot hoist junk", () => {
+    // Measured: the intent "Count how many times this button has been clicked..."
+    // put `api.executeCommand` (comm-AND) at the very top of the ranking, ahead
+    // of `log` and `expose`.
+    expect(hintTerms(["and the has been this how many"])).toEqual([]);
+  });
+
+  it("stems a term so 'store' reaches 'storage'", () => {
+    // "storage" does not contain "store" — the fifth letter differs — and that
+    // single miss ranked both storage methods 517th of 528.
+    expect(hintTerms(["store"])).toContain("stor");
   });
 
   it("a hint does not blow the budget", () => {
