@@ -60,11 +60,14 @@
 //! [`record_source_cascade_undo`] pushes a restore for every object the cascade
 //! touched into the transaction the DELETING command already has open, so one
 //! Ctrl+Z brings back the table AND its slicers AND their bindings. The one
-//! exception is timeline slicers, which have no restore arm because
-//! `TimelineSlicerState` is not persisted at all (a pre-existing gap recorded
-//! on `delete_timeline_slicer`); the cascade still removes them, because a
-//! timeline pointing at a deleted pivot renders nothing and eats clicks
-//! exactly like the slicer did.
+//! exception is timeline slicers, which have no restore arm YET. The reason
+//! this comment used to give -- "`TimelineSlicerState` is not persisted at all"
+//! -- stopped being true on 2026-08-19, when timelines gained a `.cala`/`.calp`
+//! section and the store became `Persisted<T>`. What is still missing is only
+//! the undo arm, tracked as the remaining half of BUG-0103. Until it lands the
+//! cascade still REMOVES them, because a timeline pointing at a deleted pivot
+//! renders nothing and eats clicks exactly like the slicer did -- but a delete
+//! is now a loss the user cannot undo, which is a stronger reason to finish it.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -1325,7 +1328,7 @@ pub fn cascade_deleted_sources(
     // Timelines can only be sourced from a pivot, so `dead_tables` cannot
     // affect them.
     if !dead_pivots.is_empty() {
-        let mut timelines = timeline_state.timelines.lock().unwrap();
+        let mut timelines = timeline_state.timelines.write(effect).unwrap();
         let mut to_delete: Vec<EntityId> = Vec::new();
         for (id, tl) in timelines.iter_mut() {
             let touches_connection =
@@ -1607,7 +1610,7 @@ pub fn cascade_sheet_removed(
     }
 
     {
-        let mut timelines = timeline_state.timelines.lock().unwrap();
+        let mut timelines = timeline_state.timelines.write(effect).unwrap();
         let mut to_delete: Vec<EntityId> = Vec::new();
         for (id, tl) in timelines.iter_mut() {
             match remap(tl.sheet_index) {
@@ -1921,7 +1924,7 @@ pub fn list_object_dependents(
             drop(slicers);
 
             if source_type == SlicerSourceType::Pivot {
-                let timelines = timeline_state.timelines.lock().unwrap();
+                let timelines = timeline_state.timelines.read().unwrap();
                 for tl in timelines.values() {
                     let source_hit = tl.source_id == id;
                     let conn_hit = tl.connected_pivot_ids.contains(&id);
@@ -2083,7 +2086,7 @@ pub fn list_object_dependents(
                 });
             }
             drop(slicers);
-            let timelines = timeline_state.timelines.lock().unwrap();
+            let timelines = timeline_state.timelines.read().unwrap();
             for tl in timelines.values() {
                 if tl.sheet_index != sheet_index {
                     continue;

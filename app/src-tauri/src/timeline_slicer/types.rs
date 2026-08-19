@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 // ============================================================================
 // TIMELINE LEVEL
@@ -92,9 +91,6 @@ pub struct TimelineSlicer {
     pub show_scrollbar: bool,
     /// Style preset name
     pub style_preset: String,
-    /// Horizontal scroll position (in logical units, depends on level)
-    #[serde(default)]
-    pub scroll_position: f64,
     /// Connected pivot table IDs (for report connections)
     #[serde(default)]
     pub connected_pivot_ids: Vec<identity::EntityId>,
@@ -214,14 +210,27 @@ pub struct UpdateTimelineConnectionsParams {
 
 /// Timeline slicer state managed by Tauri.
 pub struct TimelineSlicerState {
-    /// All timeline slicers: id -> TimelineSlicer
-    pub timelines: Mutex<HashMap<identity::EntityId, TimelineSlicer>>,
+    /// All timeline slicers: id -> TimelineSlicer.
+    ///
+    /// `Persisted<T>` rather than a bare `Mutex` because this store IS a save
+    /// source (`workbook.timeline_slicers`), so every write must name a
+    /// `DocumentEffect` — `write(&effect)` makes a forgotten one a COMPILE ERROR.
+    /// That matters here more than usual: before persistence landed, six of the
+    /// seven timeline commands did not even take `FileState`, so they could not
+    /// have dirtied the document at all. A save source that cannot set
+    /// `is_modified` loses the user's work twice over — the close prompt and
+    /// AutoRecover both read that one flag.
+    ///
+    /// The sibling precedent is `SlicerState.slicers`, NOT `PaneControlState`,
+    /// which is a save source on a bare `Mutex` holding its discipline by an
+    /// unenforceable convention.
+    pub timelines: crate::document_effect::Persisted<HashMap<identity::EntityId, TimelineSlicer>>,
 }
 
 impl TimelineSlicerState {
     pub fn new() -> Self {
         Self {
-            timelines: Mutex::new(HashMap::new()),
+            timelines: crate::document_effect::Persisted::new(HashMap::new()),
         }
     }
 }

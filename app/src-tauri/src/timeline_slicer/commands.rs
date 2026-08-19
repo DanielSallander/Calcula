@@ -19,6 +19,7 @@ use crate::log_debug;
 #[tauri::command]
 pub fn create_timeline_slicer(
     timeline_state: State<TimelineSlicerState>,
+    file_state: State<'_, crate::persistence::FileState>,
     params: CreateTimelineParams,
 ) -> Result<TimelineSlicer, String> {
     let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
@@ -44,7 +45,6 @@ pub fn create_timeline_slicer(
         style_preset: params
             .style_preset
             .unwrap_or_else(|| "TimelineStyleLight1".to_string()),
-        scroll_position: 0.0,
         connected_pivot_ids: vec![],
     };
 
@@ -57,10 +57,13 @@ pub fn create_timeline_slicer(
     );
 
     let result = timeline.clone();
+    // Nothing above can still refuse, so the effect is minted here and its
+    // existence IS the proof the document was dirtied.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     timeline_state
         .timelines
-        .lock()
-        .unwrap()
+        .write(&effect)
+        .map_err(|e| e.to_string())?
         .insert(id, timeline);
 
     Ok(result)
@@ -76,17 +79,22 @@ pub fn delete_timeline_slicer(
 ) -> Result<(), String> {
     log_debug!("TIMELINE", "delete_timeline_slicer id={}", timeline_id);
 
-    let mut timelines = timeline_state.timelines.lock().unwrap();
-    timelines
-        .remove(&timeline_id)
-        .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
-    drop(timelines);
-
-    // The timeline object itself is NOT persisted (TimelineSlicerState is never read
-    // by assemble_workbook_for_save -- a separate, pre-existing gap). The object
-    // SCRIPT pruned below is persisted, so this delete does change what a save
-    // writes, and that is what the effect is for.
+    // `lock_pending` because the presence check can still REFUSE: minting the
+    // effect first would leave a rejected delete with a dirty flag. Gate and
+    // mutation stay in ONE critical section — Tauri dispatches on a thread pool,
+    // so read / drop / re-lock would be a TOCTOU window.
+    let pending = timeline_state
+        .timelines
+        .lock_pending()
+        .map_err(|e| e.to_string())?;
+    if !pending.contains_key(&timeline_id) {
+        return Err(format!("Timeline slicer {} not found", timeline_id));
+    }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    {
+        let mut timelines = pending.authorize(&effect);
+        timelines.remove(&timeline_id);
+    }
     // C10: a deleted timeline must not leave its object script mounted/persisted.
     crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &timeline_id.to_string());
 
@@ -97,12 +105,20 @@ pub fn delete_timeline_slicer(
 #[tauri::command]
 pub fn update_timeline_slicer(
     timeline_state: State<TimelineSlicerState>,
+    file_state: State<'_, crate::persistence::FileState>,
     timeline_id: identity::EntityId,
     params: UpdateTimelineParams,
 ) -> Result<TimelineSlicer, String> {
     log_debug!("TIMELINE", "update_timeline_slicer id={}", timeline_id);
 
-    let mut timelines = timeline_state.timelines.lock().unwrap();
+    // The id lookup can still REFUSE, so the effect is minted only after it
+    // resolves — see `delete_timeline_slicer` for the same shape.
+    let pending = timeline_state
+        .timelines
+        .lock_pending()
+        .map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut timelines = pending.authorize(&effect);
     let tl = timelines
         .get_mut(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
@@ -136,13 +152,21 @@ pub fn update_timeline_slicer(
 #[tauri::command]
 pub fn update_timeline_position(
     timeline_state: State<TimelineSlicerState>,
+    file_state: State<'_, crate::persistence::FileState>,
     timeline_id: identity::EntityId,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let mut timelines = timeline_state.timelines.lock().unwrap();
+    // The id lookup can still REFUSE, so the effect is minted only after it
+    // resolves — see `delete_timeline_slicer` for the same shape.
+    let pending = timeline_state
+        .timelines
+        .lock_pending()
+        .map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut timelines = pending.authorize(&effect);
     let tl = timelines
         .get_mut(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
@@ -158,6 +182,7 @@ pub fn update_timeline_position(
 #[tauri::command]
 pub fn update_timeline_selection(
     timeline_state: State<TimelineSlicerState>,
+    file_state: State<'_, crate::persistence::FileState>,
     params: UpdateTimelineSelectionParams,
 ) -> Result<(), String> {
     log_debug!(
@@ -168,7 +193,14 @@ pub fn update_timeline_selection(
         params.selection_end
     );
 
-    let mut timelines = timeline_state.timelines.lock().unwrap();
+    // The id lookup can still REFUSE, so the effect is minted only after it
+    // resolves — see `delete_timeline_slicer` for the same shape.
+    let pending = timeline_state
+        .timelines
+        .lock_pending()
+        .map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut timelines = pending.authorize(&effect);
     let tl = timelines
         .get_mut(&params.timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", params.timeline_id))?;
@@ -178,26 +210,11 @@ pub fn update_timeline_selection(
     Ok(())
 }
 
-/// Update the scroll position of a timeline slicer.
-#[tauri::command]
-pub fn update_timeline_scroll(
-    timeline_state: State<TimelineSlicerState>,
-    timeline_id: identity::EntityId,
-    scroll_position: f64,
-) -> Result<(), String> {
-    let mut timelines = timeline_state.timelines.lock().unwrap();
-    let tl = timelines
-        .get_mut(&timeline_id)
-        .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
-
-    tl.scroll_position = scroll_position.max(0.0);
-    Ok(())
-}
-
 /// Update report connections for a timeline slicer.
 #[tauri::command]
 pub fn update_timeline_connections(
     timeline_state: State<TimelineSlicerState>,
+    file_state: State<'_, crate::persistence::FileState>,
     params: UpdateTimelineConnectionsParams,
 ) -> Result<(), String> {
     log_debug!(
@@ -207,7 +224,14 @@ pub fn update_timeline_connections(
         params.connected_pivot_ids
     );
 
-    let mut timelines = timeline_state.timelines.lock().unwrap();
+    // The id lookup can still REFUSE, so the effect is minted only after it
+    // resolves — see `delete_timeline_slicer` for the same shape.
+    let pending = timeline_state
+        .timelines
+        .lock_pending()
+        .map_err(|e| e.to_string())?;
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut timelines = pending.authorize(&effect);
     let tl = timelines
         .get_mut(&params.timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", params.timeline_id))?;
@@ -227,8 +251,8 @@ pub fn get_all_timeline_slicers(
 ) -> Vec<TimelineSlicer> {
     timeline_state
         .timelines
-        .lock()
-        .unwrap()
+        .read()
+        .expect("timeline store poisoned")
         .values()
         .cloned()
         .collect()
@@ -242,8 +266,8 @@ pub fn get_timeline_slicers_for_sheet(
 ) -> Vec<TimelineSlicer> {
     timeline_state
         .timelines
-        .lock()
-        .unwrap()
+        .read()
+        .expect("timeline store poisoned")
         .values()
         .filter(|t| t.sheet_index == sheet_index)
         .cloned()
@@ -258,7 +282,10 @@ pub fn get_timeline_data(
     timeline_state: State<TimelineSlicerState>,
     timeline_id: identity::EntityId,
 ) -> Result<TimelineDataResponse, String> {
-    let timelines = timeline_state.timelines.lock().unwrap();
+    let timelines = timeline_state
+        .timelines
+        .read()
+        .map_err(|e| e.to_string())?;
     let tl = timelines
         .get(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
@@ -306,7 +333,10 @@ pub fn get_timeline_selected_items(
     timeline_state: State<TimelineSlicerState>,
     timeline_id: identity::EntityId,
 ) -> Result<Option<Vec<String>>, String> {
-    let timelines = timeline_state.timelines.lock().unwrap();
+    let timelines = timeline_state
+        .timelines
+        .read()
+        .map_err(|e| e.to_string())?;
     let tl = timelines
         .get(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;

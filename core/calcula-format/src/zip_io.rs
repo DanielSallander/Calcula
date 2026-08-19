@@ -75,6 +75,15 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if !workbook.floating_ranges.is_empty() {
         manifest.features.push("floating_ranges".to_string());
     }
+    // Feature id only, no version link. An older reader DROPS an unknown section
+    // rather than misreading it -- `Manifest.features` is a bare `Vec<String>` with
+    // no whitelist, nothing in the tree uses `deny_unknown_fields`, and unknown ZIP
+    // entries are never enumerated. Losing a timeline loses a filter CONTROL, which
+    // is visible loss, not a document that comes back looking calculated -- so it
+    // takes a feature id, exactly as embedded media does.
+    if !workbook.timeline_slicers.is_empty() {
+        manifest.features.push("timeline_slicers".to_string());
+    }
     if !workbook.pivot_layouts.is_empty() {
         manifest.features.push("pivot_layouts".to_string());
     }
@@ -445,6 +454,13 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if !workbook.floating_ranges.is_empty() {
         let json = serde_json::to_string_pretty(&workbook.floating_ranges)?;
         zip.start_file("floating_ranges.json", options.clone())?;
+        zip.write_all(json.as_bytes())?;
+    }
+
+    // Timeline slicers. Feature id above, section here, unconditional read below.
+    if !workbook.timeline_slicers.is_empty() {
+        let json = serde_json::to_string_pretty(&workbook.timeline_slicers)?;
+        zip.start_file("timeline_slicers.json", options.clone())?;
         zip.write_all(json.as_bytes())?;
     }
 
@@ -1034,6 +1050,11 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let floating_ranges: Vec<persistence::SavedFloatingRange> =
         read_optional_json(&mut archive, "floating_ranges.json")?.unwrap_or_default();
 
+    // Timeline slicers -- UNCONDITIONALLY, same precedent: a build that wrote the
+    // section but forgot the feature id still gets its timelines back.
+    let timeline_slicers: Vec<persistence::SavedTimelineSlicer> =
+        read_optional_json(&mut archive, "timeline_slicers.json")?.unwrap_or_default();
+
     // Read sparklines
     let sparklines: Vec<SavedSparkline> =
         read_optional_json::<Vec<SavedSparkline>>(&mut archive, "sparklines.json")?
@@ -1124,6 +1145,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         active_sheet: manifest.active_sheet,
         tables,
         slicers,
+        timeline_slicers,
         ribbon_filters,
         pane_controls,
         user_files,
@@ -1306,6 +1328,7 @@ mod tests {
             active_sheet: 0,
             tables: vec![],
             slicers: vec![],
+            timeline_slicers: vec![],
             ribbon_filters: vec![],
             pane_controls: vec![],
             user_files: HashMap::new(),
@@ -2468,6 +2491,123 @@ mod tests {
         assert_eq!(loaded.sheets.len(), 1);
         assert_eq!(loaded.sheets[0].name, "Sheet1");
         assert!(loaded.sheets[0].cells.is_empty());
+    }
+
+    /// A timeline slicer survives save -> load, and the section is DECLARED.
+    ///
+    /// This is the test that fails if the section is written but never read back
+    /// — the shape of bug that hides for months, because saving looks fine and
+    /// the loss only appears on reopen. It asserts the VALUES, not just the
+    /// count: an empty `Vec` with the right length would pass a count check.
+    #[test]
+    fn timeline_slicers_round_trip_and_declare_their_feature_id() {
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        let tl_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        workbook.timeline_slicers = vec![persistence::SavedTimelineSlicer {
+            id: tl_id,
+            name: "Order Date".to_string(),
+            header_text: Some("When".to_string()),
+            sheet_id,
+            x: 12.5,
+            y: 34.5,
+            width: 350.0,
+            height: 100.0,
+            source_type: persistence::SavedTimelineSourceType::Pivot,
+            source_id: pivot_id,
+            field_name: "OrderDate".to_string(),
+            level: persistence::SavedTimelineLevel::Quarters,
+            selection_start: Some("2026-01-01".to_string()),
+            selection_end: Some("2026-06-30".to_string()),
+            show_header: true,
+            show_level_selector: false,
+            show_scrollbar: true,
+            style_preset: "TimelineStyleDark2".to_string(),
+            connected_pivot_ids: vec![pivot_id],
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.cala");
+        crate::save_calcula(&workbook, &path).unwrap();
+
+        let loaded = crate::load_calcula(&path).unwrap();
+        assert_eq!(
+            loaded.timeline_slicers.len(),
+            1,
+            "the timeline did not survive save -> load"
+        );
+        let got = &loaded.timeline_slicers[0];
+        assert_eq!(got.id, tl_id);
+        assert_eq!(got.name, "Order Date");
+        assert_eq!(got.header_text.as_deref(), Some("When"));
+        assert_eq!(got.sheet_id, sheet_id, "sheets are referenced by STABLE id");
+        assert_eq!(got.source_id, pivot_id);
+        assert_eq!(got.field_name, "OrderDate");
+        assert_eq!(got.level, persistence::SavedTimelineLevel::Quarters);
+        assert_eq!(got.selection_start.as_deref(), Some("2026-01-01"));
+        assert_eq!(got.selection_end.as_deref(), Some("2026-06-30"));
+        // The three booleans are `default = true`, so a field that failed to
+        // serialize would come back TRUE and look correct. Only the `false` one
+        // can catch that, which is why the fixture sets it.
+        assert!(!got.show_level_selector, "a dropped bool would default to true");
+        assert!(got.show_header);
+        assert!(got.show_scrollbar);
+        assert_eq!(got.style_preset, "TimelineStyleDark2");
+        assert_eq!(got.connected_pivot_ids, vec![pivot_id]);
+
+        // ...and the manifest DECLARES the section, which is what lets an older
+        // reader know it dropped something.
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let manifest: crate::manifest::Manifest = {
+            let mut f = archive.by_name("manifest.json").unwrap();
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut f, &mut buf).unwrap();
+            serde_json::from_str(&buf).unwrap()
+        };
+        assert!(
+            manifest.features.iter().any(|f| f == "timeline_slicers"),
+            "the timeline section was written without declaring its feature id: {:?}",
+            manifest.features
+        );
+        // A feature id is NOT a version link: an older reader must still be able
+        // to open this file and merely lose the timelines.
+        assert!(
+            manifest.format_version <= CALA_MAX_SUPPORTED_FORMAT_VERSION,
+            "a feature id must not raise format_version"
+        );
+    }
+
+    /// A workbook with no timelines writes no section and declares no id.
+    ///
+    /// Non-vacuity for the test above: an unconditional write would make that one
+    /// pass while every ordinary document grew an empty section and an
+    /// undeserved feature id.
+    #[test]
+    fn a_workbook_without_timelines_declares_nothing() {
+        let workbook = make_test_workbook();
+        assert!(workbook.timeline_slicers.is_empty(), "fixture precondition");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_timeline.cala");
+        crate::save_calcula(&workbook, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert!(
+            archive.by_name("timeline_slicers.json").is_err(),
+            "an empty timeline list must not write a section"
+        );
+        let manifest: crate::manifest::Manifest = {
+            let mut f = archive.by_name("manifest.json").unwrap();
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut f, &mut buf).unwrap();
+            serde_json::from_str(&buf).unwrap()
+        };
+        assert!(!manifest.features.iter().any(|f| f == "timeline_slicers"));
+
+        let loaded = crate::load_calcula(&path).unwrap();
+        assert!(loaded.timeline_slicers.is_empty());
     }
 
     #[test]

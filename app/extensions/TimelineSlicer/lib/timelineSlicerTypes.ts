@@ -7,7 +7,11 @@ export type TimelineSourceType = "pivot";
 export type TimelineLevel = "years" | "quarters" | "months" | "days";
 
 export interface TimelineSlicer {
-  id: number;
+  // Entity ids cross IPC as 36-char UUID STRINGS (core/identity). This said
+  // `number` while `sourceId` and `connectedPivotIds` in the same interface were
+  // already `string` — the file contradicted itself, and any round-trip proof
+  // built on the number would have been meaningless.
+  id: string;
   name: string;
   headerText: string | null;
   sheetIndex: number;
@@ -25,7 +29,6 @@ export interface TimelineSlicer {
   showLevelSelector: boolean;
   showScrollbar: boolean;
   stylePreset: string;
-  scrollPosition: number;
   connectedPivotIds: string[];
 }
 
@@ -71,12 +74,12 @@ export interface UpdateTimelineParams {
 }
 
 export interface UpdateTimelineSelectionParams {
-  timelineId: number;
+  timelineId: string;
   selectionStart: string | null;
   selectionEnd: string | null;
 }
 
 export interface UpdateTimelineConnectionsParams {
-  timelineId: number;
+  timelineId: string;
   connectedPivotIds: string[];
 }

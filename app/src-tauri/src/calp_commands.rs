@@ -257,13 +257,21 @@ fn assemble_publish_workbook(
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: &State<crate::pane_control::PaneControlState>,
     user_files_state: &State<crate::persistence::UserFilesState>,
+    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
     sheet_indices: &[usize],
 ) -> Result<PublishAssembly, String> {
+    // Timelines CARRY into the package. Their EFFECT already travels as the
+    // pivot's hidden_items/slicer_filters, so excluding the control while
+    // carrying its filter would hand a subscriber a pivot pinned to the
+    // publisher's last date range with no way to change it -- the worse of the
+    // two answers.
     let mut workbook = crate::persistence::build_workbook_for_save_with_slicers(
         state,
         user_files_state,
         slicer_state,
         ribbon_filter_state,
+        pivot_state,
+        timeline_state,
     )?;
 
     // Pane controls (Controls pane) are workbook-scoped and ride in the
@@ -625,6 +633,7 @@ pub fn calp_publish(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     params: PublishParams,
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
@@ -686,6 +695,7 @@ pub fn calp_publish(
         &ribbon_filter_state,
         &pane_control_state,
         &user_files_state,
+        &timeline_slicer_state,
         &sheet_indices,
     )?;
     let report =
@@ -975,6 +985,7 @@ pub fn calp_publish_preview(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     params: PublishPreviewParams,
     window: tauri::Window,
 ) -> Result<PublishPreviewResponse, String> {
@@ -992,6 +1003,7 @@ pub fn calp_publish_preview(
         &ribbon_filter_state,
         &pane_control_state,
         &user_files_state,
+        &timeline_slicer_state,
         &sheet_indices,
     )?;
     let report =
@@ -15052,6 +15064,13 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
     ("sheets", "CARRIED: sheets/{id}/{data,styles,cell_styles,layout,metadata}.json"),
     ("tables", "CARRIED: tables/{id}.json, filtered to published sheets"),
     ("slicers", "CARRIED: slicers.json, filtered to published sheets"),
+    (
+        "timeline_slicers",
+        "CARRIED: timeline_slicers.json. The timeline's EFFECT already travels as the 
+         pivot's hidden_items/slicer_filters, so excluding the control while carrying 
+         its filter would hand a subscriber a pivot pinned to the publisher's last 
+         date range with no way to change it.",
+    ),
     ("theme", "CARRIED: theme.json (applied only while the subscriber's theme is still default)"),
     ("scripts", "CARRIED: modules/{id}.json — inert until the subscriber runs them"),
     ("notebooks", "CARRIED: notebooks/{id}.json — execution output stripped"),

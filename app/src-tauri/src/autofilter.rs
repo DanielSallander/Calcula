@@ -1003,6 +1003,35 @@ pub(crate) fn apply_auto_filter_inner(
     file_state: &FileState,
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
+    // Refuse a filter the engine cannot perform, rather than applying nothing and
+    // reporting success. `FilterOn::Icon`'s arm in `should_row_be_visible` is EMPTY
+    // -- its own comment ends "For now, icon-filtered rows are always shown" -- so
+    // the predicate falls through to `true` and the filter hides nothing while the
+    // UI shows a filter as applied.
+    //
+    // Reachable even though no Rust code constructs it and the dropdown does not
+    // offer it: `FilterCriteria.filter_on` is `#[serde(default)]` with
+    // `rename_all = "camelCase"`, so any script, MCP tool or frontend call passing
+    // `{"filterOn": "icon"}` lands here. Filed as BUG-0104. Delete this guard when
+    // icon filtering is implemented -- `icon_filter_is_refused_rather_than_ignored`
+    // will fail and tell you to.
+    if params
+        .criteria
+        .as_ref()
+        .is_some_and(|c| c.filter_on == FilterOn::Icon)
+    {
+        return AutoFilterResult {
+            success: false,
+            auto_filter: None,
+            error: Some(
+                "Filtering by conditional-formatting icon is not implemented yet. \n                 Filter by value, colour or a custom criterion instead."
+                    .to_string(),
+            ),
+            hidden_rows: Vec::new(),
+            visible_rows: Vec::new(),
+        };
+    }
+
     let active_sheet = *state.active_sheet.read().unwrap();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(

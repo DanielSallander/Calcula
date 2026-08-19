@@ -71,7 +71,7 @@ pub fn get_object_json(
         }
         "timeline_slicer" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid timeline slicer id".to_string())?;
-            let timelines = timeline_slicer_state.timelines.lock().unwrap();
+            let timelines = timeline_slicer_state.timelines.read().unwrap();
             let timeline = timelines.get(&id)
                 .ok_or_else(|| format!("Timeline slicer {} not found", id))?;
             serde_json::to_string_pretty(timeline).map_err(|e| e.to_string())
@@ -285,7 +285,14 @@ pub fn set_object_json(
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid timeline slicer id".to_string())?;
             let new_timeline: crate::timeline_slicer::TimelineSlicer = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid timeline slicer JSON: {}", e))?;
-            let mut timelines = timeline_slicer_state.timelines.lock().unwrap();
+            // Resolve under a read guard, then decide, then write -- so an id that
+            // does not resolve leaves the document clean. Same shape as the
+            // ribbon_filter arm above.
+            if !timeline_slicer_state.timelines.read().unwrap().contains_key(&id) {
+                return Err(format!("Timeline slicer {} not found", id));
+            }
+            let effect = DocumentEffect::mutates(fs);
+            let mut timelines = timeline_slicer_state.timelines.write(&effect).unwrap();
             if let Some(existing) = timelines.get_mut(&id) {
                 *existing = new_timeline;
                 Ok(())
@@ -491,7 +498,7 @@ pub fn list_objects(
 
     // Timeline slicers
     {
-        let timelines = timeline_slicer_state.timelines.lock().unwrap();
+        let timelines = timeline_slicer_state.timelines.read().unwrap();
         for timeline in timelines.values() {
             entries.push(ObjectEntry {
                 object_type: "timeline_slicer".to_string(),
@@ -746,7 +753,7 @@ pub fn get_workbook_tree(
 
     // Timeline Slicers
     {
-        let timelines = timeline_slicer_state.timelines.lock().unwrap();
+        let timelines = timeline_slicer_state.timelines.read().unwrap();
         if !timelines.is_empty() {
             let mut node = TreeNode {
                 label: format!("Timeline Slicers ({})", timelines.len()),

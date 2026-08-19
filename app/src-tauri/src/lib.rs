@@ -5563,7 +5563,6 @@ pub fn run() {
             timeline_slicer::update_timeline_slicer,
             timeline_slicer::update_timeline_position,
             timeline_slicer::update_timeline_selection,
-            timeline_slicer::update_timeline_scroll,
             timeline_slicer::update_timeline_connections,
             timeline_slicer::get_all_timeline_slicers,
             timeline_slicer::get_timeline_slicers_for_sheet,

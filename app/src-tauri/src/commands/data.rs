@@ -4786,6 +4786,7 @@ pub(crate) fn sort_range_off_sheet(
     target: usize,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
+    reject_unimplemented_sort_on(&params.fields)?;
     crate::protection::check_sheet_action(state, target, "sort", "sort")?;
     crate::protection::check_sheet_protection_range(
         state, target,
@@ -5053,6 +5054,31 @@ pub(crate) fn sort_range_off_sheet(
     })
 }
 
+/// Refuse a sort the engine cannot actually perform, instead of performing a
+/// DIFFERENT one and reporting success.
+///
+/// `SortOn::Icon` (sort by conditional-formatting icon) has never been
+/// implemented: its comparator arm falls back to comparing VALUES. The Sorting
+/// extension nevertheless offers it by name —
+/// `<option value="icon">Conditional Formatting Icon</option>`
+/// (`app/extensions/Sorting/components/SortLevelRow.tsx:183`) — so a user could
+/// pick it, watch the rows reorder by value, and be told it worked. A plausible
+/// WRONG answer is harder to catch than an error, which is why this refuses.
+///
+/// Filed as BUG-0104. Delete this guard when icon sorting is implemented; the
+/// test `icon_sort_is_refused_rather_than_silently_sorted_by_value` will fail and
+/// tell you to.
+fn reject_unimplemented_sort_on(fields: &[SortField]) -> Result<(), String> {
+    if fields.iter().any(|f| f.sort_on == SortOn::Icon) {
+        return Err(
+            "Sorting by conditional-formatting icon is not implemented yet. \
+             Sort by cell value, cell colour or font colour instead."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn sort_range(
     state: State<AppState>,
@@ -5063,6 +5089,7 @@ pub fn sort_range(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
+    reject_unimplemented_sort_on(&params.fields)?;
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
@@ -5727,7 +5754,13 @@ fn compare_cells(
             }
         }
         SortOn::Icon => {
-            // Icon sorting not yet implemented - fall back to value comparison
+            // UNREACHABLE in practice: `reject_unimplemented_sort_on` refuses the
+            // whole operation at both entry points before any comparison runs, so
+            // this arm exists only to keep the match total. It deliberately keeps
+            // the old value-comparison body rather than panicking — a comparator
+            // that panics would take the process down if a future entry point
+            // forgot the guard, whereas this merely orders by value while the
+            // guard is what guarantees the user never gets here silently.
             let val_a = cell_a.as_ref().map(|c| &c.value);
             let val_b = cell_b.as_ref().map(|c| &c.value);
 
@@ -8164,3 +8197,10 @@ mod d8_structural_recalc_tests;
 #[cfg(test)]
 #[path = "pivot_structural_delete_tests.rs"]
 mod pivot_structural_delete_tests;
+
+/// BUG-0104 — sorting or filtering by conditional-formatting ICON must refuse
+/// rather than quietly doing something else and reporting success. A CHILD
+/// module of `data` so it can reach `reject_unimplemented_sort_on`.
+#[cfg(test)]
+#[path = "icon_refusal_tests.rs"]
+mod icon_refusal_tests;

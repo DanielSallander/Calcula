@@ -603,6 +603,7 @@ pub fn script_distribution(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     cap_store: State<CapabilityStore>,
     script_id: String,
     action: String,
@@ -733,6 +734,7 @@ pub fn script_distribution(
         &ribbon_filter_state,
         &pane_control_state,
         &user_files_state,
+        &timeline_slicer_state,
         &p,
         &window,
     );
@@ -872,6 +874,7 @@ fn dispatch(
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: &State<crate::pane_control::PaneControlState>,
     user_files_state: &State<crate::persistence::UserFilesState>,
+    timeline_slicer_state: &State<crate::timeline_slicer::TimelineSlicerState>,
     p: &serde_json::Map<String, Value>,
     window: &Window,
 ) -> Result<Value, String> {
@@ -995,6 +998,7 @@ fn dispatch(
                 ribbon_filter_state.clone(),
                 pane_control_state.clone(),
                 user_files_state.clone(),
+                timeline_slicer_state.clone(),
                 params,
                 window.clone(),
             )?;
@@ -1035,6 +1039,7 @@ fn dispatch(
                 ribbon_filter_state.clone(),
                 pane_control_state.clone(),
                 user_files_state.clone(),
+                timeline_slicer_state.clone(),
                 params,
                 window.clone(),
             )?;

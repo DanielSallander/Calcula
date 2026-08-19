@@ -562,6 +562,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         active_sheet: 0,
         tables,
         slicers: Vec::new(),
+        timeline_slicers: Vec::new(),
         user_files: HashMap::new(),
         theme: engine::theme::ThemeDefinition::default(),
         scripts: Vec::new(),

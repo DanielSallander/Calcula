@@ -74,6 +74,8 @@ pub struct Workbook {
     pub tables: Vec<SavedTable>,
     /// Slicer definitions across all sheets
     pub slicers: Vec<SavedSlicer>,
+    /// Timeline slicer definitions across all sheets.
+    pub timeline_slicers: Vec<SavedTimelineSlicer>,
     /// User files stored inside the .cala archive (path -> content).
     /// Paths are relative, e.g. "README.md" or "docs/notes.txt".
     pub user_files: HashMap<String, Vec<u8>>,
@@ -616,6 +618,7 @@ impl Workbook {
             active_sheet: 0,
             tables: Vec::new(),
             slicers: Vec::new(),
+            timeline_slicers: Vec::new(),
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
@@ -660,6 +663,7 @@ impl Workbook {
             active_sheet: 0,
             tables: Vec::new(),
             slicers: Vec::new(),
+            timeline_slicers: Vec::new(),
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
@@ -1236,6 +1240,77 @@ pub struct SavedSlicerComputedProperty {
 
 fn default_true() -> bool {
     true
+}
+
+/// Source of a timeline slicer. Only pivot tables today, exactly as in Excel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SavedTimelineSourceType {
+    Pivot,
+}
+
+/// Timeline granularity. TYPED rather than a `String`: the legacy `*Def` layer in
+/// `core/calcula-format/src/features/` coerces unknown wire values through `_ =>`
+/// fallbacks, so an unrecognised level would silently become Months instead of
+/// failing the load. A typed enum makes an unknown value a deserialization error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SavedTimelineLevel {
+    Years,
+    Quarters,
+    #[default]
+    Months,
+    Days,
+}
+
+/// A timeline slicer persisted in the workbook.
+///
+/// Sheets are referenced by STABLE ID, not index, so the row survives every
+/// renumbering between save and load — the `SavedFloatingRange` rule.
+///
+/// Serialized DIRECTLY into both `.cala` and `.calp`, with no `TimelineSlicerDef`
+/// mirror: `floating_ranges` — the precedent this feature follows — has no Def
+/// struct either. The Def layer is legacy ceremony whose `_ =>` arms turn an
+/// unknown wire value into a silent default.
+///
+/// camelCase in BOTH formats. `SavedSlicer` is the outlier that predates the
+/// `rename_all` convention and needs dual-key reads in the package inspector to
+/// compensate; do not reproduce that.
+///
+/// `scroll_position` is deliberately absent. It is view state, its only writer
+/// (`update_timeline_scroll`) had ZERO callers and was deleted with this change,
+/// and persisting it would have persisted a constant `0.0`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedTimelineSlicer {
+    pub id: EntityId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_text: Option<String>,
+    pub sheet_id: SheetId,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub source_type: SavedTimelineSourceType,
+    pub source_id: EntityId,
+    pub field_name: String,
+    #[serde(default)]
+    pub level: SavedTimelineLevel,
+    /// ISO 8601 "YYYY-MM-DD". `None` = no selection, i.e. all dates visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_end: Option<String>,
+    #[serde(default = "default_true")]
+    pub show_header: bool,
+    #[serde(default = "default_true")]
+    pub show_level_selector: bool,
+    #[serde(default = "default_true")]
+    pub show_scrollbar: bool,
+    pub style_preset: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_pivot_ids: Vec<EntityId>,
 }
 
 fn default_gap() -> f64 {

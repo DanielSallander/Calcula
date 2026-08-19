@@ -701,10 +701,14 @@ pub fn build_workbook_for_save_with_slicers(
     user_files_state: &State<UserFilesState>,
     slicer_state: &State<crate::slicer::SlicerState>,
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+    pivot_state: &State<'_, crate::pivot::types::PivotState>,
+    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
 ) -> Result<Workbook, String> {
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
     let sheet_ids_bwfs = state.sheet_ids.read().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_bwfs);
+    workbook.timeline_slicers =
+        collect_timeline_slicers_for_save(timeline_state, pivot_state, &sheet_ids_bwfs);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
     workbook.object_scripts = state.object_scripts.read().unwrap().clone();
@@ -1281,6 +1285,146 @@ fn collect_slicers_for_save(
 }
 
 /// `None` when the slicer names a sheet that no longer exists.
+/// Project the live timeline store into the saved shape.
+///
+/// ORPHANS ARE PRUNED HERE, on the WRITE side, and that is what earns the claim
+/// that the load path needs no ordering dependency on pivots. A timeline whose
+/// sheet no longer exists cannot be placed (`sheet_index_to_id` returns `None`),
+/// and one whose source pivot is gone would restore as a control wired to
+/// nothing. Dropping both at save time means `restore_timeline_slicers` can run
+/// in any order relative to `restore_pivot_definitions` and still be correct.
+///
+/// The output is SORTED BY ID so the same document produces byte-identical
+/// `timeline_slicers.json` on every save — a `HashMap` iterates in arbitrary
+/// order, which would otherwise make every save a spurious diff.
+fn collect_timeline_slicers_for_save(
+    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
+    pivot_state: &State<'_, crate::pivot::types::PivotState>,
+    sheet_ids: &[SheetId],
+) -> Vec<persistence::SavedTimelineSlicer> {
+    let timelines = match timeline_state.timelines.read() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let live_pivots = pivot_state.pivot_tables.read().ok();
+    let mut out: Vec<persistence::SavedTimelineSlicer> = timelines
+        .values()
+        .filter_map(|tl| {
+            // Orphaned by a deleted source pivot -> not worth persisting.
+            if let Some(pivots) = live_pivots.as_ref() {
+                if !pivots.contains_key(&tl.source_id) {
+                    return None;
+                }
+            }
+            Some(persistence::SavedTimelineSlicer {
+                id: tl.id,
+                name: tl.name.clone(),
+                header_text: tl.header_text.clone(),
+                sheet_id: sheet_index_to_id(sheet_ids, tl.sheet_index)?,
+                x: tl.x,
+                y: tl.y,
+                width: tl.width,
+                height: tl.height,
+                source_type: match tl.source_type {
+                    crate::timeline_slicer::TimelineSourceType::Pivot => {
+                        persistence::SavedTimelineSourceType::Pivot
+                    }
+                },
+                source_id: tl.source_id,
+                field_name: tl.field_name.clone(),
+                level: match tl.level {
+                    crate::timeline_slicer::TimelineLevel::Years => {
+                        persistence::SavedTimelineLevel::Years
+                    }
+                    crate::timeline_slicer::TimelineLevel::Quarters => {
+                        persistence::SavedTimelineLevel::Quarters
+                    }
+                    crate::timeline_slicer::TimelineLevel::Months => {
+                        persistence::SavedTimelineLevel::Months
+                    }
+                    crate::timeline_slicer::TimelineLevel::Days => {
+                        persistence::SavedTimelineLevel::Days
+                    }
+                },
+                selection_start: tl.selection_start.clone(),
+                selection_end: tl.selection_end.clone(),
+                show_header: tl.show_header,
+                show_level_selector: tl.show_level_selector,
+                show_scrollbar: tl.show_scrollbar,
+                style_preset: tl.style_preset.clone(),
+                connected_pivot_ids: tl.connected_pivot_ids.clone(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|t| t.id);
+    out
+}
+
+/// Rebuild the timeline store from a file just read.
+pub(crate) fn restore_timeline_slicers(
+    saved: &[persistence::SavedTimelineSlicer],
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    workbook: &persistence::Workbook,
+) {
+    // LOAD PATH: this is not the user's edit, so it must not dirty the document.
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let mut timelines = match timeline_state.timelines.write(&load) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    timelines.clear();
+    for st in saved {
+        // A sheet id that no longer resolves means the row outlived its sheet;
+        // skip rather than placing the control on an arbitrary index.
+        let Some(sheet_index) = sheet_id_to_index(workbook, st.sheet_id) else {
+            continue;
+        };
+        timelines.insert(
+            st.id,
+            crate::timeline_slicer::TimelineSlicer {
+                id: st.id,
+                name: st.name.clone(),
+                header_text: st.header_text.clone(),
+                sheet_index,
+                x: st.x,
+                y: st.y,
+                width: st.width,
+                height: st.height,
+                source_type: match st.source_type {
+                    persistence::SavedTimelineSourceType::Pivot => {
+                        crate::timeline_slicer::TimelineSourceType::Pivot
+                    }
+                },
+                source_id: st.source_id,
+                field_name: st.field_name.clone(),
+                level: match st.level {
+                    persistence::SavedTimelineLevel::Years => {
+                        crate::timeline_slicer::TimelineLevel::Years
+                    }
+                    persistence::SavedTimelineLevel::Quarters => {
+                        crate::timeline_slicer::TimelineLevel::Quarters
+                    }
+                    persistence::SavedTimelineLevel::Months => {
+                        crate::timeline_slicer::TimelineLevel::Months
+                    }
+                    persistence::SavedTimelineLevel::Days => {
+                        crate::timeline_slicer::TimelineLevel::Days
+                    }
+                },
+                selection_start: st.selection_start.clone(),
+                selection_end: st.selection_end.clone(),
+                show_header: st.show_header,
+                show_level_selector: st.show_level_selector,
+                show_scrollbar: st.show_scrollbar,
+                style_preset: st.style_preset.clone(),
+                connected_pivot_ids: st.connected_pivot_ids.clone(),
+            },
+        );
+    }
+}
+
 fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> Option<persistence::SavedSlicer> {
     Some(persistence::SavedSlicer {
         id: slicer.id,
@@ -2169,6 +2313,7 @@ fn assemble_workbook_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
     pivot_state: &State<crate::pivot::types::PivotState>,
     bi_state: &State<crate::bi::types::BiState>,
+    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
 ) -> Result<Workbook, String> {
     // Multi-sheet workbook build (BUG-0011: the old inline single-sheet
     // Workbook::from_grid build dropped every sheet but the active one).
@@ -2178,6 +2323,8 @@ fn assemble_workbook_for_save(
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
     let sheet_ids_save = state.sheet_ids.read().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
+    workbook.timeline_slicers =
+        collect_timeline_slicers_for_save(timeline_state, pivot_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pane_controls = collect_pane_controls_for_save(pane_control_state);
     workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
@@ -2644,6 +2791,7 @@ pub fn save_file(
         &script_state,
         &pivot_state,
         &bi_state,
+        &timeline_slicer_state,
     )?;
 
     let path_buf = PathBuf::from(&path);
@@ -3094,6 +3242,7 @@ pub fn open_file(
 
     // Restore slicers from workbook
     restore_slicers(&workbook.slicers, &slicer_state, &workbook, &state);
+    restore_timeline_slicers(&workbook.timeline_slicers, &timeline_slicer_state, &workbook);
 
     // Restore ribbon filters from workbook
     restore_ribbon_filters(&workbook.ribbon_filters, &ribbon_filter_state);
@@ -3822,14 +3971,12 @@ pub(crate) fn reset_document_scoped_stores(
     // timeline inserted in document A therefore survived File > New / Open into
     // document B — the data-INJECTION class this function exists to end.
     //
-    // It is a bare `Mutex`, not `Persisted<T>`, so the clear is `.lock()`: the
-    // store reaches no save path, so there is no saved state for the effect to
-    // gate. That is a statement about TODAY. When timeline persistence lands
-    // (the other half of BUG-0103), this becomes `Persisted<T>` and this line
-    // becomes `.write(effect)`.
+    // Now `Persisted<T>`: this store became a save source when timeline
+    // persistence landed, so the clear names the effect its callers already
+    // build (`deliberately_clean(LoadingFromDisk)` on both paths).
     timeline_slicer_state
         .timelines
-        .lock()
+        .write(effect)
         .map_err(|e| e.to_string())?
         .clear();
 
@@ -4884,6 +5031,7 @@ pub fn xlsx_save_loss_report(
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     user_files_state: State<UserFilesState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     window: tauri::Window,
 ) -> Result<Vec<String>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -4909,6 +5057,10 @@ pub fn xlsx_save_loss_report(
     check(
         !slicer_state.slicers.read().map_err(|e| e.to_string())?.is_empty(),
         "Slicers",
+    );
+    check(
+        !timeline_state.timelines.read().map_err(|e| e.to_string())?.is_empty(),
+        "Timeline slicers",
     );
     check(
         !state.floating_ranges.read().map_err(|e| e.to_string())?.is_empty(),
@@ -5082,6 +5234,7 @@ pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
     ("bi_pivot_metadata", "REPORTED with the pivots it annotates ('Pivot tables')"),
     ("pivot_layouts", "REPORTED with the pivots they lay out ('Pivot tables')"),
     ("slicers", "REPORTED: 'Slicers'"),
+    ("timeline_slicers", "REPORTED: 'Timeline slicers'"),
     ("ribbon_filters", "REPORTED: 'Ribbon filters'"),
     ("pane_controls", "REPORTED: 'Pane controls'"),
     ("comments", "REPORTED: 'Threaded comments'"),
@@ -5132,6 +5285,7 @@ pub fn auto_recover_save(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -5170,6 +5324,7 @@ pub fn auto_recover_save(
         &script_state,
         &pivot_state,
         &bi_state,
+        &timeline_slicer_state,
     )?;
 
     // Save as .cala to the recovery path. CRITICAL: if the live document is

@@ -97,7 +97,6 @@ fn timeline(name: &str, source: EntityId, connected: Vec<EntityId>) -> TimelineS
         show_level_selector: true,
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
-        scroll_position: 0.0,
         connected_pivot_ids: connected,
     }
 }
@@ -298,7 +297,7 @@ fn deleting_a_pivot_deletes_the_timeline_that_had_only_that_pivot() {
     let pivot_id = id();
     let tl = timeline("Dates", pivot_id, vec![pivot_id]);
     let tl_id = tl.id;
-    timeline_state.timelines.lock().unwrap().insert(tl_id, tl);
+    timeline_state.timelines.write(&e).unwrap().insert(tl_id, tl);
 
     let cascade = cascade_deleted_sources(
         &app_state(),
@@ -309,7 +308,7 @@ fn deleting_a_pivot_deletes_the_timeline_that_had_only_that_pivot() {
         &[DeletedSource::pivot(pivot_id)],
     );
 
-    assert!(timeline_state.timelines.lock().unwrap().is_empty());
+    assert!(timeline_state.timelines.read().unwrap().is_empty());
     assert_eq!(cascade.deleted_timelines.len(), 1);
 }
 
@@ -324,7 +323,7 @@ fn a_timeline_with_a_surviving_pivot_is_repointed() {
     let alive = id();
     let tl = timeline("Dates", dead, vec![dead, alive]);
     let tl_id = tl.id;
-    timeline_state.timelines.lock().unwrap().insert(tl_id, tl);
+    timeline_state.timelines.write(&e).unwrap().insert(tl_id, tl);
 
     cascade_deleted_sources(
         &app_state(),
@@ -335,7 +334,7 @@ fn a_timeline_with_a_surviving_pivot_is_repointed() {
         &[DeletedSource::pivot(dead)],
     );
 
-    let timelines = timeline_state.timelines.lock().unwrap();
+    let timelines = timeline_state.timelines.read().unwrap();
     let survivor = timelines.get(&tl_id).expect("timeline must survive");
     assert_eq!(survivor.source_id, alive);
     assert_eq!(survivor.connected_pivot_ids, vec![alive]);
@@ -353,7 +352,7 @@ fn deleting_a_table_never_touches_a_timeline() {
     let shared = id();
     let tl = timeline("Dates", shared, vec![shared]);
     let tl_id = tl.id;
-    timeline_state.timelines.lock().unwrap().insert(tl_id, tl);
+    timeline_state.timelines.write(&e).unwrap().insert(tl_id, tl);
 
     cascade_deleted_sources(
         &app_state(),
@@ -364,7 +363,7 @@ fn deleting_a_table_never_touches_a_timeline() {
         &[DeletedSource::table(shared)],
     );
 
-    assert!(timeline_state.timelines.lock().unwrap().contains_key(&tl_id));
+    assert!(timeline_state.timelines.read().unwrap().contains_key(&tl_id));
 }
 
 // ===========================================================================

@@ -53,16 +53,6 @@ export async function updateTimelineSelection(
   return timelineBackend.invoke<void>("update_timeline_selection", { params });
 }
 
-export async function updateTimelineScroll(
-  timelineId: number,
-  scrollPosition: number,
-): Promise<void> {
-  return timelineBackend.invoke<void>("update_timeline_scroll", {
-    timelineId,
-    scrollPosition,
-  });
-}
-
 export async function updateTimelineConnections(
   params: UpdateTimelineConnectionsParams,
 ): Promise<void> {
