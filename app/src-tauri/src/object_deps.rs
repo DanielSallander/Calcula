@@ -1735,9 +1735,19 @@ struct PaneControlSnapshotOut<'a> {
 /// `commit_transaction` afterwards — the entries land in whatever transaction
 /// is current, which is the whole point: one Ctrl+Z, one restored world.
 ///
-/// TIMELINES ARE NOT RECORDED, and that is a declared gap rather than an
-/// oversight: `TimelineSlicerState` is not persisted and has no restore arm at
-/// all, so there is nothing to record INTO. Noted on `delete_timeline_slicer`.
+/// Timelines ARE recorded, as of 2026-08-19. They were not until then, on the
+/// stated grounds that `TimelineSlicerState` "is not persisted and has no
+/// restore arm at all, so there is nothing to record INTO" — both halves of
+/// which stopped being true when persistence and the three `timeline_slicer*`
+/// restore kinds landed.
+/// Wire shape for a timeline entry — mirrors `SlicerSnapshotOut`, and must stay
+/// field-compatible with `TimelineSnapshot` in `undo_commands.rs`, which reads it.
+#[derive(serde::Serialize)]
+struct TimelineSnapshotOut<'a> {
+    timeline_id: identity::EntityId,
+    previous: &'a TimelineSlicer,
+}
+
 pub fn record_source_cascade_undo(state: &AppState, cascade: &SourceCascade) {
     if cascade.is_empty() {
         return;
@@ -1775,6 +1785,35 @@ pub fn record_source_cascade_undo_into(
         })
         .unwrap_or_default();
         undo_stack.record_custom_restore("slicer".to_string(), data, "Restore slicer binding");
+    }
+    // ORDER IS LOAD-BEARING. Entries replay in REVERSE, so these must be
+    // recorded BEFORE the caller's own `pivot_delete` entry: on undo the pivot
+    // has to exist again before the timeline that points at it is restored.
+    // Callers that record a pivot delete do so after calling this, which is what
+    // makes the ordering come out right.
+    for timeline in &cascade.deleted_timelines {
+        let data = serde_json::to_vec(&TimelineSnapshotOut {
+            timeline_id: timeline.id,
+            previous: timeline,
+        })
+        .unwrap_or_default();
+        undo_stack.record_custom_restore(
+            "timeline_slicer_delete".to_string(),
+            data,
+            "Restore timeline slicer",
+        );
+    }
+    for timeline in &cascade.rebound_timelines {
+        let data = serde_json::to_vec(&TimelineSnapshotOut {
+            timeline_id: timeline.id,
+            previous: timeline,
+        })
+        .unwrap_or_default();
+        undo_stack.record_custom_restore(
+            "timeline_slicer".to_string(),
+            data,
+            "Restore timeline binding",
+        );
     }
     for filter in &cascade.rebound_filters {
         let data = serde_json::to_vec(&RibbonFilterSnapshotOut {

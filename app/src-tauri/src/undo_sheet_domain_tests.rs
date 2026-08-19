@@ -31,6 +31,7 @@ pub(super) struct Fixture {
     pivots: PivotState,
     slicer: SlicerState,
     pane: crate::pane_control::PaneControlState,
+    timelines: crate::timeline_slicer::TimelineSlicerState,
     filters: crate::ribbon_filter::RibbonFilterState,
 }
 
@@ -69,6 +70,7 @@ impl Fixture {
             pivots: PivotState::new(),
             slicer: SlicerState::new(),
             pane: crate::pane_control::PaneControlState::new(),
+            timelines: crate::timeline_slicer::TimelineSlicerState::new(),
             filters: crate::ribbon_filter::RibbonFilterState::new(),
         }
     }
@@ -210,6 +212,7 @@ impl Fixture {
             &self.slicer,
             &self.filters,
             &self.pane,
+            &self.timelines,
             transaction,
             true,
         )
@@ -231,6 +234,7 @@ impl Fixture {
             &self.slicer,
             &self.filters,
             &self.pane,
+            &self.timelines,
             transaction,
             false,
         )

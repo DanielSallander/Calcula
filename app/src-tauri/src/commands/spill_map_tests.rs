@@ -240,6 +240,7 @@ fn undo_once(wb: &Workbook) -> bool {
         &wb.slicer,
         &wb.filters,
         &wb.pane,
+        &wb.timelines,
         transaction,
         true,
     )
@@ -258,6 +259,7 @@ fn redo_once(wb: &Workbook) -> bool {
         &wb.slicer,
         &wb.filters,
         &wb.pane,
+        &wb.timelines,
         transaction,
         false,
     )

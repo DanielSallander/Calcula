@@ -18,6 +18,7 @@ use crate::log_debug;
 /// Create a new timeline slicer.
 #[tauri::command]
 pub fn create_timeline_slicer(
+    state: State<crate::AppState>,
     timeline_state: State<TimelineSlicerState>,
     file_state: State<'_, crate::persistence::FileState>,
     params: CreateTimelineParams,
@@ -66,6 +67,24 @@ pub fn create_timeline_slicer(
         .map_err(|e| e.to_string())?
         .insert(id, timeline);
 
+    // Undo of a create is a delete, so only the id needs recording.
+    {
+        #[derive(serde::Serialize)]
+        struct TimelineCreateSnapshot {
+            timeline_id: identity::EntityId,
+        }
+        let data =
+            serde_json::to_vec(&TimelineCreateSnapshot { timeline_id: id }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Create timeline slicer");
+        undo_stack.record_custom_restore(
+            "timeline_slicer_create".to_string(),
+            data,
+            "Create timeline slicer",
+        );
+        undo_stack.commit_transaction();
+    }
+
     Ok(result)
 }
 
@@ -91,12 +110,40 @@ pub fn delete_timeline_slicer(
         return Err(format!("Timeline slicer {} not found", timeline_id));
     }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    {
+    let removed = {
         let mut timelines = pending.authorize(&effect);
-        timelines.remove(&timeline_id);
+        // BIND the removed value — undoing a delete needs the whole object, and
+        // this used to be discarded, which is why a deleted timeline could not
+        // come back.
+        timelines.remove(&timeline_id)
+    };
+
+    // ONE transaction covering the removal AND the object-script prune below,
+    // so a single Ctrl+Z restores both.
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.begin_transaction("Delete timeline slicer");
+    if let Some(previous) = removed {
+        #[derive(serde::Serialize)]
+        struct TimelineSnapshot {
+            timeline_id: identity::EntityId,
+            previous: TimelineSlicer,
+        }
+        let data = serde_json::to_vec(&TimelineSnapshot {
+            timeline_id,
+            previous,
+        })
+        .unwrap_or_default();
+        undo_stack.record_custom_restore(
+            "timeline_slicer_delete".to_string(),
+            data,
+            "Delete timeline slicer",
+        );
     }
+    drop(undo_stack);
     // C10: a deleted timeline must not leave its object script mounted/persisted.
     crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &timeline_id.to_string());
+
+    state.undo_stack.lock().unwrap().commit_transaction();
 
     Ok(())
 }
@@ -104,6 +151,7 @@ pub fn delete_timeline_slicer(
 /// Update timeline slicer properties.
 #[tauri::command]
 pub fn update_timeline_slicer(
+    state: State<crate::AppState>,
     timeline_state: State<TimelineSlicerState>,
     file_state: State<'_, crate::persistence::FileState>,
     timeline_id: identity::EntityId,
@@ -122,6 +170,7 @@ pub fn update_timeline_slicer(
     let tl = timelines
         .get_mut(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
+    let pre_edit = tl.clone();
 
     if let Some(name) = params.name {
         tl.name = name;
@@ -145,12 +194,35 @@ pub fn update_timeline_slicer(
         tl.style_preset = style_preset;
     }
 
-    Ok(tl.clone())
+    let result = tl.clone();
+    drop(timelines);
+
+    // The PRE-EDIT clone, captured above before any field was written. Undo of
+    // an update is "put the old object back", so the whole object is recorded.
+    {
+        #[derive(serde::Serialize)]
+        struct TimelineSnapshot {
+            timeline_id: identity::EntityId,
+            previous: TimelineSlicer,
+        }
+        let data = serde_json::to_vec(&TimelineSnapshot {
+            timeline_id: timeline_id,
+            previous: pre_edit,
+        })
+        .unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Update timeline slicer");
+        undo_stack.record_custom_restore("timeline_slicer".to_string(), data, "Update timeline slicer");
+        undo_stack.commit_transaction();
+    }
+
+    Ok(result)
 }
 
 /// Update timeline slicer position and size.
 #[tauri::command]
 pub fn update_timeline_position(
+    state: State<crate::AppState>,
     timeline_state: State<TimelineSlicerState>,
     file_state: State<'_, crate::persistence::FileState>,
     timeline_id: identity::EntityId,
@@ -170,17 +242,40 @@ pub fn update_timeline_position(
     let tl = timelines
         .get_mut(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
+    let pre_edit = tl.clone();
 
     tl.x = x;
     tl.y = y;
     tl.width = width;
     tl.height = height;
+    drop(timelines);
+
+    // The PRE-EDIT clone, captured above before any field was written. Undo of
+    // an update is "put the old object back", so the whole object is recorded.
+    {
+        #[derive(serde::Serialize)]
+        struct TimelineSnapshot {
+            timeline_id: identity::EntityId,
+            previous: TimelineSlicer,
+        }
+        let data = serde_json::to_vec(&TimelineSnapshot {
+            timeline_id: timeline_id,
+            previous: pre_edit,
+        })
+        .unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Move timeline slicer");
+        undo_stack.record_custom_restore("timeline_slicer".to_string(), data, "Move timeline slicer");
+        undo_stack.commit_transaction();
+    }
+
     Ok(())
 }
 
 /// Update the selected date range on a timeline slicer.
 #[tauri::command]
 pub fn update_timeline_selection(
+    state: State<crate::AppState>,
     timeline_state: State<TimelineSlicerState>,
     file_state: State<'_, crate::persistence::FileState>,
     params: UpdateTimelineSelectionParams,
@@ -204,15 +299,39 @@ pub fn update_timeline_selection(
     let tl = timelines
         .get_mut(&params.timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", params.timeline_id))?;
+    let pre_edit = tl.clone();
 
     tl.selection_start = params.selection_start;
     tl.selection_end = params.selection_end;
+    let timeline_id = params.timeline_id;
+    drop(timelines);
+
+    // The PRE-EDIT clone, captured above before any field was written. Undo of
+    // an update is "put the old object back", so the whole object is recorded.
+    {
+        #[derive(serde::Serialize)]
+        struct TimelineSnapshot {
+            timeline_id: identity::EntityId,
+            previous: TimelineSlicer,
+        }
+        let data = serde_json::to_vec(&TimelineSnapshot {
+            timeline_id: timeline_id,
+            previous: pre_edit,
+        })
+        .unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Change timeline selection");
+        undo_stack.record_custom_restore("timeline_slicer".to_string(), data, "Change timeline selection");
+        undo_stack.commit_transaction();
+    }
+
     Ok(())
 }
 
 /// Update report connections for a timeline slicer.
 #[tauri::command]
 pub fn update_timeline_connections(
+    state: State<crate::AppState>,
     timeline_state: State<TimelineSlicerState>,
     file_state: State<'_, crate::persistence::FileState>,
     params: UpdateTimelineConnectionsParams,
@@ -235,8 +354,31 @@ pub fn update_timeline_connections(
     let tl = timelines
         .get_mut(&params.timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", params.timeline_id))?;
+    let pre_edit = tl.clone();
 
     tl.connected_pivot_ids = params.connected_pivot_ids;
+    let timeline_id = params.timeline_id;
+    drop(timelines);
+
+    // The PRE-EDIT clone, captured above before any field was written. Undo of
+    // an update is "put the old object back", so the whole object is recorded.
+    {
+        #[derive(serde::Serialize)]
+        struct TimelineSnapshot {
+            timeline_id: identity::EntityId,
+            previous: TimelineSlicer,
+        }
+        let data = serde_json::to_vec(&TimelineSnapshot {
+            timeline_id: timeline_id,
+            previous: pre_edit,
+        })
+        .unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Change timeline connections");
+        undo_stack.record_custom_restore("timeline_slicer".to_string(), data, "Change timeline connections");
+        undo_stack.commit_transaction();
+    }
+
     Ok(())
 }
 

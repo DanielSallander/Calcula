@@ -209,6 +209,11 @@ mod tests;
 #[cfg(test)]
 mod eval_budget_tests;
 
+/// BUG-0103 consequence 2 — a timeline survives undo AND redo, including as
+/// cascade collateral.
+#[cfg(test)]
+mod timeline_undo_tests;
+
 #[cfg(test)]
 mod error_display_tests;
 

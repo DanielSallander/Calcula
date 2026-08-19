@@ -91,7 +91,7 @@ fn undo(wb: &Workbook) {
         .pop_undo()
         .expect("nothing to undo");
     crate::undo_commands::apply_changes(
-        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, transaction,
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, transaction,
         true,
     );
 }

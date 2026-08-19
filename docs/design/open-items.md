@@ -14,12 +14,10 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**104 entries, 100 fixed, 4 open** as of
-2026-08-18 — recounted from the file, not carried forward; it moved twice in one day). The four open
-are **BUG-0098** (the unreproduced backend wedge in §2.5), **BUG-0102** (no cell borders inside a
-frozen or split pane, filed from a code reading and not yet seen on screen), **BUG-0103** (timeline
-slicers are never saved and had no undo arm — the cross-document LEAK half is fixed, the persistence
-half needs an owner call) and **BUG-0104** (sorting and filtering by conditional-formatting icon are
+reproduction live in `tests/regression/bug-ledger.json` (**104 entries, 101 fixed, 3 open** as of
+2026-08-19 — recounted from the file, not carried forward; it moved three times in two days). The
+three open are **BUG-0098** (the unreproduced backend wedge in §2.5), **BUG-0102** (no cell borders inside a
+frozen or split pane, filed from a code reading and not yet seen on screen), **BUG-0104** (sorting and filtering by conditional-formatting icon are
 silent no-ops that report success). BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
 filed and fixed the same day, is the sibling of BUG-0086 — that fix turned out to be
 SPELLING-SPECIFIC, and a capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely.

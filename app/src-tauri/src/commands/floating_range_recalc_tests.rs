@@ -234,6 +234,7 @@ fn undoing_a_floating_range_cell_edit_restores_without_activating_the_backing_sh
         &wb.slicer,
         &wb.filters,
         &wb.pane,
+        &wb.timelines,
         transaction,
         true,
     );

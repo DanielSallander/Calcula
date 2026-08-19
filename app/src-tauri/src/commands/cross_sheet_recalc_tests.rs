@@ -47,6 +47,7 @@ pub(super) struct Workbook {
     pub(super) slicer: SlicerState,
     pub(super) pivots: PivotState,
     pub(super) pane: crate::pane_control::PaneControlState,
+    pub(super) timelines: crate::timeline_slicer::TimelineSlicerState,
     pub(super) filters: crate::ribbon_filter::RibbonFilterState,
     pub(super) timeline: crate::timeline_slicer::TimelineSlicerState,
 }
@@ -82,6 +83,7 @@ impl Workbook {
             slicer: SlicerState::new(),
             pivots: PivotState::new(),
             pane: crate::pane_control::PaneControlState::new(),
+            timelines: crate::timeline_slicer::TimelineSlicerState::new(),
             filters: crate::ribbon_filter::RibbonFilterState::new(),
             timeline: crate::timeline_slicer::TimelineSlicerState::new(),
         }
@@ -775,6 +777,7 @@ fn undo_once(wb: &Workbook) -> crate::undo_commands::UndoResult {
         &wb.slicer,
         &wb.filters,
         &wb.pane,
+        &wb.timelines,
         transaction,
         true,
     )
@@ -798,6 +801,7 @@ fn redo_once(wb: &Workbook) -> crate::undo_commands::UndoResult {
         &wb.slicer,
         &wb.filters,
         &wb.pane,
+        &wb.timelines,
         transaction,
         false,
     )

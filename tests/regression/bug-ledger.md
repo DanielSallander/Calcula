@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 104 | Open: 4 | Triaged: 0 | Fixed: 100 | Other: 0
+Total: 104 | Open: 3 | Triaged: 0 | Fixed: 101 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1272,7 +1272,7 @@ EVERY CELL BORDER PAINTED AT HALF ITS NOMINAL WEIGHT, AND VERTICAL ONES SMEARED 
 WITH A FREEZE OR A SPLIT ACTIVE, NO CELL BORDER RENDERS AT ALL. UNVERIFIED AGAINST THE RUNNING APP -- filed for attribution from a code reading, not as a reproduced defect. WHAT WAS OBSERVED (statically): panes are painted by renderZone (app/src/core/lib/gridRenderer/core.ts:230), which calls drawCellTextZone (core.ts:340). That function's body contains no reference to borders at all -- confirmed by scanning its whole body for /border/i, which returns nothing -- whereas the non-frozen painter drawCellText (rendering/cells.ts) draws all six sides. renderZone is the path for BOTH split panes (core.ts:809, 816, 823, 829) and frozen panes (core.ts:880, 886, 893, 900). WHAT IS NOT CLAIMED: that this has been seen on screen; that it affects the unfrozen path (it does not -- that is the path the sibling entry fixes); that no other code supplies borders for these zones by some route not found. TO CLOSE THIS: freeze a pane over a bordered range in the running app and look, then either fix drawCellTextZone to share the border queue drawCellText now uses, or reclassify. An E2E probe modelled on vba-idioms-wave3.spec.ts:468 with a freeze applied would settle it in one run.
 
 
-## BUG-0103 `[open]`
+## BUG-0103 `[fixed]`
 
 **Found:** 2026-08-18 (review)
 **Oracle:** timeline-slicer-never-persisted
