@@ -179,14 +179,34 @@ impl Default for FilterOperator {
 // ============================================================================
 
 /// Icon filter criteria for conditional formatting icons.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Which icon a column is filtered to.
+///
+/// Was stringly typed, and its doc examples ("3Arrows", "4TrafficLights") did not
+/// match what `IconSetType` actually serialises ("threeArrows"), so any value a
+/// caller copied from the docs could never have matched a cell.
+///
+/// "No icon" is a FLAG, not a missing index. Encoding it as an absent field would
+/// make a dropped key mean something specific, and a dropped key is exactly what
+/// happens when a wire shape changes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IconFilter {
-    /// The icon set name (e.g., "3Arrows", "4TrafficLights")
-    pub icon_set: String,
-    /// The icon index within the set (0-based)
-    pub icon_index: u32,
+    /// The icon to keep. Mutually exclusive with `no_icon`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<crate::conditional_formatting::IconRef>,
+    /// Excel's "No Cell Icon": keep only cells showing no icon at all.
+    #[serde(default)]
+    pub no_icon: bool,
 }
+
+/// The icons a filter pass resolved, per filtered column.
+///
+/// Outer key is the ABSOLUTE column; inner maps row to the icon that column's
+/// cell displays (`None` = shows none). Built ONCE per pass for only the columns
+/// actually filtered by icon — resolving per row would re-run
+/// `collect_range_stats` for every row and make the pass quadratic.
+pub(crate) type IconResolution =
+    std::collections::HashMap<u32, std::collections::HashMap<u32, Option<crate::conditional_formatting::IconRef>>>;
 
 // ============================================================================
 // FILTER CRITERIA
@@ -721,6 +741,9 @@ fn should_row_be_visible(
     row: u32,
     auto_filter: &AutoFilter,
     locale: &engine::LocaleSettings,
+    // REQUIRED, not optional: an icon filter with no map would fall through to
+    // "keep everything", which is the silent no-op this whole entry replaces.
+    icons: &IconResolution,
 ) -> bool {
     // Header row is always visible
     if row == auto_filter.start_row {
@@ -882,10 +905,15 @@ fn should_row_be_visible(
                 }
             }
             FilterOn::Icon => {
-                // Icon filtering depends on conditional formatting evaluation context,
-                // which determines which icon is displayed for each cell based on CF rules.
-                // This requires resolving CF icon sets at filter time, which is not yet
-                // integrated. For now, icon-filtered rows are always shown.
+                let resolved = icons
+                    .get(&abs_col)
+                    .and_then(|m| m.get(&row))
+                    .copied()
+                    .flatten();
+                let keep = icon_criteria_keeps(criteria.icon.as_ref(), resolved);
+                if !keep {
+                    return false;
+                }
             }
         }
     }
@@ -951,12 +979,128 @@ fn apply_top_bottom_filter(
 }
 
 /// Recompute hidden rows based on all column filters.
+/// Does a cell showing `resolved` survive this icon criteria?
+///
+/// Extracted from the predicate so the decision is unit-testable. It is worth
+/// extracting because the LAST arm is load-bearing in a way that is easy to get
+/// wrong, and a sabotage of it passed the door tests silently:
+///
+///   `None` -- a criteria that names NOTHING -- HIDES the row.
+///
+/// The door validator refuses that shape, so it should be unreachable. It is not:
+/// the whole `auto_filters` map is written into `.cala` and restored verbatim, so
+/// a malformed criteria re-enters state on LOAD without passing the door. Showing
+/// every row there would report a filter as applied while filtering nothing --
+/// exactly the lie BUG-0104 was.
+pub(crate) fn icon_criteria_keeps(
+    criteria_icon: Option<&IconFilter>,
+    resolved: Option<crate::conditional_formatting::IconRef>,
+) -> bool {
+    match criteria_icon {
+        // Excel's "No Cell Icon": keep only cells showing none.
+        Some(f) if f.no_icon => resolved.is_none(),
+        Some(f) => f.icon.is_some_and(|want| resolved == Some(want)),
+        None => false,
+    }
+}
+
+/// Refuse an icon criteria that cannot be honoured.
+///
+/// Three shapes, each of which would otherwise produce a confident empty result:
+///   - naming NEITHER an icon nor `no_icon`: there is nothing to match;
+///   - naming BOTH: "keep cells showing this icon" and "keep cells showing none"
+///     are contradictory, and picking one would be a guess;
+///   - an index outside the named set: no cell can ever show it, so the filter
+///     would hide every row while looking like an ordinary filter.
+pub(crate) fn validate_icon_criteria(criteria: &FilterCriteria) -> Result<(), String> {
+    let Some(f) = criteria.icon.as_ref() else {
+        return Err(
+            "This filter selects by conditional-formatting icon but names no icon. \
+             Choose an icon, or choose \"No Cell Icon\"."
+                .to_string(),
+        );
+    };
+    match (f.icon, f.no_icon) {
+        (None, false) => Err(
+            "This filter selects by conditional-formatting icon but names no icon. \
+             Choose an icon, or choose \"No Cell Icon\"."
+                .to_string(),
+        ),
+        (Some(_), true) => Err(
+            "This filter asks for a specific icon AND for cells with no icon. \
+             Choose one."
+                .to_string(),
+        ),
+        (Some(icon), false) => {
+            let count = crate::conditional_formatting::get_icon_count(&icon.icon_set);
+            if icon.icon_index >= count {
+                return Err(format!(
+                    "Icon {} does not exist in that icon set, which has {}. No cell could show it.",
+                    icon.icon_index, count
+                ));
+            }
+            Ok(())
+        }
+        (None, true) => Ok(()),
+    }
+}
+
+/// Resolve the icons an icon-filtered pass needs.
+///
+/// Only for columns whose criteria are actually `FilterOn::Icon`: `resolve_icons`
+/// computes one `RangeStats` per rule per call, so asking per row would re-walk
+/// every rule's range for every row and make the pass quadratic.
+///
+/// An empty map is the correct answer when nothing is filtered by icon — and it is
+/// NOT the same as a missing one, which is why the predicate takes this by
+/// reference rather than as an `Option`.
+pub(crate) fn resolve_filter_icons(
+    grid: &Grid,
+    grids: &[Grid],
+    sheet_names: &[String],
+    sheet_index: usize,
+    rules: &[crate::conditional_formatting::ConditionalFormatDefinition],
+    auto_filter: &AutoFilter,
+) -> IconResolution {
+    let mut out: IconResolution = std::collections::HashMap::new();
+    for (rel_col, col_filter) in &auto_filter.column_filters {
+        if col_filter.criteria.filter_on != FilterOn::Icon {
+            continue;
+        }
+        let abs_col = auto_filter.start_col + rel_col;
+        // Data rows only: the header is always visible and never filtered.
+        let first = auto_filter.start_row.saturating_add(1);
+        if first > auto_filter.end_row {
+            continue;
+        }
+        let cells: Vec<(u32, u32)> = (first..=auto_filter.end_row).map(|r| (r, abs_col)).collect();
+        let resolved = crate::conditional_formatting::resolve_icons(
+            grid,
+            grids,
+            sheet_names,
+            sheet_index,
+            rules,
+            &cells,
+            // The user clicked a filter and is waiting, so the same surface a sort
+            // uses. On a repaint a tripped budget costs a highlight; here it would
+            // cost the wrong ROWS.
+            crate::eval_budget::EvalSurface::Interactive,
+        );
+        let per_row = resolved.into_iter().map(|((r, _), v)| (r, v)).collect();
+        out.insert(abs_col, per_row);
+    }
+    out
+}
+
 fn recompute_hidden_rows(
     grid: &Grid,
     style_registry: &engine::StyleRegistry,
     theme: &engine::ThemeDefinition,
     auto_filter: &mut AutoFilter,
     locale: &engine::LocaleSettings,
+    // REQUIRED at all seven call sites, so none can forget it and silently show
+    // every row for an icon filter.
+    icons: &IconResolution,
 ) {
     let mut hidden = HashSet::new();
 
@@ -973,7 +1117,7 @@ fn recompute_hidden_rows(
 
     // Second pass: check each row against all other filters
     for row in (auto_filter.start_row + 1)..=auto_filter.end_row {
-        if !should_row_be_visible(grid, style_registry, theme, row, auto_filter, locale) {
+        if !should_row_be_visible(grid, style_registry, theme, row, auto_filter, locale, icons) {
             hidden.insert(row);
         }
     }
@@ -1003,36 +1147,45 @@ pub(crate) fn apply_auto_filter_inner(
     file_state: &FileState,
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
-    // Refuse a filter the engine cannot perform, rather than applying nothing and
-    // reporting success. `FilterOn::Icon`'s arm in `should_row_be_visible` is EMPTY
-    // -- its own comment ends "For now, icon-filtered rows are always shown" -- so
-    // the predicate falls through to `true` and the filter hides nothing while the
-    // UI shows a filter as applied.
+    // VALIDATE an icon criteria at the door. Icon filtering is implemented, so this
+    // no longer refuses the feature — it refuses the shapes that cannot be
+    // honoured, and it exists at the door because a caller deserves the error at
+    // the point of asking rather than a silently empty result.
     //
-    // Reachable even though no Rust code constructs it and the dropdown does not
-    // offer it: `FilterCriteria.filter_on` is `#[serde(default)]` with
-    // `rename_all = "camelCase"`, so any script, MCP tool or frontend call passing
-    // `{"filterOn": "icon"}` lands here. Filed as BUG-0104. Delete this guard when
-    // icon filtering is implemented -- `icon_filter_is_refused_rather_than_ignored`
-    // will fail and tell you to.
-    if params
-        .criteria
-        .as_ref()
-        .is_some_and(|c| c.filter_on == FilterOn::Icon)
-    {
-        return AutoFilterResult {
-            success: false,
-            auto_filter: None,
-            error: Some(
-                "Filtering by conditional-formatting icon is not implemented yet. \n                 Filter by value, colour or a custom criterion instead."
-                    .to_string(),
-            ),
-            hidden_rows: Vec::new(),
-            visible_rows: Vec::new(),
-        };
+    // Reachable from anywhere: `FilterCriteria.filter_on` is `#[serde(default)]`
+    // with `rename_all = "camelCase"`, so a script, an MCP tool or a frontend call
+    // passing `{"filterOn": "icon"}` lands here without the dropdown's help.
+    //
+    // The predicate ALSO refuses a criteria naming nothing, and that is not
+    // redundant with this: the whole `auto_filters` map round-trips through
+    // `.cala` verbatim, so a malformed criteria can re-enter state on LOAD without
+    // ever passing through this function.
+    if let Some(c) = params.criteria.as_ref() {
+        if c.filter_on == FilterOn::Icon {
+            if let Err(message) = validate_icon_criteria(c) {
+                return AutoFilterResult {
+                    success: false,
+                    auto_filter: None,
+                    error: Some(message),
+                    hidden_rows: Vec::new(),
+                    visible_rows: Vec::new(),
+                };
+            }
+        }
     }
 
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1082,7 +1235,16 @@ pub(crate) fn apply_auto_filter_inner(
 
     // Recompute hidden rows
     if active_sheet < grids.len() {
-        recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+        // Resolve icons ONCE for this pass, only for icon-filtered columns.
+        let filter_icons = resolve_filter_icons(
+            &grids[active_sheet],
+            &grids,
+            &cf_sheet_names_for_filter,
+            active_sheet,
+            &cf_rules_for_filter,
+            auto_filter,
+        );
+        recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
     }
 
     // Snapshot for the ownership re-link, performed AFTER the auto_filters
@@ -1138,6 +1300,17 @@ fn clear_column_criteria_inner(
     column_index: u32,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1166,7 +1339,16 @@ fn clear_column_criteria_inner(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+            // Resolve icons ONCE for this pass, only for icon-filtered columns.
+            let filter_icons = resolve_filter_icons(
+                &grids[active_sheet],
+                &grids,
+                &cf_sheet_names_for_filter,
+                active_sheet,
+                &cf_rules_for_filter,
+                auto_filter,
+            );
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1268,6 +1450,17 @@ pub(crate) fn reapply_auto_filter_inner(
     file_state: &FileState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1295,7 +1488,16 @@ pub(crate) fn reapply_auto_filter_inner(
             .expect("presence checked immediately above, under the same lock");
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+            // Resolve icons ONCE for this pass, only for icon-filtered columns.
+            let filter_icons = resolve_filter_icons(
+                &grids[active_sheet],
+                &grids,
+                &cf_sheet_names_for_filter,
+                active_sheet,
+                &cf_rules_for_filter,
+                auto_filter,
+            );
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1645,6 +1847,17 @@ fn set_column_filter_values_inner(
     include_blanks: bool,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1688,7 +1901,16 @@ fn set_column_filter_values_inner(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+            // Resolve icons ONCE for this pass, only for icon-filtered columns.
+            let filter_icons = resolve_filter_icons(
+                &grids[active_sheet],
+                &grids,
+                &cf_sheet_names_for_filter,
+                active_sheet,
+                &cf_rules_for_filter,
+                auto_filter,
+            );
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1744,6 +1966,17 @@ fn set_column_custom_filter_inner(
     operator: Option<FilterOperator>,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1783,7 +2016,16 @@ fn set_column_custom_filter_inner(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+            // Resolve icons ONCE for this pass, only for icon-filtered columns.
+            let filter_icons = resolve_filter_icons(
+                &grids[active_sheet],
+                &grids,
+                &cf_sheet_names_for_filter,
+                active_sheet,
+                &cf_rules_for_filter,
+                auto_filter,
+            );
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1836,6 +2078,17 @@ fn set_column_top_bottom_filter_inner(
     value: u32,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -1889,7 +2142,16 @@ fn set_column_top_bottom_filter_inner(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+            // Resolve icons ONCE for this pass, only for icon-filtered columns.
+            let filter_icons = resolve_filter_icons(
+                &grids[active_sheet],
+                &grids,
+                &cf_sheet_names_for_filter,
+                active_sheet,
+                &cf_rules_for_filter,
+                auto_filter,
+            );
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -2516,6 +2778,17 @@ fn set_column_dynamic_filter_inner(
     dynamic_criteria: DynamicFilterCriteria,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The CF rules an ICON filter needs, snapshotted and released here — BEFORE
+    // the `auto_filters` write guard below. Taking a CF read lock while holding
+    // that guard would invert the order against undo restore, which writes the CF
+    // store inside an open transaction. `rules_snapshot` releases immediately, but
+    // acquisition ORDER is what deadlocks, not duration.
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, active_sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
     // allowAutoFilter option gate.
     if let Err(e) = crate::protection::check_sheet_action(
         &state, active_sheet, "autoFilter", "use AutoFilter",
@@ -2553,7 +2826,16 @@ fn set_column_dynamic_filter_inner(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
+            // Resolve icons ONCE for this pass, only for icon-filtered columns.
+            let filter_icons = resolve_filter_icons(
+                &grids[active_sheet],
+                &grids,
+                &cf_sheet_names_for_filter,
+                active_sheet,
+                &cf_rules_for_filter,
+                auto_filter,
+            );
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();

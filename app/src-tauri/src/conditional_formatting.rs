@@ -1914,7 +1914,7 @@ fn resolve_threshold_value(
 }
 
 /// Get the number of icons in an icon set type
-fn get_icon_count(icon_set: &IconSetType) -> u32 {
+pub(crate) fn get_icon_count(icon_set: &IconSetType) -> u32 {
     match icon_set {
         IconSetType::ThreeArrows
         | IconSetType::ThreeArrowsGray

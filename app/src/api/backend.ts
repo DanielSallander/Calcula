@@ -795,11 +795,20 @@ export type DynamicFilterCriteria =
 export type FilterOperator = "and" | "or";
 
 /**
- * Icon filter criteria.
+ * Which icon a column is filtered to.
+ *
+ * Was `{ iconSet: string; iconIndex: number }`, whose doc examples ("3Arrows")
+ * did not match what the backend serialises ("threeArrows") — so a value copied
+ * from the docs could never match a cell.
+ *
+ * "No icon" is a FLAG, not an absent index: a dropped key must not mean
+ * something specific, and a dropped key is exactly what a wire change produces.
  */
 export interface IconFilter {
-  iconSet: string;
-  iconIndex: number;
+  /** The icon to keep. Mutually exclusive with `noIcon`. */
+  icon?: { iconSet: IconSetType; iconIndex: number };
+  /** Excel's "No Cell Icon": keep only cells showing no icon at all. */
+  noIcon?: boolean;
 }
 
 /**

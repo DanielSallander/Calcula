@@ -224,6 +224,11 @@ mod autofilter_recovery_tests;
 #[cfg(test)]
 mod icon_glyph_resolution_tests;
 
+/// BUG-0104 — filtering by conditional-formatting icon keeps the right rows and
+/// refuses what it cannot honour.
+#[cfg(test)]
+mod icon_filter_tests;
+
 #[cfg(test)]
 mod error_display_tests;
 
