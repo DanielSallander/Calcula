@@ -24,6 +24,7 @@ import { DEFAULT_THEME } from "./types";
 import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
+import { hasStyleInterceptors } from "../../../api/styleInterceptors";
 import {
   drawCellText,
   drawDeferredCellDecorations,
@@ -31,6 +32,7 @@ import {
   isCoveredByChrome,
   resolveEdgeBorders,
   strokeEdgeBorders,
+  resolveEffectiveStyle,
   type DeferredCellDecoration,
 } from "./rendering/cells";
 import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
@@ -357,6 +359,12 @@ function drawCellTextZone(
   // this zone path historically skipped empty cells entirely — typed cells
   // must not be skipped (ghost checkbox, button on an empty cell).
   const useCellTypes = hasCellTypes() && !state.showFormulas;
+  // CONDITIONAL FORMATTING IN A PANE (BUG-0105). This painter consulted no
+  // interceptors at all, so freezing a pane reverted every conditionally
+  // formatted cell in it to its static style. Hoisted per zone for the same
+  // reason the main painter hoists it per frame: nothing can register or
+  // unregister mid-paint.
+  const useInterceptors = hasStyleInterceptors();
 
   // DECORATIONS IN A FROZEN OR SPLIT PANE. This painter runs INSTEAD of
   // drawCellText for every cell of every pane, and it used to run no
@@ -465,9 +473,20 @@ function drawCellTextZone(
         // ordinary "draw a box" case, and this branch used to return before any
         // border work — so freezing a pane erased every such box.
         {
-          const emptyStyle = styleCache.get(cell?.styleIndex ?? 0) ?? styleCache.get(0);
+          const emptyIdx = cell?.styleIndex ?? 0;
+          const emptyStyle = styleCache.get(emptyIdx) ?? styleCache.get(0);
           if (emptyStyle) {
-            const edges = resolveEdgeBorders({}, emptyStyle);
+            // A conditional format applies to a BLANK cell too, which is why the
+            // resolve happens on this branch as well as the content one.
+            const effective = resolveEffectiveStyle(
+              "", emptyStyle, emptyIdx, row, col, useInterceptors,
+            );
+            const bg = effective.backgroundColor;
+            if (bg && bg !== "#ffffff" && bg !== "#FFFFFF" && bg !== "transparent") {
+              ctx.fillStyle = bg;
+              ctx.fillRect(baseX, baseY, colWidth, rowHeight);
+            }
+            const edges = resolveEdgeBorders(effective, emptyStyle);
             if (edges.top || edges.right || edges.bottom || edges.left) {
               strokeEdgeBorders(ctx, edges, baseX, baseY, baseX + colWidth, baseY + rowHeight);
             }
@@ -514,17 +533,22 @@ function drawCellTextZone(
       
       const styleIndex = cell?.styleIndex ?? 0;
       const cellStyle = styleCache.get(styleIndex) ?? styleCache.get(0);
+      // The style the cell ACTUALLY shows. One definition, shared with
+      // `drawCellText` — see `resolveEffectiveStyle`.
+      const effective = cellStyle
+        ? resolveEffectiveStyle(cellDisplayText, cellStyle, styleIndex, row, col, useInterceptors)
+        : null;
       
       ctx.save();
       ctx.beginPath();
       ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       ctx.clip();
       
-      if (cellStyle && cellStyle.backgroundColor &&
-          cellStyle.backgroundColor !== "#ffffff" &&
-          cellStyle.backgroundColor !== "#FFFFFF" &&
-          cellStyle.backgroundColor !== "transparent") {
-        ctx.fillStyle = cellStyle.backgroundColor;
+      if (effective && effective.backgroundColor &&
+          effective.backgroundColor !== "#ffffff" &&
+          effective.backgroundColor !== "#FFFFFF" &&
+          effective.backgroundColor !== "transparent") {
+        ctx.fillStyle = effective.backgroundColor;
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       }
 
@@ -540,7 +564,10 @@ function drawCellTextZone(
       // one fixed here; the empty `{}` below is the honest spelling of "no CF
       // available at this point", not an oversight. Filed separately.
       if (cellStyle) {
-        const edges = resolveEdgeBorders({}, cellStyle);
+        // `effective` first: a conditional format may add or override a border,
+        // and it wins over the static one — the same precedence the main painter
+        // applies. This argument was an empty `{}` while BUG-0105 was open.
+        const edges = resolveEdgeBorders(effective ?? {}, cellStyle);
         if (edges.top || edges.right || edges.bottom || edges.left) {
           strokeEdgeBorders(ctx, edges, cellLeft, cellTop, cellRight, cellBottom);
         }
@@ -573,14 +600,14 @@ function drawCellTextZone(
         continue;
       }
 
-      const fontWeight = cellStyle?.bold ? "bold" : "normal";
-      const fontStyle = cellStyle?.italic ? "italic" : "normal";
-      const fontSize = cellStyle?.fontSize ?? theme.cellFontSize;
-      const fontFamily = cellStyle?.fontFamily ?? theme.cellFontFamily;
+      const fontWeight = effective?.bold ? "bold" : "normal";
+      const fontStyle = effective?.italic ? "italic" : "normal";
+      const fontSize = effective?.fontSize ?? theme.cellFontSize;
+      const fontFamily = effective?.fontFamily ?? theme.cellFontFamily;
 
       // fontSize is in POINTS; buildCellFont converts to px (matches drawCellText).
       ctx.font = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
-      ctx.fillStyle = cellStyle?.textColor ?? theme.cellText;
+      ctx.fillStyle = effective?.textColor ?? theme.cellText;
       ctx.textBaseline = "middle";
       const fontSizePx = pointsToPixels(fontSize);
 

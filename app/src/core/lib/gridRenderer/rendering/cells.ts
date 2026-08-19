@@ -501,6 +501,45 @@ export function borderLineWidth(style: string): number {
 }
 
 /**
+ * The style a cell actually shows, after every registered interceptor — which is
+ * how CONDITIONAL FORMATTING reaches the renderer — has had its say.
+ *
+ * Exported because TWO painters need it: `drawCellText` for the ordinary grid and
+ * `drawCellTextZone` for every frozen or split pane. The pane painter consulted
+ * no interceptors at all until 2026-08-19 (BUG-0105), so freezing a pane reverted
+ * every conditionally-formatted cell in it to its static style — no fills, no
+ * font colours, no data bars.
+ *
+ * A second `applyStyleInterceptors` call site would have been the obvious fix and
+ * the wrong one: two copies of the seed step drift on the first field added to
+ * `BaseStyleInfo`, and the pane would then be subtly rather than obviously wrong.
+ */
+export function resolveEffectiveStyle(
+  displayValue: string,
+  baseCellStyle: StyleData,
+  styleIndex: number,
+  row: number,
+  col: number,
+  useInterceptors: boolean,
+): BaseStyleInfo {
+  // Interceptors take a BOOLEAN underline; the base style carries an enum. The
+  // conversion belongs here, once, for the same reason the rest of this does.
+  const seed: BaseStyleInfo = {
+    styleIndex,
+    backgroundColor: baseCellStyle.backgroundColor,
+    textColor: baseCellStyle.textColor,
+    bold: baseCellStyle.bold,
+    italic: baseCellStyle.italic,
+    underline: baseCellStyle.underline !== "none",
+    strikethrough: baseCellStyle.strikethrough,
+    fontSize: baseCellStyle.fontSize,
+    fontFamily: baseCellStyle.fontFamily,
+  };
+  if (!useInterceptors) return seed;
+  return applyStyleInterceptors(displayValue, seed, { row, col });
+}
+
+/**
  * The four EDGE borders a cell actually shows, after conditional formatting has
  * had its say. Exported because TWO painters need it and a copy would drift:
  * `drawCellText` (the ordinary grid) and `drawCellTextZone` (every frozen or
@@ -1054,26 +1093,15 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
 
       // Build base style info for interceptors
       // Note: interceptors use boolean underline, so convert enum to bool for them
-      let effectiveStyle: BaseStyleInfo = {
+      // ONE definition, shared with the pane painter — see resolveEffectiveStyle.
+      let effectiveStyle: BaseStyleInfo = resolveEffectiveStyle(
+        displayValue,
+        baseCellStyle,
         styleIndex,
-        backgroundColor: baseCellStyle.backgroundColor,
-        textColor: baseCellStyle.textColor,
-        bold: baseCellStyle.bold,
-        italic: baseCellStyle.italic,
-        underline: baseCellStyle.underline !== "none",
-        strikethrough: baseCellStyle.strikethrough,
-        fontSize: baseCellStyle.fontSize,
-        fontFamily: baseCellStyle.fontFamily,
-      };
-
-      // Apply style interceptors (e.g., conditional formatting)
-      if (useInterceptors) {
-        effectiveStyle = applyStyleInterceptors(
-          displayValue,
-          effectiveStyle,
-          { row, col }
-        );
-      }
+        row,
+        col,
+        useInterceptors,
+      );
 
       // Initialize style variables with theme defaults
       let textColor = theme.cellText;

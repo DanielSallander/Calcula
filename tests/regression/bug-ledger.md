@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 106 | Open: 4 | Triaged: 0 | Fixed: 102 | Other: 0
+Total: 106 | Open: 2 | Triaged: 0 | Fixed: 104 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1288,7 +1288,7 @@ A TIMELINE SLICER IS NEVER SAVED, HAS NO UNDO ARM, AND LEAKS INTO THE NEXT DOCUM
 SORTING AND FILTERING BY CONDITIONAL-FORMATTING ICON ARE SILENT NO-OPS THAT REPORT SUCCESS. Both arms are stubs that return the wrong answer without saying so, and one of them is offered to the user by name in a dialog. (1) SORT: `SortOn::Icon` (app/src-tauri/src/commands/data.rs:5729-5740) carries the comment "Icon sorting not yet implemented - fall back to value comparison" and does exactly that — it sorts by VALUE and returns Ok. The Sorting extension offers it explicitly: app/extensions/Sorting/components/SortLevelRow.tsx:183 renders `<option value="icon">Conditional Formatting Icon</option>`. So a user picks 'Conditional Formatting Icon', the rows reorder (by value), and nothing anywhere says the request was not honoured. A sort that silently sorts by the wrong key is worse than one that refuses. (2) FILTER: `FilterOn::Icon` (app/src-tauri/src/autofilter.rs:884-889) has an EMPTY arm whose comment ends "For now, icon-filtered rows are always shown" — the predicate falls through to true, so the filter hides nothing at all and the sheet looks unfiltered while reporting a filter is applied. WHY IT MATTERS BEYOND THE FEATURE: this is the class where the product returns a plausible WRONG answer rather than an error, which is the hardest kind for a user to catch — the rows did move, so the operation looks like it worked. RECORDED NOWHERE until now: neither arm appears in docs/design/open-items.md or the ledger; the only trace was the two code comments quoted above, which are invisible to any status read.
 
 
-## BUG-0105 `[open]`
+## BUG-0105 `[fixed]`
 
 **Found:** 2026-08-19 (review)
 **Oracle:** conditional-formatting-absent-in-panes
@@ -1296,7 +1296,7 @@ SORTING AND FILTERING BY CONDITIONAL-FORMATTING ICON ARE SILENT NO-OPS THAT REPO
 CONDITIONAL FORMATTING DOES NOT REACH A FROZEN OR SPLIT PANE AT ALL. `renderZone` -> `drawCellTextZone` (app/src/core/lib/gridRenderer/core.ts) paints every cell of every pane INSTEAD of `drawCellText`, and it runs NO style interceptors: a repo-wide grep of core.ts for hasStyleInterceptors/applyStyleInterceptors/useInterceptors returns NOTHING, while `drawCellText` consults them per cell. So the moment a user freezes a pane or splits the window, every conditional-formatting fill, font colour, data bar and icon stops being drawn in that pane — the cell reverts to its static style. STRICTLY BIGGER THAN BUG-0102, which was the same painter missing plain cell BORDERS and is fixed. That fix passes an empty `{}` where the main painter passes the interceptor-resolved style, with a comment saying why — so CF-driven borders are still missing in panes along with everything else CF does. NOT SEEN ON SCREEN. Verified by reading the two painters and by the absence of any interceptor call in the zone path; no app run was made. To confirm: apply a conditional format to a range, freeze a pane above it, and look.
 
 
-## BUG-0106 `[open]`
+## BUG-0106 `[fixed]`
 
 **Found:** 2026-08-19 (review)
 **Oracle:** autofilter-silently-wiped-on-deserialize-error

@@ -214,6 +214,11 @@ mod eval_budget_tests;
 #[cfg(test)]
 mod timeline_undo_tests;
 
+/// BUG-0106 — a malformed autofilters.json must not delete the filters that ARE
+/// readable, and must never be swallowed silently.
+#[cfg(test)]
+mod autofilter_recovery_tests;
+
 #[cfg(test)]
 mod error_display_tests;
 

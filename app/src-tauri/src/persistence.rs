@@ -3687,14 +3687,79 @@ pub fn open_file(
     {
         let mut auto_filters = state.auto_filters.write(&load_effect).map_err(|e| e.to_string())?;
         if let Some(json_bytes) = workbook.user_files.remove("autofilters.json") {
-            if let Ok(filters) =
-                serde_json::from_slice::<crate::autofilter::AutoFilterStorage>(&json_bytes)
-            {
-                *auto_filters = filters;
-            } else {
-                auto_filters.clear();
+            // PER-SHEET RECOVERY, AND NEVER A SILENT CLEAR (BUG-0106).
+            //
+            // This used to be `if let Ok(all) = from_slice(..) { .. } else { clear() }`:
+            // one unreadable byte anywhere in the section deleted EVERY autofilter
+            // in the workbook, with no error, no log and nothing on screen. The
+            // document opened looking fine with the filters gone, and the next
+            // save wrote that emptiness back over the file that still had them.
+            //
+            // The repo's own `.cala` rule is the test: an older reader dropping a
+            // section it cannot read is acceptable when the loss is VISIBLE, and a
+            // lie when the document "comes back looking calculated". A silent
+            // clear on a parse failure is that lie with no version mismatch to
+            // explain it.
+            //
+            // Two deliberate choices:
+            //   1. RECOVER WHAT PARSES. `AutoFilterStorage` is keyed by sheet, so
+            //      one corrupt entry need not cost the others. Parsing to
+            //      `HashMap<usize, Value>` first turns a whole-section failure
+            //      into a per-sheet one.
+            //   2. REFUSING THE WHOLE DOCUMENT would be disproportionate — a
+            //      workbook is not unopenable because a filter is. So the load
+            //      continues and the loss is REPORTED, which is the part that was
+            //      missing.
+            let mut lost: Vec<String> = Vec::new();
+            match serde_json::from_slice::<
+                std::collections::HashMap<usize, serde_json::Value>,
+            >(&json_bytes) {
+                Ok(per_sheet) => {
+                    let mut recovered = crate::autofilter::AutoFilterStorage::new();
+                    let mut keys: Vec<usize> = per_sheet.keys().copied().collect();
+                    keys.sort_unstable();
+                    for sheet in keys {
+                        let raw = &per_sheet[&sheet];
+                        match serde_json::from_value::<crate::autofilter::AutoFilter>(raw.clone()) {
+                            Ok(af) => {
+                                recovered.insert(sheet, af);
+                            }
+                            Err(e) => lost.push(format!("sheet {}: {}", sheet, e)),
+                        }
+                    }
+                    *auto_filters = recovered;
+                }
+                Err(e) => {
+                    // Not even an object keyed by sheet. Nothing is recoverable,
+                    // but it is still SAID rather than swallowed.
+                    auto_filters.clear();
+                    lost.push(format!("the whole section could not be read: {}", e));
+                }
+            }
+
+            if !lost.is_empty() {
+                crate::log_warn!(
+                    "PERSIST",
+                    "autofilters.json: {} entr{} could not be read and {} lost on open ({}). \
+                     Saving this document will not write them back.",
+                    lost.len(),
+                    if lost.len() == 1 { "y" } else { "ies" },
+                    if lost.len() == 1 { "was" } else { "were" },
+                    lost.join("; ")
+                );
+                // Tell the FRONTEND too: a log line nobody opens is the same
+                // silence in a different place.
+                let _ = window.emit(
+                    "document:load-warnings",
+                    serde_json::json!({
+                        "section": "autofilters.json",
+                        "lost": lost,
+                    }),
+                );
             }
         } else {
+            // No section at all — a document with no filters genuinely has none.
+            // This arm was always correct; only the parse-failure arm above lied.
             auto_filters.clear();
         }
 

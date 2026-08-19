@@ -14,11 +14,12 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**104 entries, 101 fixed, 3 open** as of
+reproduction live in `tests/regression/bug-ledger.json` (**106 entries, 104 fixed, 2 open** as of
 2026-08-19 — recounted from the file, not carried forward; it moved three times in two days). The
-three open are **BUG-0098** (the unreproduced backend wedge in §2.5), **BUG-0102** (no cell borders inside a
-frozen or split pane, filed from a code reading and not yet seen on screen), **BUG-0104** (sorting and filtering by conditional-formatting icon are
-silent no-ops that report success). BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
+two open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open deliberately — the
+guards now make a recurrence diagnosable, and it is explicitly not closeable by a speculative fix)
+and **BUG-0104** (sorting and filtering by conditional-formatting icon are not implemented; both now
+REFUSE loudly instead of silently doing something else, so nothing lies to a user while it waits). BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
 filed and fixed the same day, is the sibling of BUG-0086 — that fix turned out to be
 SPELLING-SPECIFIC, and a capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely.
 Nothing in this file duplicates a ledger entry. **Recount before restating**: the histogram is one line of node, and this figure has
