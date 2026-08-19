@@ -598,12 +598,23 @@ spending them where they are needed is the whole reason a modest machine can pro
 
 ### Measured: what the repair loop does and does not fix
 
-`qwen2.5-coder:3b`, 12 canary tasks, 4,000-token surface budget:
+12 canary tasks, 4,000-token surface budget, run against the local Ollama:
 
-| | one-shot | 4 repair rounds |
-|---|---|---|
-| passed | 0/12 | **1/12** |
-| mean score | 0.550 | **0.646** |
+| model | mode | passed | mean |
+|---|---|---|---|
+| `qwen2.5-coder:3b` | one-shot | 0/12 | 0.550 |
+| `qwen2.5-coder:3b` | **4 repair rounds** | **1/12** | **0.646** |
+| `qwen2.5:7b` | one-shot | 0/12 | 0.613 |
+
+**The repair loop bought more than the bigger model did.** +0.096 from repair on the 3B, against
++0.063 from moving to a model more than twice the size — and the repaired 3B outscores the plain 7B
+outright. That is the §1a claim ("a mediocre local model with a verify loop beats a better one
+without") holding up on real measurements rather than on argument.
+
+**Read it with the caveat, though:** these are different families (a CODER 3B against a GENERAL 7B),
+so it is not a clean scaling experiment. What it does establish is that repair is not a rounding
+error next to model choice. **Neither model crosses the bar** — 0/12 and 1/12 — so nothing here says
+a local model is ready; it says the loop is worth having when one is.
 
 It works — `trap-browser-fetch` went 0.65 to **1.00** after a single repair, the model having forgotten
 the `net.fetch` pragma and been told exactly what to add. But the shape of the residual failures
@@ -612,7 +623,9 @@ matters more than the +0.096:
 - **Six of eleven failures were VALID scripts that did not do the job.** They parse, invent nothing,
   and declare their capabilities correctly — they simply do not call what the task needs. The loop
   stopped after one round in each case because `validateScriptSource` reported `ok: true`, which was
-  the honest answer: **L0–L2 cannot see "correct but useless".**
+  the honest answer: **L0–L2 cannot see "correct but useless".** The 7B run shows the same split —
+  six of its twelve failures are the same shape — so this is structural, not an artifact of one
+  small model.
 - **Five were still invalid after exhausting all four rounds** — one never parsed at all. More
   rounds do not rescue a model that cannot hold the API in its head.
 

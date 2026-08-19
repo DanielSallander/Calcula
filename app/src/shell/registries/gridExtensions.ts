@@ -565,14 +565,18 @@ export function registerCoreGridContextMenu(): void {
       shortcut: "Shift+RClick",
       group: GridMenuGroups.DEVELOPER,
       order: 10,
+      // The dead `invoke("open_devtools")` that used to lead this handler is
+      // gone. There is no such command — it is absent from `generate_handler!`
+      // and no `fn open_devtools` exists anywhere in src-tauri — so the call
+      // ALWAYS rejected and the catch below ALWAYS ran. Behaviour is unchanged;
+      // the pretence is not. Found by backendCommandDrift.test.ts on its first
+      // run, which is the whole reason that guard exists: `invoke` takes a
+      // string, so nothing else could see it.
+      //
+      // If DevTools should really open from here, that needs a Rust command
+      // (`WebviewWindow::open_devtools`) — a feature, not a repair.
       onClick: async () => {
-        console.log("[GridMenu] Tip: Use Shift+Right-click for browser context menu with DevTools");
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          await invoke("open_devtools");
-        } catch {
-          void alertAsync("Tip: Use Shift+Right-click to access browser DevTools");
-        }
+        void alertAsync("Tip: Use Shift+Right-click to access browser DevTools");
       },
     });
   }
