@@ -26,6 +26,7 @@ import { ALLOWLIST } from "@api/scriptHost/allowlist";
 
 const TEMPLATE_PATH = path.resolve(__dirname, "../../../scripts/scriptTypings/objectContexts.template.d.ts");
 const GENERATED_PATH = path.resolve(__dirname, "../objectContexts.d.ts");
+const POLICY_PATH = path.resolve(__dirname, "../../../src/api/scriptHost/generated/scriptSurfacePolicy.ts");
 
 function readTemplate(): string {
   return fs.readFileSync(TEMPLATE_PATH, "utf8");
@@ -50,6 +51,59 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
       committed === result.output,
       "extensions/ScriptableObjects/objectContexts.d.ts is stale — run `npm run gen:script-typings`.",
     ).toBe(true);
+  });
+
+  it("matches the committed scriptSurfacePolicy.ts byte for byte", () => {
+    // The SECOND artifact of the same pass: the surface as DATA, which the draft
+    // validator (api/scriptHost/scriptValidation) indexes to answer "is this a
+    // real method?" and "what capability does calling it need?". It is checked
+    // here rather than in its own file because both outputs come from ONE probe
+    // — a test that let them drift apart would be checking nothing worth
+    // checking. Design: docs/design/local-model-script-authoring.md §5a.
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    expect(result.problems).toEqual([]);
+    const committed = fs.readFileSync(POLICY_PATH, "utf8");
+    expect(
+      committed === result.policyOutput,
+      "src/api/scriptHost/generated/scriptSurfacePolicy.ts is stale — run `npm run gen:script-typings`.",
+    ).toBe(true);
+  });
+
+  it("gives the validator a surface with the capability-bearing members on it", () => {
+    // A guard against the map silently emptying: an empty surface would make the
+    // reach check pass everything and the capability check demand nothing, and
+    // every validator test would still be green because they assert on findings.
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    const rows = [...result.policyOutput.matchAll(/\{ chain: "([^"]+)"[^\n]*?\},/g)].map((m) => m[1]);
+    expect(rows.length, "the emitted surface is suspiciously small").toBeGreaterThan(300);
+    // Every capability the allowlist gates must be reachable through some chain,
+    // or a script could need one the validator can never derive.
+    const gated = new Set(
+      Object.values(ALLOWLIST).map((p) => p.capability).filter((c): c is string => Boolean(c)),
+    );
+    const emitted = new Set(
+      [...result.policyOutput.matchAll(/capability: "([^"]+)"/g)].map((m) => m[1]),
+    );
+    // ONE exemption, and it is permanent rather than a gap to close.
+    // `formula.udf` gates `formula.udf.invoke`, which is the HOST calling INTO a
+    // script when a worksheet formula uses its UDF — the opposite direction from
+    // everything else in the allowlist. No object-script context member requires
+    // it, so no source scan can ever derive it, and a script that declares it
+    // will always draw a `declared-not-observed` NOTICE. That is the correct
+    // outcome (§11.2: a declaration we cannot observe is shown, never rejected),
+    // which is why this is exempted here instead of the guard being weakened.
+    const EXEMPT = new Set(["formula.udf"]);
+    const unreachable = [...gated].filter((c) => !emitted.has(c) && !EXEMPT.has(c)).sort();
+    // The exemption must not outlive its subject: if a chain ever DOES reach it,
+    // this list is stale and should shrink.
+    for (const c of EXEMPT) {
+      expect(emitted.has(c), `${c} is now reachable from a chain — drop it from EXEMPT`).toBe(false);
+    }
+    expect(
+      unreachable,
+      "these capabilities are gated by the broker but no author-facing chain reaches them, " +
+        "so the validator can never derive them from source: " + unreachable.join(", "),
+    ).toEqual([]);
   });
 
   it("covers every objectType buildTyped can mount", () => {

@@ -88,6 +88,74 @@ export function collectSourceFiles(root = REPO_ROOT) {
   return out;
 }
 
+/**
+ * Source files carrying an embedded NUL byte.
+ *
+ * A NUL has no business in any extension this script walks, and it is the same
+ * class of hazard as a mixed ending but nastier: an exact-string edit against
+ * the NUL silently no-ops, AND the file goes INVISIBLE to grep, so the usual way
+ * of finding the problem cannot see it. This project has already lost time to it
+ * once -- a dialog-globals violation hid in a NUL-bearing file through a whole
+ * audit -- and the same corruption was reproduced on 2026-08-19 when a generated
+ * edit wrote three NULs where spaces belonged and every gate stayed green.
+ *
+ * Deliberately NOT auto-fixed. A wrong ending has an obvious correct rewrite; a
+ * NUL does not -- it may stand for a space, or mark genuinely corrupt bytes, and
+ * guessing would destroy the evidence.
+ */
+export const KNOWN_NUL_FILES = new Map([
+  [
+    "app/src/api/writebackValidators.ts",
+    {
+      count: 3,
+      why:
+        "Deliberate: a raw NUL is the separator in the composite cache key " +
+        "`${regionId}\\0${value}` (lines 332, 338, 389). It cannot occur in either " +
+        "component, which is what makes it a safe separator. Note the cost though -- " +
+        "those three lines ARE invisible to grep, and writing the escape `\\0` instead " +
+        "of the raw byte would keep the same runtime value while removing that. " +
+        "Recorded rather than fixed: it is behaviour-adjacent code and not this " +
+        "check's business to rewrite.",
+    },
+  ],
+]);
+
+export function findNulBytes(root = REPO_ROOT) {
+  const hits = [];
+  for (const file of collectSourceFiles(root)) {
+    let buf;
+    try {
+      buf = fs.readFileSync(file);
+    } catch {
+      continue;
+    }
+    if (buf.length > 8_000_000) continue;
+    const offsets = [];
+    for (let i = 0; i < buf.length; i++) if (buf[i] === 0) offsets.push(i);
+    if (offsets.length === 0) continue;
+
+    const rel = path.relative(root, file).replace(/\\/g, "/");
+    // A file with a KNOWN, deliberate use is tolerated only at its known count.
+    // Exempting it outright would blind the check to a NEW corruption in the one
+    // file most likely to attract one, so the exemption expires the moment the
+    // count moves -- in either direction, because a deliberate use being removed
+    // means the entry is stale.
+    const known = KNOWN_NUL_FILES.get(rel);
+    if (known && known.count === offsets.length) continue;
+
+    hits.push({
+      file: rel,
+      absolute: file,
+      count: offsets.length,
+      // Report the LINE, because that is what a reader needs to open.
+      firstLine: buf.subarray(0, offsets[0]).toString("latin1").split("\n").length,
+      known,
+    });
+  }
+  hits.sort((a, b) => a.file.localeCompare(b.file));
+  return hits;
+}
+
 /** Files whose endings are mixed. Each entry carries the DOMINANT target. */
 export function findMixedLineEndings(root = REPO_ROOT) {
   const mixed = [];
@@ -134,16 +202,42 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].rep
     mixed = findMixedLineEndings();
   }
 
-  if (mixed.length === 0) {
-    console.log("[OK] no mixed line endings.");
+  // Checked even when endings are clean: the two failures are independent, and
+  // reporting only the first would hide the one that also defeats grep.
+  const nuls = findNulBytes();
+
+  if (mixed.length === 0 && nuls.length === 0) {
+    console.log("[OK] no mixed line endings, no embedded NUL bytes.");
     process.exit(0);
   }
 
-  console.error(`[FAIL] ${mixed.length} file(s) have MIXED line endings.`);
-  console.error("Exact-string edits against these files can silently no-op.\n");
-  for (const m of mixed) {
-    console.error(`  ${m.file}  CRLF=${m.crlf} LF=${m.lf}  (dominant: ${m.dominant})`);
+  if (mixed.length > 0) {
+    console.error(`[FAIL] ${mixed.length} file(s) have MIXED line endings.`);
+    console.error("Exact-string edits against these files can silently no-op.\n");
+    for (const m of mixed) {
+      console.error(`  ${m.file}  CRLF=${m.crlf} LF=${m.lf}  (dominant: ${m.dominant})`);
+    }
+    console.error("\nFix with: node scripts/check-line-endings.mjs --fix");
   }
-  console.error("\nFix with: node scripts/check-line-endings.mjs --fix");
+
+  if (nuls.length > 0) {
+    if (mixed.length > 0) console.error("");
+    console.error(`[FAIL] ${nuls.length} source file(s) contain an embedded NUL byte.`);
+    console.error(
+      "A NUL makes exact-string edits no-op AND makes the file invisible to grep,\n" +
+        "so the usual way of finding the problem cannot see it. Not auto-fixable:\n" +
+        "open the line and decide what the byte should have been.\n",
+    );
+    for (const n of nuls) {
+      console.error(`  ${n.file}  first at line ${n.firstLine} (${n.count} total)`);
+      if (n.known) {
+        console.error(
+          `    This file has a RECORDED deliberate use of ${n.known.count}, so the count moved. ` +
+            `If the new one is also deliberate, update KNOWN_NUL_FILES in this script.\n` +
+            `    Recorded reason: ${n.known.why}`,
+        );
+      }
+    }
+  }
   process.exit(1);
 }

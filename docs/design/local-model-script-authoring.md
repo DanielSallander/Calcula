@@ -391,17 +391,40 @@ surface moved to `AIChat/lib/chatTools.ts` so `__tests__/chatToolSurface.test.ts
 defect M1 would have introduced — the transcript printed `name(JSON.stringify(input))`, which for a
 draft dumps an entire macro into a chat bubble. Closes §3b.
 
-**M2 — L0/L1/L2 static validation, in `app/src/api/scriptHost/`.** Parse-only, reach check, and
-capability-pragma reconciliation per the asymmetric policy in **§11.2**, plus nearest-neighbour
-suggestions for repair messages. The highest-leverage item in the document, and immediately useful
-for cloud-authored and hand-written scripts too, not just local ones.
+**M2 — L0/L1/L2 static validation. SHIPPED 2026-08-19**, in
+`app/src/api/scriptHost/scriptValidation/`. Parse (acorn), reach check, and capability reconciliation
+per the asymmetric policy in §11.2, with nearest-neighbour repair suggestions. Useful immediately for
+cloud-authored and hand-written scripts too, not only local ones.
 
-**Two things about M2 changed after the first draft, both from §5a.** Its ground truth is
-`allowlist.ts` (237 methods, 54 capability-bearing), **not** `OP_MANIFEST` — object scripts run in
-the Worker realm, and `SURFACE_PROFILES` does not list `object-script` among the three QuickJS
-surfaces. So M2 is mostly **TypeScript in `@api/scriptHost`** rather than Rust in
-`core/script-engine`: a smaller and better-tested surface than first assumed, and the transparency
-panel wants the same answer the checker computes.
+**Its ground truth is a THIRD generated artifact**, `scriptHost/generated/scriptSurfacePolicy.ts`,
+emitted by the existing typings generator in the same pass as `objectContexts.d.ts` and pinned
+byte-for-byte by `objectContextsTypings.test.ts`. **669 rows, 58 capability-bearing**, each carrying
+the author-facing chain, the broker method and the capability. Neither `allowlist.ts` nor the probe
+alone was enough: the probe records a path RELATIVE to its owning interface (`upsert`, not
+`caps.biModel.upsert`), so chains are composed through `NAMED_SUBTREES`, which is the probe's own
+answer to "this sub-object is its own interface".
+
+Four things worth carrying forward:
+
+- **Calls are erased on both sides.** `context.api.chart("c1").setSpec(s)` reduces to
+  `api.chart.setSpec`, and the generator erases `()` from its prefixes the same way. That is what
+  lets a purely syntactic walk follow a handle with no type inference at all.
+- **Members with no broker had to be included.** The first cut emitted only policed members, which
+  would have made the reach check reject `context.objectId` — a false positive rejects the user's
+  work, which is worse than the miss it trades against.
+- **A namespace is not a data-returning call.** `api` is both a member in its own right and the
+  prefix of hundreds of chains; treating it as data-returning suppressed every finding beneath it,
+  so `api.setCellValu` sailed through as "a method on whatever `api` returned". The discriminator is
+  `known chain AND NOT a known prefix`.
+- **`formula.udf` is a permanent exemption** from "every gated capability is derivable from source".
+  It gates `formula.udf.invoke`, which is the HOST calling INTO a script when a worksheet formula
+  uses its UDF — the opposite direction from everything else in the allowlist. No context member
+  requires it, so a script declaring it will always draw a `declared-not-observed` notice, which
+  §11.2 says is the correct outcome.
+
+**One new runtime dependency: `acorn`** (~120 KB, zero deps of its own, what ESLint and Rollup
+parse with). Hand-rolling was rejected for the reason `declarations.ts` gives about regex parsing,
+and the stakes are higher here: a false positive rejects the user's script.
 
 **M3 — Provider registry, model picker, and runtime discovery.** The `ChatProvider` trait;
 `openai_compat.rs` first (§7a — it covers the most ground per line written), then `anthropic.rs`

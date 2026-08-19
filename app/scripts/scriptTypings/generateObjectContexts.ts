@@ -26,7 +26,13 @@
 //            3. THE ROSTERS — the objectType -> interface table and the
 //                             capability -> methods table, emitted at markers.
 
-import { probeSurface, type ProbedMember, type ProbeResult } from "./probeShim";
+import {
+  probeSurface,
+  NAMED_SUBTREES,
+  OBJECT_TYPE_INTERFACES,
+  type ProbedMember,
+  type ProbeResult,
+} from "./probeShim";
 import { readTemplate, type DeclaredMember, type TemplateModel } from "./declarations";
 import { ALLOWLIST, type MethodPolicy } from "../../src/api/scriptHost/allowlist";
 
@@ -40,11 +46,18 @@ export const CONTEXT_MAP_MARKER = "// @generated:context-type-map";
 export interface GenerateResult {
   /** The finished .d.ts text. Empty when `problems` is non-empty. */
   output: string;
+  /**
+   * The finished `scriptSurfacePolicy.ts` text — the same probe + allowlist
+   * facts as the JSDoc splice, but as DATA the app can read at runtime. Empty
+   * when `problems` is non-empty, for the same reason `output` is: a knowingly
+   * wrong map is worse than no map.
+   */
+  policyOutput: string;
   /** Human-readable drift reports; a non-empty list must fail the build. */
   problems: string[];
   /** Interfaces the probe reached but the template never declares. */
   unverified: string[];
-  stats: { interfaces: number; members: number; documented: number };
+  stats: { interfaces: number; members: number; documented: number; policyRows: number };
 }
 
 // ============================================================================
@@ -188,6 +201,178 @@ function capabilityTable(): string {
 }
 
 // ============================================================================
+// The surface policy map (consumed by the app at runtime)
+// ============================================================================
+
+const POLICY_BANNER = `// =============================================================================
+// GENERATED FILE - DO NOT EDIT.
+// =============================================================================
+// Produced by:  npm run gen:script-typings
+// Generator:    app/scripts/scriptTypings/generateObjectContexts.ts
+// Shape source: app/src/api/scriptHost/worker/contextShims.ts   (probed at build)
+// Policy source app/src/api/scriptHost/allowlist.ts             (tier/capability)
+//
+// WHAT THIS IS: the author-facing script surface as DATA — every member an
+// object script can call, the broker method it dispatches to, and the capability
+// the broker will demand for it. Same facts the JSDoc splice in
+// objectContexts.d.ts renders as prose, in a form the running app can index.
+//
+// WHY IT EXISTS: the draft validator (app/src/api/scriptHost/scriptValidation)
+// has to answer two questions about a script it has never seen — "is this a real
+// method?" and "which capabilities does calling it require?" — and neither can be
+// answered from a hand-written list without drifting from the broker that
+// actually enforces. Design: docs/design/local-model-script-authoring.md §5a.
+//
+// The .d.ts and this file are emitted from ONE probe in ONE pass, so they cannot
+// disagree with each other; objectContextsTypings.test.ts fails the build when
+// either stops matching the shim.
+// =============================================================================
+`;
+
+/** One callable member of the author-facing object-script surface. */
+export interface SurfaceMemberRow {
+  /**
+   * The member-name sequence an author actually writes, rooted at the context
+   * and with call parentheses removed: `caps.storage.get`, `api.chart.setSpec`,
+   * `range.setValue`.
+   *
+   * Calls are erased on BOTH sides -- here and in the validator's AST walk -- so
+   * `context.api.chart("c1").setSpec(s)` reduces to `api.chart.setSpec` and
+   * matches. Erasing them is what lets a purely syntactic walk follow a handle
+   * with no type inference at all.
+   */
+  chain: string;
+  iface: string;
+  /** Path within its own interface, e.g. "get" on ScriptStorageApi. */
+  path: string;
+  /**
+   * The allowlist key it dispatches to, e.g. "cap.fetch". Absent for members
+   * that only read a worker-local mirror and cross no policy boundary.
+   *
+   * Those are included anyway, and must be: the reach check flags a call it
+   * cannot find, so a surface missing `objectId` or `log` would reject valid
+   * scripts. A false positive here rejects the user's work, which is worse than
+   * the miss it would be trading against.
+   */
+  broker?: string;
+  tier?: string;
+  /** The capability the broker demands, when it demands one. */
+  capability?: string;
+}
+
+/**
+ * Collect every probed member that dispatches to an allowlisted broker method.
+ *
+ * Members with no `broker` are skipped: they read a worker-local mirror and
+ * cross no policy boundary, so they are neither capability-bearing nor useful
+ * for reach checking. Rows are deduplicated on the whole tuple — the same path
+ * is reachable from many interfaces through `extends`, and the validator cares
+ * about the path, not which context re-exposes it.
+ */
+/**
+ * Where each interface hangs off a context root, with call parens erased.
+ *
+ * `NAMED_SUBTREES` is the probe's OWN answer to "this sub-object is its own
+ * interface", so it is also the only honest way to rebuild the chain an author
+ * types. An interface can hang in several places -- `ScriptRange` is reachable
+ * as `range()`, `cell()` and `api.table().range()` -- so every prefix is kept
+ * and the member is emitted once per chain.
+ */
+function ifacePrefixes(): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (iface: string, prefix: string) => {
+    const list = out.get(iface) ?? [];
+    if (!list.includes(prefix)) list.push(prefix);
+    out.set(iface, list);
+  };
+  // Root contexts are reached as a bare `context.<member>`.
+  for (const [, iface] of OBJECT_TYPE_INTERFACES) if (iface) add(iface, "");
+  add("BaseObjectContext", "");
+  for (const [path, iface] of NAMED_SUBTREES) add(iface, path.replace(/\(\)/g, ""));
+  return out;
+}
+
+export function collectSurfaceRows(probe: ProbeResult): SurfaceMemberRow[] {
+  const prefixes = ifacePrefixes();
+  const seen = new Set<string>();
+  const rows: SurfaceMemberRow[] = [];
+  for (const [ifaceName, probed] of [...probe.interfaces].sort((a, b) => a[0].localeCompare(b[0]))) {
+    // An interface nothing hangs off a context yields no row: a chain that
+    // cannot be written cannot be validated.
+    const roots = prefixes.get(ifaceName);
+    if (!roots) continue;
+    for (const [path, member] of [...probed.members].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const policy: MethodPolicy | undefined = member.broker ? ALLOWLIST[member.broker] : undefined;
+      for (const root of roots) {
+        const chain = root ? `${root}.${path}` : path;
+        const key = `${chain} ${member.broker ?? ""} ${policy?.capability ?? ""}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({
+          chain,
+          iface: ifaceName,
+          path,
+          ...(member.broker ? { broker: member.broker } : {}),
+          ...(policy ? { tier: policy.tier } : {}),
+          ...(policy?.capability ? { capability: policy.capability } : {}),
+        });
+      }
+    }
+  }
+  return rows.sort(
+    (a, b) => a.chain.localeCompare(b.chain) || (a.broker ?? "").localeCompare(b.broker ?? ""),
+  );
+}
+
+function surfacePolicyModule(rows: SurfaceMemberRow[]): string {
+  const lines = rows.map((r) => {
+    const bits = [
+      `chain: ${JSON.stringify(r.chain)}`,
+      `iface: ${JSON.stringify(r.iface)}`,
+      `path: ${JSON.stringify(r.path)}`,
+    ];
+    if (r.broker) bits.push(`broker: ${JSON.stringify(r.broker)}`);
+    if (r.tier) bits.push(`tier: ${JSON.stringify(r.tier)}`);
+    if (r.capability) bits.push(`capability: ${JSON.stringify(r.capability)}`);
+    return `  { ${bits.join(", ")} },`;
+  });
+  return [
+    POLICY_BANNER,
+    'import type { CapabilityId } from "../capabilityIds";',
+    "",
+    "/** One callable member of the author-facing object-script surface. */",
+    "export interface SurfaceMember {",
+    "  /**",
+    "   * The member-name sequence an author writes, rooted at the context and",
+    '   * with call parentheses removed: "caps.storage.get", "api.chart.setSpec".',
+    "   * The validator erases calls from the source the same way, so",
+    '   * `context.api.chart("c1").setSpec(s)` matches "api.chart.setSpec".',
+    "   */",
+    "  readonly chain: string;",
+    "  /** The context interface that exposes it. */",
+    "  readonly iface: string;",
+    '  /** Path within that interface, e.g. "get" on ScriptStorageApi. */',
+    "  readonly path: string;",
+    "  /**",
+    '   * The broker method it dispatches to, e.g. "cap.fetch". Absent for members',
+    "   * that only read a worker-local mirror and cross no policy boundary; those",
+    "   * are still listed, because the reach check flags what it cannot find and a",
+    "   * surface missing them would reject valid scripts.",
+    "   */",
+    "  readonly broker?: string;",
+    "  readonly tier?: string;",
+    "  /** The capability the broker demands, when it demands one. */",
+    "  readonly capability?: CapabilityId;",
+    "}",
+    "",
+    "export const SCRIPT_SURFACE: readonly SurfaceMember[] = [",
+    ...lines,
+    "];",
+    "",
+  ].join("\n");
+}
+
+// ============================================================================
 // Entry point
 // ============================================================================
 
@@ -272,7 +457,7 @@ export function generateObjectContexts(templateSource: string, templateName = "o
   }
 
   if (problems.length) {
-    return { output: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented } };
+    return { output: "", policyOutput: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0 } };
   }
 
   let body = applyEdits(templateSource, edits);
@@ -286,7 +471,7 @@ export function generateObjectContexts(templateSource: string, templateName = "o
     problems.push(`template is missing the ${CONTEXT_MAP_MARKER} marker`);
   }
   if (problems.length) {
-    return { output: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented } };
+    return { output: "", policyOutput: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0 } };
   }
   body = body.replace(OBJECT_TYPE_MARKER, objectTypeTable(probe));
   body = body.replace(CAPABILITY_MARKER, capabilityTable());
@@ -296,10 +481,12 @@ export function generateObjectContexts(templateSource: string, templateName = "o
   if (headerAt >= 0) body = body.slice(headerAt + HEADER_MARKER.length).replace(/^\s*\n/, "");
 
   const output = `${BANNER}\n${body.replace(/\s*$/, "")}\n`;
+  const rows = collectSurfaceRows(probe);
   return {
     output,
+    policyOutput: surfacePolicyModule(rows),
     problems,
     unverified,
-    stats: { interfaces: probe.interfaces.size, members: memberCount, documented },
+    stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: rows.length },
   };
 }

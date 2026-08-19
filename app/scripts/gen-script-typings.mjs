@@ -23,6 +23,9 @@ const appRoot = path.resolve(here, "..");
 
 const TEMPLATE = path.join(here, "scriptTypings", "objectContexts.template.d.ts");
 const OUTPUT = path.join(appRoot, "extensions", "ScriptableObjects", "objectContexts.d.ts");
+// The same probe, as DATA for the running app — see the banner in the generated
+// file. Emitted in the same pass as the .d.ts so the two cannot disagree.
+const POLICY_OUTPUT = path.join(appRoot, "src", "api", "scriptHost", "generated", "scriptSurfacePolicy.ts");
 const ENTRY = path.join(here, "scriptTypings", "generateObjectContexts.ts");
 
 const checkOnly = process.argv.includes("--check");
@@ -73,32 +76,45 @@ if (result.unverified.length > 0) {
   );
 }
 
-const existing = (() => {
+function readOrNull(file) {
   try {
-    return readFileSync(OUTPUT, "utf8");
+    return readFileSync(file, "utf8");
   } catch {
     return null;
   }
-})();
+}
 
-if (checkOnly) {
-  if (existing !== result.output) {
-    console.error("[FAIL] " + path.relative(appRoot, OUTPUT) + " is stale. Run: npm run gen:script-typings");
-    process.exit(1);
+/** Both artifacts come from ONE probe, so they are written — or checked — together. */
+const ARTIFACTS = [
+  { file: OUTPUT, text: result.output, label: "typings" },
+  { file: POLICY_OUTPUT, text: result.policyOutput, label: "surface policy" },
+];
+
+let stale = false;
+for (const { file, text, label } of ARTIFACTS) {
+  const existing = readOrNull(file);
+  if (checkOnly) {
+    if (existing !== text) {
+      console.error("[FAIL] " + path.relative(appRoot, file) + " is stale. Run: npm run gen:script-typings");
+      stale = true;
+    } else {
+      console.log("[OK] " + label + " is current.");
+    }
+    continue;
   }
-  console.log("[OK] typings are current.");
-} else {
-  if (existing === result.output) {
-    console.log("[OK] typings already current (no write).");
+  if (existing === text) {
+    console.log("[OK] " + label + " already current (no write).");
   } else {
-    writeFileSync(OUTPUT, result.output, "utf8");
-    console.log("[OK] wrote " + path.relative(appRoot, OUTPUT));
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, text, "utf8");
+    console.log("[OK] wrote " + path.relative(appRoot, file));
   }
 }
+if (stale) process.exit(1);
 
 console.log(
   `[OK] ${result.stats.interfaces} interfaces verified, ${result.stats.members} members probed, ` +
-    `${result.stats.documented} carry generated broker policy.`,
+    `${result.stats.documented} carry generated broker policy, ${result.stats.policyRows} surface rows emitted.`,
 );
 
 // The probe arms RPC deadline timers inside the shim; they are cleared, but a
