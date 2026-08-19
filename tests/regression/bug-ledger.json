@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 107,
+  "nextId": 108,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4106,6 +4106,22 @@
         "digestDiffPaths": []
       },
       "notes": "The fix is small but the DECISION is the owner's: refuse the load with a clear error (safest, and consistent with the reader refusing a format_version it cannot understand), or keep the filters it CAN parse and report the rest, or preserve the raw bytes so a later build can recover them. What must not survive is the silent clear. Whatever is chosen, the same audit should sweep the sibling sections on that load path -- this pattern was found by reading ONE of them, and nothing suggests it is the only one.  — FIXED 2026-08-19, and the chosen remedy is NOT the one first recommended. I proposed refusing the load outright; that is disproportionate — a workbook is not unopenable because a filter is, and this projects own .cala rule says a section an older reader cannot understand may be DROPPED provided the loss is VISIBLE. The sin was the silence, not the loss. So: PER-SHEET RECOVERY plus a report. AutoFilterStorage is keyed by sheet, so the loader now decodes to HashMap<usize, Value> first and then per entry — one corrupt sheet costs only its own filter instead of every filter in the workbook. Whatever is lost is named in a log_warn! AND emitted as a \"document:load-warnings\" event, because a log line nobody opens is the same silence in a different place. A wholly unreadable section still recovers nothing, but now says so. The outer arm (no section at all) was always correct and is untouched: a document with no filters genuinely has none. Five tests, sabotage-checked — reverting to the whole-section decode reds the source assertion that pins the shape."
+    },
+    {
+      "id": "BUG-0107",
+      "status": "fixed",
+      "discovered": "2026-08-19",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-19 while designing icon sort/filter (BUG-0104); the design named it as a PREREQUISITE rather than residue, and it was then verified by reading both lookups"
+      },
+      "violation": {
+        "oracleId": "icon-glyph-from-wrong-rule",
+        "message": "THE CONDITIONAL-FORMATTING ICON A USER SEES CAN COME FROM A DISABLED RULE. The drawn glyph is a JOIN OF TWO INDEPENDENT LOOKUPS that can disagree: (1) the icon INDEX comes from the backend, which cascades correctly — it skips !enabled, honours stop_if_true, and respects priority; (2) the icon SET (which glyph family) comes from `findMatchingRuleId(row, col, \"iconSet\")` (app/extensions/ConditionalFormatting/lib/cfStore.ts:254-274), which matches on rule TYPE and geometric range containment ONLY. It does not read `rule.enabled`, does not honour `stop_if_true`, does not consider priority, and returns the FIRST match in array order. CONSEQUENCE: a DISABLED five-icon rule listed before an enabled three-icon rule over the same range makes the renderer draw a five-arrow glyph indexed 0..2 — a picture assembled from two different rules, one of which the user switched off. AND A HARD-CODED FALLBACK: when no rule id resolves, the renderer silently draws `threeTrafficLights1` (iconSetRenderer.ts:60) rather than nothing, so a cell can show traffic lights that no rule asked for. WHY IT MATTERS BEYOND THE PICTURE: 'sort by the icon I can see' has no referent while the displayed icon is not a single value. This is the prerequisite for BUG-0104's icon sorting, not a cosmetic sibling of it — sorting on a glyph the renderer computed from a disabled rule would produce an order the user cannot explain from what is on screen.",
+        "digestDiffPaths": []
+      },
+      "notes": "The fix makes the displayed icon ONE value decided in one place: carry the icon SET (and the rule id) on the backend's per-cell evaluation result alongside the index it already returns, so the renderer reads a single resolved answer instead of re-deriving half of it with different rules. That deletes the second lookup rather than patching it, which matters because patching `findMatchingRuleId` to check `enabled` would still leave two implementations of the cascade that can drift. Expect visual-baseline churn on any workbook with overlapping or disabled icon rules — that churn IS the bug becoming visible. — CLOSED 2026-08-19. The icon is now ONE value: the backend carries the resolved icon SET (and the producing rule id) beside the index it already returned, stamped in the loop that applies enabled/priority/stop_if_true, so it is the correctly-cascaded answer by construction. The frontend's second search is DELETED rather than patched: teaching findMatchingRuleId about `enabled` would have left two implementations of the cascade that can drift, which is how this arose. The hard-coded threeTrafficLights1 fallback is gone too — a cell with an index but no resolved set is now SKIPPED, because a wrong glyph is indistinguishable from a right one on screen and that is exactly what let this survive. Also extracted `evaluate_conditional_formats_for`, a pure twin of the Tauri command taking explicit refs and an explicit rule list. The cascade had NO direct unit coverage before this, because the only entry point took State<AppState> and was hard-wired to the active sheet. Four tests now, including the exact defect shape (a disabled FiveArrows rule listed FIRST must not supply the glyph family for an enabled ThreeArrows rule) — sabotage-checked: dropping the carried set reds three of the four. That extraction is also step one of BUG-0104: sort and filter need to resolve icons for a NAMED sheet, not whichever one is on screen. NOT YET DONE, and worth knowing: no visual baseline covers overlapping or disabled icon rules, so the corpus did not move. The churn this fix would cause is the bug becoming visible, and its absence means the corpus never saw the bug either."
     }
   ]
 }

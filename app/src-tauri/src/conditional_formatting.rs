@@ -536,6 +536,21 @@ pub struct CellConditionalFormat {
     /// For icon sets: icon index
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_index: Option<u32>,
+    /// For icon sets: WHICH icon set the index belongs to.
+    ///
+    /// Carried with the index because the two together are the icon, and apart
+    /// they were a bug (BUG-0107): the frontend used to re-derive the set with its
+    /// own rule search that matched on type and geometry only — no `enabled`, no
+    /// `stop_if_true`, no priority — so a DISABLED five-icon rule could supply the
+    /// glyph family for an index produced by an enabled three-icon rule, and a
+    /// cell with no resolvable rule silently fell back to traffic lights.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_set: Option<IconSetType>,
+    /// The rule this result came from. Set by the caller, which is the only place
+    /// that knows the rule's identity, and kept so a consumer can attribute a
+    /// result without searching for a rule that "looks like" the right one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<u64>,
     /// For color scales: interpolated color
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color_scale_color: Option<String>,
@@ -865,6 +880,87 @@ pub fn get_all_conditional_formats(
         .unwrap_or_default())
 }
 
+/// Evaluate conditional formats over a rectangle, for an EXPLICITLY NAMED sheet
+/// and an explicit rule list.
+///
+/// The pure twin of the `evaluate_conditional_formats` command, which is wired to
+/// `State<AppState>` and to the ACTIVE sheet. Two things need this shape:
+///
+///   - a unit test, which cannot build a `State<AppState>`, so the cascade
+///     (`enabled`, priority, `stop_if_true`) had no direct coverage at all; and
+///   - sorting and filtering by icon, which must resolve icons for the sheet they
+///     were asked about rather than whichever one is on screen.
+///
+/// Takes plain refs and acquires no locks, so a caller may already hold the grid
+/// guards it passes in.
+pub(crate) fn evaluate_conditional_formats_for(
+    grid: &Grid,
+    grids: &[Grid],
+    sheet_names: &[String],
+    sheet_index: usize,
+    rules: &[ConditionalFormatDefinition],
+    start_row: u32,
+    end_row: u32,
+    start_col: u32,
+    end_col: u32,
+) -> Vec<CellConditionalFormat> {
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    // One RangeStats per rule for the whole pass, never per cell: the stats are a
+    // property of the rule's ranges, not of the cell being asked about.
+    let rule_stats: Vec<Option<RangeStats>> = rules
+        .iter()
+        .map(|rule_def| {
+            if rule_def.enabled && needs_range_stats(&rule_def.rule) {
+                Some(collect_range_stats(grid, &rule_def.ranges))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut result = Vec::new();
+    for row in min_row..=max_row {
+        for col in min_col..=max_col {
+            for (idx, rule_def) in rules.iter().enumerate() {
+                if !rule_def.enabled {
+                    continue;
+                }
+                if !rule_def.ranges.iter().any(|r| r.contains(row, col)) {
+                    continue;
+                }
+                if let Some(cf) = evaluate_rule(
+                    grid,
+                    grids,
+                    sheet_names,
+                    sheet_index,
+                    &rule_def.rule,
+                    &rule_def.format,
+                    row,
+                    col,
+                    rule_stats[idx].as_ref(),
+                ) {
+                    // Stamped here because this loop is the only place that knows
+                    // WHICH rule produced the result, and it is the loop that
+                    // applies `enabled`, priority and `stop_if_true` — so the id is
+                    // the correctly-cascaded one by construction.
+                    let mut cf = cf;
+                    cf.rule_id = Some(rule_def.id);
+                    result.push(cf);
+
+                    if rule_def.stop_if_true {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Evaluate conditional formats for a range
 /// This returns the computed styles for each cell in the range
 #[tauri::command]
@@ -891,59 +987,18 @@ pub fn evaluate_conditional_formats(
         None => return EvaluateCFResult { cells: Vec::new() },
     };
 
-    let min_row = start_row.min(end_row);
-    let max_row = start_row.max(end_row);
-    let min_col = start_col.min(end_col);
-    let max_col = start_col.max(end_col);
-
-    // Pre-compute range stats for rules that need them
-    let rule_stats: Vec<Option<RangeStats>> = rules
-        .iter()
-        .map(|rule_def| {
-            if rule_def.enabled && needs_range_stats(&rule_def.rule) {
-                Some(collect_range_stats(grid, &rule_def.ranges))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut result = Vec::new();
-
-    for row in min_row..=max_row {
-        for col in min_col..=max_col {
-            for (idx, rule_def) in rules.iter().enumerate() {
-                if !rule_def.enabled {
-                    continue;
-                }
-
-                let in_range = rule_def.ranges.iter().any(|r| r.contains(row, col));
-                if !in_range {
-                    continue;
-                }
-
-                let stats = rule_stats[idx].as_ref();
-
-                if let Some(cf) = evaluate_rule(
-                    grid,
-                    &grids,
-                    &sheet_names,
-                    active_sheet,
-                    &rule_def.rule,
-                    &rule_def.format,
-                    row,
-                    col,
-                    stats,
-                ) {
-                    result.push(cf);
-
-                    if rule_def.stop_if_true {
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // ONE implementation, shared with the sort/filter paths and with the tests.
+    let result = evaluate_conditional_formats_for(
+        grid,
+        &grids,
+        &sheet_names,
+        active_sheet,
+        rules,
+        start_row,
+        end_row,
+        start_col,
+        end_col,
+    );
 
     EvaluateCFResult { cells: result }
 }
@@ -1622,6 +1677,8 @@ fn evaluate_rule(
 
             let mut cf = make_cf(row, col, format);
             cf.icon_index = Some(icon_index);
+            // The set travels WITH the index, from the rule that produced it.
+            cf.icon_set = Some(is_rule.icon_set);
             Some(cf)
         }
     }
@@ -1635,6 +1692,8 @@ fn make_cf(row: u32, col: u32, format: &ConditionalFormat) -> CellConditionalFor
         format: format.clone(),
         data_bar_percent: None,
         icon_index: None,
+        icon_set: None,
+        rule_id: None,
         color_scale_color: None,
     }
 }

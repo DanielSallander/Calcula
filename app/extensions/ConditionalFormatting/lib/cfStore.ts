@@ -238,7 +238,11 @@ function syncIconSetRegions(): void {
           endCol: col,
           data: {
             iconIndex: cf.iconIndex,
-            ruleId: findMatchingRuleId(row, col, "iconSet"),
+            // No `ruleId` for icon sets: the renderer reads `cf.iconSet` from the
+            // backend's resolved result now (BUG-0107). `findMatchingRuleId` is
+            // enabled-blind and priority-blind, so using it to pick a glyph family
+            // drew icons from rules the user had switched off. The dataBar use
+            // above is untouched — that one is a different question.
           },
         });
       }

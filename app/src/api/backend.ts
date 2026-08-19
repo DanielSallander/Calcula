@@ -2260,6 +2260,18 @@ export interface CellConditionalFormat {
   format: ConditionalFormat;
   dataBarPercent?: number;
   iconIndex?: number;
+  /**
+   * WHICH icon set `iconIndex` belongs to, resolved by the backend from the rule
+   * that actually produced it.
+   *
+   * Read this rather than searching the rule list for something that looks
+   * right: the frontend used to re-derive the set with its own search that
+   * ignored `enabled`, `stopIfTrue` and priority, so a DISABLED rule could
+   * supply the glyph family for another rule's index (BUG-0107).
+   */
+  iconSet?: IconSetType;
+  /** The rule this result came from, stamped by the correctly-cascading loop. */
+  ruleId?: number;
   colorScaleColor?: string;
 }
 

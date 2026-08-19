@@ -12,7 +12,7 @@ import {
   overlayGetColHeaderHeight,
   getGridRegions,
 } from "@api";
-import { getEvaluationForCell, getRules } from "../lib/cfStore";
+import { getEvaluationForCell } from "../lib/cfStore";
 import { drawIcon } from "./iconShapes";
 
 const ICON_SIZE = 14;
@@ -52,21 +52,25 @@ export function renderIconSets(context: OverlayRenderContext): void {
     const cfs = getEvaluationForCell(row, col);
     if (!cfs) continue;
 
-    const iconCf = cfs.find((cf) => cf.iconIndex != null);
-    if (!iconCf || iconCf.iconIndex == null) continue;
-
-    // Find the matching IconSet rule for the icon set type
-    const ruleId = region.data?.ruleId as number | undefined;
-    let iconSetType: IconSetType = "threeTrafficLights1";
-
-    if (ruleId != null) {
-      const rules = getRules();
-      const matchingRule = rules.find((r) => r.id === ruleId);
-      if (matchingRule && matchingRule.rule.type === "iconSet") {
-        const isRule = matchingRule.rule as { type: "iconSet"; iconSet: IconSetType };
-        iconSetType = isRule.iconSet;
-      }
-    }
+    // ONE RESOLVED ANSWER (BUG-0107). The index and the set now arrive together
+    // from the rule that actually produced them.
+    //
+    // This used to be a JOIN OF TWO INDEPENDENT LOOKUPS: the index from the
+    // backend, which cascades correctly (skips `enabled: false`, honours
+    // `stopIfTrue`, respects priority), and the SET from
+    // `findMatchingRuleId(row, col, "iconSet")`, which matched on rule type and
+    // range containment ONLY. A disabled five-icon rule listed before an enabled
+    // three-icon rule therefore drew a five-arrow glyph indexed 0..2 — a picture
+    // assembled from two different rules, one of them switched off. And when no
+    // rule id resolved, the renderer silently drew `threeTrafficLights1`, so a
+    // cell could show traffic lights no rule had asked for.
+    //
+    // A cell with an index but no set is now SKIPPED rather than guessed at: a
+    // wrong glyph is indistinguishable from a right one on screen, which is what
+    // let this survive.
+    const iconCf = cfs.find((cf) => cf.iconIndex != null && cf.iconSet != null);
+    if (!iconCf || iconCf.iconIndex == null || iconCf.iconSet == null) continue;
+    const iconSetType: IconSetType = iconCf.iconSet;
 
     // Position icon at left side of cell, vertically centered
     const iconX = Math.max(cellX, rhw) + 2;

@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 106 | Open: 2 | Triaged: 0 | Fixed: 104 | Other: 0
+Total: 107 | Open: 2 | Triaged: 0 | Fixed: 105 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1302,4 +1302,12 @@ CONDITIONAL FORMATTING DOES NOT REACH A FROZEN OR SPLIT PANE AT ALL. `renderZone
 **Oracle:** autofilter-silently-wiped-on-deserialize-error
 
 A MALFORMED autofilters.json SILENTLY DELETES EVERY AUTOFILTER IN THE WORKBOOK, AND THE NEXT SAVE MAKES THE LOSS PERMANENT. app/src-tauri/src/persistence.rs:3688-3697, on the .cala load path: if the section is present but `serde_json::from_slice::<AutoFilterStorage>` fails, the `else` arm runs `auto_filters.clear()`. No error is returned, nothing is logged, and the user is not told. The document opens looking fine, with every filter gone; saving then writes the empty state back over the file that still had them. THIS IS THE CLASS THE .cala RULES CALL OUT BY NAME: the test for whether a section deserves a version link is whether an older reader would MISHANDLE the document or merely lose something, and 'a stale workbook that comes back looking calculated' is the example of a drop that is a LIE. A silent clear on a PARSE FAILURE is the same lie without even a version mismatch to explain it. NOTE the two arms are not equivalent and only one is wrong: the outer `else` (no autofilters.json at all) clearing is CORRECT -- a document with no filters has none. It is the inner one, where the section EXISTS and could not be read, that destroys data. WHY IT MATTERS NOW: any change to the serialized shape of a filter makes this reachable. BUG-0104's icon-filter work adds a field to FilterCriteria, so a file written by one build and opened by another is exactly the scenario that trips it.
+
+
+## BUG-0107 `[fixed]`
+
+**Found:** 2026-08-19 (review)
+**Oracle:** icon-glyph-from-wrong-rule
+
+THE CONDITIONAL-FORMATTING ICON A USER SEES CAN COME FROM A DISABLED RULE. The drawn glyph is a JOIN OF TWO INDEPENDENT LOOKUPS that can disagree: (1) the icon INDEX comes from the backend, which cascades correctly — it skips !enabled, honours stop_if_true, and respects priority; (2) the icon SET (which glyph family) comes from `findMatchingRuleId(row, col, "iconSet")` (app/extensions/ConditionalFormatting/lib/cfStore.ts:254-274), which matches on rule TYPE and geometric range containment ONLY. It does not read `rule.enabled`, does not honour `stop_if_true`, does not consider priority, and returns the FIRST match in array order. CONSEQUENCE: a DISABLED five-icon rule listed before an enabled three-icon rule over the same range makes the renderer draw a five-arrow glyph indexed 0..2 — a picture assembled from two different rules, one of which the user switched off. AND A HARD-CODED FALLBACK: when no rule id resolves, the renderer silently draws `threeTrafficLights1` (iconSetRenderer.ts:60) rather than nothing, so a cell can show traffic lights that no rule asked for. WHY IT MATTERS BEYOND THE PICTURE: 'sort by the icon I can see' has no referent while the displayed icon is not a single value. This is the prerequisite for BUG-0104's icon sorting, not a cosmetic sibling of it — sorting on a glyph the renderer computed from a disabled rule would produce an order the user cannot explain from what is on screen.
 

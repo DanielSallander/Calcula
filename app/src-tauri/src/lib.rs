@@ -219,6 +219,11 @@ mod timeline_undo_tests;
 #[cfg(test)]
 mod autofilter_recovery_tests;
 
+/// BUG-0107 — the icon a cell shows must be ONE value from the CASCADED rule,
+/// never a glyph family borrowed from a disabled one.
+#[cfg(test)]
+mod icon_glyph_resolution_tests;
+
 #[cfg(test)]
 mod error_display_tests;
 
