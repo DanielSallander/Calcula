@@ -8,6 +8,12 @@
 //!   L4  ai_chat_run_tool: maps a Claude tool_use call to the EXISTING
 //!       mcp::tools helpers (same tool surface as the MCP server) — so AI writes
 //!       are undoable + emit refresh events, gated by check_script_security.
+//!       It also reaches mcp::drafts, so the chat can AUTHOR an object script for
+//!       the user to review instead of only executing one. Until 2026-08-19 it
+//!       could not: the three draft tools were registered on the MCP server and
+//!       absent here, so an external MCP client could hand the user a script to
+//!       read while the built-in chat's only route was run_script — which runs
+//!       immediately, the inverse of the review-then-mount invariant.
 //! SECURITY: the API key is stored in the OS keychain (DPAPI, login-bound),
 //!   never surfaced to JS, never logged, never written to the workbook. The
 //!   Anthropic call is a dedicated reqwest path (NOT the sandboxed
@@ -24,7 +30,7 @@ use windows::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
 };
 
-use crate::mcp::tools;
+use crate::mcp::{drafts, tools};
 
 /// Fixed Credential Manager target for the Anthropic API key.
 const TARGET: &str = "Calcula:aikey|anthropic";
@@ -283,6 +289,36 @@ pub async fn ai_chat_run_tool(
             // Async now: the script surface runs on a dedicated thread so the
             // read-only model.* API can bridge to the async BI internals.
             tools::execute_script(&handle, &p.code).await
+        }
+        // ---- Script drafting: AUTHOR for review, never mount or execute ----
+        // Routed to crate::mcp::drafts — the same helpers the MCP server calls,
+        // so there is ONE draft queue and one set of invariants, not two. Nothing
+        // in this arm runs JavaScript: `draft_object_script` stores the source,
+        // counts its lines, and parses its `// @capability` pragmas with the same
+        // parser that sets a saved script's R19 ceiling. Promotion to live code is
+        // the user's action in the Object Script Editor (`save_object_script`,
+        // which is window-guarded and unreachable from here).
+        //
+        // Deliberately adjacent to `run_script` above: that arm EXECUTES now, this
+        // one hands the user something to read. The distinction is the whole point
+        // of the pair and it should be visible in one screenful.
+        "draft_object_script" => {
+            let p: crate::mcp::server::DraftObjectScriptParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            drafts::draft_object_script(
+                &handle,
+                &p.name,
+                &p.object_type,
+                p.instance_id.as_deref(),
+                p.description.as_deref(),
+                &p.source,
+            )
+        }
+        "list_script_drafts" => drafts::list_script_drafts(&handle),
+        "get_script_draft" => {
+            let p: crate::mcp::server::GetScriptDraftParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            drafts::get_script_draft(&handle, &p.draft_id)
         }
         "get_chart" => {
             let p: crate::mcp::server::GetChartParams =

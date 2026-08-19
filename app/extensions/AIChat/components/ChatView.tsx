@@ -7,262 +7,40 @@
 //          model finishes (stop_reason: end_turn).
 // SECURITY: the API key is stored in the OS keychain by the backend and is never
 //          handled here beyond the one-time "save key" input.
+// CONTEXT: The tool surface and system prompt live in ../lib/chatTools, which is
+//          diffed against the Rust dispatcher by a test. This file owns the loop
+//          and the rendering only.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
-
-// ---------------------------------------------------------------------------
-// AI tool surface (Anthropic wire schema) — mirrors the ai_chat_run_tool
-// dispatcher in ai_chat.rs. Read tools + cell write + structure creation.
-// ---------------------------------------------------------------------------
-
-const TOOLS = [
-  {
-    name: "get_sheet_summary",
-    description:
-      "Get an AI-optimized summary of the workbook: sheet dimensions, column types, formula patterns, sample data, and inventories of charts, named ranges, tables, and pivots. Call this first to understand the workbook.",
-    input_schema: {
-      type: "object",
-      properties: { max_chars: { type: "number", description: "Max summary length (default 8000)." } },
-    },
-  },
-  {
-    name: "read_cell_range",
-    description: "Read the values of a rectangular cell range (0-based, inclusive).",
-    input_schema: {
-      type: "object",
-      properties: {
-        start_row: { type: "number" }, start_col: { type: "number" },
-        end_row: { type: "number" }, end_col: { type: "number" },
-      },
-      required: ["start_row", "start_col", "end_row", "end_col"],
-    },
-  },
-  {
-    name: "set_cell_value",
-    description: "Set a single cell's value or formula (use '=' prefix for formulas). Undoable.",
-    input_schema: {
-      type: "object",
-      properties: {
-        row: { type: "number", description: "0-based row" },
-        col: { type: "number", description: "0-based column (A=0)" },
-        value: { type: "string" },
-      },
-      required: ["row", "col", "value"],
-    },
-  },
-  { name: "list_charts", description: "List every chart in the workbook.", input_schema: { type: "object", properties: {} } },
-  { name: "list_named_ranges", description: "List every named range.", input_schema: { type: "object", properties: {} } },
-  { name: "list_tables", description: "List every structured table.", input_schema: { type: "object", properties: {} } },
-  { name: "list_pivots", description: "List every pivot table with its fields.", input_schema: { type: "object", properties: {} } },
-  {
-    name: "create_named_range",
-    description: "Create a workbook-defined name. Undoable.",
-    input_schema: {
-      type: "object",
-      properties: {
-        name: { type: "string" },
-        refers_to: { type: "string", description: "e.g. \"=Sheet1!$A$1:$B$10\" or \"=0.25\"" },
-        sheet_index: { type: "number", description: "Omit for workbook scope" },
-        comment: { type: "string" },
-      },
-      required: ["name", "refers_to"],
-    },
-  },
-  {
-    name: "create_table",
-    description: "Create a structured table over a cell range (0-based, inclusive). Undoable.",
-    input_schema: {
-      type: "object",
-      properties: {
-        start_row: { type: "number" }, start_col: { type: "number" },
-        end_row: { type: "number" }, end_col: { type: "number" },
-        has_headers: { type: "boolean" }, name: { type: "string" },
-      },
-      required: ["start_row", "start_col", "end_row", "end_col"],
-    },
-  },
-  {
-    name: "set_cell_range",
-    description: "Set values/formulas for multiple cells at once (more efficient than repeated set_cell_value). Undoable.",
-    input_schema: {
-      type: "object",
-      properties: {
-        cells: {
-          type: "array", description: "Cells to set.",
-          items: {
-            type: "object",
-            properties: { row: { type: "number" }, col: { type: "number" }, value: { type: "string" } },
-            required: ["row", "col", "value"],
-          },
-        },
-      },
-      required: ["cells"],
-    },
-  },
-  {
-    name: "apply_formatting",
-    description: "Apply formatting to a cell range (0-based, inclusive): bold, italic, text/background color (hex), number format, text alignment. Undoable. Requires Script Security to allow execution.",
-    input_schema: {
-      type: "object",
-      properties: {
-        start_row: { type: "number" }, start_col: { type: "number" },
-        end_row: { type: "number" }, end_col: { type: "number" },
-        bold: { type: "boolean" }, italic: { type: "boolean" },
-        text_color: { type: "string", description: "hex, e.g. #FF0000" },
-        background_color: { type: "string", description: "hex" },
-        number_format: { type: "string" },
-        text_align: { type: "string", enum: ["left", "center", "right", "general"] },
-      },
-      required: ["start_row", "start_col", "end_row", "end_col"],
-    },
-  },
-  {
-    name: "run_script",
-    description: "Execute a JavaScript script in the script engine (Calcula.getCellValue/setCellValue/getRange/setRange). Undoable + recalc-tracked. Requires Script Security to allow execution.",
-    input_schema: {
-      type: "object",
-      properties: { code: { type: "string" } },
-      required: ["code"],
-    },
-  },
-  {
-    name: "get_chart",
-    description: "Get a single chart's full definition + ChartSpec as JSON. Pass a chart_id from list_charts.",
-    input_schema: {
-      type: "object",
-      properties: { chart_id: { type: "string" } },
-      required: ["chart_id"],
-    },
-  },
-  {
-    name: "create_chart_from_spec",
-    description: "Create a NEW chart from a ChartSpec JSON object. Call list_charts/get_chart for spec examples and get_sheet_summary for the data layout first. Requires Script Security to allow execution.",
-    input_schema: {
-      type: "object",
-      properties: {
-        spec: { type: "object", description: "A ChartSpec JSON object (mark, data range, series)." },
-        sheet_index: { type: "number" }, name: { type: "string" },
-      },
-      required: ["spec"],
-    },
-  },
-  {
-    name: "create_pivot",
-    description: "Create a NEW pivot with row + value fields. Field names come from the source header row (call get_sheet_summary first). Undoable. Requires Script Security to allow execution.",
-    input_schema: {
-      type: "object",
-      properties: {
-        source_range: { type: "string", description: "A1, e.g. A1:D100" },
-        destination_cell: { type: "string", description: "A1, e.g. F1" },
-        value_fields: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              field: { type: "string" },
-              aggregation: { type: "string", enum: ["sum", "count", "average", "min", "max"] },
-            },
-            required: ["field", "aggregation"],
-          },
-        },
-        row_fields: { type: "array", items: { type: "string" } },
-        source_sheet: { type: "number" }, destination_sheet: { type: "number" },
-        has_headers: { type: "boolean" }, name: { type: "string" },
-      },
-      required: ["source_range", "destination_cell", "value_fields"],
-    },
-  },
-  // ---- BI / cube (read-only) ----
-  {
-    name: "list_bi_connections",
-    description: "List every BI/cube connection in the workbook (id, name, type, connected state, table/measure counts). Use this to discover BI models before describe_bi_model or run_bi_query.",
-    input_schema: { type: "object", properties: {} },
-  },
-  {
-    name: "describe_bi_model",
-    description: "Describe a BI/cube model's schema (tables, columns, measures, KPIs, relationships) for a connection_id from list_bi_connections. Call this before run_bi_query to learn valid measure/column names.",
-    input_schema: {
-      type: "object",
-      properties: { connection_id: { type: "string", description: "Connection id from list_bi_connections" } },
-      required: ["connection_id"],
-    },
-  },
-  {
-    name: "run_bi_query",
-    description: "Run a READ-ONLY structured BI/cube query: aggregate measures grouped by [table, column] dimensions, with optional filters. Returns a result table. Call describe_bi_model first for valid names.",
-    input_schema: {
-      type: "object",
-      properties: {
-        connection_id: { type: "string", description: "Connection id from list_bi_connections" },
-        measures: { type: "array", items: { type: "string" }, description: "Measure names to aggregate" },
-        group_by: {
-          type: "array",
-          description: "Dimensions to group by.",
-          items: { type: "object", properties: { table: { type: "string" }, column: { type: "string" } }, required: ["table", "column"] },
-        },
-        filters: {
-          type: "array",
-          description: "Optional row filters.",
-          items: { type: "object", properties: { table: { type: "string" }, column: { type: "string" }, operator: { type: "string", enum: ["=", "!=", ">", "<", ">=", "<="] }, value: { type: "string" } }, required: ["table", "column", "operator", "value"] },
-        },
-      },
-      required: ["connection_id", "measures"],
-    },
-  },
-  {
-    name: "cube_value",
-    description: "Resolve a CUBEVALUE: a measure expression plus optional member filters, against a BI model. Read-only.",
-    input_schema: {
-      type: "object",
-      properties: {
-        connection: { type: "string", description: "Connection name or id" },
-        members: { type: "array", items: { type: "string" }, description: "CUBE member-expressions, e.g. [\"[Sales Amount]\", \"Product[Category]=Bikes\"]" },
-      },
-      required: ["connection", "members"],
-    },
-  },
-  {
-    name: "cube_kpi",
-    description: "Resolve a KPI value (1), goal (2), or status (3) for a BI model. Read-only.",
-    input_schema: {
-      type: "object",
-      properties: {
-        connection: { type: "string", description: "Connection name or id" },
-        kpi: { type: "string" },
-        property: { type: "integer", enum: [1, 2, 3], description: "1 = value, 2 = goal, 3 = status" },
-      },
-      required: ["connection", "kpi", "property"],
-    },
-  },
-  {
-    name: "cube_members",
-    description: "List the distinct members of a level (a Table[Column] expression) in a BI model. Read-only.",
-    input_schema: {
-      type: "object",
-      properties: {
-        connection: { type: "string", description: "Connection name or id" },
-        level: { type: "string", description: "A level expression Table[Column], e.g. Product[Category]" },
-      },
-      required: ["connection", "level"],
-    },
-  },
-];
-
-const SYSTEM_PROMPT =
-  "You are an AI assistant embedded in Calcula, a spreadsheet application. You help the user " +
-  "read and edit the open workbook using the provided tools. Prefer get_sheet_summary to orient " +
-  "yourself before reading/writing. Cell coordinates are 0-based (row 0 = row 1, col 0 = column A). " +
-  "If the workbook has BI/cube connections (list_bi_connections), you can query them read-only with " +
-  "describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members. " +
-  "Keep replies concise. Confirm destructive or large edits before making them.";
+import { TOOLS, SYSTEM_PROMPT } from "../lib/chatTools";
 
 const MAX_TOOL_TURNS = 8;
 
 type AnyBlock = { type: string; text?: string; id?: string; name?: string; input?: unknown };
 type RawMsg = { role: "user" | "assistant"; content: string | AnyBlock[] };
 type Bubble = { kind: "user" | "assistant" | "tool" | "error"; text: string };
+
+/**
+ * One line describing a tool call, for the transcript.
+ *
+ * Most tools take small arguments and reading them verbatim is useful. Script
+ * drafting does not: `source` is an entire macro, and dumping it JSON-escaped
+ * into a chat bubble buries the conversation in a wall of `\n`-laden text —
+ * while the readable copy is already opening in the Object Script Editor, which
+ * is where the user is meant to review it. So the draft tools are summarised by
+ * intent and everything else is shown as-is.
+ */
+function summarizeToolCall(name: string, input: unknown): string {
+  const args = (input ?? {}) as Record<string, unknown>;
+  if (name === "draft_object_script") {
+    const target = args.instance_id ? `${args.object_type}/${args.instance_id}` : `${args.object_type}`;
+    const lines = typeof args.source === "string" ? args.source.split("\n").length : 0;
+    return `draft_object_script("${args.name}" -> ${target}, ${lines} lines) — for review, not mounted`;
+  }
+  return `${name}(${JSON.stringify(args)})`;
+}
 
 // ---------------------------------------------------------------------------
 // Styles
@@ -340,7 +118,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
 
         const toolResults: AnyBlock[] = [];
         for (const tu of toolUses) {
-          addBubble({ kind: "tool", text: `${tu.name}(${JSON.stringify(tu.input ?? {})})` });
+          addBubble({ kind: "tool", text: summarizeToolCall(tu.name ?? "", tu.input) });
           let result: string;
           try {
             result = await aiChatBackend.invoke<string>("ai_chat_run_tool", { name: tu.name, input: tu.input ?? {} });
@@ -382,7 +160,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     h("div", { key: "log", ref: logRef, style: log },
       bubbles.length === 0
         ? h("div", { key: "empty", style: { color: "#999", textAlign: "center", marginTop: 20 } },
-            "Ask Claude about your workbook — it can read cells, summarize data, and make undoable edits.")
+            "Ask Claude about your workbook — it can read cells, summarize data, make undoable edits, and draft scripts for you to review.")
         : bubbles.map((b, i) => h("div", { key: i, style: bubbleStyle(b.kind) }, b.text)),
       busy ? h("div", { key: "busy", style: { ...bubbleStyle("assistant"), color: "#999" } }, "…") : null,
     ),
