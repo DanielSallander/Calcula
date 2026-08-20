@@ -127,15 +127,34 @@ pub fn execute_script(
 /// Draining also matters for the PERSISTENT notebook session specifically: jobs
 /// left behind by cell N would otherwise run during cell N+1 and mutate the
 /// wrong grids.
+///
+/// **A failing job does NOT end the drain.** An early return here would leave the
+/// rest of the queue intact, and the error that reaches this arm is precisely the
+/// UNCATCHABLE one — the deadline interrupt — so "the cell timed out" was exactly
+/// the case that walked away with jobs still queued. In a persistent session
+/// those continuations then run against the NEXT cell's grids and commit under
+/// the next cell's id. So the loop runs the queue to empty and reports the FIRST
+/// error afterwards. It still terminates: QuickJS pops a job before executing it,
+/// so every iteration removes one, and a job that faults never runs far enough to
+/// queue another.
 pub(crate) fn drain_jobs(rt: &Runtime, deadline: &Deadline) -> Result<(), String> {
+    let mut first_error: Option<String> = None;
     loop {
         match rt.execute_pending_job() {
             Ok(true) => continue,
-            Ok(false) => return Ok(()),
+            Ok(false) => {
+                return match first_error {
+                    Some(message) => Err(message),
+                    None => Ok(()),
+                }
+            }
             Err(exception) => {
-                return Err(exception
+                let message = exception
                     .0
-                    .with(|ctx| describe_error(&ctx, rquickjs::Error::Exception, deadline)));
+                    .with(|ctx| describe_error(&ctx, rquickjs::Error::Exception, deadline));
+                if first_error.is_none() {
+                    first_error = Some(message);
+                }
             }
         }
     }

@@ -15,12 +15,15 @@
 //          entry point is NOT called.
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   buildRunTargetRegistrations,
   withRunTargets,
+  stripModuleSyntax,
   wrapModuleSource,
 } from "../debugWrapper";
-import { DEBUG_GLOBAL } from "../debugInstrument";
+import { DEBUG_GLOBAL, instrumentForDebug } from "../debugInstrument";
 
 /**
  * The shape the macro recorder emits, minus the recorded body: a worker function
@@ -242,5 +245,156 @@ describe("wrapModuleSource — an `export`ed declaration still compiles", () => 
     await evaluateWrapper(wrapModuleSource(source))(context);
 
     expect(writes).toEqual([[0, 0, "export function setup"]]);
+  });
+});
+
+describe("stripModuleSyntax — the specifier forms, and line alignment", () => {
+  /**
+   * Closing the DECLARATION forms and leaving these open just narrowed the
+   * hole: acorn parses with `sourceType: "module"` and accepts them, and
+   * `hasSetupEntryPoint` finds the declaration and calls the script healthy —
+   * so the blob import is the first thing that objects, at mount.
+   */
+  it("neutralises `export { setup };`", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 'specifier');",
+      "}",
+      "export { setup };",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 0, "specifier"]]);
+  });
+
+  it("neutralises `export * from` and a multi-line specifier list", () => {
+    const source = [
+      "export * from './helpers';",
+      "export {",
+      "  setup,",
+      "};",
+    ].join("\n");
+
+    const out = stripModuleSyntax(source);
+
+    expect(out).not.toContain("export");
+    // Blanked, not deleted: the line count is untouched.
+    expect(out.split("\n").length).toBe(source.split("\n").length);
+  });
+
+  /**
+   * `\s` includes `\n`, and `^` matches at the start of a blank line under
+   * `/m`, so a `\s*` prefix consumed the PRECEDING blank line's newline and
+   * shifted every following line up by one. `debugRuntime.ts` documents that
+   * the blob is line-aligned with the author's source and reports stack frames
+   * on that basis, so every reported line was too low.
+   */
+  it("does not eat the blank line before an import", () => {
+    const source = [
+      "// @capability net.fetch",
+      "",
+      "import { helper } from './util';",
+      "",
+      "function setup(context) {}",
+    ].join("\n");
+
+    const out = stripModuleSyntax(source);
+
+    expect(out.split("\n").length).toBe(source.split("\n").length);
+    expect(out.split("\n").findIndex((l) => l.includes("function setup"))).toBe(4);
+  });
+
+  it("keeps every line of the wrapped blob aligned with the author's source", () => {
+    const source = [
+      "",
+      "import { helper } from './util';",
+      "",
+      "export default function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 'aligned');",
+      "}",
+    ].join("\n");
+
+    const wrapped = wrapModuleSource(source);
+    const lines = wrapped.split("\n");
+
+    // The wrapper adds no newline before the body, so author line N is blob
+    // line N (1-indexed), and only the tail is appended.
+    expect(lines[3]).toContain("function setup");
+    expect(lines.length).toBe(source.split("\n").length + 1);
+  });
+
+  it("is idempotent", () => {
+    const source = "export const x = 1;\nexport function setup(context) {}\nexport { setup };";
+    const once = stripModuleSyntax(source);
+    expect(stripModuleSyntax(once)).toBe(once);
+  });
+});
+
+describe("the DEBUG mount composes instrumentation with the wrapper", () => {
+  /**
+   * Neither pass is wrong alone; the ORDER is the whole defect.
+   *
+   * `instrumentForDebug` inserts a yield point at offset 0, so line 1 becomes
+   * `await __calculaDbg.h(1,…);export function setup(context) {` — `export` is
+   * no longer at a line start, and `wrapModuleSource`'s anchored strip cannot
+   * reach it. The blob threw the SyntaxError the strip exists to prevent,
+   * bootstrap swallowed it and recompiled un-instrumented, and the session ran
+   * with NO breakpoint able to fire. Nothing composed the two passes, so nothing
+   * caught it: debugInstrument's own tests hand-roll a wrapper with no strips.
+   */
+  const OBJECT_SCRIPT = [
+    "export function setup(context) {",
+    "  return context.api.setCellValue(0, 0, 'debugged');",
+    "}",
+  ].join("\n");
+
+  const compiles = (wrapped: string): boolean => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      new Function(`return (${wrapped.replace(/^export default /, "")})`);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("strips BEFORE instrumenting, and the result compiles", () => {
+    const result = instrumentForDebug(stripModuleSyntax(OBJECT_SCRIPT));
+
+    expect(result.ok).toBe(true);
+    expect(compiles(wrapModuleSource(result.code, { asyncWrapper: true }))).toBe(true);
+  });
+
+  /** The negative control: the other order is what shipped, and it does not compile. */
+  it("instrumenting FIRST leaves an `export` the wrapper's strip cannot reach", () => {
+    const result = instrumentForDebug(OBJECT_SCRIPT);
+
+    expect(result.ok).toBe(true);
+    expect(result.code).toContain("export function setup");
+    expect(compiles(wrapModuleSource(result.code, { asyncWrapper: true }))).toBe(false);
+  });
+});
+
+describe("the debug mount actually applies the strip first", () => {
+  /**
+   * `bootstrap.ts` cannot be imported by a test — it is a worker entry point
+   * that hardens the ambient globals and installs `self.onmessage` at module
+   * load — so the wiring is pinned by reading it, the way this repo pins other
+   * un-importable sources. The composition property itself is proven above; this
+   * asserts the debug mount is the thing that uses it.
+   */
+  it("instruments the STRIPPED source, never the raw one", () => {
+    const bootstrap = readFileSync(
+      resolve(__dirname, "../bootstrap.ts"),
+      "utf8",
+    );
+
+    expect(bootstrap).toContain("stripModuleSyntax(spec.source)");
+    expect(bootstrap).not.toContain("instrumentForDebug(spec.source)");
+    // The fallback path must compile the stripped source too, or losing
+    // instrumentation would also lose the fix.
+    expect(bootstrap).not.toContain("withRunTargets(spec.source");
   });
 });

@@ -308,3 +308,57 @@ describe("analysis reports what it saw", () => {
     expect(a.calls.map((c) => c.chain)).toContain("log");
   });
 });
+
+describe("only `setup` receives the context", () => {
+  /**
+   * The mount tail is `typeof setup === "function" ? setup(context)`, so `setup`
+   * is the only function the context is ever passed to. Binding the first
+   * parameter of EVERY exported function made an exported helper's parameter a
+   * context binding, so its ordinary JS resolved to a bare context chain and was
+   * reported as an invented API member — a valid draft REJECTED, which is the
+   * costliest way a checker can be wrong.
+   */
+  it("does not treat an exported helper's parameter as the context", () => {
+    const source = [
+      "export function setup(context) {",
+      "  context.expose('onClick', () => {",
+      "    context.api.setCellValue(100, 1, String(total([1, 2, 3])));",
+      "  });",
+      "}",
+      "export function total(values) {",
+      "  return values.reduce((a, b) => a + Number(b), 0);",
+      "}",
+      "",
+    ].join("\n");
+
+    const report = validateScriptSource(source);
+
+    expect(report.findings.filter((f) => f.code === "unknown-member")).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
+  it("still binds `setup`'s own parameter, whatever it is named", () => {
+    const source = [
+      "export function setup(ctx) {",
+      "  ctx.api.setCellValu(0, 0, 'typo');",
+      "}",
+      "",
+    ].join("\n");
+
+    const report = validateScriptSource(source);
+
+    expect(report.findings.some((f) => f.code === "unknown-member")).toBe(true);
+  });
+
+  it("binds an arrow `export const setup`, and no other exported const", () => {
+    const bad = "export const setup = (context) => { context.api.nope(0, 0); };\n";
+    expect(validateScriptSource(bad).findings.some((f) => f.code === "unknown-member")).toBe(true);
+
+    const fine = [
+      "export function setup(context) { context.log('x'); }",
+      "export const format = (row) => row.map((c) => c.trim()).join(',');",
+      "",
+    ].join("\n");
+    expect(validateScriptSource(fine).findings.filter((f) => f.code === "unknown-member")).toEqual([]);
+  });
+});

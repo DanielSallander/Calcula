@@ -40,25 +40,63 @@ export interface WrapOptions {
  * is what keeps a user source with no trailing semicolon from swallowing it via
  * ASI, and it is present in both forms.
  */
+/**
+ * Every character replaced by a space, except line breaks.
+ *
+ * Length AND line count are preserved, so a strip never moves the code after
+ * it: breakpoints, error stacks and the debugger's call-stack view all address
+ * the author's own line and column.
+ */
+function blankOut(text: string): string {
+  return text.replace(/[^\r\n]/g, " ");
+}
+
+/**
+ * Neutralise module syntax that cannot appear where the user body is spliced.
+ *
+ * `wrapModuleSource` puts the body INSIDE a function, where `import` and
+ * `export` are SyntaxErrors. `export function setup(context)` — the form the
+ * docs, the generated IntelliSense typings and the AI authoring prompt all teach
+ * — therefore failed to compile at mount while passing every static check before
+ * it, because acorn parses the source with `sourceType: "module"` and accepts
+ * what the blob then rejects.
+ *
+ * Exported separately so a DEBUG mount can apply it BEFORE instrumentation.
+ * The instrumentation pass inserts a yield point at offset 0, which pushes
+ * `export` off column 0 and out of reach of a line-anchored strip — the blob
+ * threw, bootstrap swallowed it and silently recompiled un-instrumented, so
+ * every breakpoint in the script was dead. Blanking (rather than deleting) is
+ * what makes running it first safe: offsets computed later still line up.
+ *
+ * Idempotent — nothing matches on a second pass.
+ *
+ * Every pattern matches HORIZONTAL whitespace only. `\s` includes `\n`, and `^`
+ * matches at the start of a blank line under `/m`, so a `\s*` prefix ate the
+ * preceding blank line's newline and shifted every following line up by one.
+ */
+export function stripModuleSyntax(source: string): string {
+  return (
+    source
+      // `import …` — inert here, so the whole statement goes.
+      .replace(/^[^\S\r\n]*import\b[^\r\n]*/gm, blankOut)
+      // `export { setup };` and `export { a } from "m";` — the specifier form
+      // survives a declaration-only strip, and may span lines.
+      .replace(/^[^\S\r\n]*export[^\S\r\n]*\{[^}]*\}[^\r\n]*/gm, blankOut)
+      // `export * from "m";`
+      .replace(/^[^\S\r\n]*export[^\S\r\n]+\*[^\r\n]*/gm, blankOut)
+      // `export default <decl>` / `export <decl>` — the keyword only; the
+      // declaration itself stays exactly where the author put it.
+      .replace(/^[^\S\r\n]*export[^\S\r\n]+default\b/gm, blankOut)
+      .replace(
+        /^[^\S\r\n]*export[^\S\r\n]+(?=(?:async[^\S\r\n]+)?(?:function|const|let|var|class)\b)/gm,
+        blankOut,
+      )
+  );
+}
+
 export function wrapModuleSource(source: string, options: WrapOptions = {}): string {
   const { asyncWrapper = false, invokeSetup = true } = options;
-  // Cosmetic cleanup only (imports/exports won't resolve in a blob module).
-  //
-  // The bare `export` strip is load-bearing, not tidying: the user body is
-  // spliced INSIDE a function, where an `export` declaration is a SyntaxError,
-  // so `export function setup(context)` — the form the docs, the IntelliSense
-  // typings and the AI authoring prompt all teach — failed to compile at mount
-  // while passing every static check before it. The keyword is blanked rather
-  // than deleted so both line AND column numbers survive: breakpoints, error
-  // stacks and the debugger's call-stack view all address the user's own
-  // coordinates.
-  const cleaned = source
-    .replace(/^\s*import\s+.*$/gm, "// [import removed]")
-    .replace(/^\s*export\s+default\s+/gm, "")
-    .replace(
-      /^(\s*)export(\s+)(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm,
-      (_m, indent: string, gap: string) => `${indent}      ${gap}`,
-    );
+  const cleaned = stripModuleSyntax(source);
 
   const tail = invokeSetup
     ? `; return typeof setup === "function" ? setup(context) : undefined; }`

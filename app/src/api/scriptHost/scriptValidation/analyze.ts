@@ -172,13 +172,28 @@ function collectContextBindings(program: Node): Set<string> {
     const p = fn?.params?.[0];
     if (p?.type === "Identifier") bindings.add(p.name);
   };
+  // ONLY `setup`'s first parameter is the context.
+  //
+  // The host's mount tail is `typeof setup === "function" ? setup(context)`, so
+  // `setup` is the only function the context is ever passed to. Binding the
+  // first parameter of EVERY exported function made any exported helper's
+  // parameter a context binding, and `resolvePrefix` then resolved ordinary JS
+  // on that local to a bare context chain — so
+  //
+  //     export function total(values) { return values.reduce(...); }
+  //
+  // reported `reduce` as an invented API member and the draft was REJECTED.
+  // A validator whose failure mode is a false rejection of valid code is the
+  // same defect class as the dry run judging a realm it cannot host.
+  const isSetupName = (name: string | undefined): boolean => name === "setup";
   walk(program, (n) => {
     if (n.type === "ExportNamedDeclaration" || n.type === "ExportDefaultDeclaration") {
       const decl = n.declaration;
       if (!decl) return;
-      if (decl.type === "FunctionDeclaration") noteFirstParam(decl);
+      if (decl.type === "FunctionDeclaration" && isSetupName(decl.id?.name)) noteFirstParam(decl);
       if (decl.type === "VariableDeclaration") {
         for (const d of decl.declarations ?? []) {
+          if (!isSetupName(d.id?.name)) continue;
           const init = d.init;
           if (init && (init.type === "ArrowFunctionExpression" || init.type === "FunctionExpression")) {
             noteFirstParam(init);

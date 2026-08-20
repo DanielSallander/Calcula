@@ -12,7 +12,12 @@ import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, ge
 import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
 import { DEBUG_GLOBAL, instrumentForDebug } from "./debugInstrument";
 import { createDebugRuntime, type DebugController } from "./debugRuntime";
-import { buildRunTargetRegistrations, withRunTargets, wrapModuleSource } from "./debugWrapper";
+import {
+  buildRunTargetRegistrations,
+  stripModuleSyntax,
+  withRunTargets,
+  wrapModuleSource,
+} from "./debugWrapper";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -177,12 +182,26 @@ async function compileForDebug(spec: MountSpec): Promise<ModuleEntryFn> {
     },
   };
 
+  // Module syntax is neutralised BEFORE instrumentation, not after.
+  //
+  // The instrumentation pass inserts a yield point at offset 0, so line 1 of
+  // `export function setup(context)` becomes `await …;export function setup(…)`
+  // — `export` is no longer at a line start and `wrapModuleSource`'s anchored
+  // strip cannot reach it. The blob then threw the very SyntaxError the strip
+  // exists to prevent, the catch below swallowed it, and the fallback recompiled
+  // the ORIGINAL source un-instrumented: a debug session in which NO breakpoint
+  // can ever be hit, reported only as `instrumented: false`.
+  //
+  // Safe to run first because the strip BLANKS rather than deletes: every offset
+  // the instrumentation computes still lines up with the author's source.
+  const source = stripModuleSyntax(spec.source);
+
   // Registration statements appended AFTER the user body. They run BEFORE the
   // wrapper's tail, so the run-targets exist whether or not that tail calls
   // `setup` — which is what makes an inert mount runnable.
-  const runTargetRegs = buildRunTargetRegistrations(spec.source, !invokeSetup);
+  const runTargetRegs = buildRunTargetRegistrations(source, !invokeSetup);
 
-  const result = instrumentForDebug(spec.source);
+  const result = instrumentForDebug(source);
   if (result.ok) {
     try {
       const fn = await compileSource(withRunTargets(result.code, runTargetRegs), true, invokeSetup);
@@ -216,7 +235,7 @@ async function compileForDebug(spec: MountSpec): Promise<ModuleEntryFn> {
   // not pause), so the run-targets are registered on the fallback path too — and
   // an inert mount stays inert, because losing STEPPING must never cost the user
   // the guarantee that entering the debugger executed nothing.
-  return compileSource(withRunTargets(spec.source, runTargetRegs), false, invokeSetup);
+  return compileSource(withRunTargets(source, runTargetRegs), false, invokeSetup);
 }
 
 // ============================================================================

@@ -461,6 +461,47 @@ and every consumer branches on it before drawing a conclusion. The honest scope:
 it in the realm it actually runs in, which is a real piece of work and is filed as such; emulating
 5% of a surface and reporting the gaps as defects is not a cheaper version of it.
 
+### The same three shapes, swept for repo-wide — 2026-08-20
+
+Finding three defects stacked on each other is evidence about the CLASS, not just the instances, so
+the repo was swept for each shape: async work assumed complete, user source rewritten before
+execution, and a checker reporting a verdict it is not entitled to. 17 candidates were raised and
+each was handed to an independent verifier told to REFUTE it; 12 survived, 5 did not.
+
+**Four landed on this feature's own fix, and one was a defect IN it:**
+
+- `drain_jobs` returned on the FIRST job error — and the error that reaches that arm is the
+  uncatchable one, the deadline interrupt. So "the cell timed out" was precisely the case that
+  walked away with continuations still queued, to resume against the NEXT cell's grids and commit
+  under its id. It now runs the queue to empty and reports the first error afterwards. It still
+  terminates: QuickJS pops a job before executing it, and a job that faults never runs far enough to
+  queue another.
+- **Debug mounts still rejected `export function setup`.** The instrumentation pass inserts a yield
+  point at offset 0, pushing `export` off column 0, so the line-anchored strip never fired. The blob
+  threw, `bootstrap.ts` swallowed it and silently recompiled un-instrumented — so every breakpoint
+  in the script was dead, reported only as `instrumented: false`. The strip is now applied BEFORE
+  instrumentation, which is safe precisely because it blanks rather than deletes.
+- **`export { setup };` and `export * from …` still survived** into the function body. The same
+  validator-looser-than-the-engine asymmetry: acorn parses with `sourceType: "module"` and accepts
+  them, `hasSetupEntryPoint` finds the declaration and calls the script healthy, and the blob import
+  throws. Closing the declaration forms and leaving the specifier forms open just narrowed the hole.
+- **The `import` / `export default` strips ate the preceding blank line's newline** (`\s` includes
+  `\n`, and `^` matches at a blank line under `/m`), so the blob stopped being line-aligned with the
+  author's source — contradicting the invariant stated in that file's own header and relied on by
+  `debugRuntime.ts`. Every strip now matches horizontal whitespace only.
+
+**Two more landed on this feature elsewhere**, both of the unentitled-verdict shape: the validator
+bound the first parameter of EVERY exported function rather than only `setup`'s, so an exported
+helper's ordinary JS (`values.reduce(...)`) was reported as an invented API member and the draft
+rejected; and `scoreCandidate` never consumed the validator's `no-entry-point` error, so a script
+with no `setup` — which mounts and does nothing — scored 1.0 and `passed: true`, inflating the very
+`canaryScore` that picks the authoring tier.
+
+The remaining six are real but outside this feature; they are filed in `open-items.md` §2.1 rather
+than fixed here. The one worth naming: the object-script realm already fixed the "async handler
+rejects and nobody hears it" defect and documented it, and its **extension-realm twin never received
+the fix** — the same shape, in the same codebase, with the cure already written down next door.
+
 ## 6. Making the API surface sliceable
 
 `calcula.d.ts` (35,599 bytes, ~10k tokens estimated) fits a 32k-context model whole but blows an 8k

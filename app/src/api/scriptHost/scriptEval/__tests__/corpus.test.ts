@@ -223,3 +223,52 @@ describe("summarize", () => {
     expect(s.failures).toEqual([]);
   });
 });
+
+describe("a script with no entry point cannot score full marks", () => {
+  /**
+   * `scoreCandidate` called the validator and then ignored its VERDICT, reading
+   * two finding codes and never `no-entry-point`. A bare top-level line has no
+   * `setup`, so the mount tail calls nothing and the script does NOTHING — yet
+   * the bare-`context` fallback still resolved its calls and it scored 1.0 with
+   * `passed: true`. That number is the in-app `canaryScore` which PICKS THE
+   * AUTHORING TIER, so the inflation changed what the product did.
+   */
+  const TASK: EvalTask = {
+    id: "synthetic-no-entry-point",
+    canary: false,
+    objectType: "button",
+    intent: "Write Hello into A1 when clicked.",
+    hints: ["cell"],
+    expectCapabilities: [],
+    mustCall: ["api.setCellValue"],
+    reference: [
+      "export function setup(context) {",
+      "  context.expose('onClick', () => context.api.setCellValue(0, 0, 'Hello'));",
+      "}",
+    ],
+  };
+
+  it("scores a setup-less script below a passing mark", () => {
+    const score = scoreCandidate(TASK, "context.api.setCellValue(0, 0, 'Hello');\n");
+
+    // It really does look clean on every OTHER axis — that is why it scored 1.0.
+    expect(score.parsed).toBe(true);
+    expect(score.reachClean).toBe(true);
+    expect(score.capabilitiesDeclared).toBe(true);
+    expect(score.behavioural).toBe(true);
+    // ...but it mounts and does nothing.
+    expect(score.mountable).toBe(false);
+    expect(score.passed).toBe(false);
+    expect(score.score).toBeLessThan(1);
+  });
+
+  it("leaves a script that DOES have setup scoring exactly as before", () => {
+    const score = scoreCandidate(TASK, referenceSource(TASK));
+
+    expect(score.mountable).toBe(true);
+    expect(score.passed).toBe(true);
+    // parsed(0.05) + mountable(0.10) replaces the old parsed(0.15), so every
+    // previously-measured number stays comparable.
+    expect(score.score).toBe(1);
+  });
+});

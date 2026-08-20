@@ -55,6 +55,8 @@ export interface TaskScore {
   taskId: string;
   /** L0 — it is JavaScript. */
   parsed: boolean;
+  /** It defines the `setup` entry point the host mount actually calls. */
+  mountable: boolean;
   /** L1 — every method it calls exists. */
   reachClean: boolean;
   /** L2 — no capability used without being declared. */
@@ -74,7 +76,15 @@ export interface TaskScore {
 }
 
 const WEIGHTS = {
-  parsed: 0.15,
+  parsed: 0.05,
+  /**
+   * It has an entry point the host will actually call.
+   *
+   * Split out of `parsed`'s original 0.15 rather than added on top, so a script
+   * that HAS a `setup` scores exactly what it scored before and every measured
+   * number in the design doc stays comparable. Only the broken case moves.
+   */
+  mountable: 0.1,
   reachClean: 0.3,
   capabilitiesDeclared: 0.25,
   capabilitiesExact: 0.1,
@@ -96,6 +106,15 @@ export function scoreCandidate(task: EvalTask, candidate: string): TaskScore {
   const analysis = report.analysis;
 
   const parsed = analysis.parsed;
+  // The grader used to call the validator and then ignore its VERDICT, reading
+  // only two finding codes. A script with no `setup` raises `no-entry-point` as
+  // a `severity: "error"` — the host's mount tail simply never calls anything,
+  // so it mounts and does NOTHING — and it scored 1.0 / `passed: true`, because
+  // the bare-`context` fallback still resolved its calls. That inflates the
+  // in-app `canaryScore` that picks the authoring tier, which is the one number
+  // here that changes what the product does.
+  const mountable =
+    parsed && !report.findings.some((f) => f.code === "no-entry-point");
   const inventedMethods = report.findings
     .filter((f) => f.code === "unknown-member")
     .map((f) => f.message);
@@ -114,6 +133,7 @@ export function scoreCandidate(task: EvalTask, candidate: string): TaskScore {
 
   const score =
     (parsed ? WEIGHTS.parsed : 0) +
+    (mountable ? WEIGHTS.mountable : 0) +
     (reachClean ? WEIGHTS.reachClean : 0) +
     (capabilitiesDeclared ? WEIGHTS.capabilitiesDeclared : 0) +
     (capabilitiesExact ? WEIGHTS.capabilitiesExact : 0) +
@@ -122,6 +142,7 @@ export function scoreCandidate(task: EvalTask, candidate: string): TaskScore {
   return {
     taskId: task.id,
     parsed,
+    mountable,
     reachClean,
     capabilitiesDeclared,
     capabilitiesExact,
@@ -130,7 +151,12 @@ export function scoreCandidate(task: EvalTask, candidate: string): TaskScore {
     inventedMethods,
     score: Number(score.toFixed(4)),
     passed:
-      parsed && reachClean && capabilitiesDeclared && capabilitiesExact && behavioural,
+      parsed &&
+      mountable &&
+      reachClean &&
+      capabilitiesDeclared &&
+      capabilitiesExact &&
+      behavioural,
   };
 }
 

@@ -1064,6 +1064,77 @@ mod tests {
         }
     }
 
+    /// A cell that TIMES OUT must not leave work for the next one either.
+    ///
+    /// The nastier half of the leak, and the one an early `return` on the first
+    /// job error reintroduces: the error that ends the drain IS the deadline
+    /// interrupt, so "the cell timed out" was exactly the case that walked away
+    /// with continuations still queued. Measured with the early return restored,
+    /// the second continuation did not run in cell one at all — it ran during
+    /// cell TWO, which reported `cells_modified: 1` and held the write.
+    ///
+    /// Two things about the shape are load-bearing:
+    ///   * The FIRST continuation must run long enough to TRIP the interrupt.
+    ///     QuickJS checks the interrupt handler only periodically, so a short
+    ///     continuation finishes before any check and `execute_pending_job`
+    ///     never reports Err — this leak cannot be reproduced without a spinner.
+    ///   * The session is deliberately LEAKED at the end. Aborting a pending job
+    ///     leaves QuickJS holding a bad refcount, and DROPPING that runtime trips
+    ///     its internal `p->ref_count > 0` assertion and takes the whole test
+    ///     process down with STATUS_STACK_BUFFER_OVERRUN — before the harness can
+    ///     even print a result. That hazard is real and is filed separately; it
+    ///     is not what this test is about, and leaking one runtime for the life of
+    ///     a test process is the cheapest way to keep the two apart.
+    #[test]
+    fn a_timed_out_cell_leaves_no_job_behind_for_the_next_cell() {
+        let session = NotebookSession::new(
+            None,
+            ScriptLimits::with_timeout_ms(50),
+            CellRunInput::new(fixture().0, fixture().1, fixture().2, 0, "notebook:timeout-setup"),
+        )
+        .expect("session");
+
+        let (grids, reg, names) = fixture();
+        let (first, _) = session.run_cell(
+            "(async () => { await null; for (;;) {} })(); \
+             (async () => { await null; Calcula.setCellValue(2, 2, 'FROM_TIMED_OUT'); })();",
+            CellRunInput::new(grids, reg, names, 0, "notebook:timeout1"),
+        );
+        assert!(
+            matches!(first, ScriptResult::Error { .. }),
+            "precondition: the cell must actually time out, got {:?}",
+            first,
+        );
+
+        let (grids2, reg2, names2) = fixture();
+        let (second, modified) = session.run_cell(
+            "1 + 1",
+            CellRunInput::new(grids2, reg2, names2, 0, "notebook:timeout2"),
+        );
+
+        let outcome = match second {
+            ScriptResult::Success { cells_modified, .. } => cells_modified,
+            other => panic!("expected success, got {:?}", other),
+        };
+        let leaked = modified[0]
+            .get_cell(2, 2)
+            .map(|c| cell_value_to_string(&c.value));
+
+        // See the doc comment: dropping a runtime whose job was aborted aborts
+        // the PROCESS, so the assertions come after the leak and the session is
+        // never dropped.
+        std::mem::forget(session);
+
+        assert_eq!(
+            outcome, 0,
+            "the timed-out cell's deferred write was committed under the NEXT cell's id",
+        );
+        assert_eq!(
+            leaked, None,
+            "a continuation stranded by the timed-out cell wrote into the NEXT cell's workbook",
+        );
+    }
+
     /// A job queued by one cell must not run during the NEXT one.
     ///
     /// The session is persistent, so an undrained continuation from cell N would
