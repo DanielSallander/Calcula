@@ -73,13 +73,13 @@ import type { TimelineLevel } from "./lib/timelineSlicerTypes";
 
 let cleanupFunctions: Array<() => void> = [];
 let gridContainer: HTMLElement | null = null;
-let pendingClick: { timelineId: number; deferNarrow?: boolean } | null = null;
+let pendingClick: { timelineId: string; deferNarrow?: boolean } | null = null;
 let lastMousedownCtrl = false;
-let dragStartPositions: Map<number, { x: number; y: number }> | null = null;
+let dragStartPositions: Map<string, { x: number; y: number }> | null = null;
 
 /** Track period-drag state for range selection. */
 let periodDragState: {
-  timelineId: number;
+  timelineId: string;
   startPeriodIndex: number;
   currentPeriodIndex: number;
 } | null = null;
@@ -100,11 +100,10 @@ function activate(context: ExtensionContext): void {
 
   // Register the timeline store service so scriptable timeline (date-range
   // slicer) contexts can read/write the selected range without importing this
-  // extension. Runtime ids are EntityId strings (the TS cache type predates the
-  // EntityId migration and still annotates id as number).
+  // extension.
   registerTimelineStoreService({
     getTimelineById(id: string) {
-      const t = getTimelineById(id as unknown as number);
+      const t = getTimelineById(id);
       if (!t) return undefined;
       return {
         name: t.name,
@@ -116,11 +115,11 @@ function activate(context: ExtensionContext): void {
       };
     },
     getSelection(timelineId: string) {
-      const t = getTimelineById(timelineId as unknown as number);
+      const t = getTimelineById(timelineId);
       return { start: t?.selectionStart ?? null, end: t?.selectionEnd ?? null };
     },
     async setSelection(timelineId: string, start: string | null, end: string | null) {
-      await updateTimelineSelectionAsync(timelineId as unknown as number, start, end);
+      await updateTimelineSelectionAsync(timelineId, start, end);
     },
   });
 
@@ -158,7 +157,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "timeline-slicer") return;
 
-    const timelineId = detail.data?.timelineId as number;
+    const timelineId = detail.data?.timelineId as string;
     if (timelineId == null) return;
 
     const alreadySelected = isTimelineSelected(timelineId);
@@ -194,7 +193,7 @@ function activate(context: ExtensionContext): void {
 
     pendingClick = null;
 
-    const primaryId = detail.data?.timelineId as number;
+    const primaryId = detail.data?.timelineId as string;
     if (primaryId == null) return;
 
     const primaryStart = dragStartPositions?.get(primaryId);
@@ -229,7 +228,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "timeline-slicer") return;
 
-    const primaryId = detail.data?.timelineId as number;
+    const primaryId = detail.data?.timelineId as string;
     if (primaryId == null) return;
 
     const primaryStart = dragStartPositions?.get(primaryId);
@@ -255,7 +254,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "timeline-slicer") return;
 
-    const timelineId = detail.data?.timelineId as number;
+    const timelineId = detail.data?.timelineId as string;
     if (timelineId == null) return;
 
     updateCachedTimelineBounds(timelineId, detail.x, detail.y, detail.width, detail.height);
@@ -271,7 +270,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "timeline-slicer") return;
 
-    const timelineId = detail.data?.timelineId as number;
+    const timelineId = detail.data?.timelineId as string;
     if (timelineId == null) return;
 
     updateTimelinePositionAsync(timelineId, detail.x, detail.y, detail.width, detail.height).catch(console.error);
@@ -477,7 +476,7 @@ function activate(context: ExtensionContext): void {
 
   const handleSelectionChanged = (e: Event) => {
     const detail = (e as CustomEvent).detail;
-    const timelineId = detail?.timelineId as number;
+    const timelineId = detail?.timelineId as string;
     if (timelineId == null) return;
 
     const tl = getTimelineById(timelineId);
@@ -507,7 +506,7 @@ function activate(context: ExtensionContext): void {
   // what takes the contextual tab down.
   const handleTimelineDeleted = (e: Event) => {
     const detail = (e as CustomEvent).detail;
-    const deletedId = detail?.timelineId as number | undefined;
+    const deletedId = detail?.timelineId as string | undefined;
     if (deletedId != null) {
       dropTimelineFromSelection(deletedId);
     }
@@ -591,7 +590,7 @@ function deactivate(): void {
 // ============================================================================
 
 function handleTimelineClickAt(
-  timelineId: number,
+  timelineId: string,
   canvasX: number,
   canvasY: number,
 ): void {
@@ -645,7 +644,7 @@ function handleTimelineClickAt(
   }
 }
 
-function handlePeriodClick(timelineId: number, periodIndex: number): void {
+function handlePeriodClick(timelineId: string, periodIndex: number): void {
   const data = getCachedTimelineData(timelineId);
   if (!data || periodIndex >= data.periods.length) return;
 

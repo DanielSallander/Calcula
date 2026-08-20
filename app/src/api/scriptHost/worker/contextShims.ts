@@ -10,6 +10,7 @@
 
 import type { MountSpec, W2H, RpcErrorShape } from "../protocol";
 import { callDeadlineMs, MAX_INFLIGHT_CALLS, RUN_TARGET_EXPOSED_PREFIX } from "../protocol";
+import { describeError } from "./workerHardening";
 import type {
   ScriptDialogFormSpec,
   ScriptDialogPromptOptions,
@@ -646,12 +647,7 @@ function registerReplyingHook(
         try {
           verdict = await (h as (p: unknown) => unknown)(payload);
         } catch (err) {
-          rt.post({
-            t: "error",
-            hook,
-            message: err instanceof Error ? err.message : String(err),
-            stack: err instanceof Error ? err.stack : undefined,
-          });
+          rt.post({ t: "error", hook, ...describeError(err) });
           continue;
         }
         if (verdict === false || verdict === "cancel") return { cancel: true };
@@ -688,13 +684,11 @@ export function dispatchEvent(
 ): Promise<void> | void {
   const handlers = rt.hooks.get(hook);
   if (!handlers) return;
+  // describeError: a hostile rejection reason (throwing getters, poisoned
+  // toString, non-string message) must degrade to the generic line, never
+  // throw out of the report path.
   const report = (err: unknown): void => {
-    post({
-      t: "error",
-      hook,
-      message: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
-    });
+    post({ t: "error", hook, ...describeError(err) });
   };
   let pending: Array<Promise<void>> | null = null;
   for (const handler of [...handlers]) {
@@ -703,7 +697,7 @@ export function dispatchEvent(
     // hostile return value would otherwise throw past dispatch and abort the
     // remaining handlers.
     try {
-      const result = handler(payload);
+      const result: unknown = handler(payload);
       if (result && typeof (result as { then?: unknown }).then === "function") {
         (pending ??= []).push(
           Promise.resolve(result).then(

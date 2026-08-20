@@ -21,7 +21,7 @@
 //          a clear, actionable error naming the declarative equivalent.
 /// <reference lib="webworker" />
 
-import { safeClone } from "./workerHardening";
+import { safeClone, describeError } from "./workerHardening";
 import {
   EXTENSION_CALL_TIMEOUT_MS,
   type WX2H,
@@ -90,7 +90,10 @@ export interface ExtWorkerRuntime {
    *  handler has (rejections are already reported — awaiting is optional). */
   dispatchAppEvent(handlerId: number, payload: unknown): Promise<void> | void;
   settleCall(callId: number, ok: boolean, value: unknown, error?: ExtRpcError): void;
-  runDeactivate(): void;
+  /** Returns a promise only when the onDeactivate teardown produced one; its
+   *  rejection is already reported — awaiting is how the bootstrap holds the
+   *  {t:"deactivated"} ack until teardown finished. */
+  runDeactivate(): Promise<void> | void;
 }
 
 /**
@@ -758,7 +761,7 @@ export function buildExtensionContext(
       const fn = handlers.get(handlerId);
       if (!fn) return;
       const report = (e: unknown): void => {
-        post({ t: "error", message: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined });
+        post({ t: "error", ...describeError(e) });
       };
       // The thenable probe stays INSIDE the try: `.then` can be a throwing
       // getter and Promise.resolve() reads `constructor` synchronously, so a
@@ -785,11 +788,27 @@ export function buildExtensionContext(
       if (ok) p.resolve(value);
       else p.reject(new ExtensionCallError(error));
     },
+    /**
+     * Run the extension's onDeactivate callback. Same discipline as
+     * dispatchAppEvent: a sync throw and an async rejection are both reported
+     * (teardown failures were silently swallowed here), the thenable probe sits
+     * inside the try, and the returned promise lets the bootstrap hold its
+     * {t:"deactivated"} ack until the teardown genuinely finished.
+     */
     runDeactivate() {
+      const report = (e: unknown): void => {
+        post({ t: "error", ...describeError(e) });
+      };
       try {
-        deactivateFn?.();
-      } catch {
-        /* best effort */
+        const result: unknown = deactivateFn?.();
+        if (result && typeof (result as { then?: unknown }).then === "function") {
+          return Promise.resolve(result).then(
+            () => undefined,
+            (e: unknown) => report(e),
+          );
+        }
+      } catch (e) {
+        report(e);
       }
     },
   };

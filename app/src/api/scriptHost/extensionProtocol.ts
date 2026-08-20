@@ -419,7 +419,12 @@ export type WX2H =
   | { t: "call"; callId: number; method: string; args: unknown[] }
   | { t: "handlerResult"; reqId: number; ok: boolean; value?: unknown; error?: ExtRpcError }
   | { t: "console"; level: "log" | "warn" | "error"; args: unknown[] }
-  | { t: "error"; message: string; stack?: string };
+  | { t: "error"; message: string; stack?: string }
+  /** Deactivation ran to completion (async teardown awaited, failures already
+   *  reported as {t:"error"}). The host holds terminate() for this ack, bounded
+   *  by EXTENSION_DEACTIVATE_GRACE_MS — otherwise an async deactivate's last
+   *  write (and its failure report) races the realm's destruction. */
+  | { t: "deactivated" };
 
 /** Methods a worker extension may route through the broker, mapped to ALLOWLIST
  *  policy rows.
@@ -586,3 +591,7 @@ export function extensionReachableCapabilities(): ReadonlySet<CapabilityId> {
 export const EXTENSION_HANDLER_TIMEOUT_MS = 5_000;
 /** Worker-side deadline (ms) for a pending broker call. */
 export const EXTENSION_CALL_TIMEOUT_MS = 30_000;
+/** How long unmount waits for the worker's {t:"deactivated"} ack before
+ *  terminating anyway. Long enough for a final storage write; short enough
+ *  that a wedged teardown cannot hold a workbook close hostage. */
+export const EXTENSION_DEACTIVATE_GRACE_MS = 2_000;

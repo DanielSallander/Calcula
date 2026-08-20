@@ -77,11 +77,18 @@ pub struct TimelineSlicer {
     pub level: TimelineLevel,
     /// Start of the selected date range (ISO 8601: "YYYY-MM-DD").
     /// None = no selection (all dates visible).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// No `skip_serializing_if`: the TS type declares `selectionStart: string
+    /// | null` NON-optional, and every filter-state check in the extension is
+    /// a strict `!== null`. Skipping None made a FRESH timeline read as
+    /// `undefined` — i.e. "filtered" — painting the clear-filter indicator on
+    /// a timeline with no filter. The wire must carry what the type promises.
+    #[serde(default)]
     pub selection_start: Option<String>,
     /// End of the selected date range (ISO 8601: "YYYY-MM-DD").
-    /// None = no selection (all dates visible).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// None = no selection (all dates visible). Serialized as null; see
+    /// `selection_start`.
+    #[serde(default)]
     pub selection_end: Option<String>,
     /// Whether to show the header bar
     pub show_header: bool,
@@ -172,11 +179,29 @@ pub struct CreateTimelineParams {
     pub style_preset: Option<String>,
 }
 
+/// Deserialize `Option<Option<T>>` correctly from JSON (twin of the helper in
+/// ribbon_filter/types.rs):
+/// - field missing → `None` (outer: don't change)
+/// - field: null → `Some(None)` (present: clear)
+/// - field: value → `Some(Some(value))`
+///
+/// Without it serde maps JSON null to outer-None, so the TS promise
+/// `headerText: null` ("clear back to name") could never reach the update arm
+/// and clearing the header text was silently impossible.
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
 /// Parameters for updating timeline slicer properties.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTimelineParams {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pub header_text: Option<Option<String>>,
     pub show_header: Option<bool>,
     pub show_level_selector: Option<bool>,
@@ -232,5 +257,55 @@ impl TimelineSlicerState {
         Self {
             timelines: crate::document_effect::Persisted::new(HashMap::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod serde_shape_tests {
+    use super::*;
+
+    /// JSON null must mean "clear the header text", absent must mean "keep".
+    /// Plain serde maps both to outer-None, which made clearing structurally
+    /// impossible — the update arm never saw the null.
+    #[test]
+    fn header_text_null_clears_and_absent_keeps() {
+        let p: UpdateTimelineParams = serde_json::from_str(r#"{"headerText":null}"#).unwrap();
+        assert_eq!(p.header_text, Some(None));
+        let p: UpdateTimelineParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.header_text, None);
+        let p: UpdateTimelineParams = serde_json::from_str(r#"{"headerText":"Q"}"#).unwrap();
+        assert_eq!(p.header_text, Some(Some("Q".to_string())));
+    }
+
+    /// The TS type declares `selectionStart: string | null` NON-optional and
+    /// every filter-state check in the extension is a strict `!== null`.
+    /// Skipping None on the wire made a FRESH timeline read as `undefined` —
+    /// "filtered" — so the wire must carry the null the type promises.
+    #[test]
+    fn an_unfiltered_timeline_serializes_selection_as_null_not_absent() {
+        let json = r#"{
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "T1",
+            "sheetIndex": 0,
+            "x": 0.0, "y": 0.0, "width": 200.0, "height": 100.0,
+            "sourceType": "pivot",
+            "sourceId": "00000000-0000-4000-8000-000000000002",
+            "fieldName": "Date",
+            "showHeader": true,
+            "showLevelSelector": true,
+            "showScrollbar": true,
+            "stylePreset": "default"
+        }"#;
+        let tl: TimelineSlicer = serde_json::from_str(json).unwrap();
+        assert_eq!(tl.selection_start, None);
+        let out = serde_json::to_value(&tl).unwrap();
+        assert!(
+            out.get("selectionStart").is_some_and(|v| v.is_null()),
+            "selectionStart must serialize as JSON null, not be omitted; got {out}"
+        );
+        assert!(
+            out.get("selectionEnd").is_some_and(|v| v.is_null()),
+            "selectionEnd must serialize as JSON null, not be omitted; got {out}"
+        );
     }
 }

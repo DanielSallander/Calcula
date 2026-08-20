@@ -5,7 +5,7 @@
 // UPDATED: Added vertical alignment, text wrapping, text rotation, and empty cell background rendering
 
 import type { RenderState } from "../types";
-import type { RichTextRun, AccountingLayout, UnderlineStyle } from "../../../types";
+import type { RichTextRun, AccountingLayout, UnderlineStyle, StyleData } from "../../../types";
 import { formulaA1ToR1C1 } from "../../r1c1";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";

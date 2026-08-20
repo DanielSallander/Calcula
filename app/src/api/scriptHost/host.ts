@@ -12043,7 +12043,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "timeline.onChange":
       addForwarder(mw, hook, onAppEvent("timelineSlicer:selectionChanged", (detail) => {
         const d = detail as { timelineId: string; selectionStart: string | null; selectionEnd: string | null };
-        if (String(d.timelineId) !== instanceId) return;
+        if (d.timelineId !== instanceId) return;
         post(mw, { t: "mirror", path: "timeline.selectionStart", value: d.selectionStart });
         post(mw, { t: "mirror", path: "timeline.selectionEnd", value: d.selectionEnd });
         forwardEvent(mw, hook, { start: d.selectionStart, end: d.selectionEnd });

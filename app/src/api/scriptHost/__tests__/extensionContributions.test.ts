@@ -20,6 +20,7 @@ import {
   CONTRIBUTION_REQUIRED_CAPABILITY,
   EXTENSION_BROKER_METHODS,
   EXTENSION_CONTRIBUTION_KINDS,
+  EXTENSION_DEACTIVATE_GRACE_MS,
   EXTENSION_PUSHED_DATA_CAPABILITIES,
   countContributions,
   extensionReachableCapabilities,
@@ -78,9 +79,17 @@ class FakeWorker {
     this.listeners.get(type)?.delete(cb);
   }
 
+  /** When false, the harness holds the {t:"deactivated"} ack so a test can pin
+   *  the unmount grace-window ordering; emit it manually. */
+  autoAckDeactivate = true;
+
   /** Host -> worker. Auto-answers invokeHandler from `handlers`. */
   postMessage(msg: HostMessage): void {
     this.received.push(msg);
+    if (msg.t === "deactivate" && this.autoAckDeactivate) {
+      // Mirror the real bootstrap: teardown is awaited, then the ack posts.
+      queueMicrotask(() => this.emit({ t: "deactivated" }));
+    }
     if (msg.t === "invokeHandler") {
       const fn = this.handlers.get(msg.handlerId as number);
       const reqId = msg.reqId as number;
@@ -408,6 +417,207 @@ describe("extension contribution ceiling", () => {
       .find((i) => i.id === "ext:test.addin:x");
     expect(item!.label).toBe("Save evil (Test Add-in)");
     expect(item!.label).not.toMatch(/[‪-‮\n]/);
+  });
+
+  it("a failed menu-item click SURFACES (toast + console), never a silent no-op", async () => {
+    // `void invokeWorkerHandler(...)` in the click action discarded a rejection
+    // that occurs on three real failures (handler threw / 5s timeout / unmount
+    // mid-flight): the user clicked, it failed, and NOTHING said so.
+    const ui = await import("../../ui");
+    ui.registerMenu({ id: "file", label: "File", order: 0, items: [] });
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      contributes: { menuItems: ["file/boom"] },
+    });
+    worker.handlers.set(7, () => {
+      throw new Error("handler exploded");
+    });
+    worker.register({
+      kind: "menuItem",
+      regId: 1,
+      menuId: "file",
+      item: { id: "boom", label: "Boom" },
+      handlerId: 7,
+    });
+    const item = ui
+      .getMenus()
+      .flatMap((m) => m.items ?? [])
+      .find((i) => i.id === "ext:test.addin:boom");
+    expect(item?.action).toBeDefined();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      item!.action!();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(
+        toasts.some((t) => t.includes("Boom (Test Add-in)") && t.includes("handler exploded")),
+        `no failure toast; toasts were: ${JSON.stringify(toasts)}`,
+      ).toBe(true);
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("the COMMAND branch of a menu click surfaces failures the same way", async () => {
+    const ui = await import("../../ui");
+    ui.registerMenu({ id: "file", label: "File", order: 0, items: [] });
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      contributes: { commands: ["cmdBoom"], menuItems: ["file/viaCmd"] },
+    });
+    worker.handlers.set(3, () => {
+      throw new Error("command handler exploded");
+    });
+    worker.register({ kind: "command", regId: 1, id: "cmdBoom", handlerId: 3 });
+    worker.register({
+      kind: "menuItem",
+      regId: 2,
+      menuId: "file",
+      item: { id: "viaCmd", label: "Via Command" },
+      commandId: "cmdBoom",
+    });
+    const item = ui
+      .getMenus()
+      .flatMap((m) => m.items ?? [])
+      .find((i) => i.id === "ext:test.addin:viaCmd");
+    expect(item?.action).toBeDefined();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      item!.action!();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(
+        toasts.some(
+          (t) => t.includes("Via Command (Test Add-in)") && t.includes("command handler exploded"),
+        ),
+        `no failure toast; toasts were: ${JSON.stringify(toasts)}`,
+      ).toBe(true);
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 2c. Deactivation grace: terminate() no longer races an async teardown
+  // --------------------------------------------------------------------------
+
+  it("unmount holds terminate() for the worker's deactivated ack", async () => {
+    const { worker } = await mountFake(host, { ...BASE_MANIFEST });
+    worker.autoAckDeactivate = false;
+    // The discriminating fact is that the unmount PROMISE does not settle
+    // before the ack — "terminated is still false after N microtasks" would
+    // also pass for an implementation that merely takes N+1, which is exactly
+    // how the first version of this test failed to red under sabotage.
+    let settled = false;
+    const pending = host.unmountWorkerExtension("test.addin").then(() => {
+      settled = true;
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(worker.received.some((m) => m.t === "deactivate")).toBe(true);
+    expect(settled, "unmount settled without the deactivated ack").toBe(false);
+    expect(worker.terminated, "terminated before the worker acked deactivation").toBe(false);
+    worker.emit({ t: "deactivated" });
+    await pending;
+    expect(worker.terminated).toBe(true);
+  });
+
+  it("a registration posted during the deactivation grace window is REFUSED, not leaked", async () => {
+    // Unmount drains regCleanups and then yields at the backend revoke while
+    // the worker's listener is still attached: a register landing in that gap
+    // used to install a live menu item / formula on the drained map — cleaned
+    // up by nobody, invisible to the transparency panel, backed by a
+    // terminated worker. Found by adversarial review.
+    const ui = await import("../../ui");
+    ui.registerMenu({ id: "file", label: "File", order: 0, items: [] });
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      contributes: { menuItems: ["file/late", "file/late2"] },
+    });
+    worker.autoAckDeactivate = false;
+    const pending = host.unmountWorkerExtension("test.addin");
+    await Promise.resolve();
+    // Mid-deactivation (before the ack): a register here lands BEFORE the
+    // regCleanups drain, so even without the gate it would be cleaned up by
+    // ordering luck — it must be refused, but it cannot prove the gate.
+    worker.register({
+      kind: "menuItem",
+      regId: 9,
+      menuId: "file",
+      item: { id: "late", label: "Late" },
+      handlerId: 9,
+    });
+    worker.emit({ t: "deactivated" });
+    await pending;
+    // The DISCRIMINATING case: a register delivered after the regCleanups
+    // drain (in production: during the `await revokeBackendCapabilities` gap,
+    // while the message listener is still attached). The host code path is
+    // identical — `mounted` no longer holds the extension and nobody will
+    // iterate regCleanups again — so without the liveness gate THIS one leaks
+    // a live menu item forever.
+    worker.register({
+      kind: "menuItem",
+      regId: 10,
+      menuId: "file",
+      item: { id: "late2", label: "Late Two" },
+      handlerId: 10,
+    });
+    const leaked = ui
+      .getMenus()
+      .flatMap((m) => m.items ?? [])
+      .filter((i) => i.id === "ext:test.addin:late" || i.id === "ext:test.addin:late2");
+    expect(leaked, "a menu item registered during unmount survived it").toEqual([]);
+  });
+
+  it("the click-failure toast sanitizes the worker-supplied message (echoSafe bar)", async () => {
+    const ui = await import("../../ui");
+    ui.registerMenu({ id: "file", label: "File", order: 0, items: [] });
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      contributes: { menuItems: ["file/hostile"] },
+    });
+    worker.handlers.set(5, () => {
+      throw new Error("line1\n‮evil‬" + "x".repeat(500));
+    });
+    worker.register({
+      kind: "menuItem",
+      regId: 1,
+      menuId: "file",
+      item: { id: "hostile", label: "Hostile" },
+      handlerId: 5,
+    });
+    const item = ui
+      .getMenus()
+      .flatMap((m) => m.items ?? [])
+      .find((i) => i.id === "ext:test.addin:hostile");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      item!.action!();
+      await new Promise((r) => setTimeout(r, 0));
+      const toast = toasts.find((t) => t.includes("Hostile (Test Add-in)"));
+      expect(toast).toBeDefined();
+      expect(toast!).not.toMatch(/[‪-‮\n]/);
+      expect(toast!.length).toBeLessThan(400);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("a wedged teardown cannot hold unmount hostage: the grace deadline terminates anyway", async () => {
+    vi.useFakeTimers();
+    try {
+      const { worker } = await mountFake(host, { ...BASE_MANIFEST });
+      worker.autoAckDeactivate = false;
+      const pending = host.unmountWorkerExtension("test.addin");
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(worker.terminated).toBe(false);
+      vi.advanceTimersByTime(EXTENSION_DEACTIVATE_GRACE_MS);
+      await pending;
+      expect(worker.terminated).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a keyboard shortcut that is ALREADY BOUND is refused, never quietly duplicated", async () => {

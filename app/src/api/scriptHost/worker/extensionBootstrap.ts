@@ -9,7 +9,7 @@
 //          the host's broker checks.
 /// <reference lib="webworker" />
 
-import { hardenAmbientGlobals, forwardConsole } from "./workerHardening";
+import { hardenAmbientGlobals, forwardConsole, describeError } from "./workerHardening";
 import { buildExtensionContext, type ExtWorkerRuntime } from "./extensionWorkerContext";
 import type {
   ExtContributionDeclaration,
@@ -105,18 +105,34 @@ async function handleActivate(
   }
 }
 
-function handleDeactivate(): void {
+async function handleDeactivate(): Promise<void> {
+  // Async teardown is real work (a final storage write through the broker);
+  // await it so the host's grace window covers it, and report a failure like
+  // any other — teardown was the last silently-swallowed error path in this
+  // realm. describeError survives hostile reasons AND guarantees plain-string
+  // fields, so post() cannot DataCloneError from inside an error path.
+  const report = (e: unknown): void => {
+    post({ t: "error", ...describeError(e) });
+  };
   try {
-    activateTeardown?.();
-  } catch {
-    /* best effort */
+    await activateTeardown?.();
+  } catch (e) {
+    report(e);
   }
   try {
-    extModule?.deactivate?.();
-  } catch {
-    /* best effort */
+    await extModule?.deactivate?.();
+  } catch (e) {
+    report(e);
   }
-  runtime?.runDeactivate();
+  // runDeactivate reports its own failures and its promise is built never to
+  // reject — but the ACK must not depend on that staying true, so the await is
+  // guarded anyway: a skipped ack costs every unmount the full grace window.
+  try {
+    await runtime?.runDeactivate();
+  } catch (e) {
+    report(e);
+  }
+  post({ t: "deactivated" });
 }
 
 self.onmessage = (e: MessageEvent<HX2W>) => {
@@ -142,7 +158,7 @@ self.onmessage = (e: MessageEvent<HX2W>) => {
       runtime?.settleCall(msg.callId, msg.ok, msg.value, msg.error);
       break;
     case "deactivate":
-      handleDeactivate();
+      void handleDeactivate();
       break;
   }
 };
@@ -156,18 +172,10 @@ self.onmessage = (e: MessageEvent<HX2W>) => {
 // unconditional: silent-on-a-production-mount is the one direction an error
 // must never travel.
 self.addEventListener("unhandledrejection", (e: Event) => {
+  // describeError survives hostile reasons (throwing getters, poisoned
+  // toString) and coerces the fields to plain strings so post() cannot throw.
   const reason = (e as PromiseRejectionEvent).reason;
-  // A hostile reason can carry throwing message/stack getters; the report must
-  // survive that, so the extraction is guarded and the post is not.
-  let message = "unhandled rejection (reason unreadable)";
-  let stack: string | undefined;
-  try {
-    message = reason instanceof Error ? reason.message : String(reason);
-    stack = reason instanceof Error ? reason.stack : undefined;
-  } catch {
-    /* keep the generic line */
-  }
-  post({ t: "error", message, stack });
+  post({ t: "error", ...describeError(reason) });
 });
 
 // Keep the teardown symbol referenced for the unused-var lint; the realm dies on

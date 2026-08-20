@@ -119,6 +119,31 @@ export function safeClone(v: unknown): unknown {
 }
 
 /**
+ * Extract a postable {message, stack} from an arbitrary thrown value. Both
+ * realms host UNTRUSTED code, so every step that can run script is guarded:
+ * `instanceof` (a Proxy's getPrototypeOf trap can throw), the `message`/`stack`
+ * getters, `String(reason)` — and the RESULT is coerced to plain strings,
+ * because an own `message` property holding a function would pass extraction
+ * and then make postMessage throw DataCloneError from inside an error path
+ * (in the deactivate flow, that skipped the {t:"deactivated"} ack). A hostile
+ * reason gets the generic line; it never gets silence, and never a throw.
+ */
+export function describeError(e: unknown): { message: string; stack?: string } {
+  let message: unknown = "error (reason unreadable)";
+  let stack: unknown;
+  try {
+    message = e instanceof Error ? e.message : String(e);
+    stack = e instanceof Error ? e.stack : undefined;
+  } catch {
+    /* keep the generic line */
+  }
+  return {
+    message: typeof message === "string" ? message : "error (reason unreadable)",
+    stack: typeof stack === "string" ? stack : undefined,
+  };
+}
+
+/**
  * Mirror console output to the host (developer console / transparency). The
  * caller supplies how a forwarded line is emitted (each realm has its own
  * protocol envelope).

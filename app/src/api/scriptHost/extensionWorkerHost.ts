@@ -67,6 +67,7 @@ import {
   EXTENSION_BROKER_METHODS,
   EXTENSION_PROTOCOL_VERSION,
   EXTENSION_HANDLER_TIMEOUT_MS,
+  EXTENSION_DEACTIVATE_GRACE_MS,
   EXT_FORMULA_NAME_RE,
   MAX_EXT_FORMULA_NAME,
   isContributionDeclared,
@@ -411,11 +412,32 @@ export async function unmountWorkerExtension(extId: string): Promise<void> {
   const mw = mounted.get(extId);
   if (!mw) return;
   mounted.delete(extId);
+  // Hold terminate() for the worker's {t:"deactivated"} ack, bounded by the
+  // grace deadline. An async deactivate's last broker write — and its failure
+  // report — otherwise races the realm's destruction and can die with it. The
+  // ack listener is attached BEFORE the post so a synchronous reply cannot be
+  // missed, and only waited on if the post succeeded (a dead worker acks
+  // nothing and must not cost every unmount the full grace window).
+  let acked: Promise<void> | null = null;
   try {
+    acked = new Promise<void>((resolve) => {
+      const onAck = (e: MessageEvent<WX2H>): void => {
+        if (e.data?.t === "deactivated") done();
+      };
+      const timer = setTimeout(() => done(), EXTENSION_DEACTIVATE_GRACE_MS);
+      const done = (): void => {
+        clearTimeout(timer);
+        mw.worker.removeEventListener("message", onAck as EventListener);
+        resolve();
+      };
+      mw.worker.addEventListener("message", onAck as EventListener);
+    });
     mw.worker.postMessage({ t: "deactivate" } as HX2W);
   } catch {
     /* worker may already be dead */
+    acked = null;
   }
+  if (acked) await acked;
   // Reject any in-flight handler invocations.
   for (const p of mw.pendingInvokes.values()) {
     clearTimeout(p.timer);
@@ -707,6 +729,14 @@ function admitContribution(mw: MountedExtension, reg: ExtRegistration): string |
 
 /** Install a host-side proxy for a worker registration. */
 function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
+  // LIVENESS. Unmount drains regCleanups and then yields (the backend
+  // capability revoke is an IPC round-trip) while this worker's message
+  // listener is still attached, so a register posted during the deactivation
+  // grace window would land on the already-drained map: a live menu item,
+  // formula or claimed file extension backed by a terminated worker, cleaned
+  // up by nobody and invisible to the transparency panel. An unmounting
+  // extension registers nothing.
+  if (!mounted.has(mw.extId)) return;
   // Contributions are ceiling-gated; `event` is a subscription, not a surface.
   let contributionId: string | null = null;
   if (CONTRIBUTION_REGISTRATION_KINDS.has(reg.kind)) {
@@ -786,7 +816,13 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     if (eventName === AppEvents.WRITEBACK_SUBMISSION_RECEIVED) {
       const releasing = import("../distribution")
         .then((mod) => mod.acquireSubmissionWatch())
-        .catch(() => null);
+        .catch((e: unknown) => {
+          // A silent null leaves this subscription PERMANENTLY inert: the
+          // publisher-inbox poll never starts, so the event never fires for
+          // this subscriber and nothing anywhere says why.
+          console.error(`[ext:${mw.extId}] writeback submission watch failed to start:`, e);
+          return null;
+        });
       mw.regCleanups.set(reg.regId, () => {
         unsub();
         void releasing.then((release) => release?.());
@@ -810,11 +846,25 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     // suffix is not overridable and is stripped of control/bidi characters, so a
     // label can neither impersonate the app nor rewrite the attribution after it.
     const menuLabel = `${echoSafe(String(reg.item.label ?? reg.item.id), 96)} (${mw.extName})`;
+    // A rejected click must SURFACE. Both branches return promises that reject
+    // on three real failures (the handler threw, the 5s invoke timeout, unmount
+    // mid-flight); `void` here made a failed click indistinguishable from a
+    // successful no-op — no toast, no console line, nothing. The toast carries
+    // the same host-drawn attribution as the item itself.
+    const clickFailed = (e: unknown): void => {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[ext:${mw.extId}] menu item "${reg.item.id}" failed:`, msg);
+      // The message text is worker-supplied (BrokerError relays it verbatim), so
+      // it is held to the same echoSafe bar as every other extension-authored
+      // string this file puts in a toast — a failure notice must never become a
+      // canvas for spoofed chrome.
+      showToast(`${menuLabel} failed: ${echoSafe(msg, 200)}`, { type: "error" });
+    };
     const action = () => {
       if (reg.commandId) {
-        void CommandRegistry.execute(hostCommandId(mw.extId, reg.commandId));
+        CommandRegistry.execute(hostCommandId(mw.extId, reg.commandId)).catch(clickFailed);
       } else if (reg.handlerId !== undefined) {
-        void invokeWorkerHandler(mw, reg.handlerId, []);
+        invokeWorkerHandler(mw, reg.handlerId, []).catch(clickFailed);
       }
     };
     registerMenuItem(reg.menuId, {
@@ -1311,11 +1361,26 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
   const { handle } = mw;
   if (!handle.declaredCapabilities.has(cap)) return; // above the ceiling -> broker denies
 
+  // LIVENESS, twice per branch: before the prompt (an unmounting extension
+  // must not raise a consent dialog at all) and after it (a prompt already on
+  // screen when unmount ran can be answered AFTER revokeScriptGrants /
+  // revokeBackendCapabilities — recording the grant then would re-create live
+  // capability state for a terminated worker, and the guarded operation would
+  // genuinely execute on behalf of dead code).
+  const refuseIfUnmounted = (): void => {
+    if (!mounted.has(mw.extId)) {
+      throw new BrokerError(
+        "PermissionDenied",
+        "the extension was unmounted while this capability request was pending; nothing was granted",
+      );
+    }
+  };
   if (cap === "net.fetch") {
     const origin = fetchOriginOf(args[0]);
     if (!origin) return;
     if (handle.grants.has(cap) && hasFetchOrigin(handle.scriptId, origin)) return;
     if (wasDeniedThisSession(handle.scriptId, cap, origin)) return;
+    refuseIfUnmounted();
     const decision = await requestCapabilityGrant({
       scriptId: handle.scriptId,
       scriptName: handle.scriptName,
@@ -1323,6 +1388,7 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
       origin,
     });
     if (decision === "deny") return;
+    refuseIfUnmounted();
     recordCapabilityGrant(handle.scriptId, cap, origin);
     try {
       await grantNetOrigin(handle.scriptId, origin);
@@ -1334,6 +1400,7 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
 
   if (handle.grants.has(cap)) return;
   if (wasDeniedThisSession(handle.scriptId, cap, null)) return;
+  refuseIfUnmounted();
   const decision = await requestCapabilityGrant({
     scriptId: handle.scriptId,
     scriptName: handle.scriptName,
@@ -1341,6 +1408,7 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
     origin: null,
   });
   if (decision !== "deny") {
+    refuseIfUnmounted();
     recordCapabilityGrant(handle.scriptId, cap);
     // Mirror BI-family grants into the authoritative Rust store (the Rust
     // gates re-check it). net.fetch is mirrored above per-origin.

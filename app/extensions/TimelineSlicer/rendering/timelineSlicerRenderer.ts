@@ -182,18 +182,18 @@ function computeLayout(
 // Scroll State
 // ============================================================================
 
-const scrollOffsets = new Map<number, number>();
+const scrollOffsets = new Map<string, number>();
 
-export function getScrollOffset(timelineId: number): number {
+export function getScrollOffset(timelineId: string): number {
   return scrollOffsets.get(timelineId) ?? 0;
 }
 
-export function setScrollOffset(timelineId: number, offset: number): void {
+export function setScrollOffset(timelineId: string, offset: number): void {
   const max = getMaxScrollOffset(timelineId);
   scrollOffsets.set(timelineId, Math.max(0, Math.min(offset, max)));
 }
 
-export function getMaxScrollOffset(timelineId: number): number {
+export function getMaxScrollOffset(timelineId: string): number {
   const tl = getTimelineById(timelineId);
   if (!tl) return 0;
 
@@ -213,7 +213,7 @@ export function resetScrollOffsets(): void {
 // ============================================================================
 
 export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
-  const timelineId = ctx.region.data?.timelineId as number | undefined;
+  const timelineId = ctx.region.data?.timelineId as string | undefined;
   if (timelineId == null) return;
 
   const tl = getTimelineById(timelineId);
@@ -538,7 +538,7 @@ export function getTimelineHitDetail(
   canvasX: number,
   canvasY: number,
   bounds: { x: number; y: number; width: number; height: number },
-  timelineId: number,
+  timelineId: string,
 ): TimelineHitResult | null {
   const tl = getTimelineById(timelineId);
   if (!tl) return null;
@@ -619,7 +619,7 @@ export function getTimelineHitDetail(
 export const getTimelineCursor: OverlayCursorFn = (ctx) => {
   if (!ctx.floatingCanvasBounds) return null;
 
-  const timelineId = ctx.region.data?.timelineId as number | undefined;
+  const timelineId = ctx.region.data?.timelineId as string | undefined;
   if (timelineId == null) return null;
 
   const hit = getTimelineHitDetail(

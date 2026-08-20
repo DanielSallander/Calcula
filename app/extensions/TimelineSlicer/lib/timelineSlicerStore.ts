@@ -24,7 +24,7 @@ import { TimelineSlicerEvents } from "./timelineSlicerEvents";
 let cachedTimelines: TimelineSlicer[] = [];
 
 /** Cached timeline data per timeline (id -> response). */
-const dataCache = new Map<number, TimelineDataResponse>();
+const dataCache = new Map<string, TimelineDataResponse>();
 
 // ============================================================================
 // Accessors
@@ -34,7 +34,7 @@ export function getAllTimelines(): TimelineSlicer[] {
   return cachedTimelines;
 }
 
-export function getTimelineById(id: number): TimelineSlicer | undefined {
+export function getTimelineById(id: string): TimelineSlicer | undefined {
   return cachedTimelines.find((t) => t.id === id);
 }
 
@@ -43,7 +43,7 @@ export function getTimelinesForSheet(sheetIndex: number): TimelineSlicer[] {
 }
 
 export function getCachedTimelineData(
-  timelineId: number,
+  timelineId: string,
 ): TimelineDataResponse | undefined {
   return dataCache.get(timelineId);
 }
@@ -74,7 +74,7 @@ export async function createTimelineAsync(
 }
 
 export async function deleteTimelineAsync(
-  timelineId: number,
+  timelineId: string,
 ): Promise<boolean> {
   try {
     await api.deleteTimelineSlicer(timelineId);
@@ -90,7 +90,7 @@ export async function deleteTimelineAsync(
 }
 
 export async function updateTimelineAsync(
-  timelineId: number,
+  timelineId: string,
   params: UpdateTimelineParams,
 ): Promise<TimelineSlicer | null> {
   try {
@@ -113,7 +113,7 @@ export async function updateTimelineAsync(
 }
 
 export async function updateTimelinePositionAsync(
-  timelineId: number,
+  timelineId: string,
   x: number,
   y: number,
   width: number,
@@ -135,7 +135,7 @@ export async function updateTimelinePositionAsync(
 }
 
 export async function updateTimelineSelectionAsync(
-  timelineId: number,
+  timelineId: string,
   selectionStart: string | null,
   selectionEnd: string | null,
 ): Promise<void> {
@@ -169,7 +169,7 @@ export async function updateTimelineSelectionAsync(
  * Used for live drag preview rendering.
  */
 export function updateCachedTimelinePosition(
-  timelineId: number,
+  timelineId: string,
   x: number,
   y: number,
 ): void {
@@ -186,7 +186,7 @@ export function updateCachedTimelinePosition(
  * Used for live resize preview rendering.
  */
 export function updateCachedTimelineBounds(
-  timelineId: number,
+  timelineId: string,
   x: number,
   y: number,
   width: number,
@@ -207,7 +207,7 @@ export function updateCachedTimelineBounds(
 // ============================================================================
 
 export async function refreshTimelineData(
-  timelineId: number,
+  timelineId: string,
 ): Promise<TimelineDataResponse | null> {
   try {
     const data = await api.getTimelineData(timelineId);

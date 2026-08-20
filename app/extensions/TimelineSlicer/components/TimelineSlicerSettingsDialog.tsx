@@ -127,7 +127,7 @@ export function TimelineSlicerSettingsDialog({
   onClose,
   data,
 }: DialogProps): React.ReactElement | null {
-  const timelineId = data?.timelineId as number | undefined;
+  const timelineId = data?.timelineId as string | undefined;
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 320, minHeight: 280 });

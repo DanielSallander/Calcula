@@ -27,7 +27,10 @@ function extensionContext() {
     { name: "Test Ext", version: "1.0.0", provenance: "distributed" },
     {},
   );
-  const ctx = built.context as { events: { onAppEvent: EventRegistrar } };
+  const ctx = built.context as {
+    events: { onAppEvent: EventRegistrar };
+    onDeactivate: (fn: () => unknown) => void;
+  };
   const register = (cb: (payload: unknown) => unknown): number => {
     ctx.events.onAppEvent("test:event", cb);
     const reg = posted.filter((m): m is Extract<WX2H, { t: "register" }> => m.t === "register").at(-1);
@@ -36,7 +39,7 @@ function extensionContext() {
   };
   const errors = (): Array<Extract<WX2H, { t: "error" }>> =>
     posted.filter((m): m is Extract<WX2H, { t: "error" }> => m.t === "error");
-  return { runtime: built.runtime, register, errors };
+  return { runtime: built.runtime, register, errors, onDeactivate: ctx.onDeactivate.bind(ctx) };
 }
 
 describe("extension app-event dispatch reports async failures", () => {
@@ -151,6 +154,79 @@ describe("extension app-event dispatch reports async failures", () => {
 
     await pending;
     expect(errors().map((e) => e.message)).toEqual(["late boom"]);
+  });
+});
+
+describe("runDeactivate reports teardown failures", () => {
+  // Teardown was the last silently-swallowed error path in this realm: a sync
+  // throw hit `/* best effort */`, an async rejection hit nothing at all. Both
+  // now travel the same {t:"error"} channel as every other handler failure, and
+  // the returned promise is how the bootstrap holds its deactivated ack.
+  it("reports an async teardown rejection, settling with the teardown", async () => {
+    const { runtime, onDeactivate, errors } = extensionContext();
+    onDeactivate(async () => {
+      throw new Error("teardown boom");
+    });
+
+    await runtime.runDeactivate();
+
+    expect(errors().map((e) => e.message)).toEqual(["teardown boom"]);
+  });
+
+  it("reports a sync teardown throw instead of swallowing it", () => {
+    const { runtime, onDeactivate, errors } = extensionContext();
+    onDeactivate(() => {
+      throw new Error("sync teardown boom");
+    });
+
+    runtime.runDeactivate();
+
+    expect(errors().map((e) => e.message)).toEqual(["sync teardown boom"]);
+  });
+
+  it("a clean teardown posts nothing (and none registered is a no-op)", async () => {
+    const clean = extensionContext();
+    clean.onDeactivate(async () => {});
+    await clean.runtime.runDeactivate();
+    expect(clean.errors()).toEqual([]);
+
+    const none = extensionContext();
+    expect(none.runtime.runDeactivate()).toBeUndefined();
+    expect(none.errors()).toEqual([]);
+  });
+
+  it("a POISONED thrown value (throwing toString) gets the generic line — never a throw past runDeactivate", () => {
+    // String(e) runs hostile code; if report itself threw, the bootstrap's
+    // {t:"deactivated"} ack would be skipped and every unmount would pay the
+    // full grace window. Found by adversarial review, not by the author.
+    const { runtime, onDeactivate, errors } = extensionContext();
+    onDeactivate(() => {
+      throw {
+        toString(): never {
+          throw new Error("poisoned toString");
+        },
+      };
+    });
+
+    expect(() => runtime.runDeactivate()).not.toThrow();
+    expect(errors().map((e) => e.message)).toEqual(["error (reason unreadable)"]);
+  });
+
+  it("an async rejection whose Error carries a NON-STRING message posts plain strings only", async () => {
+    // An own `message` holding a function passes extraction and would make
+    // postMessage itself throw DataCloneError — from inside the error path.
+    const { runtime, onDeactivate, errors } = extensionContext();
+    onDeactivate(async () => {
+      const e = new Error("x");
+      (e as unknown as { message: unknown }).message = () => {};
+      throw e;
+    });
+
+    await runtime.runDeactivate();
+
+    expect(errors()).toHaveLength(1);
+    expect(typeof errors()[0].message).toBe("string");
+    expect(errors()[0].message).toBe("error (reason unreadable)");
   });
 });
 

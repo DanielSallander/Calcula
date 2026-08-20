@@ -19,7 +19,7 @@ import type { TimelineSlicer } from "../lib/timelineSlicerTypes";
 // State
 // ============================================================================
 
-const selectedTimelineIds = new Set<number>();
+const selectedTimelineIds = new Set<string>();
 let optionsTabRegistered = false;
 
 // ============================================================================
@@ -30,7 +30,7 @@ let optionsTabRegistered = false;
  * Called when a timeline slicer is clicked.
  * Shows the contextual ribbon tab and broadcasts the state.
  */
-export function selectTimeline(timelineId: number, additive = false): void {
+export function selectTimeline(timelineId: string, additive = false): void {
   const tl = getTimelineById(timelineId);
   if (!tl) return;
 
@@ -104,7 +104,7 @@ export function deselectTimeline(): void {
  * configure. One timeline, not the whole selection: Excel keeps the survivors
  * of a multi-select.
  */
-export function dropTimelineFromSelection(timelineId: number): void {
+export function dropTimelineFromSelection(timelineId: string): void {
   if (!selectedTimelineIds.delete(timelineId)) return;
   if (selectedTimelineIds.size === 0) {
     // Re-arm the guard `deselectTimeline` checks -- the delete above already
@@ -117,20 +117,20 @@ export function dropTimelineFromSelection(timelineId: number): void {
   requestOverlayRedraw();
 }
 
-export function getSelectedTimelineId(): number | null {
+export function getSelectedTimelineId(): string | null {
   if (selectedTimelineIds.size === 0) return null;
-  let last: number | null = null;
+  let last: string | null = null;
   for (const id of selectedTimelineIds) {
     last = id;
   }
   return last;
 }
 
-export function getSelectedTimelineIds(): ReadonlySet<number> {
+export function getSelectedTimelineIds(): ReadonlySet<string> {
   return selectedTimelineIds;
 }
 
-export function isTimelineSelected(timelineId: number): boolean {
+export function isTimelineSelected(timelineId: string): boolean {
   return selectedTimelineIds.has(timelineId);
 }
 

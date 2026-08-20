@@ -197,7 +197,10 @@ export function InsertTimelineDialog({
           if (dateFields.length > 0) {
             pivotSources.push({
               id: p.id,
-              name: p.name || `PivotTable${p.id}`,
+              // Ids are UUIDs now; interpolating one made the dropdown read
+              // "PivotTable0198f0ab-…". A short prefix keeps unnamed pivots
+              // distinguishable without the noise.
+              name: p.name || `PivotTable (${p.id.slice(0, 8)})`,
               sheetIndex: p.sheetIndex,
               dateFields,
             });

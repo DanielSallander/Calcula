@@ -92,7 +92,7 @@ interface MenuItem {
 function showContextMenu(
   clientX: number,
   clientY: number,
-  timelineId: number,
+  timelineId: string,
 ): void {
   closeTimelineContextMenu();
 

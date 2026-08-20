@@ -204,11 +204,24 @@ pub struct CreateSlicerParams {
     pub style_preset: Option<String>,
 }
 
+/// Deserialize `Option<Option<T>>` correctly from JSON (twin of the helper in
+/// ribbon_filter/types.rs and timeline_slicer/types.rs): missing → None,
+/// null → Some(None), value → Some(Some(value)). Without it JSON null maps to
+/// outer-None and clearing the header text is silently impossible.
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
 /// Parameters for updating slicer properties.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSlicerParams {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pub header_text: Option<Option<String>>,
     pub show_header: Option<bool>,
     pub columns: Option<u32>,
@@ -254,5 +267,22 @@ impl SlicerState {
             computed_prop_dependencies: Mutex::new(HashMap::new()),
             computed_prop_dependents: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod serde_shape_tests {
+    use super::*;
+
+    /// JSON null must mean "clear the header text", absent must mean "keep" —
+    /// same defect and fix as UpdateTimelineParams (timeline_slicer/types.rs).
+    #[test]
+    fn header_text_null_clears_and_absent_keeps() {
+        let p: UpdateSlicerParams = serde_json::from_str(r#"{"headerText":null}"#).unwrap();
+        assert_eq!(p.header_text, Some(None));
+        let p: UpdateSlicerParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.header_text, None);
+        let p: UpdateSlicerParams = serde_json::from_str(r#"{"headerText":"Q"}"#).unwrap();
+        assert_eq!(p.header_text, Some(Some("Q".to_string())));
     }
 }

@@ -17,12 +17,12 @@ export async function createTimelineSlicer(
   return timelineBackend.invoke<TimelineSlicer>("create_timeline_slicer", { params });
 }
 
-export async function deleteTimelineSlicer(timelineId: number): Promise<void> {
+export async function deleteTimelineSlicer(timelineId: string): Promise<void> {
   return timelineBackend.invoke<void>("delete_timeline_slicer", { timelineId });
 }
 
 export async function updateTimelineSlicer(
-  timelineId: number,
+  timelineId: string,
   params: UpdateTimelineParams,
 ): Promise<TimelineSlicer> {
   return timelineBackend.invoke<TimelineSlicer>("update_timeline_slicer", {
@@ -32,7 +32,7 @@ export async function updateTimelineSlicer(
 }
 
 export async function updateTimelinePosition(
-  timelineId: number,
+  timelineId: string,
   x: number,
   y: number,
   width: number,
@@ -72,7 +72,7 @@ export async function getTimelineSlicersForSheet(
 }
 
 export async function getTimelineData(
-  timelineId: number,
+  timelineId: string,
 ): Promise<TimelineDataResponse> {
   return timelineBackend.invoke<TimelineDataResponse>("get_timeline_data", {
     timelineId,
@@ -80,7 +80,7 @@ export async function getTimelineData(
 }
 
 export async function getTimelineSelectedItems(
-  timelineId: number,
+  timelineId: string,
 ): Promise<string[] | null> {
   return timelineBackend.invoke<string[] | null>("get_timeline_selected_items", {
     timelineId,

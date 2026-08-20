@@ -15,8 +15,12 @@ export interface RibbonTabInfo {
   accentColor: string | null;
 }
 
+// Entity ids cross IPC as 36-char UUID STRINGS (core/identity). These said
+// `number` — a leftover from before the EntityId migration that the window
+// bridge's `any[]` kept invisible to tsc; any future invariant doing numeric
+// work on one would compile clean and degenerate to NaN comparisons.
 export interface SlicerInfo {
-  id: number;
+  id: string;
   name: string;
   sheetIndex: number;
 }
@@ -27,12 +31,12 @@ export interface ChartInfo {
 }
 
 export interface TableInfo {
-  id: number;
+  id: string;
   name: string;
 }
 
 export interface PivotInfo {
-  pivotId: number;
+  pivotId: string;
   sheetIndex: number;
   startRow: number;
   startCol: number;
@@ -41,7 +45,7 @@ export interface PivotInfo {
 }
 
 export interface TimelineInfo {
-  id: number;
+  id: string;
   name: string;
   sheetIndex: number;
 }

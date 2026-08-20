@@ -48,8 +48,8 @@ vi.mock("../../manifest", () => ({
 }));
 
 /** THE BACKEND, as a set of ids. */
-let backendTimelines: number[] = [];
-const deleteTimelineSpy = vi.fn(async (id: number) => {
+let backendTimelines: string[] = [];
+const deleteTimelineSpy = vi.fn(async (id: string) => {
   backendTimelines = backendTimelines.filter((t) => t !== id);
 });
 
@@ -71,7 +71,7 @@ vi.mock("../timeline-slicer-api", () => ({
     })),
   getTimelineData: async () => ({ periods: [] }),
   createTimelineSlicer: vi.fn(),
-  deleteTimelineSlicer: (id: number) => deleteTimelineSpy(id),
+  deleteTimelineSlicer: (id: string) => deleteTimelineSpy(id),
   updateTimelineSlicer: vi.fn(),
   updateTimelinePosition: vi.fn(),
   updateTimelineSelection: vi.fn(),
@@ -90,7 +90,7 @@ import {
 /** The one line `index.ts` wires on TIMELINE_DELETED. */
 function wireExtension(): () => void {
   const handler = (e: Event) => {
-    const id = (e as CustomEvent).detail?.timelineId as number | undefined;
+    const id = (e as CustomEvent).detail?.timelineId as string | undefined;
     if (id != null) dropTimelineFromSelection(id);
   };
   window.addEventListener(TimelineSlicerEvents.TIMELINE_DELETED, handler);
@@ -105,7 +105,7 @@ function tabIsRegistered(): boolean {
   return events.length > 0 ? events[events.length - 1].on : false;
 }
 
-let announced: number[] = [];
+let announced: string[] = [];
 let capture: (e: Event) => void;
 
 beforeEach(() => {
@@ -115,7 +115,7 @@ beforeEach(() => {
   backendTimelines = [];
   announced = [];
   capture = (e: Event) => {
-    announced.push((e as CustomEvent).detail.timelineId as number);
+    announced.push((e as CustomEvent).detail.timelineId as string);
   };
   window.addEventListener(TimelineSlicerEvents.TIMELINE_DELETED, capture);
   return () => window.removeEventListener(TimelineSlicerEvents.TIMELINE_DELETED, capture);
@@ -124,9 +124,9 @@ beforeEach(() => {
 describe("a pivot cascade takes the contextual Timeline tab down", () => {
   it("pivot.create -> timeline.create -> pivot.delete leaves no Timeline tab", async () => {
     const unwire = wireExtension();
-    backendTimelines = [1];
+    backendTimelines = ["t1"];
     await refreshCache();
-    selectTimeline(1);
+    selectTimeline("t1");
     expect(tabIsRegistered(), "precondition: the Timeline tab is showing").toBe(true);
     expect(mockAddContextKey).toHaveBeenCalledWith("timeline-slicer");
 
@@ -136,8 +136,8 @@ describe("a pivot cascade takes the contextual Timeline tab down", () => {
     await refreshCache();
 
     expect(deleteTimelineSpy).not.toHaveBeenCalled();
-    expect(announced).toEqual([1]);
-    expect(isTimelineSelected(1)).toBe(false);
+    expect(announced).toEqual(["t1"]);
+    expect(isTimelineSelected("t1")).toBe(false);
     expect(tabIsRegistered()).toBe(false);
     expect(mockRemoveContextKey).toHaveBeenCalledWith("timeline-slicer");
     unwire();
@@ -145,25 +145,25 @@ describe("a pivot cascade takes the contextual Timeline tab down", () => {
 
   it("keeps the survivors of a multi-selection", async () => {
     const unwire = wireExtension();
-    backendTimelines = [1, 2];
+    backendTimelines = ["t1", "t2"];
     await refreshCache();
-    selectTimeline(1);
-    selectTimeline(2, true);
+    selectTimeline("t1");
+    selectTimeline("t2", true);
 
-    backendTimelines = [2];
+    backendTimelines = ["t2"];
     await refreshCache();
 
-    expect(announced).toEqual([1]);
-    expect([...getSelectedTimelineIds()]).toEqual([2]);
+    expect(announced).toEqual(["t1"]);
+    expect([...getSelectedTimelineIds()]).toEqual(["t2"]);
     expect(tabIsRegistered()).toBe(true);
     unwire();
   });
 
   it("a refresh that removes nothing announces nothing", async () => {
     const unwire = wireExtension();
-    backendTimelines = [1];
+    backendTimelines = ["t1"];
     await refreshCache();
-    selectTimeline(1);
+    selectTimeline("t1");
     await refreshCache();
     expect(announced).toEqual([]);
     expect(tabIsRegistered()).toBe(true);
@@ -172,14 +172,14 @@ describe("a pivot cascade takes the contextual Timeline tab down", () => {
 
   it("the by-hand delete announces exactly once, through the same diff", async () => {
     const unwire = wireExtension();
-    backendTimelines = [1];
+    backendTimelines = ["t1"];
     await refreshCache();
-    selectTimeline(1);
+    selectTimeline("t1");
 
-    await deleteTimelineAsync(1);
+    await deleteTimelineAsync("t1");
 
-    expect(deleteTimelineSpy).toHaveBeenCalledWith(1);
-    expect(announced).toEqual([1]);
+    expect(deleteTimelineSpy).toHaveBeenCalledWith("t1");
+    expect(announced).toEqual(["t1"]);
     expect(tabIsRegistered()).toBe(false);
     unwire();
   });

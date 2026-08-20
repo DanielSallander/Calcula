@@ -432,7 +432,7 @@ pub fn get_timeline_data(
         .get(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
 
-    let pivot_id = tl.source_id as PivotId;
+    let pivot_id = tl.source_id;
     let level = tl.level;
     let sel_start = tl.selection_start.clone();
     let sel_end = tl.selection_end.clone();
@@ -494,7 +494,7 @@ pub fn get_timeline_selected_items(
     let sel_end = parse_iso_date(&sel_end_str)
         .ok_or_else(|| format!("Invalid selection_end: {}", sel_end_str))?;
 
-    let pivot_id = tl.source_id as PivotId;
+    let pivot_id = tl.source_id;
 
     // Get the raw string representations of date values from the pivot cache
     let selected = get_pivot_date_value_strings_in_range(
