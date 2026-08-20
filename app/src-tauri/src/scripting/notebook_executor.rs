@@ -309,6 +309,13 @@ fn executor_loop(rx: mpsc::Receiver<Job>) {
                 // LEAK it rather than dropping it. `session = None` alone would
                 // be the crash. See `NotebookSession::is_poisoned`.
                 //
+                // Honest about the leak's SIZE: a forgotten session is not just
+                // a runtime — it holds the cell's cloned grids, style registry
+                // and (when models are wired) the provider handle, so each
+                // poisoning leaks a workbook-sized snapshot. Bounded by how
+                // often a user's async continuation outruns the cell budget,
+                // and each occurrence is user-visible as the cell's error.
+                //
                 // Deliberately narrow: an ordinary error, and even an ordinary
                 // eval TIMEOUT, leaves the runtime intact, and the user's
                 // notebook globals are the point of a persistent session — they
@@ -431,19 +438,30 @@ mod tests {
     #[test]
     fn a_poisoned_session_is_leaked_rather_than_dropped() {
         let source = include_str!("notebook_executor.rs");
+
+        // Every needle is ASSEMBLED at runtime so this test's own literals can
+        // never satisfy the search. With plain string literals, deleting the
+        // production branch left `source.find(...)` matching the TEST's own
+        // text — which happens to contain "std::mem::forget" in an assert
+        // message — and the guard stayed green with the fix gone (found by
+        // adversarial review).
+        let poisoned_check = format!("if s.is_poisoned{}", "() {");
+        let forget_call = format!("std::mem::{}(dead)", "forget");
+        let take_call = format!("session.{}()", "take");
+
         let marker = source
-            .find("if s.is_poisoned()")
+            .find(&poisoned_check)
             .expect("the run arm must consult is_poisoned() before reusing the session");
         let branch = &source[marker..marker + 400];
 
         assert!(
-            branch.contains("std::mem::forget"),
+            branch.contains(&forget_call),
             "the poisoned session must be LEAKED; dropping it crashes the process:
 {}",
             branch,
         );
         assert!(
-            branch.contains("session.take()"),
+            branch.contains(&take_call),
             "it must also be taken out of the slot, or the next cell reuses a corrupt runtime",
         );
     }

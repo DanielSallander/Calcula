@@ -187,6 +187,51 @@ mod tests {
         )
     }
 
+    /// A job abort in a ONE-OFF run must not crash the process on drop.
+    ///
+    /// The notebook flags this condition (`is_poisoned`) and its executor leaks
+    /// the session; the one-off path dropped its runtime unconditionally, and a
+    /// script whose `async` continuation outruns the budget then killed the
+    /// whole app (`p->ref_count > 0` -> STATUS_STACK_BUFFER_OVERRUN) through
+    /// every one-off surface — MCP execute_script, the chat's run_script, and
+    /// the AI dry run, whose entire purpose is to be a SAFE preview. Found by
+    /// this session's own adversarial review of its drain fix.
+    ///
+    /// Green here means two things at once: the process survived the drop path,
+    /// and the caller got its REAL context back, not the placeholder the leaked
+    /// runtime is left holding. Grids are deliberately withheld on every error
+    /// (nothing may apply a partially-mutated grid), so the probe for "which
+    /// context came back" is the CONSOLE OUTPUT: it lives inside the
+    /// ScriptContext, and the error path reports it — a swap that handed back
+    /// the placeholder would report none.
+    #[test]
+    fn a_job_abort_in_a_one_off_does_not_crash_the_process() {
+        let options = ScriptRunOptions {
+            limits: ScriptLimits::with_timeout_ms(50),
+            ..ScriptRunOptions::default()
+        };
+        let (result, _grids) = run(
+            "console.log('logged before the abort');              (async () => { await null; for (;;) {} })();",
+            options,
+        );
+
+        match result {
+            ScriptResult::Error { message, output } => {
+                assert!(
+                    message.contains("time budget"),
+                    "the abort should surface as the budget error, got {:?}",
+                    message,
+                );
+                assert!(
+                    format!("{:?}", output).contains("logged before the abort"),
+                    "the error must carry the REAL context's console output — an empty                      output here means the recovery handed back the placeholder,                      losing the user's only clue about where the script got stuck: {:?}",
+                    output,
+                );
+            }
+            other => panic!("an aborted continuation must fail the run: {:?}", other),
+        }
+    }
+
     /// A tight budget aborts a runaway loop with the budget message instead of
     /// blocking the calling (UI) thread forever.
     #[test]

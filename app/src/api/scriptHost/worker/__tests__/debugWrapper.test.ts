@@ -367,13 +367,19 @@ describe("the DEBUG mount composes instrumentation with the wrapper", () => {
     expect(compiles(wrapModuleSource(result.code, { asyncWrapper: true }))).toBe(true);
   });
 
-  /** The negative control: the other order is what shipped, and it does not compile. */
-  it("instrumenting FIRST leaves an `export` the wrapper's strip cannot reach", () => {
+  /**
+   * The tokenizer made the ORDER stop mattering: a mid-line `export` (which is
+   * exactly what instrumentation produces by inserting a yield point before it)
+   * is still module syntax at a statement position, and the strip now reaches
+   * it. Bootstrap keeps strip-first anyway; this pins that even the wrong order
+   * can no longer silently kill every breakpoint.
+   */
+  it("even instrumenting FIRST now compiles — the order defect is gone as a class", () => {
     const result = instrumentForDebug(OBJECT_SCRIPT);
 
     expect(result.ok).toBe(true);
     expect(result.code).toContain("export function setup");
-    expect(compiles(wrapModuleSource(result.code, { asyncWrapper: true }))).toBe(false);
+    expect(compiles(wrapModuleSource(result.code, { asyncWrapper: true }))).toBe(true);
   });
 });
 
@@ -396,5 +402,141 @@ describe("the debug mount actually applies the strip first", () => {
     // The fallback path must compile the stripped source too, or losing
     // instrumentation would also lose the fix.
     expect(bootstrap).not.toContain("withRunTargets(spec.source");
+    // And the ORDER is the property, not the spellings: the strip must run
+    // before instrumentation regardless of how either call is phrased, so a
+    // rename that dodges the exact-string pins above still has to keep the
+    // sequence to pass this.
+    const stripAt = bootstrap.indexOf("stripModuleSyntax(");
+    const instrumentAt = bootstrap.indexOf("instrumentForDebug(");
+    expect(stripAt).toBeGreaterThan(-1);
+    expect(instrumentAt).toBeGreaterThan(-1);
+    expect(stripAt).toBeLessThan(instrumentAt);
+  });
+});
+
+describe("stripModuleSyntax is tokenizer-aware — the six regex defects", () => {
+  /**
+   * THE SILENT one: a template-literal line starting with module keywords is
+   * DATA, and the regex pass blanked it — corrupting the string's runtime
+   * value with no error anywhere. The tokenizer knows it is inside backticks.
+   */
+  it("never touches lines inside a multi-line template literal", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "const snippet = `",
+      "import foo from 'bar';",
+      "export { setup };",
+      "export * from './x';",
+      "`;",
+      "function setup(context) {",
+      "  return context.api.setCellValue(0, 0, snippet);",
+      "}",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes.length).toBe(1);
+    const value = String(writes[0][2]);
+    expect(value).toContain("import foo from 'bar';");
+    expect(value).toContain("export { setup };");
+  });
+
+  it("tracks ${…} nesting — code inside an interpolation is still code", () => {
+    const source = [
+      "const s = `a ${ (() => { return 'x'; })() } b`;",
+      "export function setup(context) {}",
+    ].join("\n");
+
+    const out = stripModuleSyntax(source);
+
+    expect(out).toContain("`a ${ (() => { return 'x'; })() } b`");
+    expect(out).not.toMatch(/export function/);
+    expect(out).toContain("function setup");
+  });
+
+  /** A `}` inside a comment in the specifier list truncated the regex strip. */
+  it("a comment brace inside a specifier list cannot truncate the strip", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 'commented');",
+      "}",
+      "export {",
+      "  setup, // the entry point (see wrapper: `typeof setup === \"function\"`) }",
+      "};",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 0, "commented"]]);
+  });
+
+  /** Real code after an import on the same line was blanked with it. */
+  it("keeps a real statement trailing an import on the same line", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "import { helper } from './util'; function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 'trailing');",
+      "}",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 0, "trailing"]]);
+  });
+
+  /** A newline between `export` and its declaration defeated every regex. */
+  it("strips an `export` split from its declaration by a line break", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "export",
+      "function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 'split');",
+      "}",
+    ].join("\n");
+
+    const wrapped = wrapModuleSource(source);
+    await evaluateWrapper(wrapped)(context);
+
+    expect(writes).toEqual([[0, 0, "split"]]);
+    // Blanked in place: the line count is untouched.
+    expect(wrapped.split("\n").length).toBe(source.split("\n").length + 1);
+  });
+
+  /** Mid-line export after another statement — the line anchor's blind spot. */
+  it("strips a mid-line `export` after another statement", async () => {
+    const { context, writes } = recordingContext();
+    const source =
+      "const ready = true; export function setup(context) {\n" +
+      "  return context.api.setCellValue(0, 0, String(ready));\n" +
+      "}";
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 0, "true"]]);
+  });
+
+  it("leaves property keys, member access and dynamic import() alone", () => {
+    const source = [
+      "const config = { export: 1, import: 2 };",
+      "const a = config.export + config.import;",
+      "const lazy = () => import('./never-loaded');",
+      "function setup(context) { context.log(a); }",
+    ].join("\n");
+
+    expect(stripModuleSyntax(source)).toBe(source);
+  });
+
+  it("blanks an ASI import (no semicolon) up to its line end only", () => {
+    const source = [
+      "import helper from './util'",
+      "function setup(context) { context.log('x'); }",
+    ].join("\n");
+
+    const out = stripModuleSyntax(source);
+
+    expect(out.split("\n")[0].trim()).toBe("");
+    expect(out).toContain("function setup(context)");
+    expect(out.split("\n").length).toBe(source.split("\n").length);
   });
 });

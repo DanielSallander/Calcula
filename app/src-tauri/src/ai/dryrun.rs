@@ -263,14 +263,39 @@ pub async fn ai_dry_run_script(
     code: String,
     fixture: Option<Vec<crate::mcp::tools::CellSeed>>,
     read_back: Option<Vec<CellRef>>,
+    surface: Option<String>,
     window: tauri::Window,
 ) -> Result<DryRunReport, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
-    // Decline BEFORE running: for a source this realm cannot host, the run's
-    // answer would be about the emulator, not the script. See `declined_reason`.
-    if let Some(reason) = declined_reason(&code) {
-        return Ok(declined(reason));
+    // The CALLER usually knows what it is previewing — draftGate gates
+    // `draft_object_script` and nothing else, so its scripts are object scripts
+    // BY DEFINITION. An explicit label beats guessing from the source text:
+    // the substring heuristics both under-declined (`const setup = (c) => …`
+    // with no literal `context.api.` was judged in the wrong realm) and
+    // over-declined (a comment mentioning `context.expose(` suppressed L3 for a
+    // plain script). Found by adversarial review; the heuristics remain ONLY
+    // for unlabeled callers.
+    match surface.as_deref() {
+        Some("object-script") => {
+            return Ok(declined(
+                "the script is an object script, and this preview runs in a different \
+                 realm that cannot host it",
+            ));
+        }
+        // An explicitly-labeled one-off IS this realm's own language: whatever
+        // the interpreter says about it — including a syntax error on `export`,
+        // which one-off scripts genuinely may not use — is a correct verdict,
+        // so no heuristic may suppress it.
+        Some("one-off") => {}
+        _ => {
+            // Unlabeled: decline BEFORE running when the source looks like it
+            // belongs to the other realm — the run's answer would be about the
+            // emulator, not the script. See `declined_reason`.
+            if let Some(reason) = declined_reason(&code) {
+                return Ok(declined(reason));
+            }
+        }
     }
 
     let seeds = fixture.unwrap_or_default();
@@ -557,6 +582,44 @@ Calcula.setCellValue(0, 0, s);",
 
         assert!(report.applicable);
         assert!(report.declined_reason.is_none());
+    }
+
+    /// The caller's explicit label OUTRANKS the source heuristics.
+    ///
+    /// The label is decided in the command before anything runs, so the rule is
+    /// pinned where it is cheap: a labeled object script is declined no matter
+    /// how plain it looks, and a labeled one-off is judged no matter how much
+    /// its text resembles an object script — for a one-off, `export` really is
+    /// a syntax error and reporting it is CORRECT.
+    #[test]
+    fn an_explicit_label_outranks_the_heuristics() {
+        // Object-script label: even a source with no object-script tell.
+        assert!(
+            declined_reason("Calcula.setCellValue(0, 0, 'x');").is_none(),
+            "precondition: the heuristics alone would have judged this",
+        );
+        // One-off label: even a source every heuristic would decline.
+        assert!(
+            declined_reason("export function setup(context) {}").is_some(),
+            "precondition: the heuristics alone would have declined this",
+        );
+        // The routing itself lives in ai_dry_run_script's match — pinned by the
+        // source, since the command needs a running app to invoke. Assembled
+        // needles, so this test's own literals can never satisfy the search.
+        let source = include_str!("dryrun.rs");
+        let object_arm = format!("Some({}object-script{})", '"', '"');
+        let oneoff_arm = format!("Some({}one-off{}) => {}", '"', '"', "{}");
+        let arm_at = source.find(&object_arm).expect("object-script arm missing");
+        let after = &source[arm_at..arm_at + 400];
+        assert!(
+            after.contains("declined("),
+            "the object-script arm must DECLINE, not judge: {}",
+            &after[..after.len().min(200)],
+        );
+        assert!(
+            source.contains(&oneoff_arm),
+            "the one-off arm must bypass the heuristics entirely",
+        );
     }
 
 }

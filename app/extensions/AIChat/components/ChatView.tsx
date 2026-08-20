@@ -204,7 +204,15 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
               name: tu.name,
               input: tu.input ?? {},
             });
-            results.push({ type: "toolResult", toolUseId: tu.id, content: result, isError: false });
+            // The gate's dry-run note rides on the tool result so the model —
+            // and the transcript — say what the draft would DO, not just that
+            // it was queued. Empty for declined/inapplicable dry runs.
+            results.push({
+              type: "toolResult",
+              toolUseId: tu.id,
+              content: verdict.note ? result + verdict.note : result,
+              isError: false,
+            });
           } catch (e) {
             // Flagged as an error rather than passed off as a normal result, so
             // the model can tell "the tool refused" from "the tool answered".

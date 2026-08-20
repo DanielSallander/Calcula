@@ -168,9 +168,12 @@ function flatten(node: Node): Flattened | null {
  */
 function collectContextBindings(program: Node): Set<string> {
   const bindings = new Set<string>();
+  /** The function nodes recognised as `setup` — their first param IS the context. */
+  const setupFns = new Set<Node>();
   const noteFirstParam = (fn: Node | null | undefined) => {
     const p = fn?.params?.[0];
     if (p?.type === "Identifier") bindings.add(p.name);
+    if (fn) setupFns.add(fn);
   };
   // ONLY `setup`'s first parameter is the context.
   //
@@ -204,28 +207,150 @@ function collectContextBindings(program: Node): Set<string> {
   });
   // A script with no export at all still gets validated: `setup` may be a plain
   // declaration the host picks up, and a draft under repair is often mid-edit.
+  // Both declaration forms, mirroring hasSetupEntryPoint — the fallback used to
+  // accept only `function setup`, so `const setup = (c) => …` with a parameter
+  // not named context/ctx was validated with nothing bound and every check
+  // passed vacuously.
   if (bindings.size === 0) {
     walk(program, (n) => {
       if (n.type === "FunctionDeclaration" && n.id?.name === "setup") noteFirstParam(n);
+      if (
+        n.type === "VariableDeclarator" &&
+        n.id?.type === "Identifier" &&
+        n.id.name === "setup" &&
+        n.init &&
+        (n.init.type === "ArrowFunctionExpression" || n.init.type === "FunctionExpression")
+      ) {
+        noteFirstParam(n.init);
+      }
     });
   }
 
-  // LAST RESORT: a bare `context.` root, wherever it appears.
+  // THE WRAPPER'S OWN PARAMETER, always. The mount splices the body inside
+  // `function(context) { … }` (worker/debugWrapper.ts), so a bare `context.…`
+  // use resolves to the real context by CLOSURE from anywhere in the script —
+  // including a stray top-level `context.caps.fetch(…)` that WORKS at runtime
+  // and used to go unexamined whenever `setup` named its parameter something
+  // else, because the walk below only ran when nothing else had bound (found by
+  // adversarial review). A name-keyed binding set cannot express per-scope
+  // shadowing, so this is conservatively skipped the moment ANYTHING else in
+  // the script declares its own `context` — under-detecting a shadowing script
+  // beats falsely flagging its local object's methods.
+  {
+    let shadowed = false;
+    walk(program, (n) => {
+      if (shadowed) return;
+      if (
+        n.type === "FunctionDeclaration" ||
+        n.type === "FunctionExpression" ||
+        n.type === "ArrowFunctionExpression"
+      ) {
+        if (setupFns.has(n)) return; // setup's own `context` param IS the context
+        for (const p of n.params ?? []) {
+          if (p?.type === "Identifier" && p.name === "context") shadowed = true;
+        }
+      }
+      if (n.type === "VariableDeclarator" && n.id?.type === "Identifier" && n.id.name === "context") {
+        shadowed = true;
+      }
+      if (n.type === "CatchClause" && n.param?.type === "Identifier" && n.param.name === "context") {
+        shadowed = true;
+      }
+    });
+    if (!shadowed) bindings.add("context");
+  }
+
+  // HELPERS THE CONTEXT IS PASSED TO. `setup(context) { helper(context); }`
+  // with `helper(c) { c.api.… }` makes `c` the context at runtime, and the
+  // setup-only narrowing left it invisible to the reach and capability checks —
+  // the false-PASS half of the trade that fixed the false rejections (found by
+  // adversarial review). Name-keyed bindings force conservatism, and every
+  // guard errs toward NOT binding:
+  //   * every call site of the function must pass a context-bound identifier
+  //     at that position (a polymorphic helper is skipped);
+  //   * the parameter's name must be declared exactly ONCE in the whole script
+  //     (a reused name would bind unrelated code);
+  //   * fixpoint, so a helper handing its context on to another helper is
+  //     followed, bounded by the number of parameters in the script.
+  {
+    const fns = new Map<string, Node>();
+    walk(program, (n) => {
+      if (n.type === "FunctionDeclaration" && n.id?.type === "Identifier") {
+        fns.set(n.id.name, n);
+      }
+      if (
+        n.type === "VariableDeclarator" &&
+        n.id?.type === "Identifier" &&
+        n.init &&
+        (n.init.type === "ArrowFunctionExpression" || n.init.type === "FunctionExpression")
+      ) {
+        fns.set(n.id.name, n.init);
+      }
+    });
+    const calls = new Map<string, Node[][]>();
+    walk(program, (n) => {
+      if (n.type !== "CallExpression" || !n.callee) return;
+      const callee = unwrap(n.callee);
+      if (callee.type === "Identifier" && fns.has(callee.name)) {
+        const list = calls.get(callee.name) ?? [];
+        list.push(n.arguments ?? []);
+        calls.set(callee.name, list);
+      }
+    });
+    const declarationCount = new Map<string, number>();
+    const bump = (name: string | undefined) => {
+      if (name) declarationCount.set(name, (declarationCount.get(name) ?? 0) + 1);
+    };
+    walk(program, (n) => {
+      if (n.type === "VariableDeclarator" && n.id?.type === "Identifier") bump(n.id.name);
+      if (
+        n.type === "FunctionDeclaration" ||
+        n.type === "FunctionExpression" ||
+        n.type === "ArrowFunctionExpression"
+      ) {
+        if (n.type === "FunctionDeclaration") bump(n.id?.name);
+        for (const p of n.params ?? []) if (p?.type === "Identifier") bump(p.name);
+      }
+      if (n.type === "CatchClause" && n.param?.type === "Identifier") bump(n.param.name);
+    });
+
+    for (;;) {
+      let grew = false;
+      for (const [name, fn] of fns) {
+        const sites = calls.get(name);
+        if (!sites || sites.length === 0) continue;
+        (fn.params ?? []).forEach((p: Node, k: number) => {
+          if (p?.type !== "Identifier" || bindings.has(p.name)) return;
+          if ((declarationCount.get(p.name) ?? 0) !== 1) return;
+          const fed = sites.every((args) => {
+            const arg = args[k] ? unwrap(args[k]) : undefined;
+            return arg?.type === "Identifier" && bindings.has(arg.name);
+          });
+          if (fed) {
+            bindings.add(p.name);
+            grew = true;
+          }
+        });
+      }
+      if (!grew) break;
+    }
+  }
+
+  // LAST RESORT: a bare `ctx.` root, when nothing else bound anything.
   //
   // Without this the reach and capability checks PASS VACUOUSLY on a script that
-  // has no recognisable entry point — nothing is rooted, so nothing is examined,
-  // and a script calling `context.caps.fetch(...)` reports zero findings. Found
-  // by the eval corpus (M5) on a real 3B model's answer, which wrote a top-level
-  // `onClick(() => { context.cell('A1').getValue(); })` with no `setup` at all
-  // and scored a clean bill of health from both checks.
-  //
-  // Conservative: it only ever ADDS detection, and only for the two identifiers
-  // the typings actually teach.
+  // has no recognisable entry point — nothing is rooted, so nothing is examined.
+  // Found by the eval corpus (M5) on a real 3B model's answer. `context` no
+  // longer needs this (it is bound unconditionally above, absent shadowing);
+  // `ctx` stays gated on emptiness because it is NOT the wrapper's parameter —
+  // a legitimate local (`const ctx = canvas.getContext(…)`) is a real thing,
+  // and only a script where nothing else bound suggests the bare-idiom draft
+  // this exists to catch.
   if (bindings.size === 0) {
     walk(program, (n) => {
       if (n.type !== "MemberExpression") return;
       const root = unwrap(n.object);
-      if (root.type === "Identifier" && (root.name === "context" || root.name === "ctx")) {
+      if (root.type === "Identifier" && root.name === "ctx") {
         bindings.add(root.name);
       }
     });
@@ -234,13 +359,23 @@ function collectContextBindings(program: Node): Set<string> {
 }
 
 /**
- * Does the source define a function named `setup`?
+ * Does the source have an ENTRY POINT the mount will actually run?
  *
- * The wrapper's tail is `typeof setup === "function" ? setup(context) : undefined`
- * (worker/debugWrapper.ts), so a script without one MOUNTS AND DOES NOTHING. The
- * module body still runs, which is why this is not caught by anything else: no
- * error, no output, no effect. It is the quietest possible failure and a model
- * that answers with a bare handler call produces it every time.
+ * Two forms qualify, because two forms genuinely work:
+ *   1. A function named `setup` — the wrapper's tail is
+ *      `typeof setup === "function" ? setup(context) : undefined`.
+ *   2. A TOP-LEVEL `context.expose(...)` call — the module body runs at mount
+ *      with the wrapper's parameter (literally named `context`) in scope, so
+ *      the handler registers without any `setup`. Rejecting this form called a
+ *      WORKING script broken (found by adversarial review). `ctx.expose(...)`
+ *      does NOT qualify: `ctx` is not defined in the wrapper, so that script
+ *      throws a ReferenceError at mount — and top-level only, because an
+ *      expose inside a function nothing calls never runs.
+ *
+ * A script with neither MOUNTS AND DOES NOTHING. The module body still runs,
+ * which is why this is not caught by anything else: no error, no output, no
+ * effect. It is the quietest possible failure and a model that answers with a
+ * bare handler call produces it every time.
  */
 export function hasSetupEntryPoint(program: Node): boolean {
   let found = false;
@@ -255,7 +390,26 @@ export function hasSetupEntryPoint(program: Node): boolean {
       found = true;
     }
   });
-  return found;
+  if (found) return true;
+
+  // Form 2: a top-level `context.expose(...)` statement (possibly wrapped in
+  // an export, though that form is unusual). Deliberately NOT a walk — depth
+  // matters here.
+  for (const stmt of (program.body ?? []) as Node[]) {
+    const expr = stmt.type === "ExpressionStatement" ? stmt.expression : undefined;
+    const call = expr?.type === "CallExpression" ? expr : undefined;
+    const callee = call?.callee;
+    if (
+      callee?.type === "MemberExpression" &&
+      callee.object?.type === "Identifier" &&
+      callee.object.name === "context" &&
+      callee.property?.type === "Identifier" &&
+      callee.property.name === "expose"
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

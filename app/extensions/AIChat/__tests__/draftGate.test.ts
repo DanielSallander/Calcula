@@ -16,11 +16,17 @@ const INVENTED = "export function setup(context) {\n  context.api.setCellValu(0,
 const UNDECLARED = "export function setup(context) {\n  context.caps.fetch('https://example.com');\n}\n";
 const NO_SETUP = "onClick(() => { context.log('x'); });\n";
 
+// The REAL wire shape, as the Rust backend serialises it (dryRunReportDrift
+// pins the field list). The doubles used to omit `applicable`, a shape the
+// backend cannot emit — so the judged-failure branch was only ever tested
+// against inputs production never produces.
 const dryOk = (totalChanges = 1) => ({
-  ok: true, error: null, durationMs: 2, changes: [], truncated: false, totalChanges, output: [],
+  ok: true, error: null, durationMs: 2, changes: [], truncated: false, totalChanges,
+  output: [], readBack: [], applicable: true, declinedReason: null,
 });
 const dryFailed = (error: string) => ({
-  ok: false, error, durationMs: 1, changes: [], truncated: false, totalChanges: 0, output: [],
+  ok: false, error, durationMs: 1, changes: [], truncated: false, totalChanges: 0,
+  output: [], readBack: [], applicable: true, declinedReason: null,
 });
 
 beforeEach(() => {
@@ -171,5 +177,42 @@ describe("a dry run that DECLINED is not a verdict", () => {
     const v = await gateToolCall("draft_object_script", { source: GOOD });
     expect(v.allow).toBe(false);
     expect(v.message).toContain("TypeError");
+  });
+});
+
+describe("an allowed draft carries the dry run's observation", () => {
+  it("appends a note naming what the draft would change", async () => {
+    invoke.mockResolvedValue(dryOk(3));
+    const v = await gateToolCall("draft_object_script", { source: GOOD });
+    expect(v.allow).toBe(true);
+    expect(v.note).toContain("3 cells");
+  });
+
+  it("carries no note when the preview declined", async () => {
+    invoke.mockResolvedValue({
+      ok: true, error: null, durationMs: 0, changes: [], truncated: false,
+      totalChanges: 0, output: [], readBack: [], applicable: false,
+      declinedReason: "ES module",
+    });
+    const v = await gateToolCall("draft_object_script", { source: GOOD });
+    expect(v.allow).toBe(true);
+    expect(v.note).toBeUndefined();
+  });
+});
+
+describe("the gate labels its dry runs", () => {
+  /**
+   * This gate guards `draft_object_script` exclusively, so its scripts are
+   * object scripts BY DEFINITION — the label lets the backend decline
+   * authoritatively instead of guessing from substrings, which both under- and
+   * over-declined (adversarial review, 2026-08-20).
+   */
+  it("sends surface: object-script with every dry run", async () => {
+    invoke.mockResolvedValue(dryOk());
+    await gateToolCall("draft_object_script", { source: GOOD });
+    expect(invoke).toHaveBeenCalledWith(
+      "ai_dry_run_script",
+      expect.objectContaining({ surface: "object-script" }),
+    );
   });
 });

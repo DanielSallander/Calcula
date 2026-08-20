@@ -33,6 +33,14 @@ export interface GateVerdict {
   allow: boolean;
   /** When `allow` is false, the text handed back to the model as a tool result. */
   message?: string;
+  /**
+   * When `allow` is true and a dry run produced a usable observation, a
+   * one-line note the caller APPENDS to the tool result — so the model and the
+   * transcript say something concrete ("would change 3 cells") instead of just
+   * "queued". `describeDryRun` existed for exactly this and was dead code until
+   * the adversarial review noticed nothing ever called it.
+   */
+  note?: string;
 }
 
 const ALLOW: GateVerdict = { allow: true };
@@ -47,7 +55,15 @@ const ALLOW: GateVerdict = { allow: true };
  */
 async function tryDryRun(source: string): Promise<DryRunReport | null> {
   try {
-    return await aiChatBackend.invoke<DryRunReport>("ai_dry_run_script", { code: source });
+    // Labeled explicitly: this gate guards `draft_object_script` and nothing
+    // else, so the source is an object script BY DEFINITION — the backend
+    // declines authoritatively instead of guessing from substrings (which both
+    // under- and over-declined; see ai/dryrun.rs). The preview will apply to
+    // these drafts once it can run them in the Worker realm they belong to.
+    return await aiChatBackend.invoke<DryRunReport>("ai_dry_run_script", {
+      code: source,
+      surface: "object-script",
+    });
   } catch {
     return null;
   }
@@ -103,7 +119,8 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
     };
   }
 
-  return ALLOW;
+  const note = describeDryRun(dry);
+  return note ? { allow: true, note } : ALLOW;
 }
 
 /**

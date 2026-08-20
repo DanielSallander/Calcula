@@ -107,7 +107,7 @@ entries. The extraction one-liners are in the git history of this document's int
 | Tool dispatcher | [ai_chat.rs:219](../../app/src-tauri/src/ai_chat.rs#L219) | Dispatches into `mcp::tools` — **already vendor-neutral** |
 | Draft-and-review flow | [mcp/drafts.rs:238](../../app/src-tauri/src/mcp/drafts.rs#L238) | `draft_object_script`; the exact flow this design needs |
 | Draft review UI | `ScriptableObjects/ObjectScriptEditorApp.tsx` | Has a draft path (`objectScriptEditorDraft.test.tsx`) |
-| **Object-script policy** | `api/scriptHost/allowlist.ts` | **The ground truth for what this feature drafts.** 237 methods, **54 capability-bearing**, mapped to the 16 ids. Its own header: consumed by broker dispatch, the transparency panel, and consent-dialog text, "so drift is impossible" |
+| **Object-script policy** | `api/scriptHost/allowlist.ts` | **The ground truth for what this feature drafts.** 233 methods, **53 capability-bearing**, mapped to the 16 ids. Its own header: consumed by broker dispatch, the transparency panel, and consent-dialog text, "so drift is impossible" |
 | QuickJS op manifest | [manifest.rs](../../core/script-engine/src/manifest.rs) | **130 entries** (115 `op()` + 15 `gated()`). Governs `notebook-cell`, `one-off-script`, `mcp-tool` — **NOT object scripts**; see §5a |
 | Capability vocabulary | `api/scriptHost/capabilityIds.ts` | **16 ids**: `net.fetch`, `bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`, `bi.model`, `bi.connector`, `ui.dialog`, `distribution.writeback`, `schedule`, `file.picker`, `ui.shortcut`, `grid.read`, `distribution.publish`, `distribution.subscribe` |
 | Typings generator | `app/scripts/gen-script-typings.mjs` + `scriptTypings/declarations.ts` | AST-based, lockstep-tested against the runtime shim. The slicing work in §6 extends this rather than inventing it |
@@ -286,10 +286,10 @@ project has two sandboxes with two separate policies.
 
 | Surface | Realm | Policy / ground truth |
 |---|---|---|
-| **Object scripts** — what `draft_object_script` produces | per-script hardened **Worker** | **`api/scriptHost/allowlist.ts`** (237 methods, 54 capability-bearing) |
+| **Object scripts** — what `draft_object_script` produces | per-script hardened **Worker** | **`api/scriptHost/allowlist.ts`** (233 methods, 53 capability-bearing) |
 | notebook-cell, one-off-script, mcp-tool | Rust **QuickJS** | `core/script-engine/src/manifest.rs` (`OP_MANIFEST`, 130 entries) |
 
-`SURFACE_PROFILES` in `manifest.rs` names its three surfaces explicitly, and `object-script` is not
+`SURFACE_PROFILES` in `manifest.rs` names its FOUR surfaces explicitly (notebook-cell, one-off-script, mcp-tool, writeback-validator), and `object-script` is not
 one of them. So **M2's L1/L2 must read `allowlist.ts`** — and its self-description is exactly the
 property the checker needs: one object consumed by broker dispatch, the transparency panel, and the
 consent-dialog text, so what the checker validates against is what the broker will actually enforce.
@@ -497,6 +497,28 @@ rejected; and `scoreCandidate` never consumed the validator's `no-entry-point` e
 with no `setup` — which mounts and does nothing — scored 1.0 and `passed: true`, inflating the very
 `canaryScore` that picks the authoring tier.
 
+### "Fix everything you discover" — the second pass, 2026-08-20
+
+The owner's instruction turned the three FILED families into fixes:
+
+- **`stripModuleSyntax` is now a tokenizer, not five regexes.** One pass tracking string /
+  template (`${…}` nesting included) / comment state. The silent-corruption member — blanking
+  DATA inside a multi-line template literal — is dead, and so are the five loud ones. A side
+  effect worth naming: the DEBUG mount's strip-before-instrument ORDER stopped mattering,
+  because a mid-line `export` is still a statement to a tokenizer; the wrong order now compiles
+  too, and a test pins that the defect is gone as a class rather than merely dodged.
+- **The validator follows the context now.** The literal `context` is bound unconditionally
+  (the wrapper's parameter is reachable by closure from anywhere) unless the script declares its
+  own, and a helper's parameter is bound when EVERY call site feeds it a context-bound
+  identifier and the name is unique — to a fixpoint, so helper-to-helper handoff is followed.
+  Every guard errs toward NOT binding: a polymorphic helper or a reused name stays unexamined,
+  because a false rejection is the worse failure. That residue is stated in open-items, not
+  hidden.
+- **The dry run stops guessing for callers that know.** `ai_dry_run_script` takes an explicit
+  `surface`: draftGate labels everything `object-script` (declined authoritatively — its drafts
+  are object scripts by definition), a labeled `one-off` is judged with no heuristic able to
+  suppress the verdict, and the substring heuristics survive only for unlabeled callers.
+
 The remaining six are real but outside this feature; they are filed in `open-items.md` §2.1 rather
 than fixed here. The one worth naming: the object-script realm already fixed the "async handler
 rejects and nobody hears it" defect and documented it, and its **extension-realm twin never received
@@ -524,6 +546,19 @@ Two residues, stated rather than hidden: a poisoned runtime is LEAKED (bounded b
 itself is upstream in QuickJS. Both directions of the flag are sabotage-verified — a flag that never
 fires would drop a corrupt runtime, and one that always fires would leak a runtime on the commonest
 notebook mistake there is.
+
+**The first fix covered half the surface — caught by this session's own adversarial review.** The
+notebook got the poison flag; the ONE-OFF path (`ScriptEngine::run` → MCP `execute_script`, the
+chat's `run_script`, calp, and `ai_dry_run_script` itself) still dropped its runtime
+unconditionally, so a drafted script whose `async` continuation outruns the budget crashed the
+whole app **during the "safe" preview**. Probed in minutes, reproduced, fixed the same narrow way:
+when a job faulted, the `ScriptContext` is recovered through `RefCell::replace` with an empty
+placeholder — `Rc::try_unwrap` can never succeed while the runtime is leaked, and the caller still
+needs its console output, which is the only clue about where the script got stuck — then runtime and
+context are `mem::forget`-ed. Grids are already withheld on every error by design, so nothing is
+lost that an error path ever delivered. Guarded by
+`a_job_abort_in_a_one_off_does_not_crash_the_process` (`core/script-engine/src/lib.rs`), whose red
+under sabotage is the crashed binary itself.
 
 ## 6. Making the API surface sliceable
 

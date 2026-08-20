@@ -80,12 +80,49 @@ pub fn execute_script(
     // is the one that explains the rest.
     let drain = drain_jobs(&rt, &deadline);
     deadline.disarm();
+    // A drain error means a JOB was aborted mid-execution (the uncatchable
+    // deadline interrupt) — the same condition `NotebookSession::is_poisoned`
+    // flags, and it makes this runtime unsafe to DROP: QuickJS is left holding
+    // a bad refcount, and freeing it trips `p->ref_count > 0` and takes the
+    // PROCESS down with STATUS_STACK_BUFFER_OVERRUN. Measured on this very
+    // path 2026-08-20: `(async () => { await null; for (;;) {} })();` through
+    // any one-off surface — MCP execute_script, the chat's run_script, the AI
+    // dry run — crashed the app on the `drop(rt)` below. Before jobs were
+    // drained the continuation never ran, so it could never be aborted; the
+    // drain made this reachable and the notebook fix alone did not cover it.
+    let poisoned = drain.is_err();
     let result = result
         .and_then(|()| drain)
         .and_then(|()| match rejections.first() {
             Some(message) => Err(message),
             None => Ok(()),
         });
+
+    if poisoned {
+        // Recover the caller's ScriptContext WITHOUT dropping the runtime: the
+        // JS closures hold Rc clones of `shared_ctx`, so `Rc::try_unwrap` can
+        // never succeed while the runtime is leaked — but replacing the
+        // RefCell's CONTENTS hands the real context out by value and leaves the
+        // leaked closures holding an empty placeholder. The caller still gets
+        // its grids and console output; only the runtime is abandoned. Leaking
+        // is bounded by how often a script's async continuation outruns the
+        // budget — rare, and always surfaced as the error below.
+        let placeholder = ScriptContext::new(
+            Vec::new(),
+            engine::style::StyleRegistry::new(),
+            Vec::new(),
+            0,
+            crate::types::AppInfo::default(),
+            crate::types::HostState::default(),
+        );
+        let context = shared_ctx.replace(placeholder);
+        std::mem::forget(qjs_context);
+        std::mem::forget(rt);
+        return Ok(ExecutionOutcome {
+            context,
+            error: result.err(),
+        });
+    }
 
     // Drop the QuickJS context and runtime BEFORE unwrapping the Rc.
     // The JS closures (getCellValue, setCellValue, etc.) each hold an Rc clone;
@@ -128,33 +165,32 @@ pub fn execute_script(
 /// left behind by cell N would otherwise run during cell N+1 and mutate the
 /// wrong grids.
 ///
-/// **A failing job does NOT end the drain.** An early return here would leave the
-/// rest of the queue intact, and the error that reaches this arm is precisely the
-/// UNCATCHABLE one — the deadline interrupt — so "the cell timed out" was exactly
-/// the case that walked away with jobs still queued. In a persistent session
-/// those continuations then run against the NEXT cell's grids and commit under
-/// the next cell's id. So the loop runs the queue to empty and reports the FIRST
-/// error afterwards. It still terminates: QuickJS pops a job before executing it,
-/// so every iteration removes one, and a job that faults never runs far enough to
-/// queue another.
+/// **The FIRST failing job ends the drain**, and that is a termination
+/// requirement, not a shortcut. An intermediate version ran the queue to empty
+/// past errors, reasoning that an aborted job "never runs far enough to queue
+/// another" — refuted by this session's adversarial review: QuickJS polls the
+/// interrupt handler on a countdown counter that RESETS each time it fires, so a
+/// job that queues its successor FIRST and spins SECOND is aborted mid-spin with
+/// the successor already queued (`Promise.resolve().then(f)` costs a handful of
+/// polls; the spin costs thousands). Every iteration then errs with the queue
+/// still non-empty, and a drain with no cap loops forever — wedging the
+/// notebook-executor thread, or the synchronous Tauri command thread under MCP
+/// `execute_script` / the AI dry run / the .calp writeback validator, at 100%
+/// CPU. Exactly the "never wedge the thread" guarantee `limits` exists to give.
+///
+/// Stopping is safe ONLY because every caller treats an erred drain as POISON:
+/// the one-off path leaks its runtime (see `execute_script`), and
+/// `NotebookSession` sets `is_poisoned` and refuses every later cell, so the
+/// jobs left on an abandoned queue can never run against anyone's grids.
 pub(crate) fn drain_jobs(rt: &Runtime, deadline: &Deadline) -> Result<(), String> {
-    let mut first_error: Option<String> = None;
     loop {
         match rt.execute_pending_job() {
             Ok(true) => continue,
-            Ok(false) => {
-                return match first_error {
-                    Some(message) => Err(message),
-                    None => Ok(()),
-                }
-            }
+            Ok(false) => return Ok(()),
             Err(exception) => {
-                let message = exception
+                return Err(exception
                     .0
-                    .with(|ctx| describe_error(&ctx, rquickjs::Error::Exception, deadline));
-                if first_error.is_none() {
-                    first_error = Some(message);
-                }
+                    .with(|ctx| describe_error(&ctx, rquickjs::Error::Exception, deadline)));
             }
         }
     }

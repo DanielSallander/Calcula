@@ -304,7 +304,10 @@ describe("suggestions", () => {
 describe("analysis reports what it saw", () => {
   it("records the context binding it walked from", () => {
     const a = analyzeScript("export function setup(ctx) { ctx.log('x'); }");
-    expect(a.contextBindings).toEqual(["ctx"]);
+    // `ctx` is setup's own parameter; the literal `context` is ALSO bound,
+    // always — the wrapper's parameter is reachable by closure from anywhere
+    // in the script, whatever setup calls its own (absent shadowing).
+    expect([...a.contextBindings].sort()).toEqual(["context", "ctx"].sort());
     expect(a.calls.map((c) => c.chain)).toContain("log");
   });
 });
@@ -360,5 +363,142 @@ describe("only `setup` receives the context", () => {
       "",
     ].join("\n");
     expect(validateScriptSource(fine).findings.filter((f) => f.code === "unknown-member")).toEqual([]);
+  });
+});
+
+describe("what counts as an entry point", () => {
+  /**
+   * The wrapper's parameter is literally named `context`, so a top-level
+   * `context.expose(...)` registers its handler at mount and WORKS. Rejecting
+   * it as "nothing would run" was a false claim about a working script —
+   * the unentitled-verdict shape again (found by adversarial review).
+   */
+  it("accepts a top-level context.expose script — it genuinely runs", () => {
+    const report = validateScriptSource(
+      "context.expose('onClick', async () => {\n" +
+      "  await context.api.setCellValue(0, 0, 'works');\n" +
+      "});\n",
+    );
+    expect(report.findings.filter((f) => f.code === "no-entry-point")).toEqual([]);
+  });
+
+  it("rejects ctx.expose at top level — `ctx` is a ReferenceError at mount", () => {
+    const report = validateScriptSource(
+      "ctx.expose('onClick', () => { ctx.log('x'); });\n",
+    );
+    expect(report.findings.some((f) => f.code === "no-entry-point")).toBe(true);
+  });
+
+  it("does not count an expose buried in a function nothing calls", () => {
+    const report = validateScriptSource(
+      "function helper() {\n" +
+      "  context.expose('onClick', () => {});\n" +
+      "}\n",
+    );
+    expect(report.findings.some((f) => f.code === "no-entry-point")).toBe(true);
+  });
+
+  /**
+   * The un-exported arrow form: hasSetupEntryPoint accepted it, but the
+   * binding fallback only knew `function setup`, so a parameter not named
+   * context/ctx left NOTHING bound and every reach/capability check passed
+   * vacuously.
+   */
+  it("binds an un-exported `const setup = (c) => …`'s parameter", () => {
+    const report = validateScriptSource(
+      "const setup = (c) => {\n" +
+      "  c.api.setCellValu(0, 0, 'typo');\n" +
+      "};\n",
+    );
+    expect(report.findings.some((f) => f.code === "unknown-member")).toBe(true);
+  });
+});
+
+describe("context flow — the false-pass half of the setup-only trade", () => {
+  /**
+   * `setup(context) { helper(context); }` makes helper's parameter the context
+   * at runtime. The setup-only narrowing fixed drafts being REJECTED for an
+   * exported helper's ordinary JS, but left an invented member INSIDE a
+   * context-fed helper invisible — and the dry run declines object scripts, so
+   * nothing downstream caught it either.
+   */
+  it("flags an invented member inside a helper the context is passed to", () => {
+    const report = validateScriptSource(
+      [
+        "export function setup(context) {",
+        "  context.expose('onClick', () => helper(context));",
+        "}",
+        "function helper(c) {",
+        "  c.api.setCellValu(0, 0, 'typo');",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    expect(report.findings.some((f) => f.code === "unknown-member")).toBe(true);
+  });
+
+  it("follows the context through TWO helpers (fixpoint)", () => {
+    const report = validateScriptSource(
+      [
+        "export function setup(context) {",
+        "  first(context);",
+        "}",
+        "function first(a) { second(a); }",
+        "function second(b) { b.caps.fetch('https://example.com'); }",
+        "",
+      ].join("\n"),
+    );
+    expect(report.findings.some((f) => f.code === "undeclared-capability")).toBe(true);
+  });
+
+  /** A polymorphic helper is skipped — binding it would false-flag real JS. */
+  it("does not bind a helper that is ALSO called with something else", () => {
+    const report = validateScriptSource(
+      [
+        "export function setup(context) {",
+        "  context.expose('onClick', () => { render(context); render([1, 2]); });",
+        "}",
+        "function render(values) {",
+        "  return values.reduce ? values.reduce((a, b) => a + b, 0) : 0;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    expect(report.findings.filter((f) => f.code === "unknown-member")).toEqual([]);
+  });
+
+  /**
+   * The wrapper's parameter is LITERALLY `context`, reachable by closure, so a
+   * stray top-level use works at runtime even when setup names its parameter
+   * something else — and must therefore be examined.
+   */
+  it("examines a bare top-level context use even when setup(c) binds c", () => {
+    const report = validateScriptSource(
+      [
+        "context.caps.fetch('https://example.com');",
+        "export function setup(c) {",
+        "  c.log('x');",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    expect(report.findings.some((f) => f.code === "undeclared-capability")).toBe(true);
+  });
+
+  /** A script that declares its OWN `context` is left alone — shadowing. */
+  it("does not flag a local named context inside a nested function", () => {
+    const report = validateScriptSource(
+      [
+        "export function setup(c) {",
+        "  c.expose('onClick', () => draw());",
+        "}",
+        "function draw() {",
+        "  const context = { fillRect: () => {} };",
+        "  context.fillRect();",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    expect(report.findings.filter((f) => f.code === "unknown-member")).toEqual([]);
   });
 });

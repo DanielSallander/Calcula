@@ -183,6 +183,27 @@ impl NotebookSession {
     ///
     /// JavaScript global variables from previous cells remain accessible.
     pub fn run_cell(&self, source: &str, input: CellRunInput) -> (ScriptResult, Vec<Grid>) {
+        // A poisoned session runs NOTHING more. Its queue may still hold jobs the
+        // aborted drain abandoned (draining past an abort cannot terminate — see
+        // `drain_jobs`), and any call into the runtime could run them against
+        // THIS cell's grids and commit under this cell's id. The refusal is what
+        // makes stopping the drain on the first job error sound; the host is
+        // expected to retire the session (which the notebook executor does, so a
+        // user never actually sees this message — it exists for a caller that
+        // forgets).
+        if self.poisoned.get() {
+            return (
+                ScriptResult::Error {
+                    message: "This notebook session was poisoned by an aborted background job \
+                              (a timed-out async continuation) and cannot run further cells. \
+                              Reset the notebook to start a fresh session."
+                        .to_string(),
+                    output: Vec::new(),
+                },
+                input.grids,
+            );
+        }
+
         let start = Instant::now();
 
         // Swap in fresh grid data + host state for this cell execution
@@ -1062,6 +1083,39 @@ mod tests {
         }
     }
 
+    /// A late-handled rejection must not forgive an UNRELATED real failure.
+    ///
+    /// The tracker used to clear EVERY record when any one rejection was
+    /// handled late, so this script reported Success: the late `catch` on `p`
+    /// erased the record of the async body that genuinely threw. The
+    /// start-several-then-await pattern hits this routinely — it is not a
+    /// contrived shape.
+    #[test]
+    fn a_late_handled_rejection_does_not_forgive_an_unrelated_failure() {
+        let session = session(None);
+        let (grids, reg, names) = fixture();
+
+        let (result, _) = session.run_cell(
+            "(async () => { throw new Error('real failure'); })(); \
+             const p = Promise.reject(new Error('handled later')); \
+             Promise.resolve().then(() => p.catch(() => {}));",
+            CellRunInput::new(grids, reg, names, 0, "notebook:mixed"),
+        );
+
+        match result {
+            ScriptResult::Error { message, .. } => assert!(
+                message.contains("real failure"),
+                "the surviving record must be the UNHANDLED failure, got {:?}",
+                message,
+            ),
+            other => panic!(
+                "one real unhandled rejection must fail the run even when another \
+                 was handled late: {:?}",
+                other,
+            ),
+        }
+    }
+
     /// A rejection from one cell must not be reported against the NEXT one.
     ///
     /// The rejection sink is shared with the runtime, and the runtime outlives
@@ -1148,27 +1202,24 @@ mod tests {
         assert!(poisoned, "an aborted job left the runtime unsafe to drop, unflagged");
     }
 
-    /// A cell that TIMES OUT must not leave work for the next one either.
+    /// A cell whose JOB was aborted must not hand work to the next one — and the
+    /// guarantee is now a REFUSAL, not a completed drain.
     ///
-    /// The nastier half of the leak, and the one an early `return` on the first
-    /// job error reintroduces: the error that ends the drain IS the deadline
-    /// interrupt, so "the cell timed out" was exactly the case that walked away
-    /// with continuations still queued. Measured with the early return restored,
-    /// the second continuation did not run in cell one at all — it ran during
-    /// cell TWO, which reported `cells_modified: 1` and held the write.
+    /// The contract went through three shapes, each refuted by a measurement:
+    ///   1. Early-return on the first job error — stranded the rest of the queue,
+    ///      and the stranded write was committed under the NEXT cell's id
+    ///      (measured: cell two reported `cells_modified: 1`).
+    ///   2. Drain past errors to empty — cannot terminate: the interrupt fires on
+    ///      a countdown that RESETS per fire, so a job that queues its successor
+    ///      and then spins is aborted with the successor already queued, forever
+    ///      (the wedge test below).
+    ///   3. Current: stop on the first job error, POISON the session, and REFUSE
+    ///      every later cell. The abandoned queue can never touch anyone's
+    ///      grids because the runtime never runs again.
     ///
-    /// Two things about the shape are load-bearing:
-    ///   * The FIRST continuation must run long enough to TRIP the interrupt.
-    ///     QuickJS checks the interrupt handler only periodically, so a short
-    ///     continuation finishes before any check and `execute_pending_job`
-    ///     never reports Err — this leak cannot be reproduced without a spinner.
-    ///   * The session is deliberately LEAKED at the end. Aborting a pending job
-    ///     leaves QuickJS holding a bad refcount, and DROPPING that runtime trips
-    ///     its internal `p->ref_count > 0` assertion and takes the whole test
-    ///     process down with STATUS_STACK_BUFFER_OVERRUN — before the harness can
-    ///     even print a result. That hazard is real and is filed separately; it
-    ///     is not what this test is about, and leaking one runtime for the life of
-    ///     a test process is the cheapest way to keep the two apart.
+    /// The session is deliberately LEAKED at the end: dropping a runtime whose
+    /// job was aborted trips QuickJS's `p->ref_count > 0` and takes the process
+    /// down before the harness prints a result.
     #[test]
     fn a_timed_out_cell_leaves_no_job_behind_for_the_next_cell() {
         let session = NotebookSession::new(
@@ -1189,33 +1240,74 @@ mod tests {
             "precondition: the cell must actually time out, got {:?}",
             first,
         );
+        assert!(session.is_poisoned(), "a job abort must poison the session");
 
         let (grids2, reg2, names2) = fixture();
-        let (second, modified) = session.run_cell(
-            "1 + 1",
+        let (second, returned) = session.run_cell(
+            "Calcula.setCellValue(9, 9, 'SHOULD_NEVER_RUN'); 1 + 1",
             CellRunInput::new(grids2, reg2, names2, 0, "notebook:timeout2"),
         );
 
-        let outcome = match second {
-            ScriptResult::Success { cells_modified, .. } => cells_modified,
-            other => panic!("expected success, got {:?}", other),
-        };
-        let leaked = modified[0]
+        let refused = matches!(&second, ScriptResult::Error { message, .. } if message.contains("poisoned"));
+        let stranded = returned[0]
             .get_cell(2, 2)
             .map(|c| cell_value_to_string(&c.value));
+        let own_write = returned[0]
+            .get_cell(9, 9)
+            .map(|c| cell_value_to_string(&c.value));
 
-        // See the doc comment: dropping a runtime whose job was aborted aborts
-        // the PROCESS, so the assertions come after the leak and the session is
-        // never dropped.
+        // See the doc comment: never drop a poisoned session.
         std::mem::forget(session);
 
-        assert_eq!(
-            outcome, 0,
-            "the timed-out cell's deferred write was committed under the NEXT cell's id",
+        assert!(
+            refused,
+            "a poisoned session must refuse the next cell — running it could execute \
+             the abandoned queue against this cell's grids: {:?}",
+            second,
         );
-        assert_eq!(
-            leaked, None,
-            "a continuation stranded by the timed-out cell wrote into the NEXT cell's workbook",
+        assert_eq!(stranded, None, "the aborted cell's stranded write reached the next cell's grids");
+        assert_eq!(own_write, None, "the refused cell must not have run at all");
+    }
+
+    /// The drain TERMINATES against a job that re-queues itself and then spins.
+    ///
+    /// The adversarial shape: `Promise.resolve().then(f)` queues the successor in
+    /// a handful of interrupt polls; the spin then burns thousands, so once the
+    /// deadline has expired EVERY job is aborted mid-spin with its successor
+    /// already queued. A drain that runs the queue to empty past errors never
+    /// sees an empty queue and wedges the thread forever at 100% CPU — this test
+    /// HANGING is the red, which is why the drain stops at the first job error
+    /// instead. Reachable from every one-off surface, including the .calp
+    /// writeback validator, i.e. code a package AUTHOR wrote and a SUBSCRIBER
+    /// runs.
+    #[test]
+    fn a_self_requeuing_spinner_cannot_wedge_the_drain() {
+        let session = NotebookSession::new(
+            None,
+            ScriptLimits::with_timeout_ms(50),
+            CellRunInput::new(fixture().0, fixture().1, fixture().2, 0, "notebook:wedge-setup"),
+        )
+        .expect("session");
+
+        let (grids, reg, names) = fixture();
+        let started = std::time::Instant::now();
+        let (result, _) = session.run_cell(
+            "(async () => { await null; \
+                (function f() { Promise.resolve().then(f); for (;;) {} })(); \
+             })();",
+            CellRunInput::new(grids, reg, names, 0, "notebook:wedge1"),
+        );
+        let elapsed = started.elapsed();
+
+        let errored = matches!(result, ScriptResult::Error { .. });
+        // The abort corrupts the runtime, so this session too must be leaked.
+        std::mem::forget(session);
+
+        assert!(errored, "the wedge script must fail, not succeed");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "returning at all is the property; {:?} means the drain is not terminating",
+            elapsed,
         );
     }
 

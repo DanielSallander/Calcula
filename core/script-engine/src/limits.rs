@@ -179,8 +179,24 @@ impl Rejections {
         self.seen.borrow_mut().push(message);
     }
 
-    /// Forget everything recorded — used both to reset between runs and when a
-    /// rejection is handled after the fact (see `install`).
+    /// Forget ONE recorded rejection — the one a late-attached handler just
+    /// resolved, identified by its coerced reason text.
+    ///
+    /// This used to clear EVERYTHING, which meant a script with two independent
+    /// rejections — one real failure, one handled a microtask late — reported
+    /// SUCCESS: the late `catch` erased the real failure's record along with its
+    /// own (found by adversarial review; the start-parallel-then-await pattern
+    /// hits it routinely). Matching by reason text removes exactly one record;
+    /// two identical messages still leave the other in place, which errs toward
+    /// reporting a failure that was real.
+    pub fn resolve(&self, message: &str) {
+        let mut seen = self.seen.borrow_mut();
+        if let Some(i) = seen.iter().position(|m| m == message) {
+            seen.remove(i);
+        }
+    }
+
+    /// Forget everything recorded — the per-run reset.
     pub fn clear(&self) {
         self.seen.borrow_mut().clear();
     }
@@ -200,13 +216,14 @@ impl Rejections {
 /// the API-registration evals that run before the user's script.
 ///
 /// The tracker is deliberately ASYMMETRIC. It records only rejections that had
-/// no handler at rejection time, and a later `is_handled` callback CLEARS what
-/// was recorded rather than being ignored. QuickJS does not call the tracker at
-/// all when a `.catch` is already attached, so the only way to reach the
-/// clearing path is a handler attached in a later microtask — a valid script.
-/// Erring toward forgetting a real rejection is the right direction here:
-/// reporting a working script as broken is the failure mode this whole checker
-/// exists to avoid.
+/// no handler at rejection time, and a later `is_handled` callback RESOLVES the
+/// matching record rather than being ignored. QuickJS does not call the tracker
+/// at all when a `.catch` is already attached, so the only way to reach the
+/// resolving path is a handler attached in a later microtask — a valid script.
+/// The resolution is per-rejection, matched on the coerced reason text: an
+/// earlier version cleared EVERY record, so one late-handled promise silently
+/// forgave an unrelated real failure and the run reported Success — the exact
+/// verdict the tracker exists to prevent.
 pub fn install(rt: &Runtime, limits: ScriptLimits) -> (Rc<Deadline>, Rc<Rejections>) {
     rt.set_memory_limit(limits.memory_bytes);
     rt.set_max_stack_size(limits.max_stack_bytes);
@@ -219,15 +236,17 @@ pub fn install(rt: &Runtime, limits: ScriptLimits) -> (Rc<Deadline>, Rc<Rejectio
     let tracked = rejections.clone();
     rt.set_host_promise_rejection_tracker(Some(Box::new(
         move |ctx: rquickjs::Ctx, _promise: rquickjs::Value, reason: rquickjs::Value, is_handled: bool| {
-            if is_handled {
-                tracked.clear();
-                return;
-            }
             // Coercing an Error yields "Error: <message>", which is what a
-            // reader needs; anything else stringifies to something usable.
+            // reader needs; anything else stringifies to something usable. The
+            // same reason value arrives on BOTH calls for a given promise, so
+            // the text doubles as the resolution key.
             let text = rquickjs::Coerced::<String>::from_js(&ctx, reason)
                 .map(|c| c.0)
                 .unwrap_or_else(|_| "unhandled promise rejection".to_string());
+            if is_handled {
+                tracked.resolve(&text);
+                return;
+            }
             tracked.record(text);
         },
     )));
