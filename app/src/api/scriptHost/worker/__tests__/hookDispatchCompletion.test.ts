@@ -132,4 +132,43 @@ describe("hook dispatch reports completion", () => {
     const { rt, post } = buttonContext();
     expect(dispatchEvent(rt, "onClick", undefined, post)).toBeUndefined();
   });
+
+  it("a poisoned thenable (throwing `then` getter) is reported and never stops the others", () => {
+    // `.then` access and Promise.resolve() run synchronously during collection;
+    // a hostile return value must land in the error channel like any other
+    // handler failure, not throw past dispatch and abort the rest of the loop.
+    const { button, rt, posted, post } = buttonContext();
+    let lastRan = false;
+    (button.onClick as ClickRegistrar)(() => ({
+      get then(): never {
+        throw new Error("poisoned thenable");
+      },
+    }));
+    (button.onClick as ClickRegistrar)(() => {
+      lastRan = true;
+    });
+
+    expect(() => dispatchEvent(rt, "onClick", undefined, post)).not.toThrow();
+    expect(lastRan).toBe(true);
+    expect(posted.filter((m) => m.t === "error").map((m) => (m as { message: string }).message))
+      .toEqual(["poisoned thenable"]);
+  });
+
+  it("couples its returned promise to the handlers: a rejection AFTER a tick is reported by the time the dispatch settles", async () => {
+    // Pins the settle-coupling contract: an implementation that reports
+    // rejections but returns an already-resolved promise passes every
+    // same-microtask test and fails only this one.
+    const { button, rt, posted, post } = buttonContext();
+    (button.onClick as ClickRegistrar)(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      throw new Error("late boom");
+    });
+
+    const pending = dispatchEvent(rt, "onClick", undefined, post);
+    expect(posted.filter((m) => m.t === "error")).toEqual([]);
+
+    await pending;
+    expect(posted.filter((m) => m.t === "error").map((m) => (m as { message: string }).message))
+      .toEqual(["late boom"]);
+  });
 });

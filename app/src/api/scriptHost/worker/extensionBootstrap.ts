@@ -136,7 +136,7 @@ self.onmessage = (e: MessageEvent<HX2W>) => {
       if (runtime) void runtime.invokeHandler(msg.reqId, msg.handlerId, msg.args);
       break;
     case "appEvent":
-      runtime?.dispatchAppEvent(msg.handlerId, msg.payload);
+      if (runtime) void runtime.dispatchAppEvent(msg.handlerId, msg.payload);
       break;
     case "callResult":
       runtime?.settleCall(msg.callId, msg.ok, msg.value, msg.error);
@@ -146,6 +146,29 @@ self.onmessage = (e: MessageEvent<HX2W>) => {
       break;
   }
 };
+
+// Last line of defense for a rejection nothing collects: an extension's own
+// floating promise, or a fire-and-forget broker call (ui.notifications.showToast
+// discards its brokerCall deliberately). Handler dispatch never lands here —
+// invokeHandler awaits and dispatchAppEvent collects thenables — so anything
+// that does is a rejection NO code path observes, and this realm has no
+// debugger, so unlike the object-script twin (bootstrap.ts, debug-gated) it is
+// unconditional: silent-on-a-production-mount is the one direction an error
+// must never travel.
+self.addEventListener("unhandledrejection", (e: Event) => {
+  const reason = (e as PromiseRejectionEvent).reason;
+  // A hostile reason can carry throwing message/stack getters; the report must
+  // survive that, so the extraction is guarded and the post is not.
+  let message = "unhandled rejection (reason unreadable)";
+  let stack: string | undefined;
+  try {
+    message = reason instanceof Error ? reason.message : String(reason);
+    stack = reason instanceof Error ? reason.stack : undefined;
+  } catch {
+    /* keep the generic line */
+  }
+  post({ t: "error", message, stack });
+});
 
 // Keep the teardown symbol referenced for the unused-var lint; the realm dies on
 // terminate() regardless.

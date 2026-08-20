@@ -698,20 +698,22 @@ export function dispatchEvent(
   };
   let pending: Array<Promise<void>> | null = null;
   for (const handler of [...handlers]) {
-    let result: unknown;
+    // The thenable probe stays INSIDE the try: `.then` can be a throwing
+    // getter and Promise.resolve() reads `constructor` synchronously, so a
+    // hostile return value would otherwise throw past dispatch and abort the
+    // remaining handlers.
     try {
-      result = handler(payload);
+      const result = handler(payload);
+      if (result && typeof (result as { then?: unknown }).then === "function") {
+        (pending ??= []).push(
+          Promise.resolve(result).then(
+            () => undefined,
+            (err: unknown) => report(err),
+          ),
+        );
+      }
     } catch (err) {
       report(err);
-      continue;
-    }
-    if (result && typeof (result as { then?: unknown }).then === "function") {
-      (pending ??= []).push(
-        Promise.resolve(result).then(
-          () => undefined,
-          (err: unknown) => report(err),
-        ),
-      );
     }
   }
   if (!pending) return;

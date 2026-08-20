@@ -86,7 +86,9 @@ export class ExtensionCallError extends Error {
 /** Worker-internal control surface the bootstrap drives from host messages. */
 export interface ExtWorkerRuntime {
   invokeHandler(reqId: number, handlerId: number, args: unknown[]): Promise<void>;
-  dispatchAppEvent(handlerId: number, payload: unknown): void;
+  /** Returns a promise only when the handler produced one; it settles when the
+   *  handler has (rejections are already reported — awaiting is optional). */
+  dispatchAppEvent(handlerId: number, payload: unknown): Promise<void> | void;
   settleCall(callId: number, ok: boolean, value: unknown, error?: ExtRpcError): void;
   runDeactivate(): void;
 }
@@ -741,13 +743,38 @@ export function buildExtensionContext(
         });
       }
     },
+    /**
+     * Host app-event → the registered handler, fire-and-forget for the HOST but
+     * never for the error channel. Every privileged call in this realm is a
+     * brokered Promise, so any handler doing real work is async — and an async
+     * handler's throw is a REJECTION the try/catch cannot see. Collect the
+     * thenable and report its rejection exactly like a synchronous throw, or a
+     * failed handler is silent on a production mount (the object-script twin,
+     * contextShims.ts dispatchEvent, names and closes the same hazard). The
+     * returned promise settles once the handler has; the bootstrap discards it
+     * today, but a caller that needs "the dispatch is OVER" can await it.
+     */
     dispatchAppEvent(handlerId, payload) {
       const fn = handlers.get(handlerId);
       if (!fn) return;
-      try {
-        void fn(payload);
-      } catch (e) {
+      const report = (e: unknown): void => {
         post({ t: "error", message: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined });
+      };
+      // The thenable probe stays INSIDE the try: `.then` can be a throwing
+      // getter and Promise.resolve() reads `constructor` synchronously, so a
+      // hostile return value would otherwise throw past this method, out of
+      // onmessage, and past the unhandledrejection backstop (it is a sync
+      // throw, not a rejection).
+      try {
+        const result = fn(payload);
+        if (result && typeof (result as { then?: unknown }).then === "function") {
+          return Promise.resolve(result).then(
+            () => undefined,
+            (e: unknown) => report(e),
+          );
+        }
+      } catch (e) {
+        report(e);
       }
     },
     settleCall(callId, ok, value, error) {
