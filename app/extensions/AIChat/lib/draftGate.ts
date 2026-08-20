@@ -1,0 +1,119 @@
+//! FILENAME: app/extensions/AIChat/lib/draftGate.ts
+// PURPOSE: Put the validation ladder in front of `draft_object_script`, so a
+//          script the model gets wrong never reaches the user's review queue.
+// CONTEXT: docs/design/local-model-script-authoring.md §5, §11.2.
+//
+//          THE CHAT ALREADY HAS A REPAIR LOOP — the agentic tool loop. So this
+//          needs no new machinery: when a draft fails validation the gate
+//          returns the repair text AS THE TOOL RESULT, the model reads it like
+//          any other tool output, fixes the script and calls the tool again.
+//          Bolting the standalone `authorScript` loop in beside it would have
+//          meant two repair loops disagreeing about whose turn it was.
+//
+//          WHY GATE AT ALL. `draft_object_script` queues a script for a HUMAN to
+//          read and mount. Every wrong draft that reaches that queue spends a
+//          person's attention on something a machine could have rejected in a
+//          millisecond — and, measured against two real local models, roughly
+//          half of what they produce is wrong in a way the ladder can see.
+//
+//          NOTICES NEVER BLOCK (§11.2). A capability declared but not observed
+//          is information for the reviewer, not a defect; feeding it back would
+//          teach the model to strip declarations it cannot prove it needs.
+
+import { validateScriptSource, repairPrompt } from "@api/scriptHost/scriptValidation";
+// The report's shape is declared once, beside the authoring loop that also
+// consumes it. A second mirror here would be one more thing to drift from
+// `DryRunReport` in ai/dryrun.rs.
+import type { DryRunReport } from "@api/scriptHost/scriptAuthoring";
+import { aiChatBackend } from "./aiChatBackend";
+
+/** What the gate decided about one tool call. */
+export interface GateVerdict {
+  /** True when the call may proceed to the backend. */
+  allow: boolean;
+  /** When `allow` is false, the text handed back to the model as a tool result. */
+  message?: string;
+}
+
+const ALLOW: GateVerdict = { allow: true };
+
+/**
+ * Run a candidate through the dry run, tolerating an unavailable backend.
+ *
+ * A dry run that cannot RUN must not block a draft: the command is new, and a
+ * gate that turns its own failure into a rejection would make the chat refuse
+ * work for a reason the user cannot act on. Returns null when no verdict could
+ * be reached, which the caller treats as "no objection".
+ */
+async function tryDryRun(source: string): Promise<DryRunReport | null> {
+  try {
+    return await aiChatBackend.invoke<DryRunReport>("ai_dry_run_script", { code: source });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide whether a tool call may proceed.
+ *
+ * Only `draft_object_script` is gated. `run_script` is deliberately NOT: it is
+ * the execute-now path the user asked for explicitly, it is undoable, and
+ * refusing it on a static check would be the chat second-guessing a direct
+ * instruction. The draft path is different precisely because its output is
+ * queued for someone to read.
+ */
+export async function gateToolCall(name: string, input: unknown): Promise<GateVerdict> {
+  if (name !== "draft_object_script") return ALLOW;
+
+  // Only a real, non-empty STRING is worth validating. A missing or non-string
+  // `source` is malformed input, and `validate_draft` in mcp/drafts.rs already
+  // answers that clearly — whereas coercing `42` to a script and reporting that
+  // it "defines no setup function" would be a confusing critique of a type
+  // error.
+  const raw = (input as { source?: unknown } | null)?.source;
+  if (typeof raw !== "string" || raw.trim() === "") return ALLOW;
+  const source = raw;
+
+  // L0-L2: parse, reach, capabilities.
+  const report = validateScriptSource(source);
+  if (!report.ok) {
+    return {
+      allow: false,
+      message:
+        "The script was NOT queued for review — it does not pass Calcula's checks.\n\n" +
+        repairPrompt(report) +
+        "\n\nFix these and call draft_object_script again.",
+    };
+  }
+
+  // L3: does it actually run?
+  const dry = await tryDryRun(source);
+  if (dry && !dry.ok) {
+    return {
+      allow: false,
+      message:
+        "The script was NOT queued for review. It passes every static check but FAILS when run " +
+        `against a copy of the workbook:\n  ${dry.error ?? "unknown error"}\n\n` +
+        "Fix the runtime error and call draft_object_script again.",
+    };
+  }
+
+  return ALLOW;
+}
+
+/**
+ * A one-line note about what the draft would do, appended to the tool result so
+ * the model — and the transcript — say something concrete rather than "queued".
+ *
+ * Deliberately separate from the gate: this runs only for drafts that PASSED,
+ * and it is descriptive, never a rejection.
+ */
+export function describeDryRun(dry: DryRunReport | null): string {
+  if (!dry || !dry.ok) return "";
+  if (dry.totalChanges === 0) {
+    return " When run against a copy of the workbook it changed no cells.";
+  }
+  return ` When run against a copy of the workbook it would change ${dry.totalChanges} cell${
+    dry.totalChanges === 1 ? "" : "s"
+  }.`;
+}

@@ -18,6 +18,7 @@ import { aiChatBackend } from "../lib/aiChatBackend";
 import { TOOLS, SYSTEM_PROMPT } from "../lib/chatTools";
 import { AI_STREAM_EVENT, type ChatBlock, type ChatMessage, type ChatResponse, type StreamEvent } from "../lib/aiTypes";
 import { isComplete, readSelection } from "../lib/providerSelection";
+import { gateToolCall } from "../lib/draftGate";
 import { ModelPicker } from "./ModelPicker";
 
 const MAX_TOOL_TURNS = 8;
@@ -185,6 +186,20 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
         for (const tu of toolUses) {
           addBubble({ kind: "tool", text: summarizeToolCall(tu.name, tu.input) });
           try {
+            // The validation ladder runs BEFORE a draft reaches the user's review
+            // queue. A rejection comes back as the tool result, so the model's own
+            // agentic loop performs the repair — no second repair loop needed.
+            const verdict = await gateToolCall(tu.name, tu.input);
+            if (!verdict.allow) {
+              addBubble({ kind: "error", text: "Draft rejected — sent back for correction." });
+              results.push({
+                type: "toolResult",
+                toolUseId: tu.id,
+                content: verdict.message ?? "The script was not accepted.",
+                isError: true,
+              });
+              continue;
+            }
             const result = await aiChatBackend.invoke<string>("ai_chat_run_tool", {
               name: tu.name,
               input: tu.input ?? {},
