@@ -133,6 +133,114 @@ describe("the repair loop", () => {
   });
 });
 
+describe("L3 — the dry run turns a runtime failure into a repair round", () => {
+  // The gap this closes, measured against two real local models: roughly HALF of
+  // all failures were scripts the validator called `ok`. The loop stopped after
+  // one round on every one of them, because "does it parse and call real
+  // methods" was the only question it could ask.
+  const dryOk = (totalChanges: number) => ({
+    ok: true,
+    error: null,
+    durationMs: 3,
+    changes: [],
+    truncated: false,
+    totalChanges,
+    output: [],
+  });
+  const dryFailed = (error: string) => ({
+    ok: false,
+    error,
+    durationMs: 1,
+    changes: [],
+    truncated: false,
+    totalChanges: 0,
+    output: [],
+  });
+
+  it("repairs a script that passes every static check but throws when run", () => {
+    // GOOD is statically valid, so without L3 this returns on attempt 0.
+    return (async () => {
+      const complete = scripted(GOOD, GOOD);
+      let call = 0;
+      const dryRun = vi.fn(async () => (call++ === 0 ? dryFailed("TypeError: v.map is not a function") : dryOk(1)));
+      const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete, dryRun });
+      expect(r.ok).toBe(true);
+      expect(complete).toHaveBeenCalledTimes(2);
+      const repair = complete.mock.calls[1][1];
+      expect(repair).toContain("FAILS when run against a copy of the workbook");
+      expect(repair).toContain("TypeError: v.map is not a function");
+    })();
+  });
+
+  it("repairs a script that runs cleanly and changes nothing, when writes were expected", async () => {
+    const complete = scripted(GOOD, GOOD);
+    let call = 0;
+    const dryRun = vi.fn(async () => (call++ === 0 ? dryOk(0) : dryOk(1)));
+    const r = await authorScript({
+      intent: "put hi in A1",
+      objectType: "button",
+      plan: PLAN,
+      complete,
+      dryRun,
+      expectsWrites: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(complete.mock.calls[1][1]).toContain("changes NOTHING");
+  });
+
+  it("accepts a no-op script when the task did not ask for writes", async () => {
+    // A script that only reads and reports is a normal thing to ask for; marking
+    // it wrong would make the loop refuse legitimate work.
+    const complete = scripted(GOOD);
+    const dryRun = vi.fn(async () => dryOk(0));
+    const r = await authorScript({ intent: "log it", objectType: "button", plan: PLAN, complete, dryRun });
+    expect(r.ok).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT dry-run a draft that already failed the static checks", async () => {
+    // Executing a known-broken script wastes a run and produces a runtime error
+    // that merely restates the static one — noise exactly when the model needs
+    // one clear instruction.
+    const complete = scripted(INVENTED, GOOD);
+    const dryRun = vi.fn(async () => dryOk(1));
+    await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete, dryRun });
+    expect(dryRun).toHaveBeenCalledTimes(1);
+    expect(complete.mock.calls[1][1]).toContain("is not part of the object-script API");
+  });
+
+  it("records the dry run on the attempt it belongs to", async () => {
+    const complete = scripted(GOOD);
+    const dryRun = vi.fn(async () => dryOk(4));
+    const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete, dryRun });
+    expect(r.attempts[0].dryRun?.totalChanges).toBe(4);
+  });
+
+  it("behaves exactly as before when no dry run is supplied", async () => {
+    // The offline eval runner has no live workbook; the loop must still work.
+    const complete = scripted(GOOD);
+    const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete });
+    expect(r.ok).toBe(true);
+    expect(r.attempts[0].dryRun).toBeUndefined();
+  });
+
+  it("reports a statically-valid script that never runs as such, not as 'still wrong: '", async () => {
+    const complete = scripted(GOOD);
+    const dryRun = vi.fn(async () => dryFailed("ReferenceError: foo is not defined"));
+    const r = await authorScript({
+      intent: "x",
+      objectType: "button",
+      plan: { ...PLAN, repairRounds: 1 },
+      complete,
+      dryRun,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("passes every static check but fails when run");
+    expect(r.summary).toContain("ReferenceError");
+    expect(r.summary).not.toContain("Still wrong: .");
+  });
+});
+
 describe("running out of rounds", () => {
   it("fails honestly instead of returning the last attempt as a success", async () => {
     const complete = scripted(INVENTED);

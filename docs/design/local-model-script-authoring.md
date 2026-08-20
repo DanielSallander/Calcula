@@ -376,10 +376,35 @@ after that lesson had already been written down. Assertions ahead of the target 
 experiment must pass them to discriminate anything, so the canned report had to claim exactly what a
 real run would.
 
-**What it does NOT do yet.** It answers "did this change anything, and what?" — enough to catch the
-valid-but-useless failures, since those change nothing at all. It does not yet compare the diff to
-what a task EXPECTED; that needs per-task expectations on the 36 corpus tasks plus a scorer change,
-and is what would turn L3 from a signal into a grade.
+### L3 is wired into the repair loop (2026-08-20)
+
+`authorScript` takes an optional `dryRun` hook. Once L0-L2 pass, the draft is run against a clone and
+two things become repairable that were invisible before:
+
+- **It throws when run.** A script can parse, invent nothing, declare its capabilities correctly and
+  still fail on the first line. The runtime error goes back as the repair instruction.
+- **It runs cleanly and changes nothing**, when the caller says writes were expected.
+
+That is the measured gap: against two real local models, roughly HALF of all failures were scripts
+the validator called `ok`, and the loop stopped after one round on every one of them because
+"does it parse and call real methods" was the only question it could ask.
+
+Three deliberate choices:
+
+- **The dry run happens only AFTER the static checks pass.** Executing a known-broken draft wastes a
+  run and yields a runtime error that merely restates the static one — noise at exactly the moment
+  the model needs one clear instruction.
+- **`expectsWrites` is the CALLER's judgement, not a corpus field.** "Changed nothing" is only a
+  defect when the task was meant to write, a read-and-report script is a normal thing to ask for,
+  and only the caller knows whether the live workbook holds the data the task assumes — against an
+  empty sheet a correct "sort rows 2-500" changes nothing and must not be marked wrong.
+- **The hook is optional**, because the offline eval runner has no live workbook and the loop must
+  still work without one.
+
+**What it does NOT do yet.** It cannot say whether the change was the RIGHT one — only that
+something ran, and something changed. Grading the diff against a task's expected result needs
+per-task expectations and a workbook fixture to run them against, which is a larger piece than the
+rung itself.
 
 ## 6. Making the API surface sliceable
 
