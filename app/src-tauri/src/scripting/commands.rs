@@ -29,7 +29,11 @@ use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptRespon
 /// Numbers render with '.' as the decimal separator (NOT locale-aware) because
 /// the resulting `CellUpdateInput` is fed back through the edit pipeline with
 /// `invariant = true`, which expects US-format input.
-fn cell_input_string(cell: &Cell) -> String {
+/// `pub(crate)` for the dry-run preview (`ai/dryrun.rs`), which must render the
+/// BEFORE side of a diff with exactly the same rule the apply path uses for the
+/// after side — otherwise a preview could show a spurious change for a cell
+/// whose two renderings merely disagree.
+pub(crate) fn cell_input_string(cell: &Cell) -> String {
     if let Some(formula) = cell.formula_string() {
         return format!("={}", formula);
     }

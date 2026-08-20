@@ -19,6 +19,7 @@
 //!          providers.rs), so selecting one means nothing leaves the machine.
 
 pub mod discovery;
+pub mod dryrun;
 pub mod providers;
 pub mod stream;
 pub mod tools;

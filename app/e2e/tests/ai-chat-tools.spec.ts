@@ -70,9 +70,26 @@ test.describe("AI chat tool dispatcher (C1, L4)", () => {
       });
 
       // The write went through the undoable pipeline.
+      //
+      // ORDER IS LOAD-BEARING: `undo` reverses the LAST undoable operation, so
+      // nothing that mutates the workbook may sit between the AI write above and
+      // this undo. An earlier draft of this file put the dry-run block here and
+      // its two `update_cell` calls silently retargeted the undo — A1 kept its
+      // "99" and the assertion below failed pointing at the AI write, which was
+      // innocent. Anything new goes AFTER this pair.
       await tauri.core.invoke("undo");
       const cellAfterUndo: any = await tauri.core.invoke("get_cell", { row: 0, col: 0 });
       await tauri.core.invoke("update_cell", { row: 0, col: 0, value: "" });
+
+      // L3: a DRY RUN previews without applying. This is the one assertion that
+      // can prove the invariant — the report is easy to fake, an unchanged
+      // workbook is not.
+      await tauri.core.invoke("update_cell", { row: 5, col: 5, value: "keep-me" });
+      const dry: any = await tauri.core.invoke("ai_dry_run_script", {
+        code: "Calcula.setCellValue(5, 5, 'OVERWRITTEN');",
+      });
+      const cellAfterDryRun: any = await tauri.core.invoke("get_cell", { row: 5, col: 5 });
+      await tauri.core.invoke("update_cell", { row: 5, col: 5, value: "" });
 
       return {
         hasKeyType: typeof hasKey,
@@ -84,6 +101,11 @@ test.describe("AI chat tool dispatcher (C1, L4)", () => {
         unknownErr,
         draft: String(draft ?? ""),
         drafts: String(drafts ?? ""),
+        dryOk: dry?.ok,
+        dryTotal: dry?.totalChanges,
+        dryBefore: String(dry?.changes?.[0]?.before ?? ""),
+        dryAfter: String(dry?.changes?.[0]?.after ?? ""),
+        dryCellUnchanged: String(cellAfterDryRun?.display ?? cellAfterDryRun?.value ?? ""),
         undoDisplay: String(cellAfterUndo?.display ?? cellAfterUndo?.value ?? ""),
       };
     });
@@ -107,5 +129,15 @@ test.describe("AI chat tool dispatcher (C1, L4)", () => {
     expect(result.draft).toContain("storage"); // declared ceiling surfaced
     expect(result.drafts).toContain("E2E Draft");
     expect(result.drafts).toContain("mounted=false");
+
+    // L3: the preview REPORTS the change...
+    expect(result.dryOk).toBe(true);
+    expect(result.dryTotal).toBe(1);
+    expect(result.dryBefore).toBe("keep-me");
+    expect(result.dryAfter).toBe("OVERWRITTEN");
+    // ...and the workbook is untouched. This is the invariant the whole rung
+    // rests on: if a "preview" ever writes, it has silently become an edit, and
+    // the review step that is supposed to protect the user has been bypassed.
+    expect(result.dryCellUnchanged).toBe("keep-me");
   });
 });

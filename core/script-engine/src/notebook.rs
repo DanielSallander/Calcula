@@ -865,6 +865,47 @@ mod tests {
         }
     }
 
+    /// THE ISOLATION CLAIM, tested directly: a run mutates the grids it was
+    /// GIVEN and leaves the caller's own copy alone.
+    ///
+    /// Everything above the engine assumes this — `run_script_isolated` hands in
+    /// a clone and keeps a second clone as a diff baseline, and the L3 dry run
+    /// rests entirely on the original being untouched. It had never been
+    /// asserted at this level, so when a dry run was observed writing to the
+    /// live workbook there was no way to tell whether the engine was the leak or
+    /// merely the accused. This test answers that question in milliseconds
+    /// instead of a two-minute app launch.
+    #[test]
+    fn a_run_never_mutates_the_callers_grids() {
+        let session = session(None);
+        let (grids, reg, names) = fixture();
+
+        // The caller's copy, kept out of the run exactly as run_script_isolated
+        // keeps its baseline.
+        let baseline = grids.clone();
+        let before = baseline[0].get_cell(5, 5).map(|c| cell_value_to_string(&c.value));
+
+        let input = CellRunInput::new(grids, reg, names, 0, "notebook:isolation");
+        let (result, modified) = session.run_cell("Calcula.setCellValue(5, 5, 'OVERWRITTEN')", input);
+        match result {
+            ScriptResult::Success { .. } => {}
+            other => panic!("expected success, got {:?}", other),
+        }
+
+        // The run's OUTPUT carries the write...
+        assert_eq!(
+            cell_value_to_string(&modified[0].get_cell(5, 5).expect("written cell").value),
+            "OVERWRITTEN",
+        );
+        // ...and the caller's copy is untouched.
+        assert_eq!(
+            baseline[0].get_cell(5, 5).map(|c| cell_value_to_string(&c.value)),
+            before,
+            "the run mutated the caller's grids — every dry run and every diff baseline above \
+             this layer is built on that not happening",
+        );
+    }
+
     /// cells_modified counts EFFECTIVE changes: rewriting a cell with the value
     /// it already holds is not a modification.
     #[test]

@@ -317,10 +317,69 @@ a targeted fix. Combined with the zero marginal cost of local retries (§1a), th
 that lets model quality degrade *gracefully* instead of failing — which is the whole hardware-
 independence argument in one line.
 
-**L3 must be a true dry run.** The interpreter already executes over cloned grid state
-(`ReachClass::Grid` in `manifest.rs` is explicit that nothing escapes the clone), so the substrate
-exists. The new work is an entry point that runs and reports **without applying the writeback** —
-`tools::execute_script` today is undoable-and-applied, which is not the same thing.
+**L3 must be a true dry run — BUILT 2026-08-19** as `ai/dryrun.rs` + `ai_dry_run_script`.
+
+The missing piece turned out to be a decision point, not machinery. `run_script_with_model`
+(`mcp/tools.rs`) already cloned the grids, ran the script against the clone on its own thread, and
+handed back `modified_grids`; `apply_script_result` was a separate step afterwards, and
+`diff_grids_to_updates` already existed for it. So the split is:
+
+| | |
+|---|---|
+| `run_script_isolated` | gate, run, return what changed. **Applies nothing.** |
+| `run_script_with_model` | that, plus the apply — byte-identical for every existing caller |
+| `ai_dry_run_script` | that, plus a diff. Applies nothing, ever. |
+
+Sharing the run rather than copying it is deliberate: a duplicate would be a second copy of the
+security gate, the capability grant/revoke and the thread hand-off, and this project has already
+measured what a copied run path costs.
+
+Two details that would be wrong the obvious way:
+
+- **The baseline is a second clone taken BEFORE the run**, not a re-read of `AppState` afterwards.
+  Re-reading races any concurrent edit and diffs against the wrong state.
+- **`cell_input_string` is shared with the apply path.** The preview must render the *before* side
+  with exactly the rule the apply path uses for the *after* side, or a cell whose two renderings
+  merely disagree shows up as a spurious change.
+
+**The invariant is asserted where it can actually be proven, and it HOLDS.** A report is easy to
+fake; an unchanged workbook is not. `e2e/tests/ai-chat-tools.spec.ts` writes a value, dry-runs a
+script that would overwrite it, asserts the report names the change, then asserts **the cell still
+holds the original**. It passes, and an in-command probe of live `AppState` reads `keep-me` at entry,
+after the run returns, and after unwrap.
+
+**It is also asserted where it is IMPLEMENTED**, which is what finally settled it:
+`a_run_never_mutates_the_callers_grids` (`core/script-engine/src/notebook.rs`) runs
+`Calcula.setCellValue` against a `CellRunInput` and checks the caller's own copy is untouched while
+the returned copy carries the write. Every layer above depends on that and nothing had ever asserted
+it at the layer that implements it. It runs in **milliseconds** against a two-minute app launch.
+
+### The hours this cost, and why
+
+This rung was reported as BROKEN for a stretch, on a defect that never existed. Worth recording,
+because the mechanism will recur:
+
+**A source restored while its own build is in flight leaves cargo believing the binary is current.**
+The source was restored at 20:12:40; the still-running sabotage build finished at 20:17:13. Cargo
+compared source (20:12:40) to binary (20:17:13), found the binary newer, and rebuilt nothing — so the
+next run executed the SABOTAGED binary with clean source on disk and **zero compile errors**.
+
+The check used to rule that out — "the binary is newer than the source, therefore it rebuilt" — is
+exactly backwards: in this race, a newer binary is the signature of a stale one. Read the run's log
+for `Compiling` / `could not compile`, or the `[e2e] app binary: … (built <time>)` line, and never
+edit sources while a build is running.
+
+**Two experiments were also wasted on shielding assertions.** The first sabotage (apply BEFORE the
+diff) reddened `totalChanges`, not the write-invariant, because the second run then diffed against
+already-modified state. The first bisect (empty report) failed the same way for the same reason —
+after that lesson had already been written down. Assertions ahead of the target are shields; an
+experiment must pass them to discriminate anything, so the canned report had to claim exactly what a
+real run would.
+
+**What it does NOT do yet.** It answers "did this change anything, and what?" — enough to catch the
+valid-but-useless failures, since those change nothing at all. It does not yet compare the diff to
+what a task EXPECTED; that needs per-task expectations on the 36 corpus tasks plus a scorer change,
+and is what would turn L3 from a signal into a grade.
 
 ## 6. Making the API surface sliceable
 

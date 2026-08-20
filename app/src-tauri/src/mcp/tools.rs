@@ -1159,7 +1159,23 @@ fn output_item_to_json(item: &script_engine::ScriptOutputItem) -> serde_json::Va
     }
 }
 
-/// Gate, run, and apply one MCP/AI script with the model provider attached.
+/// What one isolated run produced, before anyone decides whether to keep it.
+pub(crate) struct IsolatedRun {
+    pub result: script_engine::ScriptResult,
+    pub modified_grids: Vec<engine::grid::Grid>,
+    /// The grids as they were BEFORE the run — the diff baseline.
+    pub baseline_grids: Vec<engine::grid::Grid>,
+    pub active_sheet: usize,
+}
+
+/// Gate and RUN one MCP/AI script with the model provider attached. Applies
+/// nothing.
+///
+/// Split out of `run_script_with_model` so the dry-run path (L3 of the draft
+/// validator, `ai/dryrun.rs`) can reuse the execution EXACTLY and simply decline
+/// to apply. Duplicating the setup instead would be a second copy of the
+/// capability grant, the thread hand-off and the revoke — and this project has
+/// already measured what happens when a run path is copied rather than shared.
 ///
 /// THREADING: the provider bridges to the async BI internals with
 /// `Handle::block_on`, which is only sound off a runtime thread — so the run
@@ -1167,10 +1183,10 @@ fn output_item_to_json(item: &script_engine::ScriptOutputItem) -> serde_json::Va
 /// this fn awaits its oneshot reply instead of blocking a tokio worker. (The
 /// QuickJS session is `!Send` too, so it is created, used and dropped entirely
 /// inside that thread.)
-async fn run_script_with_model(
+pub(crate) async fn run_script_isolated(
     handle: &AppHandle,
     code: &str,
-) -> Result<ScriptRunOutcome, String> {
+) -> Result<IsolatedRun, String> {
     // External MCP clients are script execution — the AI access ceiling must
     // allow "script" AND the same security gate as run_script applies.
     // ("prompt" without a session approval refuses: the MCP path is headless
@@ -1186,6 +1202,11 @@ async fn run_script_with_model(
     let state = handle.state::<AppState>();
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
     let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
+    // A SECOND clone kept out of the run, purely as the diff baseline. The run
+    // consumes `grids`, and a dry run has to answer "what would change" against
+    // the state as it was — reading AppState again afterwards would race any
+    // concurrent edit and diff against the wrong thing.
+    let baseline_grids = grids.clone();
     let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
@@ -1264,7 +1285,22 @@ async fn run_script_with_model(
     }
 
     let (result, modified_grids) = run_result??;
-    apply_script_result(handle, result, modified_grids, active_sheet)
+    Ok(IsolatedRun {
+        result,
+        modified_grids,
+        baseline_grids,
+        active_sheet,
+    })
+}
+
+/// Gate, run, and APPLY one MCP/AI script. The behaviour every existing caller
+/// had before the run/apply split.
+async fn run_script_with_model(
+    handle: &AppHandle,
+    code: &str,
+) -> Result<ScriptRunOutcome, String> {
+    let run = run_script_isolated(handle, code).await?;
+    apply_script_result(handle, run.result, run.modified_grids, run.active_sheet)
 }
 
 /// Route a finished script's writes through the SHARED edit pipeline (C1a) so
