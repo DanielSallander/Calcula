@@ -1,12 +1,20 @@
 # Local-model script authoring — hardware-independent AI that writes Calcula scripts
 
-**Status:** **M1–M7 ALL SHIPPED 2026-08-19.** Written and built the same day; every milestone's
-as-built notes are in §8, including the things that turned out differently from the design.
+**Status:** **M1–M7 SHIPPED 2026-08-19. L3 and the UI wiring SHIPPED 2026-08-20.** Every
+milestone's as-built notes are in §8, including the things that turned out differently from the
+design — and the two places the design itself was wrong.
 
-The pipeline now runs end to end: pick any model (local or cloud, any vendor) → probe it against the
-built-in tasks → author a script at the tier that measurement implies → validate it → correct it →
-hand the user a draft to review and mount. Nothing in it is vendor-specific, and nothing in it
-assumes a particular machine.
+**The pipeline is reachable by a user, end to end:** pick any model (local or cloud, any vendor) →
+optionally measure it against the built-in tasks → chat → the model drafts a script → the validation
+ladder checks it, including a dry run against a clone → a bad draft goes back to the model
+automatically → only a validated draft reaches the review queue → the user reads it and decides
+whether it becomes live code. Nothing in it is vendor-specific, and nothing in it assumes a
+particular machine.
+
+**The one honest gap:** L3 knows a script RAN and CHANGED something. It does not know the change was
+the RIGHT one. Grading a diff against a task's expected result needs per-task expectations plus a
+workbook fixture to run them against — larger than the rung itself, and recorded here rather than
+implied.
 
 **Owner decisions that shaped it** (2026-08-19):
 
