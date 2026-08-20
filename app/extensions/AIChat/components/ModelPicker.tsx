@@ -18,6 +18,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { aiChatBackend } from "../lib/aiChatBackend";
 import type { DiscoveredRuntime, ProviderStatus } from "../lib/aiTypes";
 import { readSelection, writeSelection, type ProviderSelection } from "../lib/providerSelection";
+import { readProfile, runProbe, summarizeProfile, type ModelProfile } from "../lib/probeRunner";
 
 const h = React.createElement;
 
@@ -27,6 +28,7 @@ const select: React.CSSProperties = { padding: 5, border: "1px solid #CCC", bord
 const input: React.CSSProperties = { padding: 5, border: "1px solid #CCC", borderRadius: 4, fontSize: 12 };
 const btn: React.CSSProperties = { padding: "6px 12px", border: "none", borderRadius: 4, background: "#0078D4", color: "#FFF", cursor: "pointer" };
 const subtle: React.CSSProperties = { color: "#666", margin: 0, lineHeight: 1.45 };
+const linkBtn: React.CSSProperties = { background: "none", border: "none", color: "#0078D4", cursor: "pointer", padding: 0, fontSize: 11, textDecoration: "underline" };
 const errorBox: React.CSSProperties = { background: "#FDECEA", border: "1px solid #F5C6C2", color: "#A1241B", padding: "6px 8px", borderRadius: 4 };
 
 export interface ModelPickerProps {
@@ -43,6 +45,10 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
   const [keyInput, setKeyInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [profile, setProfile] = useState<ModelProfile | null>(null);
+  const [probing, setProbing] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const cancelRef = React.useRef(false);
 
   const provider = providers.find((p) => p.id === sel.providerId);
 
@@ -123,7 +129,37 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
     const next = { ...sel, model };
     setSel(next);
     writeSelection(next);
+    setProfile(model ? readProfile(next.providerId, model) : null);
   }, [sel]);
+
+  /**
+   * Run the built-in tasks against the chosen model.
+   *
+   * §4b: this is the only honest answer to "will this model work for Calcula?"
+   * — it runs OUR tasks through OUR validator, rather than reading a spec sheet
+   * or a benchmark measured on something else.
+   */
+  const testModel = useCallback(async () => {
+    if (!provider || !sel.model) return;
+    setProbing(true);
+    setProgress({ done: 0, total: 0 });
+    setError(null);
+    cancelRef.current = false;
+    try {
+      const result = await runProbe({
+        providerId: provider.id,
+        model: sel.model,
+        baseUrl: sel.baseUrl,
+        onProgress: (done, total) => setProgress({ done, total }),
+        isCancelled: () => cancelRef.current,
+      });
+      setProfile(result);
+    } catch (e) {
+      setError(`${e}`);
+    } finally {
+      setProbing(false);
+    }
+  }, [provider, sel.model, sel.baseUrl]);
 
   const locals = providers.filter((p) => p.isLocal);
   const clouds = providers.filter((p) => !p.isLocal);
@@ -193,6 +229,29 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
             h("option", { key: "", value: "" }, busy ? "Loading…" : "Select…"),
             models.map((m) => h("option", { key: m, value: m }, m)),
           ),
+        )
+      : null,
+
+    // The measured verdict. §10: a weak model must SAY it is weak before the
+    // user relies on it, or they blame the product rather than the model.
+    provider && sel.model
+      ? h("div", { key: "probe", style: { display: "flex", flexDirection: "column", gap: 6 } },
+          h("p", { key: "s", style: subtle }, summarizeProfile(profile)),
+          probing
+            ? h("div", { key: "p", style: { display: "flex", alignItems: "center", gap: 8 } },
+                h("span", { key: "t", style: subtle },
+                  progress.total > 0
+                    ? `Testing ${progress.done}/${progress.total}…`
+                    : "Testing…"),
+                h("button", {
+                  key: "c", style: linkBtn,
+                  onClick: () => { cancelRef.current = true; },
+                }, "Stop"),
+              )
+            : h("button", {
+                key: "b", style: { ...btn, background: "#5A5A5A" },
+                onClick: () => void testModel(),
+              }, profile ? "Test again" : "Test this model"),
         )
       : null,
 
