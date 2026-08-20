@@ -89,6 +89,8 @@ pub struct NotebookSession {
     /// before every cell: the session outlives any one cell, so a rejection from
     /// cell N must not be reported against cell N+1.
     rejections: Rc<limits::Rejections>,
+    /// Set once a JOB was aborted mid-execution — see `is_poisoned`.
+    poisoned: std::cell::Cell<bool>,
     /// Limits profile in force for this session (notebook profile by default).
     limits: ScriptLimits,
 }
@@ -145,8 +147,30 @@ impl NotebookSession {
             shared_ctx,
             deadline,
             rejections,
+            poisoned: std::cell::Cell::new(false),
             limits,
         })
+    }
+
+    /// This session's runtime is no longer safe to USE **or to DROP**.
+    ///
+    /// Set when the deadline interrupt aborted a queued JOB mid-execution.
+    /// QuickJS is then left holding a bad refcount, and dropping that runtime
+    /// trips its own `p->ref_count > 0` assertion and takes the PROCESS down
+    /// with `STATUS_STACK_BUFFER_OVERRUN`. Measured 2026-08-20, and the
+    /// distinction is sharp: a cell that merely times out during `eval` — no job
+    /// ever queued — drops perfectly safely. It is aborting a JOB that corrupts.
+    ///
+    /// A caller that sees `true` must replace the session AND deliberately LEAK
+    /// the old one (`std::mem::forget`) rather than drop it. Leaking one runtime
+    /// is the cost of not crashing the app; it is bounded by how often a user's
+    /// `async` continuation runs past the cell budget, which is rare and always
+    /// user-visible. The real repair is upstream in QuickJS's job unwinding.
+    ///
+    /// Reachable only because jobs now RUN: before the queue was drained, a
+    /// continuation never executed, so it could never be interrupted.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.get()
     }
 
     /// Execute a single notebook cell.
@@ -203,6 +227,11 @@ impl NotebookSession {
         // by this cell would otherwise run during the next one and mutate ITS
         // grids. See `drain_jobs` for why it cannot go inside the closure above.
         let drain_result = crate::runtime::drain_jobs(&self.runtime, &self.deadline);
+        // A job that FAULTED is the uncatchable kind — the deadline interrupt —
+        // and it leaves the runtime unsafe to drop. See `is_poisoned`.
+        if drain_result.is_err() {
+            self.poisoned.set(true);
+        }
         self.deadline.disarm();
         // The eval's own error wins: it came first, and a drain error is usually
         // its aftermath rather than a second, independent fault. An unhandled
@@ -1062,6 +1091,61 @@ mod tests {
             ScriptResult::Success { .. } => {}
             other => panic!("the previous cell's rejection failed this one: {:?}", other),
         }
+    }
+
+    /// Aborting a JOB poisons the session; an ordinary eval timeout does not.
+    ///
+    /// The distinction is the whole design. Measured 2026-08-20: a session whose
+    /// queued job was interrupted CRASHES the process when dropped
+    /// (`p->ref_count > 0` -> STATUS_STACK_BUFFER_OVERRUN), while a session whose
+    /// cell merely spun at the top level drops perfectly safely. If this flag
+    /// were set for every timeout, the host would leak a runtime for the most
+    /// common notebook mistake there is; if it were never set, the host would
+    /// drop a corrupted one and take the app down.
+    #[test]
+    fn a_job_abort_poisons_the_session_and_an_eval_timeout_does_not() {
+        // An eval timeout: nothing was ever queued, so nothing was aborted.
+        let clean = NotebookSession::new(
+            None,
+            ScriptLimits::with_timeout_ms(50),
+            CellRunInput::new(fixture().0, fixture().1, fixture().2, 0, "notebook:clean"),
+        )
+        .expect("session");
+        let (g, r, n) = fixture();
+        let (res, _) = clean.run_cell("for (;;) {}", CellRunInput::new(g, r, n, 0, "notebook:clean1"));
+        assert!(
+            matches!(res, ScriptResult::Error { .. }),
+            "precondition: the cell must time out, got {:?}",
+            res,
+        );
+        assert!(
+            !clean.is_poisoned(),
+            "an eval timeout aborted no job — poisoning it would leak a runtime for the \
+             commonest notebook mistake there is",
+        );
+        drop(clean); // Safe, and asserted by doing it.
+
+        // A job abort: the continuation spins past the budget.
+        let dirty = NotebookSession::new(
+            None,
+            ScriptLimits::with_timeout_ms(50),
+            CellRunInput::new(fixture().0, fixture().1, fixture().2, 0, "notebook:dirty"),
+        )
+        .expect("session");
+        let (g2, r2, n2) = fixture();
+        let (res2, _) = dirty.run_cell(
+            "(async () => { await null; for (;;) {} })();",
+            CellRunInput::new(g2, r2, n2, 0, "notebook:dirty1"),
+        );
+        assert!(
+            matches!(res2, ScriptResult::Error { .. }),
+            "precondition: the job must be aborted, got {:?}",
+            res2,
+        );
+        let poisoned = dirty.is_poisoned();
+        // NEVER drop it — that is the crash this flag exists to prevent.
+        std::mem::forget(dirty);
+        assert!(poisoned, "an aborted job left the runtime unsafe to drop, unflagged");
     }
 
     /// A cell that TIMES OUT must not leave work for the next one either.

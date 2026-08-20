@@ -502,6 +502,29 @@ than fixed here. The one worth naming: the object-script realm already fixed the
 rejects and nobody hears it" defect and documented it, and its **extension-realm twin never received
 the fix** — the same shape, in the same codebase, with the cure already written down next door.
 
+### The fix's own cost, paid rather than filed — 2026-08-20
+
+Draining the job queue made something newly reachable: a continuation can now be INTERRUPTED, and
+aborting a job leaves QuickJS holding a bad refcount, so **dropping that runtime kills the process**
+(`p->ref_count > 0` -> `STATUS_STACK_BUFFER_OVERRUN`) — after the test harness has already printed a
+green result. Before the drain, a queued continuation never executed, so it could never be
+interrupted. The trade was still right (a silent no-op that reports success is worse than a loud
+crash), but it was not free, and leaving it as a ledger row would have been leaving a crash in the
+product.
+
+The measurement that shaped the repair, taken rather than assumed: **a cell that merely times out
+during `eval` drops perfectly safely — nothing was ever queued. It is aborting a JOB that corrupts.**
+So the flag is narrow. `NotebookSession::is_poisoned()` is set only when a job faulted, and the
+executor retires such a session with `std::mem::forget` instead of dropping it — `session = None`
+there IS the crash. An ordinary error, and an ordinary eval timeout, keep the session: a user's
+notebook globals are the whole point of a persistent one, and nothing corrupted them.
+
+Two residues, stated rather than hidden: a poisoned runtime is LEAKED (bounded by how often an
+`async` continuation outruns the cell budget — rare, and always user-visible), and the unwinding bug
+itself is upstream in QuickJS. Both directions of the flag are sabotage-verified — a flag that never
+fires would drop a corrupt runtime, and one that always fires would leak a runtime on the commonest
+notebook mistake there is.
+
 ## 6. Making the API surface sliceable
 
 `calcula.d.ts` (35,599 bytes, ~10k tokens estimated) fits a 32k-context model whole but blows an 8k

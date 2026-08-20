@@ -302,6 +302,23 @@ fn executor_loop(rx: mpsc::Receiver<Job>) {
                 }
                 let s = session.as_ref().expect("session just ensured");
                 let outcome = s.run_cell(&source, input);
+                // A cell whose queued JOB was aborted mid-execution leaves the
+                // QuickJS runtime unsafe to use AND unsafe to drop: dropping it
+                // trips `p->ref_count > 0` inside QuickJS and takes the whole app
+                // down. Retire it here so the next cell builds a fresh one, and
+                // LEAK it rather than dropping it. `session = None` alone would
+                // be the crash. See `NotebookSession::is_poisoned`.
+                //
+                // Deliberately narrow: an ordinary error, and even an ordinary
+                // eval TIMEOUT, leaves the runtime intact, and the user's
+                // notebook globals are the point of a persistent session — they
+                // are not thrown away for a failure that did not corrupt
+                // anything.
+                if s.is_poisoned() {
+                    if let Some(dead) = session.take() {
+                        std::mem::forget(dead);
+                    }
+                }
                 let _ = reply.send(Ok(outcome));
             }
             Job::Reset { reply } => {
@@ -403,4 +420,32 @@ mod tests {
             other => panic!("expected success, got {:?}", other),
         }
     }
+    /// A poisoned session must be RETIRED WITHOUT BEING DROPPED.
+    ///
+    /// `session = None` is the obvious way to retire it and is precisely the
+    /// crash: dropping a runtime whose job was aborted trips QuickJS's own
+    /// `p->ref_count > 0` and takes the app down. The executor loop owns a live
+    /// thread and a channel, so the branch cannot be driven directly from a unit
+    /// test; the wiring is pinned by reading it, the way this repo pins other
+    /// un-drivable sources.
+    #[test]
+    fn a_poisoned_session_is_leaked_rather_than_dropped() {
+        let source = include_str!("notebook_executor.rs");
+        let marker = source
+            .find("if s.is_poisoned()")
+            .expect("the run arm must consult is_poisoned() before reusing the session");
+        let branch = &source[marker..marker + 400];
+
+        assert!(
+            branch.contains("std::mem::forget"),
+            "the poisoned session must be LEAKED; dropping it crashes the process:
+{}",
+            branch,
+        );
+        assert!(
+            branch.contains("session.take()"),
+            "it must also be taken out of the slot, or the next cell reuses a corrupt runtime",
+        );
+    }
+
 }
