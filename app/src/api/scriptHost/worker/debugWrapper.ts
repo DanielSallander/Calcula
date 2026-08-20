@@ -43,9 +43,22 @@ export interface WrapOptions {
 export function wrapModuleSource(source: string, options: WrapOptions = {}): string {
   const { asyncWrapper = false, invokeSetup = true } = options;
   // Cosmetic cleanup only (imports/exports won't resolve in a blob module).
+  //
+  // The bare `export` strip is load-bearing, not tidying: the user body is
+  // spliced INSIDE a function, where an `export` declaration is a SyntaxError,
+  // so `export function setup(context)` — the form the docs, the IntelliSense
+  // typings and the AI authoring prompt all teach — failed to compile at mount
+  // while passing every static check before it. The keyword is blanked rather
+  // than deleted so both line AND column numbers survive: breakpoints, error
+  // stacks and the debugger's call-stack view all address the user's own
+  // coordinates.
   const cleaned = source
     .replace(/^\s*import\s+.*$/gm, "// [import removed]")
-    .replace(/^\s*export\s+default\s+/gm, "");
+    .replace(/^\s*export\s+default\s+/gm, "")
+    .replace(
+      /^(\s*)export(\s+)(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm,
+      (_m, indent: string, gap: string) => `${indent}      ${gap}`,
+    );
 
   const tail = invokeSetup
     ? `; return typeof setup === "function" ? setup(context) : undefined; }`

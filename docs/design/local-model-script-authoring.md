@@ -412,7 +412,54 @@ Three deliberate choices:
 **What it does NOT do yet.** It cannot say whether the change was the RIGHT one — only that
 something ran, and something changed. Grading the diff against a task's expected result needs
 per-task expectations and a workbook fixture to run them against, which is a larger piece than the
-rung itself.
+rung itself. `fixture` (seed cells into the clone before the run) and `readBack` (report named cell
+values after it) are BUILT, which is the half that has to exist first; the corpus expectations and
+the scorer that reads them are not.
+
+### L3 answered a question it could not answer — three defects, 2026-08-20
+
+Wiring L3 in front of `draft_object_script` was wrong in a way none of its own tests could see,
+because they doubled the backend. Probing the real interpreter took milliseconds and found three
+separate faults stacked on each other. All three are FIXED; the sequence is the lesson.
+
+**1. The preview could not parse what it was judging.** Object scripts are `export function
+setup(context)`. The dry run evaluates source in the Rust QuickJS realm, which answers
+`unsupported keyword: export`. L3 therefore rejected EVERY valid object script with "it passes every
+static check but FAILS when run against a copy of the workbook" — the most expensive way a checker
+can be wrong, because the model then spends its repair rounds fixing correct code.
+
+**2. Even parseable, an `async` handler silently did nothing.** QuickJS parks everything past the
+first `await` on a job queue, and NOTHING in the engine drained it. The cell body ran to its first
+`await`, `eval` returned, the grids were read back unchanged, and the run reported `Success` with
+`cells_modified: 0`. That is worse than an error: `expectsWrites && totalChanges === 0` would have
+told the model to "actually write the cells" about a script that already did.
+
+This one was never AI-specific — it is an engine defect reaching every notebook cell, one-off script
+and MCP `execute_script`. `runtime::drain_jobs` now runs the microtask queue for both run paths,
+inside the armed deadline (so a promise chain that never settles is cut by the same budget, with no
+iteration cap that would cut a long-but-finite one short) and on the error path too (the notebook
+session is persistent, so a job left queued by cell N would otherwise resume against cell N+1's
+grids). An unhandled rejection now fails the run, via a tracker that is deliberately ASYMMETRIC:
+a rejection handled later CLEARS what was recorded, because QuickJS calls the tracker even for an
+ordinary `try/catch` around an `await`, and reporting working code as broken is the failure this
+whole ladder exists to avoid.
+
+**3. The shape the prompt teaches could not mount AT ALL.** `wrapModuleSource` splices the user body
+INSIDE a function, where an `export` declaration is a SyntaxError. It stripped `export default` and
+`import`, never a bare `export`. So `export function setup(context)` — the form the docs, the
+generated IntelliSense typings, this feature's prompt and every one of its tests use — failed at
+mount while passing every static check before it. The production path that works
+(`MacroRecorder`'s codegen) emits `function setup(context)` with no `export`, which is why nobody had
+hit it. The wrapper now blanks the keyword rather than deleting it, so line AND column numbers
+survive for breakpoints and stack traces.
+
+**The rule this produced.** A rung that cannot judge must DECLINE, never guess. `ai_dry_run_script`
+returns `applicable: false` with a reason for any source this realm cannot host, having run nothing,
+and every consumer branches on it before drawing a conclusion. The honest scope: the Worker realm's
+`context` exposes 358 `api.*` members and the interpreter's realm shares NINETEEN of them — of the
+16 chains the prompt always shows, only four. A faithful preview of an object script means running
+it in the realm it actually runs in, which is a real piece of work and is filed as such; emulating
+5% of a surface and reporting the gaps as defects is not a cheaper version of it.
 
 ## 6. Making the API surface sliceable
 

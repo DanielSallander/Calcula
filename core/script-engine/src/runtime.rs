@@ -41,7 +41,7 @@ pub fn execute_script(
     let rt = Runtime::new().map_err(|e| format!("Failed to create QuickJS runtime: {}", e))?;
     // Memory + stack ceilings and the interrupt handler go on before ANY code
     // runs in this runtime.
-    let deadline = limits::install(&rt, limits);
+    let (deadline, rejections) = limits::install(&rt, limits);
     let qjs_context = Context::full(&rt)
         .map_err(|e| format!("Failed to create context: {}", e))?;
 
@@ -65,13 +65,27 @@ pub fn execute_script(
         // "not available on this surface" error when no provider is injected)
         crate::ops::model::register_model_ops(&ctx, &globals, shared_ctx.clone())?;
 
-        // Execute the user script under the wall-clock budget.
+        // Execute the user script under the wall-clock budget. The budget stays
+        // ARMED past this closure: the microtasks the script queued have not run
+        // yet, and they are drained below, still on this script's clock.
         deadline.arm(limits.timeout_ms);
         let eval_result: rquickjs::Result<Value> = ctx.eval(js_source);
-        deadline.disarm();
 
         eval_result.map(|_| ()).map_err(|e| describe_error(&ctx, e, &deadline))
     });
+
+    // Finish what the script deferred (`async`/`await`, promise chains) before
+    // anything reads its grids back. Outside the `with` above by necessity — see
+    // `drain_jobs`. An eval error wins over a drain error: it came first and it
+    // is the one that explains the rest.
+    let drain = drain_jobs(&rt, &deadline);
+    deadline.disarm();
+    let result = result
+        .and_then(|()| drain)
+        .and_then(|()| match rejections.first() {
+            Some(message) => Err(message),
+            None => Ok(()),
+        });
 
     // Drop the QuickJS context and runtime BEFORE unwrapping the Rc.
     // The JS closures (getCellValue, setCellValue, etc.) each hold an Rc clone;
@@ -88,6 +102,43 @@ pub fn execute_script(
         context,
         error: result.err(),
     })
+}
+
+/// Run every microtask the script left queued, so `async`/`await` and promise
+/// chains finish before the caller reads the grids back.
+///
+/// QuickJS parks a function's continuation past its first `await` on a job queue
+/// that nothing drains on its own. Left undrained, an async body runs as far as
+/// that first `await`, `eval` returns, the grids are read back UNCHANGED, and the
+/// run reports `Success` with `cells_modified: 0` — a silent no-op wearing a
+/// clean bill of health. That is the worst answer a verifier can give, so this is
+/// correctness, not polish. A rejected promise becomes the run's error here for
+/// the same reason: an async body that throws must not report success.
+///
+/// Two call-site requirements, both load-bearing:
+///   * Call it from OUTSIDE any `Context::with` closure — `with` holds the very
+///     runtime lock `execute_pending_job` needs, so calling it inside deadlocks.
+///   * Call it while the deadline is still ARMED. The interrupt handler fires
+///     inside job execution too, and it is the ONLY thing that stops a promise
+///     chain which re-queues itself forever; there is deliberately no iteration
+///     cap here, because a cap would cut a long-but-finite chain short and call
+///     it a failure.
+///
+/// Draining also matters for the PERSISTENT notebook session specifically: jobs
+/// left behind by cell N would otherwise run during cell N+1 and mutate the
+/// wrong grids.
+pub(crate) fn drain_jobs(rt: &Runtime, deadline: &Deadline) -> Result<(), String> {
+    loop {
+        match rt.execute_pending_job() {
+            Ok(true) => continue,
+            Ok(false) => return Ok(()),
+            Err(exception) => {
+                return Err(exception
+                    .0
+                    .with(|ctx| describe_error(&ctx, rquickjs::Error::Exception, deadline)));
+            }
+        }
+    }
 }
 
 /// Turn a failed `ctx.eval` into a user-facing message.

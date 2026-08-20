@@ -71,9 +71,9 @@ impl CellRunInput {
 /// used from a single thread. In the Tauri command layer, use
 /// `tokio::task::spawn_blocking` or a dedicated thread.
 pub struct NotebookSession {
-    /// The QuickJS runtime — kept alive for the session lifetime.
-    /// Not directly read, but must outlive `context` (drop order matters).
-    #[allow(dead_code)]
+    /// The QuickJS runtime — kept alive for the session lifetime, must outlive
+    /// `context` (drop order matters), and owns the microtask queue that
+    /// `run_cell` drains after every cell.
     runtime: Runtime,
     /// The QuickJS context — global JS scope lives here.
     context: Context,
@@ -85,6 +85,10 @@ pub struct NotebookSession {
     /// handler is installed once for the session; this is RE-ARMED per cell so
     /// the budget is per EXECUTION, not per session.
     deadline: Rc<Deadline>,
+    /// Unhandled promise rejections, shared with the runtime's tracker. CLEARED
+    /// before every cell: the session outlives any one cell, so a rejection from
+    /// cell N must not be reported against cell N+1.
+    rejections: Rc<limits::Rejections>,
     /// Limits profile in force for this session (notebook profile by default).
     limits: ScriptLimits,
 }
@@ -106,7 +110,7 @@ impl NotebookSession {
             .map_err(|e| format!("Failed to create QuickJS runtime: {}", e))?;
         // Ceilings + interrupt handler installed before any code runs. The
         // deadline starts disarmed; run_cell arms it per execution.
-        let deadline = limits::install(&runtime, limits);
+        let (deadline, rejections) = limits::install(&runtime, limits);
         let context = Context::full(&runtime)
             .map_err(|e| format!("Failed to create QuickJS context: {}", e))?;
 
@@ -140,6 +144,7 @@ impl NotebookSession {
             context,
             shared_ctx,
             deadline,
+            rejections,
             limits,
         })
     }
@@ -178,6 +183,7 @@ impl NotebookSession {
         // wall-clock budget (the session is long-lived; the budget is not).
         // Like a REPL / Jupyter notebook, the value of the last expression is
         // captured and displayed as output (unless it is undefined).
+        self.rejections.clear();
         self.deadline.arm(self.limits.timeout_ms);
         let eval_result = self
             .context
@@ -191,7 +197,23 @@ impl NotebookSession {
                 Err(e) => Err(crate::runtime::describe_error(&ctx, e, &self.deadline)),
             }
         });
+        // Finish what the cell deferred (`async`/`await`, promise chains) before
+        // the grids are read back, while the budget is still armed. Runs even
+        // when the eval failed: this session is PERSISTENT, and a job left queued
+        // by this cell would otherwise run during the next one and mutate ITS
+        // grids. See `drain_jobs` for why it cannot go inside the closure above.
+        let drain_result = crate::runtime::drain_jobs(&self.runtime, &self.deadline);
         self.deadline.disarm();
+        // The eval's own error wins: it came first, and a drain error is usually
+        // its aftermath rather than a second, independent fault. An unhandled
+        // rejection is checked last — it is the quietest of the three, and the
+        // only evidence that an `async` body failed rather than did nothing.
+        let eval_result = eval_result
+            .and_then(|last| drain_result.map(|()| last))
+            .and_then(|last| match self.rejections.first() {
+                Some(message) => Err(message),
+                None => Ok(last),
+            });
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -903,6 +925,178 @@ mod tests {
             before,
             "the run mutated the caller's grids — every dry run and every diff baseline above \
              this layer is built on that not happening",
+        );
+    }
+
+    /// An `async` body must FINISH before the grids are read back.
+    ///
+    /// QuickJS parks everything past the first `await` on a job queue that
+    /// nothing drained. The cell below ran as far as its `await`, `eval`
+    /// returned, and the run reported `Success` with `cells_modified: 0` and an
+    /// untouched grid — a silent no-op that looks exactly like a clean pass.
+    /// Discovered while wiring the AI dry run, where "ran fine, changed nothing"
+    /// is the single most misleading verdict the checker can produce.
+    #[test]
+    fn an_async_body_finishes_before_the_grids_are_read_back() {
+        let session = session(None);
+        let (grids, reg, names) = fixture();
+        let input = CellRunInput::new(grids, reg, names, 0, "notebook:async");
+
+        let (result, modified) = session.run_cell(
+            "(async () => { await null; Calcula.setCellValue(0, 1, 'ASYNC_RAN'); })();",
+            input,
+        );
+
+        match result {
+            ScriptResult::Success { cells_modified, .. } => assert_eq!(
+                cells_modified, 1,
+                "the async continuation never ran, so the write never happened",
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+        assert_eq!(
+            modified[0]
+                .get_cell(0, 1)
+                .map(|c| cell_value_to_string(&c.value)),
+            Some("ASYNC_RAN".to_string()),
+        );
+    }
+
+    /// ...and an `async` body that THROWS must be reported as an error.
+    ///
+    /// The other half of the same defect: the rejection surfaces only once the
+    /// job queue is drained. Undrained, a handler that throws on every input
+    /// still reports `Success`, which would let the AI repair loop stop on a
+    /// script that cannot work.
+    #[test]
+    fn an_async_body_that_throws_is_reported_as_an_error() {
+        let session = session(None);
+        let (grids, reg, names) = fixture();
+        let input = CellRunInput::new(grids, reg, names, 0, "notebook:asyncthrow");
+
+        let (result, _) = session.run_cell(
+            "(async () => { await null; throw new Error('handler blew up'); })();",
+            input,
+        );
+
+        match result {
+            ScriptResult::Error { message, .. } => assert!(
+                message.contains("handler blew up"),
+                "the rejection should name the script's own error, got {:?}",
+                message,
+            ),
+            other => panic!("an async body that throws must not report success: {:?}", other),
+        }
+    }
+
+    /// A rejection the script HANDLES is not an error.
+    ///
+    /// The guard that matters more than the two above: reporting a working
+    /// script as broken is the exact failure this checker exists to prevent, and
+    /// a rejection tracker is the easiest way to introduce it. `try/catch` around
+    /// an `await` is ordinary, correct code.
+    #[test]
+    fn a_rejection_the_script_handles_is_not_an_error() {
+        let session = session(None);
+        let (grids, reg, names) = fixture();
+        let input = CellRunInput::new(grids, reg, names, 0, "notebook:caught");
+
+        let (result, _) = session.run_cell(
+            "(async () => { try { await Promise.reject(new Error('expected')); } \
+             catch (e) { Calcula.setCellValue(0, 0, 'RECOVERED'); } })();",
+            input,
+        );
+
+        match result {
+            ScriptResult::Success { cells_modified, .. } => assert_eq!(cells_modified, 1),
+            other => panic!("a handled rejection must not fail the run: {:?}", other),
+        }
+    }
+
+    /// ...including one handled a microtask LATE, which is the only path that
+    /// reaches the tracker's `is_handled` branch.
+    #[test]
+    fn a_rejection_handled_late_is_not_an_error() {
+        let session = session(None);
+        let (grids, reg, names) = fixture();
+        let input = CellRunInput::new(grids, reg, names, 0, "notebook:caughtlate");
+
+        let (result, _) = session.run_cell(
+            "const p = Promise.reject(new Error('late')); \
+             Promise.resolve().then(() => p.catch(() => {}));",
+            input,
+        );
+
+        match result {
+            ScriptResult::Success { .. } => {}
+            other => panic!("a late-handled rejection must not fail the run: {:?}", other),
+        }
+    }
+
+    /// A rejection from one cell must not be reported against the NEXT one.
+    ///
+    /// The rejection sink is shared with the runtime, and the runtime outlives
+    /// every cell. Without a per-cell reset the first async failure would make
+    /// every later cell in the session fail too, each blaming code that is fine.
+    #[test]
+    fn a_rejection_from_one_cell_is_not_reported_against_the_next() {
+        let session = session(None);
+
+        let (grids, reg, names) = fixture();
+        let (first, _) = session.run_cell(
+            "(async () => { throw new Error('cell one blew up'); })();",
+            CellRunInput::new(grids, reg, names, 0, "notebook:carry1"),
+        );
+        assert!(
+            matches!(first, ScriptResult::Error { .. }),
+            "precondition: the first cell must actually fail, got {:?}",
+            first,
+        );
+
+        let (grids2, reg2, names2) = fixture();
+        let (second, _) = session.run_cell(
+            "1 + 1",
+            CellRunInput::new(grids2, reg2, names2, 0, "notebook:carry2"),
+        );
+        match second {
+            ScriptResult::Success { .. } => {}
+            other => panic!("the previous cell's rejection failed this one: {:?}", other),
+        }
+    }
+
+    /// A job queued by one cell must not run during the NEXT one.
+    ///
+    /// The session is persistent, so an undrained continuation from cell N would
+    /// resume against cell N+1's freshly-swapped grids and write to the wrong
+    /// workbook. Draining on the error path too is what prevents it.
+    #[test]
+    fn a_cell_leaves_no_job_behind_for_the_next_cell() {
+        let session = session(None);
+
+        let (grids, reg, names) = fixture();
+        let (_, _) = session.run_cell(
+            "(async () => { await null; Calcula.setCellValue(9, 9, 'FROM_CELL_ONE'); })(); \
+             throw new Error('cell one fails');",
+            CellRunInput::new(grids, reg, names, 0, "notebook:leak1"),
+        );
+
+        let (grids2, reg2, names2) = fixture();
+        let (result, modified) = session.run_cell(
+            "1 + 1",
+            CellRunInput::new(grids2, reg2, names2, 0, "notebook:leak2"),
+        );
+
+        match result {
+            ScriptResult::Success { cells_modified, .. } => assert_eq!(
+                cells_modified, 0,
+                "the previous cell's deferred write landed in this cell's grids",
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+        assert_eq!(
+            modified[0].get_cell(9, 9).map(|c| cell_value_to_string(&c.value)),
+            None,
+            "cell one's continuation wrote into cell two's workbook",
         );
     }
 

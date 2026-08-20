@@ -1138,6 +1138,7 @@ fn the_restored_spill_map_is_what_keeps_a_reloaded_origin_alive_2ab() {
 fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_a_reason() {
     // (file relative to src/, function, reason it needs no spill maintenance)
     const EXEMPT: &[(&str, &str, &str)] = &[
+        ("mcp/tools.rs", "apply_seeds", "IS NOT A DOCUMENT WRITE: seeds a DETACHED CLONE for a dry run (ai/dryrun.rs). The grid it writes never reaches AppState, is discarded when the run ends, and has no spill map to orphan."),
         // -- It IS the spill machinery, or an inner step of it ---------------
         ("commands/data.rs", "erase_released_spill_cells", "IS the tear-down's grid half: it erases exactly the cells take_spills_* released"),
         // §3bm REMOVED SIX ENTRIES FROM THIS LIST, and that is the point of the

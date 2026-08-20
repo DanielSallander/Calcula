@@ -764,6 +764,7 @@ fn remove_duplicates_rebuilds_dependencies_before_seeding() {
 fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() {
     // (file relative to src/, function, reason it does not recalculate)
     const EXEMPT: &[(&str, &str, &str)] = &[
+        ("mcp/tools.rs", "apply_seeds", "IS NOT A DOCUMENT WRITE: seeds a DETACHED CLONE for a dry run (ai/dryrun.rs). Nothing downstream observes it, so there are no dependents to recalculate."),
         // -- It IS recalculation, or an inner step of it -------------------
         ("calculation.rs", "run_calculation_pass", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet)"),
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the SHEET-scoped pass: reports a cycle the pass already detected on the sheets it does not evaluate"),

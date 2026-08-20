@@ -126,3 +126,50 @@ describe("describeDryRun", () => {
     expect(describeDryRun(dryFailed("x"))).toBe("");
   });
 });
+
+describe("a dry run that DECLINED is not a verdict", () => {
+  /**
+   * The preview runs in the interpreter's realm; an object script is authored
+   * against the Worker realm's `context`. The two share a fraction of one
+   * surface and the interpreter rejects `export` outright, so the preview
+   * answered "it FAILS when run" for every valid draft this feature produced —
+   * and the model then spent its repair rounds on correct code.
+   */
+  const declined = () => ({
+    ok: true,
+    error: null,
+    durationMs: 0,
+    changes: [],
+    truncated: false,
+    totalChanges: 0,
+    output: [],
+    readBack: [],
+    applicable: false,
+    declinedReason: "the script is an ES module (`export`/`import`)",
+  });
+
+  it("allows a draft the preview could not host", async () => {
+    invoke.mockResolvedValue(declined());
+    expect((await gateToolCall("draft_object_script", { source: GOOD })).allow).toBe(true);
+  });
+
+  it("still rejects on the STATIC checks — declining does not disable the ladder", async () => {
+    invoke.mockResolvedValue(declined());
+    const v = await gateToolCall("draft_object_script", { source: INVENTED });
+    expect(v.allow).toBe(false);
+    expect(v.message).toContain("api.setCellValue");
+  });
+
+  it("says nothing about a script it never ran", () => {
+    // "it changed no cells" reads as a finding, and would be fabricated.
+    expect(describeDryRun(declined())).toBe("");
+    expect(describeDryRun(dryOk(0))).toContain("changed no cells");
+  });
+
+  it("a report that DID run is still judged", async () => {
+    invoke.mockResolvedValue(dryFailed("TypeError: x is not a function"));
+    const v = await gateToolCall("draft_object_script", { source: GOOD });
+    expect(v.allow).toBe(false);
+    expect(v.message).toContain("TypeError");
+  });
+});

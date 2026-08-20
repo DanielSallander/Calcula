@@ -7,11 +7,11 @@
 //! re-armable so a long-lived runtime (the notebook session) can budget each
 //! execution independently instead of the session as a whole.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
-use rquickjs::Runtime;
+use rquickjs::{FromJs, Runtime};
 use serde::{Deserialize, Serialize};
 
 /// Heap ceiling for a script runtime (256 MB).
@@ -163,20 +163,76 @@ impl Deadline {
     }
 }
 
-/// Apply `limits` to `rt` and install the interrupt handler that enforces the
-/// wall-clock budget. Returns the shared `Deadline` so the caller can arm it
-/// before each execution and inspect it afterwards.
+/// Promise rejections that nothing in the script handled.
+///
+/// An `async` body that throws rejects a promise instead of raising through
+/// `eval`, so without this the run reports `Success` and the failure is silent.
+/// Recorded here at rejection time and read once the job queue is drained.
+#[derive(Default)]
+pub struct Rejections {
+    seen: RefCell<Vec<String>>,
+}
+
+impl Rejections {
+    /// Note a rejection that had no handler when it happened.
+    pub fn record(&self, message: String) {
+        self.seen.borrow_mut().push(message);
+    }
+
+    /// Forget everything recorded — used both to reset between runs and when a
+    /// rejection is handled after the fact (see `install`).
+    pub fn clear(&self) {
+        self.seen.borrow_mut().clear();
+    }
+
+    /// The first unhandled rejection, if any.
+    pub fn first(&self) -> Option<String> {
+        self.seen.borrow().first().cloned()
+    }
+}
+
+/// Apply `limits` to `rt`, install the interrupt handler that enforces the
+/// wall-clock budget, and install the promise-rejection tracker. Returns the
+/// shared `Deadline` so the caller can arm it before each execution, and the
+/// shared `Rejections` so it can tell a silent async failure from a success.
 ///
 /// The returned deadline starts DISARMED: installing limits must never abort
 /// the API-registration evals that run before the user's script.
-pub fn install(rt: &Runtime, limits: ScriptLimits) -> Rc<Deadline> {
+///
+/// The tracker is deliberately ASYMMETRIC. It records only rejections that had
+/// no handler at rejection time, and a later `is_handled` callback CLEARS what
+/// was recorded rather than being ignored. QuickJS does not call the tracker at
+/// all when a `.catch` is already attached, so the only way to reach the
+/// clearing path is a handler attached in a later microtask — a valid script.
+/// Erring toward forgetting a real rejection is the right direction here:
+/// reporting a working script as broken is the failure mode this whole checker
+/// exists to avoid.
+pub fn install(rt: &Runtime, limits: ScriptLimits) -> (Rc<Deadline>, Rc<Rejections>) {
     rt.set_memory_limit(limits.memory_bytes);
     rt.set_max_stack_size(limits.max_stack_bytes);
 
     let deadline = Deadline::new();
     let handler_deadline = deadline.clone();
     rt.set_interrupt_handler(Some(Box::new(move || handler_deadline.expired())));
-    deadline
+
+    let rejections = Rc::new(Rejections::default());
+    let tracked = rejections.clone();
+    rt.set_host_promise_rejection_tracker(Some(Box::new(
+        move |ctx: rquickjs::Ctx, _promise: rquickjs::Value, reason: rquickjs::Value, is_handled: bool| {
+            if is_handled {
+                tracked.clear();
+                return;
+            }
+            // Coercing an Error yields "Error: <message>", which is what a
+            // reader needs; anything else stringifies to something usable.
+            let text = rquickjs::Coerced::<String>::from_js(&ctx, reason)
+                .map(|c| c.0)
+                .unwrap_or_else(|_| "unhandled promise rejection".to_string());
+            tracked.record(text);
+        },
+    )));
+
+    (deadline, rejections)
 }
 
 #[cfg(test)]

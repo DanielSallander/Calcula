@@ -175,3 +175,72 @@ describe("buildRunTargetRegistrations — what a session can start", () => {
     expect(withRunTargets("body", "regs;")).toBe("body\nregs;");
   });
 });
+
+describe("wrapModuleSource — an `export`ed declaration still compiles", () => {
+  /**
+   * The user body is spliced INSIDE a function, where `export` is a
+   * SyntaxError. `export function setup(context)` is the form the docs, the
+   * generated IntelliSense typings and the AI authoring prompt all teach, so a
+   * script could pass every static check and then fail to mount. Found while
+   * dry-running AI drafts, where every generated script carried it.
+   */
+  it("mounts and runs `export function setup`", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "export function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 'exported');",
+      "}",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 0, "exported"]]);
+  });
+
+  it("mounts `export const` and `export async function` too", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "export const target = 7;",
+      "export async function setup(context) {",
+      "  await context.api.setCellValue(0, target, 'both');",
+      "}",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 7, "both"]]);
+  });
+
+  /**
+   * Breakpoints, error stacks and the debugger's call-stack view all address
+   * the user's own coordinates, so the keyword is blanked rather than deleted.
+   */
+  it("preserves the line AND column of what followed the keyword", () => {
+    const source = ["const a = 1;", "export function setup(context) {}"].join("\n");
+
+    const wrapped = wrapModuleSource(source);
+    const line = wrapped.split("\n").find((l) => l.includes("function setup"));
+
+    expect(line).toBeDefined();
+    // The keyword is GONE (otherwise this assertion holds trivially — the
+    // untouched text has `function setup` at that column too)...
+    expect(line).not.toContain("export");
+    // ...and what followed it did not move.
+    expect(line!.indexOf("function setup")).toBe("export function setup".indexOf("function setup"));
+    expect(wrapped.split("\n").length).toBe(source.split("\n").length + 1);
+  });
+
+  it("leaves the word alone where it is not a declaration", async () => {
+    const { context, writes } = recordingContext();
+    const source = [
+      "function setup(context) {",
+      "  const note = 'export function setup';",
+      "  return context.api.setCellValue(0, 0, note);",
+      "}",
+    ].join("\n");
+
+    await evaluateWrapper(wrapModuleSource(source))(context);
+
+    expect(writes).toEqual([[0, 0, "export function setup"]]);
+  });
+});

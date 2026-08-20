@@ -1159,6 +1159,56 @@ fn output_item_to_json(item: &script_engine::ScriptOutputItem) -> serde_json::Va
     }
 }
 
+/// One cell written into the CLONE before a script runs.
+///
+/// Exists so a dry run can be made DETERMINISTIC: the eval corpus needs "sum
+/// column B" to run against a column B that actually holds numbers, and it
+/// cannot depend on whatever the user's workbook happens to contain. Seeds touch
+/// the clone and the diff baseline ONLY — `AppState` never sees them, which is
+/// what keeps a fixture from becoming a write.
+///
+/// Values are typed the obvious way: a string that parses as a number becomes a
+/// Number, everything else is Text. FORMULAS ARE NOT SUPPORTED — a leading `=`
+/// is stored as text, because compiling one here would mean running the parser
+/// and the dependency graph outside the pipeline that owns them, and a fixture
+/// that silently stored a formula as text would be worse than one that says it
+/// cannot.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellSeed {
+    pub row: u32,
+    pub col: u32,
+    pub value: String,
+}
+
+/// Type a seed value the way a fixture means it.
+pub(crate) fn seed_cell_value(raw: &str) -> engine::cell::CellValue {
+    if raw.is_empty() {
+        return engine::cell::CellValue::Empty;
+    }
+    match raw.parse::<f64>() {
+        Ok(n) if n.is_finite() => engine::cell::CellValue::Number(n),
+        _ => engine::cell::CellValue::Text(raw.to_string()),
+    }
+}
+
+/// Apply seeds to one grid.
+pub(crate) fn apply_seeds(grid: &mut engine::grid::Grid, seeds: &[CellSeed]) {
+    for seed in seeds {
+        let style_index = grid.get_cell(seed.row, seed.col).map(|c| c.style_index).unwrap_or(0);
+        grid.set_cell(
+            seed.row,
+            seed.col,
+            engine::cell::Cell {
+                ast: None,
+                value: seed_cell_value(&seed.value),
+                style_index,
+                rich_text: None,
+            },
+        );
+    }
+}
+
 /// What one isolated run produced, before anyone decides whether to keep it.
 pub(crate) struct IsolatedRun {
     pub result: script_engine::ScriptResult,
@@ -1186,6 +1236,7 @@ pub(crate) struct IsolatedRun {
 pub(crate) async fn run_script_isolated(
     handle: &AppHandle,
     code: &str,
+    seeds: &[CellSeed],
 ) -> Result<IsolatedRun, String> {
     // External MCP clients are script execution — the AI access ceiling must
     // allow "script" AND the same security gate as run_script applies.
@@ -1201,15 +1252,27 @@ pub(crate) async fn run_script_isolated(
 
     let state = handle.state::<AppState>();
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
-    let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
+    let mut grids = state.grids.read().map_err(|e| e.to_string())?.clone();
+    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+
+    // Seeds are applied to the CLONE, before the baseline is taken, so a fixture
+    // is the STARTING STATE rather than a change the script gets credited with.
+    // `AppState` is never touched — that is what keeps a fixture from becoming a
+    // write, and it is why seeding happens here rather than through the ordinary
+    // edit pipeline.
+    if !seeds.is_empty() {
+        if let Some(grid) = grids.get_mut(active_sheet) {
+            apply_seeds(grid, seeds);
+        }
+    }
+
     // A SECOND clone kept out of the run, purely as the diff baseline. The run
     // consumes `grids`, and a dry run has to answer "what would change" against
     // the state as it was — reading AppState again afterwards would race any
     // concurrent edit and diff against the wrong thing.
     let baseline_grids = grids.clone();
-    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
-    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     // The REAL host inputs, so a script sees the live locale / calculation mode
     // / named styles rather than engine defaults (what `ScriptEngine::run` gave).
     let app_info = crate::scripting::types::build_app_info(&state);
@@ -1299,7 +1362,7 @@ async fn run_script_with_model(
     handle: &AppHandle,
     code: &str,
 ) -> Result<ScriptRunOutcome, String> {
-    let run = run_script_isolated(handle, code).await?;
+    let run = run_script_isolated(handle, code, &[]).await?;
     apply_script_result(handle, run.result, run.modified_grids, run.active_sheet)
 }
 

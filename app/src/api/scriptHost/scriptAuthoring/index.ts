@@ -67,6 +67,20 @@ export interface DryRunReport {
   truncated: boolean;
   totalChanges: number;
   output: string[];
+  /** Values of the cells the caller asked to see, after the run. */
+  readBack: Array<{ row: number; col: number; value: string }>;
+  /**
+   * Whether the dry run can speak to this script AT ALL.
+   *
+   * False means NOTHING else here is evidence about the script — an object
+   * script runs in the Worker realm, the preview runs in the interpreter's, and
+   * the two share a fraction of one surface. Callers MUST branch on this before
+   * drawing any conclusion; treating a declined report as a verdict rejected
+   * every valid draft this feature produced.
+   */
+  applicable: boolean;
+  /** Why the dry run declined, when `applicable` is false. */
+  declinedReason?: string | null;
 }
 
 export interface AuthorAttempt {
@@ -147,7 +161,12 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
     if (report.ok && req.dryRun) {
       const dry = await req.dryRun(source);
       attempt.dryRun = dry;
-      if (!dry.ok) {
+      // A declined report is not a verdict. Reading one as a failure sent the
+      // model round after round "fixing" a script that was already correct,
+      // because the preview realm cannot host an object script at all.
+      if (dry.applicable === false) {
+        behaviouralFix = "";
+      } else if (!dry.ok) {
         behaviouralFix =
           `The script passes every static check but FAILS when run against a copy of the workbook:\n` +
           `  ${dry.error ?? "unknown error"}\n` +

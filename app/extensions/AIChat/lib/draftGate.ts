@@ -87,8 +87,13 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
   }
 
   // L3: does it actually run?
+  //
+  // `applicable === false` means the preview realm cannot host this script, so
+  // its answer describes the emulator rather than the draft. Object scripts —
+  // which is everything this gate sees — land there, and treating that as a
+  // failure rejected every valid draft with "it FAILS when run".
   const dry = await tryDryRun(source);
-  if (dry && !dry.ok) {
+  if (dry && dry.applicable !== false && !dry.ok) {
     return {
       allow: false,
       message:
@@ -109,7 +114,9 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
  * and it is descriptive, never a rejection.
  */
 export function describeDryRun(dry: DryRunReport | null): string {
-  if (!dry || !dry.ok) return "";
+  // Say nothing rather than "it changed no cells" about a script that was never
+  // run — that sentence reads as a finding, and it would be fabricated.
+  if (!dry || !dry.ok || dry.applicable === false) return "";
   if (dry.totalChanges === 0) {
     return " When run against a copy of the workbook it changed no cells.";
   }
