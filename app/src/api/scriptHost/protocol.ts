@@ -118,6 +118,18 @@ export interface MountSpec {
   snapshot: {
     properties?: Record<string, unknown>;
     selection?: unknown;
+    /**
+     * PREVIEW mounts only (§5c.1): a mirror path with no seed THROWS a
+     * `PREVIEW_MIRROR_GAP`-prefixed error instead of answering its fallback.
+     *
+     * A real mount's fallbacks are placeholders the host immediately overwrites
+     * with `{t:"mirror"}` pushes; a preview sends none, so under a preview the
+     * fallback is not a default — it is a fabricated answer (`sheetCount: 0`
+     * against a real 3-sheet workbook) that crosses no broker and therefore
+     * can never gap. Strict mode turns that silent fiction into the same
+     * decline every other unservable member gets.
+     */
+    strict?: boolean;
   };
 }
 
@@ -288,12 +300,31 @@ export type W2H =
   | { t: "validated"; valid: boolean; error?: string }
   | { t: "call"; callId: number; method: string; args: unknown[] }
   | { t: "hookRegistered"; hook: string }
+  // Posted when an {t:"event"} dispatch PROMISE settles (success or failure).
+  // The preview's completion signal for a handler that sleeps between broker
+  // calls: quiescence-by-calls saw nothing in flight during the sleep and cut
+  // the run short, losing the tail write (§5c.1). Real mounts ignore it.
+  | { t: "eventDone"; hook: string }
   | { t: "renderCellsResult"; reqId: number; styles: (StyleOverride | null)[] }
   | { t: "renderDrawResult"; reqId: number; bitmap: ImageBitmap | null; hitGeometry?: SandboxHitGeometry | null }
   | { t: "methodResult"; callId: number; ok: boolean; value?: unknown; error?: RpcErrorShape }
   | { t: "console"; level: "log" | "warn" | "error"; args: unknown[] }
   | { t: "error"; hook?: string; message: string; stack?: string }
-  | { t: "pong"; seq: number };
+  // `timers` = live capped timers in the realm (workerHardening). The preview's
+  // quiescence check needs it: a handler suspended on setTimeout has no broker
+  // call in flight, so without this count the drain declared the realm idle
+  // and a correct script's tail writes were missing from the diff (§5c.1).
+  | { t: "pong"; seq: number; timers?: number };
+
+/**
+ * Prefix of the error a STRICT mount's unseeded mirror read throws.
+ *
+ * A string marker rather than a class because it crosses the worker boundary
+ * as `{t:"error"}` text; the preview recognises it and converts the run into a
+ * decline ("the preview cannot serve <path>") instead of reporting the throw
+ * as the script's own failure.
+ */
+export const PREVIEW_MIRROR_GAP = "__preview-mirror-gap__:";
 
 // ============================================================================
 // Errors & limits

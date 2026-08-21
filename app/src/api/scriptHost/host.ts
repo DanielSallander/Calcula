@@ -24,7 +24,7 @@ import {
   type ScriptHandle,
 } from "./broker";
 import { assertMountAllowed } from "./mountGate";
-import { drainBrokerTraffic, hookPayload, withTimeout } from "./scriptPreview/runShape";
+import { drainBrokerTraffic, synthesizableHookPayload, withTimeout } from "./scriptPreview/runShape";
 import type { PreviewBackend } from "./scriptPreview/backend";
 import {
   PROTOCOL_VERSION,
@@ -1140,6 +1140,27 @@ export interface PreviewRunResult {
    * would have made identically.
    */
   refusals: Array<{ method: string; code: string; message: string }>;
+  /**
+   * Hooks the script registered that were OFFERED opportunistically and NOT
+   * fired, because the preview cannot synthesize the payload the product's
+   * forwarder delivers (§5c.1). Firing them with `undefined` instead is how a
+   * correct destructuring handler got rejected as "FAILS when run" — so an
+   * unfired handler is reported, never guessed at.
+   */
+  skippedHooks: string[];
+  /**
+   * An explicitly-NAMED event whose payload the preview cannot synthesize.
+   * The caller asserted this hook must be exercised; the preview cannot do it
+   * faithfully, so the run proves nothing and the caller must decline.
+   */
+  unsupportedEvent?: string;
+  /**
+   * The realm never went quiet because live TIMERS were still pending when the
+   * budget expired. Not a verdict: a `setInterval` dashboard poller is legal in
+   * the product, which bounds nothing — so the caller declines rather than
+   * reporting "still making calls" about a script that may be correct.
+   */
+  undecidable?: string;
   /** True when this environment has no Worker realm at all (jsdom). */
   realmUnavailable?: boolean;
 }
@@ -1195,7 +1216,7 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
     // NOT a verdict. jsdom has no Worker, and answering "it did not run" there
     // would be a statement about the test environment reported as one about the
     // script — the precise failure this whole rung exists to avoid.
-    return { ran: false, realmUnavailable: true, hooks: [], calls: [], refusals: [] };
+    return { ran: false, realmUnavailable: true, hooks: [], calls: [], refusals: [], skippedHooks: [] };
   }
 
   const scriptName = req.scriptName || "(preview)";
@@ -1218,7 +1239,15 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
   let hookError: string | undefined;
   let mountSettle: ((ok: boolean, error?: string) => void) | null = null;
   let pingSeq = 0;
-  let awaitingPong: { seq: number; resolve: () => void } | null = null;
+  let awaitingPong: { seq: number; resolve: (timers: number) => void } | null = null;
+  /** Dispatches the realm has reported complete ({t:"eventDone"}). */
+  let eventDoneCount = 0;
+  /**
+   * The lowest live-timer count any pong has reported — the realm's
+   * infrastructure floor (Vite's dev-mode HMR client holds one permanently).
+   * Only the DELTA above this floor is evidence about the script.
+   */
+  let minPongTimers = Number.MAX_SAFE_INTEGER;
 
   const send = (msg: H2W): void => worker.postMessage(msg);
 
@@ -1235,8 +1264,13 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
         if (awaitingPong?.seq === msg.seq) {
           const { resolve } = awaitingPong;
           awaitingPong = null;
-          resolve();
+          // An old worker build's pong carries no count; 0 keeps the previous
+          // behaviour rather than wedging quiescence on `undefined !== 0`.
+          resolve(msg.timers ?? 0);
         }
+        break;
+      case "eventDone":
+        eventDoneCount++;
         break;
       case "error":
         // A hook handler that threw or rejected reports HERE and dispatch
@@ -1307,25 +1341,26 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
    * The offline harness needs none of this: it calls `dispatchEvent` in-process,
    * so the handler has already run by the time it looks.
    */
-  const realmCaughtUp = (timeoutMs: number): Promise<void> =>
-    new Promise<void>((resolve) => {
+  const realmCaughtUp = (timeoutMs: number): Promise<number> =>
+    new Promise<number>((resolve) => {
       const seq = ++pingSeq;
       awaitingPong = { seq, resolve };
       // Resolve rather than reject on timeout: the drain that follows has its
       // own budget and produces the better message, and a realm that stopped
-      // answering will be caught there.
+      // answering will be caught there. -1 = "no pong", which quiescence must
+      // treat as NOT-quiet — an unanswered ping proves nothing about timers.
       setTimeout(() => {
         if (awaitingPong?.seq === seq) {
           awaitingPong = null;
-          resolve();
+          resolve(-1);
         }
       }, timeoutMs);
       send({ t: "ping", seq });
     });
 
   /**
-   * Run the realm to a standstill: nothing in flight, and nothing the realm has
-   * yet to react to.
+   * Run the realm to a standstill: nothing in flight, and nothing the realm
+   * has yet to react to.
    *
    * ONE DRAIN IS NOT ENOUGH, and the reason is a full round trip. When a call
    * is refused, the host settles it and `inFlight` drops to zero — but the
@@ -1336,28 +1371,95 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
    * the pair repeats while new calls keep appearing — which is also what makes
    * a `.then` chain that issues its next call from the previous one's result
    * settle properly rather than being cut off half-way.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT DO: require the realm's live-TIMER count
+   * to reach zero. That was the first fix for the lost-tail-write defect
+   * (§5c.1), and it wedged every dev-mode preview at 5s — the count includes
+   * realm INFRASTRUCTURE (Vite's HMR client keeps a permanent retry timer in
+   * dev workers), and timer bookkeeping cannot tell a script's sleep from the
+   * plumbing's. A handler's timer-suspended work is instead covered by the
+   * realm's OWN completion signal: `{t:"eventDone"}` when the dispatch promise
+   * settles, awaited by the fire loop below. The pong's timer count survives
+   * only as DIAGNOSIS — it picks the budget-expiry message, never quiescence.
    */
-  const settleRealm = async (timeoutMs: number): Promise<string | undefined> => {
+  const settleRealm = async (
+    timeoutMs: number,
+  ): Promise<{ reason: string; undecidable: boolean } | undefined> => {
     const startedAt = Date.now();
     for (;;) {
       const seen = calls.length;
       const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
       const stuck = await drainBrokerTraffic(() => inFlight, remaining);
-      if (stuck !== undefined) return stuck;
+      if (stuck !== undefined) return { reason: stuck, undecidable: false };
       // Flush: anything the realm posts while digesting the results above —
       // an error, or the next call in a chain — arrives before the pong does,
       // because the realm handles messages in order.
-      await realmCaughtUp(Math.max(0, timeoutMs - (Date.now() - startedAt)));
+      const timers = await realmCaughtUp(Math.max(0, timeoutMs - (Date.now() - startedAt)));
+      if (timers >= 0 && timers < minPongTimers) minPongTimers = timers;
       if (calls.length === seen && inFlight === 0) return undefined;
       if (Date.now() - startedAt > timeoutMs) {
-        return `the script was still making calls ${timeoutMs / 1000}s after it was started`;
+        return {
+          reason:
+            timers === -1
+              ? `the realm stopped answering within ${timeoutMs / 1000}s`
+              : `the script was still making calls ${timeoutMs / 1000}s after it was started`,
+          undecidable: false,
+        };
       }
     }
   };
 
+  /**
+   * Wait for the realm to report `count` dispatches complete (§5c.1).
+   *
+   * THE COMPLETION SIGNAL, not an optimisation: a handler that sleeps between
+   * broker calls (`await sleep(100); write(...)`) has NOTHING in flight while
+   * suspended, so quiescence-by-calls declared the realm idle mid-sleep and
+   * the tail write was silently missing from the diff — "changed nothing"
+   * about a correct script. The realm posts `{t:"eventDone"}` when the
+   * dispatch promise settles, which by construction is after every await the
+   * handler chained — so waiting here, then draining, catches the tail.
+   *
+   * On timeout the TIMER DELTA picks the verdict: a count above the lowest
+   * this realm has reported means the handler is plausibly waiting on its own
+   * timer (a `setInterval` poller is legal in the product, which bounds
+   * nothing), so the answer is UNDECIDABLE — a decline, never "it failed".
+   * The baseline subtraction is what keeps dev-mode infrastructure timers
+   * (Vite's HMR retry loop holds one permanently) from declining everything.
+   */
+  const awaitEventDone = async (
+    count: number,
+    timeoutMs: number,
+  ): Promise<{ reason: string; undecidable: boolean } | undefined> => {
+    const startedAt = Date.now();
+    while (eventDoneCount < count) {
+      if (Date.now() - startedAt > timeoutMs) {
+        const timers = await realmCaughtUp(1_000);
+        if (timers > minPongTimers) {
+          return {
+            reason:
+              "the handler was still waiting on a timer when the preview's budget expired, so " +
+              "the preview cannot know what it would eventually do",
+            undecidable: true,
+          };
+        }
+        return {
+          reason: `the handler did not complete within ${timeoutMs / 1000}s`,
+          undecidable: false,
+        };
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return undefined;
+  };
+
+  const skippedHooks: string[] = [];
+  let unsupportedEvent: string | undefined;
+  let undecidable: string | undefined;
+
   const finish = (ran: boolean, error?: string): PreviewRunResult => {
     worker.terminate();
-    return { ran, error, hooks, calls, refusals };
+    return { ran, error, hooks, calls, refusals, skippedHooks, unsupportedEvent, undecidable };
   };
 
   try {
@@ -1399,9 +1501,21 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
     // the same `.then`-chain shape that made the offline harness misgrade a
     // correct script. Settle before observing anything.
     const settledSetup = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
-    if (settledSetup !== undefined) return finish(false, settledSetup);
+    if (settledSetup !== undefined) {
+      if (settledSetup.undecidable) {
+        undecidable = settledSetup.reason;
+        return finish(false);
+      }
+      return finish(false, settledSetup.reason);
+    }
     if (hookError !== undefined) return finish(false, `setup(context) threw: ${hookError}`);
     await req.onSettle?.().catch(() => undefined);
+    // RE-CHECKED after onSettle, and attributed to setup: the settle only
+    // proves the realm went quiet, and a rejection from a handler's returned
+    // promise can land during onSettle's own IPC round trip. Without this
+    // check the error was blamed on the NEXT hook — or, when there was none,
+    // dropped, and a throwing script graded as a clean run (§5c.1).
+    if (hookError !== undefined) return finish(false, `setup(context) threw: ${hookError}`);
 
     for (const event of req.events ?? []) {
       if (!hooks.includes(event)) {
@@ -1416,23 +1530,69 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
             `context.${event}(handler))`,
         );
       }
+      // THE PAYLOAD DISCIPLINE (§5c.1). The product's forwarders deliver rich,
+      // hook-specific payloads; firing a registered handler with a guessed one
+      // (the first version sent `undefined`) made CORRECT destructuring
+      // handlers throw and rejected the draft — the rung's founding failure
+      // mode. A hook whose payload cannot be synthesized is therefore never
+      // fired: skipped-and-reported when it was offered opportunistically,
+      // and the whole run is unsupported when the caller named it — an
+      // explicit event is an assertion the hook must be EXERCISED, and a
+      // preview that cannot do that faithfully has nothing to say.
+      const synthesized = synthesizableHookPayload(event);
+      if (synthesized === null) {
+        if (req.eventOptional) {
+          skippedHooks.push(event);
+          continue;
+        }
+        unsupportedEvent = event;
+        return finish(true);
+      }
       const fires = Math.max(1, req.eventCount ?? 1);
       for (let i = 0; i < fires; i++) {
-        send({ t: "event", hook: event, payload: hookPayload(event) });
-        // A hook dispatch is FIRE-AND-FORGET in this protocol — the realm sends
-        // no ack — so quiescence is the only signal there is that the handler
-        // is over, and it is meaningless until the handler has STARTED.
-        await realmCaughtUp(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
-        const stuck = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
-        if (stuck !== undefined) return finish(false, stuck);
+        const doneTarget = eventDoneCount + 1;
+        send({ t: "event", hook: event, payload: synthesized.payload });
+        // The realm ACKS a dispatch when its promise settles ({t:"eventDone"},
+        // §5c.1) — which is after every await the handler chained, sleeps
+        // included. Waiting for the ack FIRST is what keeps a handler's
+        // timer-suspended tail work in the run; the drain afterwards is what
+        // catches the broker calls that tail work posted, plus any
+        // non-returned `.then` chain the ack cannot see.
+        const done = await awaitEventDone(doneTarget, req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
+        if (done !== undefined) {
+          if (done.undecidable) {
+            undecidable = done.reason;
+            return finish(false);
+          }
+          return finish(false, `the "${event}" handler: ${done.reason}`);
+        }
+        const settled = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
+        if (settled !== undefined) {
+          if (settled.undecidable) {
+            undecidable = settled.reason;
+            return finish(false);
+          }
+          return finish(false, settled.reason);
+        }
         if (hookError !== undefined) {
           return finish(false, `the "${event}" handler threw: ${hookError}`);
         }
         await req.onSettle?.().catch(() => undefined);
+        // Same re-check as after setup's onSettle, attributed to THIS event —
+        // the error latch is first-wins and is inspected after every phase, so
+        // whatever it holds here arrived during this event's settle or
+        // recalculation, not during a later one.
+        if (hookError !== undefined) {
+          return finish(false, `the "${event}" handler threw: ${hookError}`);
+        }
       }
     }
 
     if (workerError !== undefined) return finish(false, workerError);
+    // The last line of defence for a rejection that lands in the microscopic
+    // window after the final onSettle check: better attributed vaguely than
+    // reported as a clean run.
+    if (hookError !== undefined) return finish(false, `a handler threw: ${hookError}`);
     return finish(true);
   } catch (e) {
     // The realm must not survive an unexpected failure of its own driver.

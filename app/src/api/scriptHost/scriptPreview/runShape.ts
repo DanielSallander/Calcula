@@ -27,11 +27,43 @@ export function withTimeout<T>(work: Promise<T>, ms: number, what: string): Prom
 }
 
 /**
- * The payload the product's forwarder sends with each hook — mirrored from the
- * `button:clicked` emitter (`{ instanceId, x, y }` thinned to `{ x, y }`).
+ * The payloads a preview can SYNTHESIZE faithfully — and nothing else.
+ *
+ * The product's forwarders deliver rich, hook-specific payloads: a click is
+ * `{ x, y }`, `sheet.onSelectionChange` is `{ startRow, startCol, endRow,
+ * endCol, sheetIndex, areas }`, `cell.onEdit` is `{ changes: [...] }` — and
+ * the handlers (and even some SHIMS: cell.onEdit dereferences
+ * `payload.changes` before user code runs) are written against those shapes.
+ *
+ * The first version of this function returned `undefined` for everything but
+ * clicks, and the preview then FIRED those hooks anyway — so a correct
+ * destructuring handler threw against `undefined` and the draft was rejected
+ * with "FAILS when run against a copy of the workbook": the rung's founding
+ * failure mode, reproduced for every object type except button (adversarial
+ * review, 2026-08-21). The rule is now the decline discipline applied to
+ * payloads: a hook whose payload this table cannot produce is NOT fired — the
+ * driver skips it with a note when it was offered opportunistically, and the
+ * run is inapplicable when the caller named it explicitly. Never fired with a
+ * guess.
+ *
+ * Growing this table is welcome, but each entry must mirror the REAL
+ * forwarder's shape (`wireHookForwarder`, host.ts) — an entry with invented
+ * fields would just move the lie one level down.
  */
-export function hookPayload(event: string): unknown {
-  return event === "onClick" || event === "onDoubleClick" ? { x: 0, y: 0 } : undefined;
+const SYNTHESIZABLE_HOOK_PAYLOADS: Record<string, () => unknown> = {
+  // Mirrored from the `button:clicked` emitter (`{ instanceId, x, y }` thinned
+  // to `{ x, y }` by the forwarder).
+  onClick: () => ({ x: 0, y: 0 }),
+  onDoubleClick: () => ({ x: 0, y: 0 }),
+};
+
+/**
+ * The payload to fire `event` with, or null when the preview cannot produce
+ * the shape the product's forwarder would deliver.
+ */
+export function synthesizableHookPayload(event: string): { payload: unknown } | null {
+  const make = SYNTHESIZABLE_HOOK_PAYLOADS[event];
+  return make ? { payload: make() } : null;
 }
 
 /**

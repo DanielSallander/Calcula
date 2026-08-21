@@ -455,6 +455,14 @@ mod tests {
         // Non-finite input must not become a Number and poison a grid.
         assert!(matches!(seed_cell_value("inf"), CellValue::Text(_)));
         assert!(matches!(seed_cell_value("NaN"), CellValue::Text(_)));
+        // Canonical boolean spellings are BOOLEANS — the edit pipeline types
+        // user entry that way and cell_input_string renders Boolean cells as
+        // exactly these strings. Typed as Text, =IF(A1,...) over a seeded
+        // boolean computed against a string (§5c.1). Exact-match only.
+        assert!(matches!(seed_cell_value("TRUE"), CellValue::Boolean(true)));
+        assert!(matches!(seed_cell_value("FALSE"), CellValue::Boolean(false)));
+        assert!(matches!(seed_cell_value("true"), CellValue::Text(_)));
+        assert!(matches!(seed_cell_value("True"), CellValue::Text(_)));
     }
 
     #[test]

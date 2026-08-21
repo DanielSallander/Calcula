@@ -310,7 +310,17 @@ export function collectSurfaceRows(probe: ProbeResult): SurfaceMemberRow[] {
       const policy: MethodPolicy | undefined = member.broker ? ALLOWLIST[member.broker] : undefined;
       for (const root of roots) {
         const chain = root ? `${root}.${path}` : path;
-        const key = `${chain} ${member.broker ?? ""} ${policy?.capability ?? ""}`;
+        // The IFACE is part of the identity, deliberately. The key used to be
+        // chain+broker+capability alone, which collapsed every same-named hook
+        // onto the alphabetically FIRST interface that carried it: the surface
+        // said onSelectionChange belongs to SheetContext only, while the worker
+        // really registers it for slicer, cell and row too — so anything
+        // deriving per-TYPE facts from these rows (objectHooksFor, the prompt's
+        // own-member floor) saw slicer/table/timeline/row as hookless and a
+        // preview never fired their handlers. Validation is untouched: the
+        // validator matches by CHAIN, and duplicate chains across interfaces
+        // were already legal (getCellValue has two owners).
+        const key = `${ifaceName} ${chain} ${member.broker ?? ""} ${policy?.capability ?? ""}`;
         if (seen.has(key)) continue;
         seen.add(key);
         rows.push({
@@ -372,6 +382,19 @@ function surfacePolicyModule(rows: SurfaceMemberRow[]): string {
     "",
     "export const SCRIPT_SURFACE: readonly SurfaceMember[] = [",
     ...lines,
+    "];",
+    "",
+    "/**",
+    " * Which context interface each drafted object type is handed — the probe's",
+    " * own table (OBJECT_TYPE_INTERFACES), emitted so runtime consumers stop",
+    " * deriving it from the `\"<Type>Context\"` naming convention. The convention",
+    ' * was wrong for "textbox" (BaseObjectContext, not TextboxContext) and would',
+    " * silently misfire again on the next irregular name; the preview's",
+    " * objectHooksFor fires an object's handlers from this map, so a wrong entry",
+    " * here means a type whose handlers are never exercised.",
+    " */",
+    "export const OBJECT_TYPE_CONTEXTS: ReadonlyArray<readonly [objectType: string, iface: string]> = [",
+    ...OBJECT_TYPE_INTERFACES.map(([t, i]) => `  [${JSON.stringify(t)}, ${JSON.stringify(i)}],`),
     "];",
     "",
   ].join("\n");
@@ -547,13 +570,25 @@ export function collectSlices(probe: ProbeResult, model: TemplateModel, source: 
   };
 
   const sharedChains = entries.filter((e) => isShared(e.chain)).map((e) => e.chain);
+  // Ownership per TYPE comes from the per-iface ROWS, not from ifaceByChain's
+  // first-owner map: a chain carried by several root contexts (onSelectionChange
+  // on sheet, slicer, cell AND row) is OWN to each of them, and the first-owner
+  // view silently emptied every later type's own-member floor — which is how
+  // the prompt ranker under-served slicer/table/timeline tasks.
+  const chainsByIface = new Map<string, Set<string>>();
+  for (const r of rows) {
+    const set = chainsByIface.get(r.iface) ?? new Set<string>();
+    set.add(r.chain);
+    chainsByIface.set(r.iface, set);
+  }
+  const sliceChains = new Set(entries.map((e) => e.chain));
   const ownByObjectType = new Map<string, string[]>();
   for (const [objectType, iface] of OBJECT_TYPE_INTERFACES) {
     if (!iface) continue;
-    const own = entries
-      .filter((e) => !isShared(e.chain) && ifaceByChain.get(e.chain) === iface)
-      .map((e) => e.chain);
-    ownByObjectType.set(objectType, own);
+    const own = [...(chainsByIface.get(iface) ?? [])].filter(
+      (chain) => sliceChains.has(chain) && !isShared(chain),
+    );
+    ownByObjectType.set(objectType, own.sort());
   }
 
   return { entries, sharedChains, ownByObjectType };

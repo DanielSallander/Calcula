@@ -59,11 +59,19 @@ pub struct PreviewEvalResult {
     pub values: Vec<PreviewFormulaValue>,
     /// The fixed point was NOT reached within the pass budget.
     ///
-    /// Reported rather than hidden: a chain deeper than the budget leaves some
-    /// values stale, and a caller that presented them as final would be
-    /// showing numbers the workbook would never produce.
+    /// Reported rather than hidden: an unfinished iteration leaves values the
+    /// workbook would never produce, and a caller that presented them as final
+    /// would be lying with numbers. With the budget at formulas+1 the only
+    /// inhabitants of `false` are true cycles and volatile functions
+    /// (RAND/NOW), which re-randomize every pass by design.
     pub converged: bool,
     pub passes: u32,
+    /// How many formulas produced a SPILLED ARRAY. A spill writes neighbors a
+    /// single-cell result cannot express — its first element alone is a wrong
+    /// answer wearing the right cell — so spilling formulas are counted and
+    /// refused rather than collapsed (§5c.1; `to_cell_value` would have taken
+    /// `arr.first()`).
+    pub spilled: u32,
 }
 
 /// How many cells one preview may evaluate.
@@ -73,14 +81,20 @@ pub struct PreviewEvalResult {
 /// draft from turning a preview into an unbounded calculation.
 pub const MAX_PREVIEW_EVAL_CELLS: usize = 20_000;
 
-/// How many times the whole formula set is re-evaluated.
+/// The CAP on evaluation passes — a runaway bound, not the working budget.
 ///
-/// A formula reads the VALUES its references currently hold, so a chain
-/// (`C1 = B1*2`, `B1 = A1+1`) needs one pass per link. Eight covers every
-/// realistic draft; beyond that the answer is reported as unconverged rather
-/// than iterated indefinitely, because a preview is a thing a person waits for
-/// and a circular reference would otherwise never terminate.
-const MAX_PASSES: u32 = 8;
+/// The working budget is `formulas + 1`: this is batch (Jacobi) iteration, so
+/// each pass propagates exactly ONE dependency link, an acyclic set of N
+/// formulas is fully settled after at most N passes, and one more pass is
+/// needed to OBSERVE that nothing changed. The first version used a flat 8,
+/// under the assumption that "a chain needs one pass per link" made 8 deep
+/// enough — but chain depth belongs to the WORKBOOK, not the draft: a 50-row
+/// running-total column (`C2=C1+B2`, `C3=C2+B3`, …) is depth 50, bog-standard
+/// sheet content, and every settle on such a sheet ended "unconverged" with
+/// partial sums stored and a note blaming a circular reference the sheet did
+/// not have (§5c.1). Only true cycles and volatile functions (RAND/NOW) can
+/// now exhaust the budget, and both deserve exactly the unconverged verdict.
+const PASS_CAP: u32 = 512;
 
 /// Build the grid a preview's cells describe.
 ///
@@ -115,28 +129,61 @@ fn build_grid(cells: &[PreviewCellInput]) -> (Grid, Vec<(u32, u32, String)>) {
 
 /// Evaluate every formula to a fixed point over the supplied cells.
 ///
-/// Pure — no Tauri state, no I/O — so the iteration and the convergence
-/// reporting are unit-testable without a running app.
+/// Pure — no Tauri state, no I/O — so the iteration, the convergence
+/// reporting and the spill refusal are unit-testable without a running app.
+///
+/// The RAW evaluation API is used (not `evaluate_formula_multi_sheet`, whose
+/// `to_cell_value()` collapses an array to its FIRST element): a dynamic-array
+/// result means the formula would SPILL into neighbors, which a single-cell
+/// store cannot express, so it is counted in `spilled` and the caller refuses
+/// the whole batch rather than fabricating half a spill. ASTs are parsed once,
+/// not once per pass.
 pub fn evaluate_preview(cells: &[PreviewCellInput], sheet_name: &str) -> PreviewEvalResult {
+    use engine::evaluator::EvalResult;
+
     let (grid, formulas) = build_grid(cells);
     let names = vec![sheet_name.to_string()];
     let mut grids = vec![grid];
+    let no_files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
 
+    // Parse once. A formula that does not parse evaluates to #VALUE! exactly as
+    // `evaluate_formula_multi_sheet` reports a parse failure — a stable value,
+    // so it converges rather than burning passes.
+    let parsed: Vec<(u32, u32, Option<engine::Expression>)> = formulas
+        .iter()
+        .map(|(row, col, f)| (*row, *col, crate::parse_formula_to_engine_ast(f).ok()))
+        .collect();
+
+    let budget = (parsed.len() as u32).saturating_add(1).min(PASS_CAP);
     let mut passes = 0;
-    let mut converged = formulas.is_empty();
-    while passes < MAX_PASSES && !converged {
+    let mut converged = parsed.is_empty();
+    let mut spilled_cells: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    while passes < budget && !converged {
         passes += 1;
         // Evaluate the WHOLE set against the grid as it currently stands, then
         // apply. Evaluating and writing in one loop would make a formula's
         // answer depend on the order the cells happen to be in.
-        let results: Vec<(u32, u32, CellValue)> = formulas
+        let results: Vec<(u32, u32, CellValue)> = parsed
             .iter()
-            .map(|(row, col, f)| {
-                (
-                    *row,
-                    *col,
-                    crate::evaluate_formula_multi_sheet(&grids, &names, 0, f),
-                )
+            .map(|(row, col, ast)| {
+                let value = match ast {
+                    None => CellValue::Error(engine::cell::CellError::Value),
+                    Some(ast) => {
+                        let raw = crate::evaluate_formula_raw_with_ast_and_files(
+                            &grids, &names, 0, ast, &no_files, None,
+                        );
+                        if matches!(raw, EvalResult::Array(_)) {
+                            spilled_cells.insert((*row, *col));
+                            // A stable stand-in so the iteration can still
+                            // converge; the caller discards ALL values when
+                            // anything spilled, so this is never reported.
+                            CellValue::Empty
+                        } else {
+                            raw.to_cell_value()
+                        }
+                    }
+                };
+                (*row, *col, value)
             })
             .collect();
 
@@ -157,7 +204,7 @@ pub fn evaluate_preview(cells: &[PreviewCellInput], sheet_name: &str) -> Preview
         }
     }
 
-    let values = formulas
+    let values = parsed
         .iter()
         .map(|(row, col, _)| PreviewFormulaValue {
             row: *row,
@@ -169,7 +216,12 @@ pub fn evaluate_preview(cells: &[PreviewCellInput], sheet_name: &str) -> Preview
         })
         .collect();
 
-    PreviewEvalResult { values, converged, passes }
+    PreviewEvalResult {
+        values,
+        converged,
+        passes,
+        spilled: spilled_cells.len() as u32,
+    }
 }
 
 /// Compute the values of the formulas a preview grid holds. Touches no state.
@@ -230,12 +282,64 @@ mod tests {
     }
 
     #[test]
+    fn a_deep_chain_is_ordinary_sheet_content_and_MUST_converge() {
+        // THE defect the flat 8-pass budget shipped (§5c.1): a running-total
+        // column is depth N — the depth belongs to the WORKBOOK, not the draft
+        // — and every settle over one ended "unconverged" with partial sums
+        // stored and a note blaming a cycle the sheet does not have. 40 links
+        // is deliberately far past the old budget.
+        let mut cells = vec![cell(0, 0, "1"), cell(0, 1, "=A1+1")];
+        for row in 1..40u32 {
+            // B(row+1) = B(row) + 1, spelled in A1 refs: B2=B1+1, B3=B2+1, ...
+            cells.push(PreviewCellInput {
+                row,
+                col: 1,
+                input: format!("=B{}+1", row),
+            });
+        }
+        let r = evaluate_preview(&cells, "Sheet1");
+        assert!(r.converged, "a 40-link chain is not a cycle; got passes={}", r.passes);
+        let bottom = r.values.iter().find(|v| v.row == 39 && v.col == 1).unwrap();
+        assert_eq!(bottom.display, "41", "each link adds 1 to A1's 1");
+    }
+
+    #[test]
     fn a_circular_reference_stops_and_SAYS_it_did_not_settle() {
         // Never terminating is not an option in something a person waits for,
-        // and neither is presenting a half-iterated number as final.
+        // and neither is presenting a half-iterated number as final. With the
+        // budget at formulas+1, a genuine cycle exhausts exactly that.
         let r = evaluate_preview(&[cell(0, 0, "=B1+1"), cell(0, 1, "=A1+1")], "Sheet1");
         assert!(!r.converged, "a cycle cannot converge; the caller must be told");
-        assert_eq!(r.passes, MAX_PASSES);
+        assert_eq!(r.passes, 3, "two formulas + the observation pass");
+    }
+
+    #[test]
+    fn a_spilling_formula_is_REFUSED_not_collapsed_to_its_first_element() {
+        // `to_cell_value()` takes arr.first() — so =SEQUENCE(3) would have
+        // reported "1" in the anchor with the neighbors silently absent: half
+        // a spill presented as a whole answer. The count is the caller's
+        // signal to discard the entire batch.
+        let r = evaluate_preview(
+            &[cell(0, 0, "=SEQUENCE(3)"), cell(0, 1, "=1+1")],
+            "Sheet1",
+        );
+        assert_eq!(r.spilled, 1, "exactly the SEQUENCE cell spills");
+        // The non-spilling neighbor still evaluated — discarding is the
+        // CALLER's decision, made once, with the count in hand.
+        let plain = r.values.iter().find(|v| v.row == 0 && v.col == 1).unwrap();
+        assert_eq!(plain.display, "2");
+    }
+
+    #[test]
+    fn boolean_cells_reach_formulas_as_booleans_not_text() {
+        // seed_cell_value typed "TRUE" as Text, so =IF(A1,...) computed against
+        // a string where the workbook computes a real answer (§5c.1).
+        let r = evaluate_preview(
+            &[cell(0, 0, "TRUE"), cell(0, 1, "=IF(A1,\"yes\",\"no\")")],
+            "Sheet1",
+        );
+        assert!(r.converged);
+        assert_eq!(r.values[0].display, "yes", "a Boolean cell drives IF directly");
     }
 
     #[test]
@@ -270,5 +374,8 @@ mod tests {
         assert_eq!(v["converged"], serde_json::json!(true));
         assert_eq!(v["values"][0]["row"], serde_json::json!(1));
         assert_eq!(v["values"][0]["display"], serde_json::json!("1"));
+        // `spilled` is load-bearing for the TS side: absent, the caller's
+        // `result.spilled > 0` reads undefined and the refusal never fires.
+        assert_eq!(v["spilled"], serde_json::json!(0));
     }
 }

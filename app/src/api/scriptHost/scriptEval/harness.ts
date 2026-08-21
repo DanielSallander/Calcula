@@ -38,7 +38,8 @@ import { validateScriptSource } from "../scriptValidation";
 import type { CapabilityId } from "../capabilityIds";
 import { PreviewGrid } from "../scriptPreview/grid";
 import { createPreviewBackend, createPreviewState } from "../scriptPreview/backend";
-import { drainBrokerTraffic, hookPayload, withTimeout } from "../scriptPreview/runShape";
+import { drainBrokerTraffic, synthesizableHookPayload, withTimeout } from "../scriptPreview/runShape";
+import { PREVIEW_MIRROR_GAP } from "../protocol";
 import type { MountSpec, W2H } from "../protocol";
 import type { EvalTask, OutcomeObservation } from "./index";
 
@@ -83,7 +84,11 @@ export async function runTaskOutcome(task: EvalTask, source: string): Promise<Ou
     apiVersion: "1.0",
     source: "",
     scriptName: task.id,
-    snapshot: {},
+    // STRICT (§5c.1): an unseeded mirror read GAPS instead of answering its
+    // placeholder fallback — a candidate branching on context.properties.* must
+    // become ungradable, not graded against a fabricated 0. Corpus references
+    // read no mirrors (Layer A pins them at 1.0 through this).
+    snapshot: { strict: true },
   };
 
   // The identity admission is decided against. Unlike the in-app preview — whose
@@ -148,6 +153,13 @@ export async function runTaskOutcome(task: EvalTask, source: string): Promise<Ou
       col: e.col,
       value: grid.input(e.row, e.col),
     }));
+    // A strict-mirror throw is a HARNESS GAP wearing an error's clothes: the
+    // marker means "the harness could not answer this read", never "the script
+    // is wrong", so it must reach gradeOutcome as ungradable.
+    if (error?.includes(PREVIEW_MIRROR_GAP)) {
+      const path = error.slice(error.indexOf(PREVIEW_MIRROR_GAP) + PREVIEW_MIRROR_GAP.length).trim();
+      state.gap ??= `context reads of "${path}"`;
+    }
     return { ran, error, harnessGap: state.gap, readBack, output: [...output], totalChanges };
   };
 
@@ -204,13 +216,26 @@ export async function runTaskOutcome(task: EvalTask, source: string): Promise<Ou
     );
   }
 
+  // THE PAYLOAD DISCIPLINE (§5c.1). A corpus task NAMES the hook its solution
+  // must handle, and the product delivers a hook-specific payload the harness
+  // must reproduce or refuse. Firing with a guessed payload made correct
+  // destructuring handlers throw — graded 0 with a false repair diagnosis. A
+  // hook the table cannot synthesize is a HARNESS GAP: the task is ungradable
+  // for this candidate, never a model failure. (Every current outcome event is
+  // onClick, so today this arms a tripwire rather than changing a grade.)
+  const synthesized = synthesizableHookPayload(outcome.event);
+  if (synthesized === null) {
+    state.gap ??= `a synthesizable payload for the "${outcome.event}" hook`;
+    return finish(false);
+  }
+
   // Sequential fires: a persistence task ("count clicks across sessions")
   // cannot be separated from a reset by a single click — both write "1".
   const fires = Math.max(1, outcome.eventCount ?? 1);
   for (let i = 0; i < fires; i++) {
     try {
       await withTimeout(
-        Promise.resolve(dispatchEvent(rt, outcome.event, hookPayload(outcome.event), post)),
+        Promise.resolve(dispatchEvent(rt, outcome.event, synthesized.payload, post)),
         EVENT_TIMEOUT_MS,
         `the "${outcome.event}" handler`,
       );

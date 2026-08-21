@@ -15,7 +15,7 @@ import { PreviewGrid, cellShape } from "../grid";
 import { recalculatePreviewGrid, type PreviewEvalResult } from "../formulaEval";
 
 const evaluator = (result: Partial<PreviewEvalResult>) =>
-  vi.fn(async () => ({ values: [], converged: true, passes: 1, ...result }) as PreviewEvalResult);
+  vi.fn(async () => ({ values: [], converged: true, passes: 1, spilled: 0, ...result }) as PreviewEvalResult);
 
 function gridWith(cells: Array<[number, number, string]>): PreviewGrid {
   const grid = new PreviewGrid();
@@ -70,10 +70,11 @@ describe("recalculating the preview grid", () => {
     expect(evaluate).not.toHaveBeenCalled();
   });
 
-  it("REPORTS a non-convergent result instead of presenting it as final", async () => {
-    // A circular reference stops at the pass budget. The partly-iterated
-    // numbers are still stored — they are the best available — but the caller
-    // is told, so the report can say so rather than assert them.
+  it("stores NOTHING from a non-convergent result, and says why", async () => {
+    // §5c.1 rule 1. The first version stored the half-iterated numbers as "the
+    // best available" — but they are numbers the workbook would never show
+    // (a 50-row running-total column read as garbage), so an unconverged pass
+    // now keeps the grid exactly as it was and reports it.
     const grid = gridWith([
       [0, 0, "=B1+1"],
       [0, 1, "=A1+1"],
@@ -81,11 +82,60 @@ describe("recalculating the preview grid", () => {
     const note = await recalculatePreviewGrid(
       grid,
       "Sheet1",
-      evaluator({ values: [{ row: 0, col: 0, display: "8" }], converged: false, passes: 8 }),
+      evaluator({ values: [{ row: 0, col: 0, display: "8" }], converged: false, passes: 3 }),
     );
-    expect(note).toMatch(/did not settle in 8 passes/);
-    expect(note).toMatch(/circular/i);
-    expect(grid.cachedDisplay(0, 0), "the best available value is still stored").toBe("8");
+    expect(note).toMatch(/did not settle within the evaluation budget \(3 passes/);
+    expect(note).toMatch(/circular reference, or a volatile function/i);
+    expect(note).toMatch(/workbook's last computed ones/);
+    expect(
+      grid.cachedDisplay(0, 0),
+      "a half-iterated number is a value the workbook would never show",
+    ).toBeUndefined();
+  });
+
+  it("stores NOTHING when any formula spills, and says why", async () => {
+    // §5c.1 rule 2. A spill writes NEIGHBORS; a single-cell result cannot
+    // express that, and its first element alone is a wrong answer wearing the
+    // right cell.
+    const grid = gridWith([
+      [0, 0, "=SEQUENCE(3)"],
+      [0, 1, "=1+1"],
+    ]);
+    const note = await recalculatePreviewGrid(
+      grid,
+      "Sheet1",
+      evaluator({ values: [{ row: 0, col: 1, display: "2" }], spilled: 1 }),
+    );
+    expect(note).toMatch(/produces a spilled array/);
+    expect(note).toMatch(/workbook's last computed ones/);
+    expect(grid.cachedDisplay(0, 1), "even the non-spilling neighbor is withheld").toBeUndefined();
+  });
+
+  it("never lets a computed ERROR replace an existing value, and says so", async () => {
+    // §5c.1 rule 3 — the worst confirmed finding of the review. The evaluator
+    // sees ONE sheet with no names and no UDFs, so `=Sheet2!A1` computes #REF!
+    // where the workbook computed 250; storing that replaced truth with the
+    // evaluator's horizon, and the script's own reads then branched on it.
+    const grid = new PreviewGrid();
+    grid.seedFromDocument(0, 0, "=Sheet2!A1*2", "250");
+    grid.setInput(1, 0, "=1/0"); // script-written, no prior display
+    const note = await recalculatePreviewGrid(
+      grid,
+      "Sheet1",
+      evaluator({
+        values: [
+          { row: 0, col: 0, display: "#REF!" },
+          { row: 1, col: 0, display: "#DIV/0!" },
+        ],
+      }),
+    );
+    expect(grid.cachedDisplay(0, 0), "the workbook's 250 outranks the evaluator's #REF!").toBe("250");
+    expect(
+      grid.cachedDisplay(1, 0),
+      "a script-written formula with no prior display genuinely errors",
+    ).toBe("#DIV/0!");
+    expect(note).toMatch(/1 formula the preview cannot evaluate/);
+    expect(note).toMatch(/kept the workbook's computed value/);
   });
 
   it("leaves the grid exactly as it was when the evaluator is unavailable", async () => {

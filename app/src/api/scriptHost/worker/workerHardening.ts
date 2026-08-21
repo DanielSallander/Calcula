@@ -47,6 +47,23 @@ function neuter(target: object, name: string): void {
 }
 
 /**
+ * How many capped timers are live right now. 0 until `hardenAmbientGlobals`
+ * has installed the caps (nothing user-authored can have set a timer before
+ * that, so 0 is also the true answer then).
+ *
+ * WHY IT IS OBSERVABLE (§5c.1): the preview's quiescence detection counts
+ * broker calls in flight, and a handler suspended on `setTimeout` has NONE —
+ * so its tail work was invisible, the drain declared the realm idle, and a
+ * correct script's final writes were silently missing from the diff. The pong
+ * now carries this count, and the preview treats live timers as "not quiet".
+ */
+let readLiveTimerCount: () => number = () => 0;
+
+export function liveTimerCount(): number {
+  return readLiveTimerCount();
+}
+
+/**
  * Remove ambient network/storage authority and install rate-capped timers.
  * MUST be the first thing a worker bootstrap runs, before any user/extension
  * source is compiled or evaluated.
@@ -73,6 +90,7 @@ export function hardenAmbientGlobals(): void {
   const intrinsicClearTimeout = self.clearTimeout.bind(self);
   const intrinsicClearInterval = self.clearInterval.bind(self);
   const liveTimers = new Set<number>();
+  readLiveTimerCount = () => liveTimers.size;
 
   const cappedSetTimeout = (handler: (...a: unknown[]) => void, timeout?: number, ...args: unknown[]): number => {
     if (liveTimers.size >= MAX_LIVE_TIMERS) {

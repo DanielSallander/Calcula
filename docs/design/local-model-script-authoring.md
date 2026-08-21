@@ -657,6 +657,79 @@ parity: a formula the SNAPSHOT supplied carries the workbook's own value, a form
 writes gets a computed one, and what remains is that dependents settle a phase later than the
 product would settle them.
 
+### 5c.2 The adversarial review of 5c/5c.1 — 12 verified findings, ALL FIXED 2026-08-21
+
+A six-lens adversarial pass (28 raw findings, 12 verified: 10 confirmed + 2 partial) over the
+preview work found that **each of §5c.1's three features shipped with a false-verdict defect of
+exactly the class the rung exists to prevent** — invisible to every unit suite because the defects
+live in the seams the tests double. The safety invariant survived all six lenses: no confirmed
+path writes the document, acquires a grant, raises consent, or leaves audit residue. What did not
+survive, and how each fix holds:
+
+**Hooks (the worst cluster — three findings stacked).** (1) Every non-click hook fired with
+`payload: undefined` where the product delivers rich shapes (`onSelectionChange` gets
+`{startRow,…,areas}`; `cell.onEdit`'s own SHIM dereferences `payload.changes` before user code
+runs) — so a correct destructuring handler threw and the draft was rejected "FAILS when run": the
+founding failure mode, reproduced for every type except button. The rule is now the decline
+discipline applied to payloads (`SYNTHESIZABLE_HOOK_PAYLOADS`, runShape.ts): a hook whose payload
+cannot be synthesized faithfully is never fired — skipped WITH A NOTE when offered
+opportunistically, the run inapplicable when named explicitly, a HARNESS GAP in the corpus driver.
+(2) The generated surface DEDUPED `on*` chains across interfaces (dedup key omitted `iface`), so
+`objectHooksFor` returned NOTHING for slicer/table/timeline/row while the worker really registers
+their hooks — a throwing row handler graded clean. The dedup key now carries the interface (894
+rows, was 669), the per-type own-member floor for the prompt ranker was rebuilt from per-iface rows
+(it had the same single-owner blindness), and `OBJECT_TYPE_CONTEXTS` is emitted into the policy so
+the runtime stops deriving interfaces from a naming convention — which (3) was itself wrong for
+`textbox` (BaseObjectContext), and the objectHooks guard's `NO_OWN_CONTEXT` list had ENSHRINED the
+generator defect for `row` instead of catching it. The guard now pins recovered per-type hook
+LISTS against what `contextShims` registers.
+
+**Formula recalc (it was destroying truth to add it).** The settle-point recalc re-evaluated EVERY
+formula against a one-sheet, name-less, UDF-less grid and OVERWROTE the workbook's correct cached
+displays — `=Sheet2!A1` became `#REF!` where the snapshot carried 250, even for drafts that wrote
+nothing. And the flat 8-pass budget was exceeded by ordinary sheets (Jacobi iteration settles one
+link per pass; a 50-row running-total column is depth 50 — the depth belongs to the WORKBOOK), so
+such sheets ended "unconverged" with partial sums stored and a note blaming a cycle they did not
+have. Three rules now hold, each pinned: store only on CONVERGENCE (budget = formulas+1, capped
+512); store NOTHING when anything SPILLS (the raw eval API preserves array-ness; `to_cell_value`
+would have collapsed a spill to its first element); a computed ERROR never replaces an existing
+display (it may fill an empty one — a script-written `=1/0` genuinely errors). Plus:
+`seed_cell_value` now types exact TRUE/FALSE as Booleans (as Text, `=IF(A1,…)` computed against a
+string), the truncated-copy case skips recalc entirely, and the non-convergence note no longer
+latches across a later settle that converged.
+
+**The async truth-holes.** A hook error surfacing during `onSettle`'s IPC await was attributed to
+the NEXT hook — or, after the last fire, dropped, grading a throwing script as a clean run; the
+error latch is now checked after every phase including a last line before `finish(true)`. And
+quiescence-by-calls could not see a handler suspended on `setTimeout`, so `await sleep(100);
+write(…)` lost its tail write from the diff. **The first fix for that was itself wrong twice**,
+which §5c's method section should remember: requiring the pong's live-timer count to reach zero
+wedged every dev-mode preview at the budget — the count includes realm INFRASTRUCTURE (Vite's HMR
+client holds a permanent retry timer in dev workers), and timer bookkeeping cannot tell a script's
+sleep from the plumbing's. The mechanism is now the realm's own completion signal:
+`{t:"eventDone"}` posted when the dispatch promise settles (after every chained await, sleeps
+included), awaited before the drain; the timer count survives only as DIAGNOSIS, baselined against
+the lowest value seen, to choose between "did not complete" and the undecidable-decline for a
+script legitimately waiting on its own timer.
+
+**Mirrors.** Every preview mounted with EMPTY mirror seeds, so mirror-backed members answered
+placeholder fallbacks — `context.properties.sheetCount` read 0 against a real 3-sheet workbook —
+with NO broker call, the one kind of wrong answer the gap discipline could not see. Previews now
+mount STRICT (`MountSpec.snapshot.strict`): what the preview knows is seeded (sheetNames,
+sheetCount), and an unseeded mirror read throws a `PREVIEW_MIRROR_GAP`-marked error that the
+preview converts into a decline naming the path (a harness gap in the corpus driver).
+
+**Measurement.** The coverage test's `chain -> broker` map let duplicated chains CLOBBER each
+other (`setCellValue` routes to `sheet.setCellValue` on SheetContext and `object.setState` on
+TableContext; the map kept whichever sorted last) — it is now a multimap and a chain counts served
+only when EVERY route is. Corrected numbers: prompt core 19/19 and corpus 100% (unchanged, still
+asserted); addressable coverage 55.3% @8k / 74.6% @4k.
+
+Verification: 107,746 unit tests / 839 files, 11 Rust tests (deep-chain convergence, spill
+refusal, boolean IF among them), 14 E2E cases — four new discriminators, one per fix cluster —
+and three sabotage rounds, each resurrecting the original defect verbatim (the lost tail write,
+the error clobber, `Cannot destructure property 'startRow' of 'undefined'`).
+
 ### The same three shapes, swept for repo-wide — 2026-08-20
 
 Finding three defects stacked on each other is evidence about the CLASS, not just the instances, so

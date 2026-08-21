@@ -53,10 +53,23 @@ function servedMethods(): Set<string> {
   return new Set([...body.matchAll(/^\s*case "([a-z]+\.[A-Za-z0-9]+)":/gm)].map((m) => m[1]));
 }
 
-/** chain -> broker method, for every member that crosses the broker at all. */
-const brokerOf = new Map<string, string>(
-  SCRIPT_SURFACE.filter((m) => m.broker).map((m) => [m.chain, m.broker as string]),
-);
+/**
+ * chain -> EVERY broker method it can dispatch to. A MULTIMAP, not a map: the
+ * same chain routes differently per interface (`setCellValue` is
+ * `sheet.setCellValue` on SheetContext and `object.setState` on TableContext),
+ * and a single-valued map let the last row CLOBBER the first — the measurement
+ * then scored the object.setState route as "served" because the sheet route
+ * happened to sort later (adversarial review, 2026-08-21). A chain counts as
+ * served only when ALL of its routes are; a mixed chain is a visible gap,
+ * which errs toward understating coverage rather than hiding a decline.
+ */
+const brokersOf = new Map<string, Set<string>>();
+for (const m of SCRIPT_SURFACE) {
+  if (!m.broker) continue;
+  const set = brokersOf.get(m.chain) ?? new Set<string>();
+  set.add(m.broker);
+  brokersOf.set(m.chain, set);
+}
 
 /**
  * Split a set of chains into what the preview can serve and what it cannot.
@@ -85,9 +98,9 @@ function classify(chains: Iterable<string>, served: Set<string>) {
       else unknown.push(chain);
       continue;
     }
-    const broker = brokerOf.get(member);
-    if (!broker) ok.push(chain); // worker-local; no backend involved
-    else (served.has(broker) ? ok : gapped).push(chain);
+    const routes = brokersOf.get(member);
+    if (!routes) ok.push(chain); // worker-local; no backend involved
+    else ([...routes].every((b) => served.has(b)) ? ok : gapped).push(chain);
   }
   return { ok: ok.sort(), gapped: gapped.sort(), unknown: unknown.sort() };
 }
@@ -99,7 +112,13 @@ describe("the preview serves what the model is actually taught", () => {
   it("reads a real backend, so the coverage below is not measured against nothing", () => {
     expect(served.size).toBeGreaterThan(30);
     expect(served.has("api.setCellValue")).toBe(true);
-    expect(brokerOf.size).toBeGreaterThan(300);
+    expect(brokersOf.size).toBeGreaterThan(300);
+    // The clobber fingerprint (adversarial review): these chains carry
+    // CONFLICTING per-interface routes, and a single-valued map hid one.
+    expect([...(brokersOf.get("setCellValue") ?? [])].sort()).toEqual([
+      "object.setState",
+      "sheet.setCellValue",
+    ]);
   });
 
   /**
@@ -176,11 +195,13 @@ describe("the preview serves what the model is actually taught", () => {
      */
     const outOfReach = (chain: string): boolean => {
       const member = callableAncestorOf(chain);
-      const broker = member ? brokerOf.get(member) : undefined;
-      if (!broker) return false;
+      const routes = member ? brokersOf.get(member) : undefined;
+      if (!routes) return false;
       // Capability-bearing is derived from the ALLOWLIST rather than listed, so
-      // the set cannot drift as capabilities are added.
-      return !!ALLOWLIST[broker]?.capability || UNPREVIEWABLE.has(broker);
+      // the set cannot drift as capabilities are added. EVERY route must be out
+      // of reach: a chain servable through one interface and not another is an
+      // addressable gap, not a structural one.
+      return [...routes].every((b) => !!ALLOWLIST[b]?.capability || UNPREVIEWABLE.has(b));
     };
 
     const rows: string[] = [];
@@ -263,8 +284,8 @@ describe("the preview serves what the model is actually taught", () => {
   it("reports the coverage rate over the whole author-facing surface", () => {
     const everyChain = SCRIPT_SURFACE.map((m) => m.chain);
     const { ok, gapped } = classify(everyChain, served);
-    const brokerBearing = ok.filter((c) => brokerOf.has(c)).length + gapped.length;
-    const pct = ((ok.filter((c) => brokerOf.has(c)).length / brokerBearing) * 100).toFixed(1);
+    const brokerBearing = ok.filter((c) => brokersOf.has(c)).length + gapped.length;
+    const pct = ((ok.filter((c) => brokersOf.has(c)).length / brokerBearing) * 100).toFixed(1);
 
     // eslint-disable-next-line no-console
     console.log(

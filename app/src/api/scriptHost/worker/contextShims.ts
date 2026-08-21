@@ -9,7 +9,7 @@
 //          capability shaping here is COSMETIC — enforcement is host-side.
 
 import type { MountSpec, W2H, RpcErrorShape } from "../protocol";
-import { callDeadlineMs, MAX_INFLIGHT_CALLS, RUN_TARGET_EXPOSED_PREFIX } from "../protocol";
+import { callDeadlineMs, MAX_INFLIGHT_CALLS, PREVIEW_MIRROR_GAP, RUN_TARGET_EXPOSED_PREFIX } from "../protocol";
 import { describeError } from "./workerHardening";
 import type {
   ScriptDialogFormSpec,
@@ -772,7 +772,19 @@ export function registerRunTargetHandler(
 
 function mirror<T>(rt: WorkerRuntime, path: string, fallback: T): T {
   const v = rt.mirrors.get(path);
-  return v === undefined ? fallback : (v as T);
+  if (v !== undefined) return v as T;
+  // STRICT mounts (previews, §5c.1): an unseeded mirror read must GAP, not
+  // answer. In a real mount the fallback is a placeholder the host overwrites
+  // with {t:"mirror"} pushes within moments; a preview pushes nothing, so here
+  // the fallback would be a fabricated answer (sheetCount 0 against a real
+  // 3-sheet workbook) that crosses no broker — the one kind of wrong answer
+  // the gap discipline could not see. The marker-prefixed throw surfaces as
+  // {t:"error"}, and the preview converts it into a decline rather than
+  // reporting it as the script's failure.
+  if (rt.spec.snapshot.strict === true) {
+    throw new Error(`${PREVIEW_MIRROR_GAP}${path}`);
+  }
+  return fallback;
 }
 
 // ============================================================================

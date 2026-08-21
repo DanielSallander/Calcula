@@ -40,6 +40,7 @@
 //          safety-by-absence list.
 
 import { hostPreviewScript, type PreviewRunResult } from "../host";
+import { PREVIEW_MIRROR_GAP } from "../protocol";
 import { ALLOWLIST } from "../allowlist";
 import { createPreviewBackend, createPreviewState, type PreviewStubs } from "./backend";
 import { PreviewGrid } from "./grid";
@@ -118,13 +119,23 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
   // back saw an empty display, and a script that changed an input left every
   // dependent holding its pre-run value. Recomputed at each settle point by the
   // Rust evaluator (pure over the cells handed to it) — see formulaEval.ts for
-  // why not per-read, and why a failure here is silent.
+  // why not per-read, why a failure here is silent, and the honesty rules the
+  // adversarial review forced (store only on convergence; a computed ERROR
+  // never replaces a workbook value).
+  //
+  // NOT over a TRUNCATED copy (§5c.1): a formula whose references extend past
+  // the copied rectangle would recompute from partial data and REPLACE the
+  // right number the snapshot carried — the recalc would be destroying truth
+  // to add it. The capped copy already carries its own note.
   const evaluate = req.evaluator ?? backendEvaluator;
   const sheetName = snapshot.sheetNames[snapshot.activeSheet] ?? "Sheet1";
-  let unsettledFormulas: string | undefined;
+  let formulaNote: string | undefined;
   const onSettle = async (): Promise<void> => {
-    unsettledFormulas =
-      (await recalculatePreviewGrid(snapshot.grid, sheetName, evaluate)) ?? unsettledFormulas;
+    if (snapshot.truncated) return;
+    // Plain assignment, never a `??`-latch: each settle's verdict REPLACES the
+    // last, so a transient non-convergence during setup does not survive a
+    // final pass that settled cleanly (and vice versa the LAST word wins).
+    formulaNote = await recalculatePreviewGrid(snapshot.grid, sheetName, evaluate);
   };
 
   let run: PreviewRunResult;
@@ -136,6 +147,19 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
       scriptName: "(preview)",
       tier: req.tier ?? "unlocked",
       backend,
+      // STRICT mirrors (§5c.1): what the preview KNOWS is seeded, and every
+      // unseeded mirror read GAPS instead of answering its placeholder
+      // fallback. Without this, `context.properties.sheetCount` read 0 against
+      // a real 3-sheet workbook — a fabricated answer that crossed no broker,
+      // so the gap discipline could never see it, and a correct draft branching
+      // on it "ran and changed nothing".
+      snapshot: {
+        strict: true,
+        properties: {
+          "workbook.sheetCount": snapshot.sheetNames.length,
+          "workbook.sheetNames": [...snapshot.sheetNames],
+        },
+      },
       // No explicit event means "whatever this object type can fire" — the
       // draft's own registrations then decide what actually runs. A caller that
       // NAMES one is asserting the script must handle it, so absence is a
@@ -173,6 +197,32 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
     );
   }
 
+  // The same discipline for the three ways a RUN can be unjudgeable (§5c.1) —
+  // each is a fact about the preview, and a verdict built on it would be about
+  // the emulator again:
+  //  - an unseeded MIRROR read (the strict-mount throw carries a marker);
+  //  - an explicitly-named event whose payload cannot be synthesized;
+  //  - a budget that expired while the script legitimately waited on timers.
+  const mirrorGap = [run.error, ...state.output].find((s) => s?.includes(PREVIEW_MIRROR_GAP));
+  if (mirrorGap) {
+    const path = mirrorGap.slice(mirrorGap.indexOf(PREVIEW_MIRROR_GAP) + PREVIEW_MIRROR_GAP.length);
+    return declined(
+      `the preview cannot serve context reads of "${path.trim()}", so it has nothing to say ` +
+        `about this script`,
+      [...state.output],
+    );
+  }
+  if (run.unsupportedEvent) {
+    return declined(
+      `the preview cannot synthesize the payload the "${run.unsupportedEvent}" hook receives, ` +
+        `so it cannot exercise the handler this run was asked to exercise`,
+      [...state.output],
+    );
+  }
+  if (run.undecidable) {
+    return declined(run.undecidable, [...state.output]);
+  }
+
   // A CAPABILITY call is a preview limitation, not a script defect.
   //
   // The preview declares nothing, so the broker's R19 ceiling refuses every
@@ -203,12 +253,22 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
     (r) => `[preview] ${r.method} was refused: ${r.message}`,
   );
 
+  // A registered handler the preview chose not to fire is REPORTED, so an
+  // unexercised branch can never read as an exercised-and-clean one. This is a
+  // note rather than a decline: everything that DID run ran faithfully, and
+  // the reviewer decides whether the unfired handler is where the work lives.
+  const skippedNotes = run.skippedHooks.map(
+    (h) =>
+      `[preview] the ${h} handler was registered but not exercised — the preview cannot ` +
+      `synthesize the payload it receives`,
+  );
+
   return buildReport({
     ok: run.ran,
     error: run.error,
     durationMs: Date.now() - startedAt,
     changes: diffGrid(before, snapshot.grid),
-    output: [...state.output, ...refusalNotes],
+    output: [...state.output, ...refusalNotes, ...skippedNotes],
     readBack: (req.readBack ?? []).map((r) => ({
       row: r.row,
       col: r.col,
@@ -217,12 +277,15 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
     // A capped copy still produces a REAL verdict — the script ran against real
     // data, just not all of it — so this is a note rather than a decline. It is
     // said out loud because a reviewer who cannot see the bound would read
-    // "changed 3 cells" as a statement about the whole sheet.
+    // "changed 3 cells" as a statement about the whole sheet. When the copy was
+    // capped, formulas were deliberately NOT re-evaluated (see onSettle above),
+    // and that is said too.
     note: [
       snapshot.truncated
-        ? `only the first ${MAX_SNAPSHOT_CELLS} cells of the sheet were copied for this preview`
+        ? `only the first ${MAX_SNAPSHOT_CELLS} cells of the sheet were copied for this preview, ` +
+          `and formulas were not re-evaluated over the partial copy`
         : undefined,
-      unsettledFormulas,
+      formulaNote,
     ]
       .filter(Boolean)
       .join("; ") || undefined,

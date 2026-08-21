@@ -35,9 +35,16 @@ export interface PreviewFormulaValue {
 
 export interface PreviewEvalResult {
   values: PreviewFormulaValue[];
-  /** False when the pass budget ran out — a cycle, or a very deep chain. */
+  /** False when the pass budget ran out — a cycle, or a volatile function. */
   converged: boolean;
   passes: number;
+  /**
+   * Dynamic-array (spilling) formulas the evaluator refused to collapse.
+   * A spill writes its NEIGHBORS too, which a single-cell result cannot
+   * express — the first element alone would be a wrong answer wearing the
+   * right cell. When any formula spills, no values are stored at all.
+   */
+  spilled: number;
 }
 
 /** The evaluator, injected so this module is testable with no backend. */
@@ -56,12 +63,27 @@ export async function backendEvaluator(
 }
 
 /**
- * Recompute every formula in the grid and store the results as cached values.
+ * Recompute every formula in the grid and store the results as cached values —
+ * under three honesty rules the adversarial review forced (§5c.1), each of
+ * which exists because the first version broke it and thereby DESTROYED truth
+ * the snapshot already carried:
  *
- * Returns a note when the values are NOT trustworthy as final — a cycle or a
- * chain deeper than the budget — so the caller can say so rather than present
- * a half-iterated number as the answer. Returns undefined when there was
- * nothing to do or everything settled.
+ *  1. STORE ONLY ON CONVERGENCE. A half-iterated fixed point is a set of
+ *     numbers the workbook would never show; presenting them made a plain
+ *     running-total column read as garbage. An unconverged pass stores nothing
+ *     and says so.
+ *  2. STORE NOTHING WHEN ANYTHING SPILLS. A dynamic-array formula writes its
+ *     neighbors; a single-cell result cannot express that, and its first
+ *     element alone is a wrong answer wearing the right cell.
+ *  3. A COMPUTED ERROR NEVER REPLACES AN EXISTING VALUE. The evaluator sees
+ *     one sheet, no named ranges, no UDFs — so `=Sheet2!A1` computes #REF!
+ *     where the workbook computed 250. An error result may FILL an empty
+ *     display (a script-written `=1/0` genuinely errors), but overwriting a
+ *     workbook value with one reports the evaluator's horizon as the
+ *     script's defect.
+ *
+ * Returns a note when the values could not be (fully) stored, so the report
+ * can say so; undefined when there was nothing to do or everything settled.
  */
 export async function recalculatePreviewGrid(
   grid: PreviewGrid,
@@ -79,11 +101,33 @@ export async function recalculatePreviewGrid(
     return undefined;
   }
 
+  if (result.spilled > 0) {
+    return (
+      `${result.spilled} formula${result.spilled === 1 ? "" : "s"} produce${result.spilled === 1 ? "s" : ""} ` +
+      `a spilled array, which the preview cannot evaluate — formula values shown are the ` +
+      `workbook's last computed ones`
+    );
+  }
+  if (!result.converged) {
+    return (
+      `the sheet's formulas did not settle within the evaluation budget (${result.passes} passes — ` +
+      `a circular reference, or a volatile function like RAND/NOW) — formula values shown are ` +
+      `the workbook's last computed ones`
+    );
+  }
+
+  let kept = 0;
   for (const v of result.values) {
+    const existing = grid.cachedDisplay(v.row, v.col);
+    const isError = v.display.startsWith("#");
+    if (isError && existing !== undefined && !existing.startsWith("#")) {
+      kept++;
+      continue;
+    }
     grid.setCachedDisplay(v.row, v.col, v.display);
   }
-  return result.converged
-    ? undefined
-    : `some formulas did not settle in ${result.passes} passes (a circular reference, or a very deep chain), ` +
-        `so their values are not final`;
+  return kept > 0
+    ? `${kept} formula${kept === 1 ? "" : "s"} the preview cannot evaluate (references outside ` +
+        `this sheet, or functions it does not have) kept the workbook's computed value${kept === 1 ? "" : "s"}`
+    : undefined;
 }

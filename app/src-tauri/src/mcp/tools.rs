@@ -1182,9 +1182,23 @@ pub struct CellSeed {
 }
 
 /// Type a seed value the way a fixture means it.
+///
+/// Exact "TRUE"/"FALSE" become Booleans, matching both the edit pipeline's
+/// typing of user entry and `cell_input_string`'s canonical rendering of a
+/// Boolean cell — which is exactly the spelling the preview grid sends back
+/// here. Typing them as Text made every formula over a boolean cell compute
+/// against a string (`=IF(A1,…)` → #VALUE!) where the workbook computes a
+/// real answer (§5c.1). Exact-match only: "true" and "True" stay Text, the
+/// conservative reading of an ambiguous spelling.
 pub(crate) fn seed_cell_value(raw: &str) -> engine::cell::CellValue {
     if raw.is_empty() {
         return engine::cell::CellValue::Empty;
+    }
+    if raw == "TRUE" {
+        return engine::cell::CellValue::Boolean(true);
+    }
+    if raw == "FALSE" {
+        return engine::cell::CellValue::Boolean(false);
     }
     match raw.parse::<f64>() {
         Ok(n) if n.is_finite() => engine::cell::CellValue::Number(n),

@@ -9,7 +9,7 @@
 
 import { MAX_SANDBOX_HIT_RECTS, RUN_TARGET_EXPOSED_PREFIX, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
 import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, registerRunTargetHandler, type WorkerRuntime } from "./contextShims";
-import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
+import { hardenAmbientGlobals, forwardConsole, liveTimerCount, safeClone } from "./workerHardening";
 import { DEBUG_GLOBAL, instrumentForDebug } from "./debugInstrument";
 import { createDebugRuntime, type DebugController } from "./debugRuntime";
 import {
@@ -456,7 +456,13 @@ self.onmessage = (e: MessageEvent<H2W>) => {
         // here drops nothing — it only stops a duplicate unhandled rejection.
         void Promise.resolve(
           trackActivity(msg.hook, () => dispatchHookEvent(rt, msg.hook, msg.payload, post)),
-        ).catch(() => undefined);
+        )
+          .catch(() => undefined)
+          // Completion, not success: failures were already reported by
+          // dispatchEvent itself. The ack is what lets a preview wait for a
+          // handler that sleeps between calls instead of declaring the realm
+          // idle mid-sleep (§5c.1).
+          .finally(() => post({ t: "eventDone", hook: msg.hook }));
       }
       break;
     }
@@ -494,7 +500,9 @@ self.onmessage = (e: MessageEvent<H2W>) => {
       }
       break;
     case "ping":
-      post({ t: "pong", seq: msg.seq });
+      // timers: live capped timers, so the preview can refuse to call a realm
+      // "quiet" while a handler is merely suspended on setTimeout (§5c.1).
+      post({ t: "pong", seq: msg.seq, timers: liveTimerCount() });
       break;
   }
 };

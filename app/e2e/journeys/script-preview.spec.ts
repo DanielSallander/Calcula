@@ -343,6 +343,120 @@ export function setup(context) {
     expect(report.output.join("\n")).toContain(`read: ${SEED}`);
   });
 
+  test("waits for a handler that sleeps between calls — its tail write is COUNTED", async ({ grid }) => {
+    const page = grid.page;
+    // §5c.1 C9. `await sleep(100)` suspends the handler with NO broker call in
+    // flight, so quiescence-by-calls declared the realm idle and the tail write
+    // was silently missing from the diff — "changed nothing" about a correct
+    // script. The pong now carries the realm's live-timer count and the settle
+    // loop waits for it to reach zero.
+    const report = await preview(
+      page,
+      `export function setup(context) {
+  context.onClick(async () => {
+    const v = await context.api.getCellValue(${TARGET.row}, ${TARGET.col});
+    await new Promise((r) => setTimeout(r, 120));
+    context.api.setCellValue(1, ${TARGET.col}, "tail:" + v);
+  });
+}
+`,
+      "onClick",
+    );
+    expect(report.applicable, `declined: ${report.declinedReason}`).toBe(true);
+    expect(report.ok, `failed: ${report.error}`).toBe(true);
+    expect(report.totalChanges, "the write AFTER the sleep is part of the run").toBe(1);
+    expect(report.changes[0]).toMatchObject({ row: 1, col: TARGET.col, after: `tail:${SEED}` });
+  });
+
+  test("attributes a throw that lands AFTER the settle to the hook that threw", async ({ grid }) => {
+    const page = grid.page;
+    // §5c.1 C8. The rejection surfaces only when the timer fires — after the
+    // drain went quiet. Unchecked after onSettle, it was either blamed on the
+    // NEXT hook or dropped entirely, grading a throwing script as a clean run.
+    const report = await preview(
+      page,
+      `export function setup(context) {
+  context.onClick(async () => {
+    await new Promise((r) => setTimeout(r, 80));
+    throw new Error("boom-after-timer");
+  });
+}
+`,
+      "onClick",
+    );
+    expect(report.applicable, `declined: ${report.declinedReason}`).toBe(true);
+    expect(report.ok, "a throwing handler must never grade as a clean run").toBe(false);
+    expect(report.error ?? "").toContain("boom-after-timer");
+    expect(report.error ?? "").toContain("onClick");
+  });
+
+  test("SKIPS a hook whose payload it cannot synthesize — and says so — instead of firing undefined at it", async ({ grid }) => {
+    const page = grid.page;
+    // §5c.1 A1. The product delivers {startRow, ..., areas} to onSelectionChange;
+    // the preview cannot synthesize that, and firing the handler with undefined
+    // made this CORRECT destructuring draft throw -> "FAILS when run" -> false
+    // rejection. Offered opportunistically (no explicit event), the hook is now
+    // skipped with a note; the click handler still runs and is judged.
+    const report = await page.evaluate(
+      async ({ source }) => {
+        const mod = (await (
+          window as unknown as { __calcImport: (u: string) => Promise<unknown> }
+        ).__calcImport(new URL("/src/api/scriptHost/scriptPreview/index.ts", document.baseURI).href)) as {
+          previewObjectScript: (req: unknown) => Promise<unknown>;
+        };
+        return (await mod.previewObjectScript({ source, objectType: "sheet" })) as unknown;
+      },
+      {
+        source: `export function setup(context) {
+  context.onSelectionChange(({ startRow, startCol }) => {
+    context.log("moved to", startRow, startCol);
+  });
+}
+`,
+      },
+    ) as DryRunReport;
+    expect(report.applicable, `declined: ${report.declinedReason}`).toBe(true);
+    expect(report.ok, `a correct handler must not be fired with a guessed payload: ${report.error}`).toBe(true);
+    expect(report.output.join("\n")).toContain("onSelectionChange handler was registered but not exercised");
+  });
+
+  test("serves the mirrors it seeded and DECLINES the ones it cannot", async ({ grid }) => {
+    const page = grid.page;
+    // §5c.1 D. Every preview used to mount with EMPTY mirror seeds, so
+    // context.properties.sheetCount read a fabricated 0 with no broker call —
+    // a wrong answer the gap discipline could not see. Known facts are now
+    // seeded; everything else gaps.
+    const run = (source: string) =>
+      page.evaluate(
+        async ({ source }) => {
+          const mod = (await (
+            window as unknown as { __calcImport: (u: string) => Promise<unknown> }
+          ).__calcImport(new URL("/src/api/scriptHost/scriptPreview/index.ts", document.baseURI).href)) as {
+            previewObjectScript: (req: unknown) => Promise<unknown>;
+          };
+          return (await mod.previewObjectScript({ source, objectType: "workbook" })) as unknown;
+        },
+        { source },
+      ) as Promise<DryRunReport>;
+
+    const seeded = await run(`export function setup(context) {
+  context.log("sheets=" + context.properties.sheetCount);
+}
+`);
+    expect(seeded.applicable, `declined: ${seeded.declinedReason}`).toBe(true);
+    expect(seeded.ok, `failed: ${seeded.error}`).toBe(true);
+    // The REAL count, not the placeholder 0 the fallback used to fabricate.
+    expect(seeded.output.join("\n")).toMatch(/sheets=[1-9]/);
+
+    const unseeded = await run(`export function setup(context) {
+  context.log("title=" + context.properties.title);
+}
+`);
+    expect(unseeded.applicable, "an unseeded mirror read is a gap, not an answer").toBe(false);
+    expect(unseeded.declinedReason ?? "").toContain("workbook.title");
+    expect(unseeded.ok, "a decline is not a failure").toBe(true);
+  });
+
   test("DECLINES rather than judging when the backend cannot serve a member", async ({ grid }) => {
     const page = grid.page;
     // The gap discipline, end to end. `api.setActiveSheet` is a real member the
