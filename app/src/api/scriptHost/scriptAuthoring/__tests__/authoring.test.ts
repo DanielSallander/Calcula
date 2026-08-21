@@ -13,7 +13,7 @@ import { CANARY_TASKS } from "../../generated/canaryTasks";
 const GOOD = [
   "```javascript",
   "export function setup(context) {",
-  "  context.expose('onClick', async () => {",
+  "  context.onClick(async () => {",
   "    await context.api.setCellValue(0, 0, 'hi');",
   "  });",
   "}",
@@ -23,7 +23,7 @@ const GOOD = [
 const INVENTED = [
   "```javascript",
   "export function setup(context) {",
-  "  context.expose('onClick', async () => {",
+  "  context.onClick(async () => {",
   "    await context.api.setCellValu(0, 0, 'hi');",
   "  });",
   "}",
@@ -33,7 +33,7 @@ const INVENTED = [
 const UNDECLARED = [
   "```javascript",
   "export function setup(context) {",
-  "  context.expose('onClick', async () => {",
+  "  context.onClick(async () => {",
   "    await context.caps.fetch('https://example.com');",
   "  });",
   "}",

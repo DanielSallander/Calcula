@@ -134,8 +134,9 @@ export function validateScriptSource(source: string): ValidationReport {
       code: "no-entry-point",
       message:
         "The script defines no `setup` function, so nothing would run when it is mounted. " +
-        "Wrap the logic in `export function setup(context) { ... }` and register handlers " +
-        "with `context.expose(name, handler)`.",
+        "Wrap the logic in `export function setup(context) { ... }`, register event handlers " +
+        "through the object's hooks (a button's click is `context.onClick(handler)`), and use " +
+        "`context.expose(name, handler)` only for named commands.",
     });
   }
 

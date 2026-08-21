@@ -28,6 +28,7 @@
 
 import {
   SURFACE_ENTRIES,
+  OWN_CHAINS_BY_OBJECT_TYPE,
   chainsForObjectType,
   isKnownObjectType,
   type SurfaceEntry,
@@ -229,12 +230,36 @@ export function rankSurface(objectType: string, hints?: readonly string[]): Surf
     : [...SURFACE_ENTRIES];
 
   const terms = hintTerms(hints);
+  // The object's OWN members — a button has exactly `instanceId` and `onClick`.
+  // They exist BECAUSE the script is attached to this object, and one of them is
+  // usually the only way the script ever RUNS: a button script without
+  // `context.onClick(handler)` mounts and does nothing, clicked or not. Hint
+  // ranking cannot be trusted to keep them (no user says "onClick"), and at a 4k
+  // budget five canary tasks measurably lost the hook behind hinted grid
+  // members — a prompt on which the correct answer was unwritable.
+  // Guarded by isKnownObjectType, not `?? []`: the map is a plain object, so
+  // a prototype-key objectType ("constructor", "toString") would read an
+  // inherited FUNCTION here, dodge the ?? and throw inside new Set — taking
+  // down the documented unknown-type whole-surface fallback with it.
+  const own = new Set<string>(isKnownObjectType(objectType) ? OWN_CHAINS_BY_OBJECT_TYPE[objectType] : []);
   // Ordered comparison rather than one blended number: each key is a separate
   // claim, and blending them into a score made it impossible to say why a member
   // had been dropped.
   const keys = (e: SurfaceEntry): number[] => {
     const group = GROUP_ORDER.indexOf(e.group);
     return [
+      // 0. The object's own members outrank everything, hints included.
+      own.has(e.chain) ? 0 : 1,
+      // 0b. Then the FLOOR — context group, core set, capability index —
+      //     ahead of hint pressure. Floor membership used to put these in the
+      //     right BUCKET but still ordered by hint tier, so a hint-heavy task
+      //     flooded the budget with tier-0 matches until the floor itself fell
+      //     out. Measured: at the runner's own 8k default budget,
+      //     grid-sum-in-script's prompt held every api.set* sibling EXCEPT
+      //     `api.setCellValue`. A floor is a floor only if nothing can rank it
+      //     out; the keys below keep the floor's own internal order (index →
+      //     context → core grid) exactly as it was.
+      e.group === "context" || CORE.has(e.chain) || CAPABILITY_INDEX.has(e.chain) ? 0 : 1,
       // 1. What must be present for the task to be answerable at all:
       //      * the object's OWN members and the core set, always;
       //      * anything the request named precisely (a last-segment match);

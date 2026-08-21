@@ -22,9 +22,10 @@
 // The provider must be one `ai_providers_list` knows, and its key (if any) must
 // already be stored — this script never asks for or handles a secret.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -76,7 +77,22 @@ async function loadAppModules() {
   const appRequire = createRequire(path.join(appRoot, "package.json"));
   const { build } = await import(pathToFileURL(appRequire.resolve("esbuild")).href);
 
-  const outDir = path.join(appRoot, "node_modules", ".cache", `calcula-eval-${process.pid}`);
+  const cacheRoot = path.join(appRoot, "node_modules", ".cache");
+  // Sweep bundle dirs leaked by crashed runs: the exit handler cannot fire on
+  // a SIGKILL or a task-manager kill, pids recycle, and nothing else reclaims
+  // them. Anything older than an hour is not a concurrent run.
+  try {
+    for (const entry of readdirSync(cacheRoot)) {
+      if (!entry.startsWith("calcula-eval-")) continue;
+      const dir = path.join(cacheRoot, entry);
+      if (Date.now() - statSync(dir).mtimeMs > 60 * 60 * 1000) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  } catch {
+    /* a missing cache dir or a locked stale dir is not worth failing the run */
+  }
+  const outDir = path.join(cacheRoot, `calcula-eval-${process.pid}`);
   mkdirSync(outDir, { recursive: true });
   const outfile = path.join(outDir, "eval.mjs");
   const entry = path.join(outDir, "entry.ts");
@@ -84,6 +100,7 @@ async function loadAppModules() {
     entry,
     [
       `export * from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptEval/index.ts").replace(/\\/g, "/"))};`,
+      `export { runTaskOutcome } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptEval/harness.ts").replace(/\\/g, "/"))};`,
       `export { buildSurfacePrompt } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptPrompt/index.ts").replace(/\\/g, "/"))};`,
       `export { authorScript } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptAuthoring/index.ts").replace(/\\/g, "/"))};`,
     ].join("\n"),
@@ -99,12 +116,20 @@ async function loadAppModules() {
     logLevel: "silent",
   });
   const mod = await import(`file://${outfile.replace(/\\/g, "/")}`);
-  rmSync(outDir, { recursive: true, force: true });
-  return mod;
+  // The bundle stays on disk for the grading subprocesses; removed at exit.
+  process.on("exit", () => {
+    try {
+      rmSync(outDir, { recursive: true, force: true });
+    } catch {
+      /* a transient lock on a temp dir is not worth failing the run over */
+    }
+  });
+  return { mod, bundlePath: outfile };
 }
 
-const { scoreCandidate, extractScript, summarize, referenceSource, buildSurfacePrompt, authorScript } =
-  await loadAppModules();
+const { mod: appModules, bundlePath } = await loadAppModules();
+const { scoreCandidate, gradeOutcome, extractScript, summarize, referenceSource, buildSurfacePrompt, authorScript } =
+  appModules;
 
 const corpus = JSON.parse(readFileSync(path.join(here, "tasks.json"), "utf8"));
 const tasks = corpus.tasks.filter((t) => (canaryOnly ? t.canary : true));
@@ -155,10 +180,170 @@ async function complete(systemPrompt, userPrompt) {
   return body.choices?.[0]?.message?.content ?? "";
 }
 
+// ---------------------------------------------------------------------------
+// Expected-diff grading (the corpus half of L3)
+// ---------------------------------------------------------------------------
+//
+// A task with an `outcome` block is GRADED: the candidate is executed against
+// the task's fixture in the outcome harness and the resulting cell values and
+// output are compared to the expectations. Execution happens in a SUBPROCESS,
+// never here: model output is untrusted, and this process holds the provider
+// key in its environment. The child gets a scrubbed env, Node's permission
+// model where this Node supports it, and a hard kill after GRADE_TIMEOUT_MS —
+// which is also the only defence that works against a synchronous infinite
+// loop, the one thing no in-process timeout can interrupt.
+
+const GRADE_TIMEOUT_MS = 10_000;
+const gradeChild = path.join(here, "grade-child.mjs");
+
+/**
+ * The strictest permission flag this Node accepts, probed once.
+ *
+ * `--permission` (Node 23+) / `--experimental-permission` (Node 20-22) deny
+ * file WRITES, child processes and worker threads to the graded script. When
+ * neither works the run proceeds — this is an opt-in dev CLI, not the product
+ * sandbox — but says so loudly rather than pretending.
+ */
+function detectPermissionArgs() {
+  for (const flag of ["--permission", "--experimental-permission"]) {
+    const probe = spawnSync(
+      process.execPath,
+      [flag, `--allow-fs-read=${here}`, `--allow-fs-read=${path.dirname(bundlePath)}`, gradeChild, bundlePath],
+      { input: "", env: childEnv(), timeout: 15_000 },
+    );
+    // The probe sends no payload, so the child exits on a JSON parse failure —
+    // status 1 with our own stack on stderr means the flag itself was accepted.
+    if (probe.status !== 9 && !String(probe.stderr).includes("bad option")) {
+      return [flag, `--allow-fs-read=${here}`, `--allow-fs-read=${path.dirname(bundlePath)}`];
+    }
+  }
+  console.log(
+    "[eval] WARNING: this Node has no --permission support; graded scripts run without an OS-level sandbox.",
+  );
+  return [];
+}
+
+/** No provider key, no user profile — just enough for Node to start on Windows. */
+function childEnv() {
+  const env = {};
+  for (const k of ["SYSTEMROOT", "SystemRoot", "WINDIR", "TEMP", "TMP"]) {
+    if (process.env[k] !== undefined) env[k] = process.env[k];
+  }
+  return env;
+}
+
+let permissionArgs;
+
+/** Run one candidate against one task's fixture; returns an OutcomeObservation. */
+function observeOutcome(task, source) {
+  if (permissionArgs === undefined) permissionArgs = detectPermissionArgs();
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [...permissionArgs, gradeChild, bundlePath], {
+      env: childEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // Capped: the candidate can reach process.stderr in the child, and an
+    // unbounded `out += d` under a tight write loop grows past V8's string
+    // limit and crashes THIS process mid-run. A real observation is small.
+    const MAX_OUT = 1_000_000;
+    const MAX_ERR = 262_144;
+    let out = "";
+    let err = "";
+    let settled = false;
+    const finish = (obs) => {
+      if (!settled) {
+        settled = true;
+        resolve(obs);
+      }
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      // The observation may already be complete on stdout with the child kept
+      // alive only by a candidate's stray timer — prefer the real result over
+      // a fabricated verdict.
+      try {
+        finish(JSON.parse(out));
+        return;
+      } catch {
+        /* nothing parseable — fall through to the honest timeout */
+      }
+      finish({
+        ran: false,
+        error: `did not finish within ${GRADE_TIMEOUT_MS / 1000}s (killed) — a runaway loop is a wrong answer`,
+        readBack: [],
+        output: [],
+        totalChanges: 0,
+      });
+    }, GRADE_TIMEOUT_MS);
+    child.stdout.on("data", (d) => {
+      if (out.length < MAX_OUT) out += d;
+      else child.kill("SIGKILL");
+    });
+    child.stderr.on("data", (d) => {
+      if (err.length < MAX_ERR) err += d;
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      try {
+        finish(JSON.parse(out));
+      } catch {
+        finish({
+          ran: false,
+          error: `grading subprocess failed: ${(err || out || "no output").slice(0, 300)}`,
+          readBack: [],
+          output: [],
+          totalChanges: 0,
+        });
+      }
+    });
+    child.stdin.write(JSON.stringify({ task, source }));
+    child.stdin.end();
+  });
+}
+
+/**
+ * The L3 hook for the repair loop, backed by the harness instead of a live
+ * workbook. `applicable: false` on a harness gap — a member the harness cannot
+ * service says nothing about the script, exactly like the realm mismatch the
+ * in-app dry run declines on.
+ */
+function harnessDryRun(task) {
+  return async (source) => {
+    const obs = await observeOutcome(task, source);
+    if (obs.harnessGap) {
+      return {
+        ok: true,
+        error: null,
+        durationMs: 0,
+        changes: [],
+        truncated: false,
+        totalChanges: 0,
+        output: obs.output,
+        readBack: obs.readBack,
+        applicable: false,
+        declinedReason: `the offline harness does not implement ${obs.harnessGap}`,
+      };
+    }
+    return {
+      ok: obs.ran,
+      error: obs.ran ? null : (obs.error ?? "unknown error"),
+      durationMs: 0,
+      changes: [],
+      truncated: false,
+      totalChanges: obs.totalChanges,
+      output: obs.output,
+      readBack: obs.readBack,
+      applicable: true,
+    };
+  };
+}
+
 const SYSTEM = [
   "You write Calcula object scripts.",
   "Reply with ONE fenced JavaScript code block and nothing else.",
   "The script must export `setup(context)` and reach the API through `context`.",
+  "React to the object's events through its hooks: a button's click handler is `context.onClick(handler)`.",
+  "Use `context.expose(name, handler)` only for named commands — an exposed handler does NOT run on click.",
   "Declare any privileged capability with a `// @capability <id>` comment at the top.",
 ].join("\n");
 
@@ -185,15 +370,20 @@ for (const task of tasks) {
   let score;
   let candidate = "";
   let rounds = 0;
+  let grade;
   try {
     if (repairRounds > 0) {
-      // The product path: generate, validate, hand the errors back.
+      // The product path: generate, validate, hand the errors back. A gradable
+      // task also gets the harness as its L3 hook, so "it throws when run" and
+      // "it runs and changes nothing" become repairable offline too.
       const authored = await authorScript({
         intent: task.intent,
         objectType: task.objectType,
         hints: task.hints,
         plan: { tier: "standard", surfaceBudgetTokens: budgetTokens, repairRounds, rationale: "" },
         complete: (system, user) => complete(system, user),
+        dryRun: task.outcome ? harnessDryRun(task) : undefined,
+        expectsWrites: Boolean(task.outcome?.expect?.length),
       });
       candidate = authored.source;
       rounds = authored.attempts.length - 1;
@@ -201,7 +391,10 @@ for (const task of tasks) {
       const reply = await complete(SYSTEM, userPrompt);
       candidate = extractScript(reply);
     }
-    score = scoreCandidate(task, candidate);
+    if (task.outcome) {
+      grade = gradeOutcome(task.outcome, await observeOutcome(task, candidate));
+    }
+    score = scoreCandidate(task, candidate, grade);
   } catch (err) {
     // A transport failure is NOT a zero for the model — recording it as one
     // would quietly blame the model for a laptop that went to sleep.
@@ -215,6 +408,11 @@ for (const task of tasks) {
   scores.push(score.passed ? score : { ...score, candidate });
   const mark = score.passed ? "PASS" : "FAIL";
   const fixes = rounds > 0 ? ` [+${rounds} repair${rounds === 1 ? "" : "s"}]` : "";
+  const graded = score.graded
+    ? ` [graded ${score.outcome.checksPassed}/${score.outcome.checksTotal}]`
+    : grade && !grade.gradable
+      ? ` [ungradable: harness lacks ${grade.harnessGap}]`
+      : "";
   const why = score.passed
     ? ""
     : `  (${[
@@ -223,15 +421,34 @@ for (const task of tasks) {
         !score.capabilitiesDeclared && "undeclared capability",
         !score.capabilitiesExact && "over-declared",
         !score.behavioural && `missing ${score.missingCalls.join(",")}`,
+        score.graded && !score.outcome.ran && `run failed: ${score.outcome.error ?? "?"}`,
+        score.graded &&
+          score.outcome.ran &&
+          score.outcome.grade < 1 &&
+          `wrong outcome: ${[
+            ...score.outcome.wrongCells.map(
+              (w) => `R${w.row + 1}C${w.col + 1} holds ${JSON.stringify(w.actual)}, expected ${JSON.stringify(w.expected)}`,
+            ),
+            ...score.outcome.missingOutput.map((m) => `output never mentions ${JSON.stringify(m)}`),
+          ].join("; ")}`,
       ]
         .filter(Boolean)
         .join("; ")})`;
-  console.log(`  ${mark} ${task.id} ${score.score.toFixed(2)}${fixes}${why}`);
+  console.log(`  ${mark} ${task.id} ${score.score.toFixed(2)}${fixes}${graded}${why}`);
 }
 
 const summary = summarize(scores);
+// A harness gap silently downgrades a task to static-only scoring; a run with
+// many of them is measuring less than it appears to, and must say so.
+const gapped = scores.filter((s) => s.outcome && !s.outcome.gradable);
 console.log("");
 console.log(`[eval] ${summary.passed}/${summary.total} passed, mean score ${summary.meanScore.toFixed(3)}`);
+if (gapped.length > 0) {
+  console.log(
+    `[eval] WARNING: ${gapped.length} gradable task(s) fell back to static scoring on a harness gap: ` +
+      gapped.map((s) => `${s.taskId} (${s.outcome.harnessGap})`).join(", "),
+  );
+}
 if (scores.length < tasks.length) {
   // Never let a partial run masquerade as a complete one.
   console.log(`[eval] WARNING: ${tasks.length - scores.length} task(s) errored and are NOT counted above.`);
@@ -241,7 +458,16 @@ if (jsonOut && typeof jsonOut === "string") {
   writeFileSync(
     jsonOut,
     JSON.stringify(
-      { provider: providerId, model, budgetTokens, canaryOnly, corpusVersion: corpus.version, summary, scores },
+      {
+        provider: providerId,
+        model,
+        budgetTokens,
+        canaryOnly,
+        corpusVersion: corpus.version,
+        ungradable: gapped.map((s) => ({ taskId: s.taskId, harnessGap: s.outcome.harnessGap })),
+        summary,
+        scores,
+      },
       null,
       2,
     ),

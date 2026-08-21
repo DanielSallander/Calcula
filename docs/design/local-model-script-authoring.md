@@ -11,10 +11,32 @@ automatically → only a validated draft reaches the review queue → the user r
 whether it becomes live code. Nothing in it is vendor-specific, and nothing in it assumes a
 particular machine.
 
-**The one honest gap:** L3 knows a script RAN and CHANGED something. It does not know the change was
-the RIGHT one. Grading a diff against a task's expected result needs per-task expectations plus a
-workbook fixture to run them against — larger than the rung itself, and recorded here rather than
-implied.
+**~~The one honest gap~~ — CLOSED 2026-08-20: expected-diff grading is built.** The corpus (v2)
+carries per-task expectations (`outcome`: fixture + event + expected cell input strings /
+output substrings), and the offline runner executes every gradable candidate through
+`scriptEval/harness.ts` — the REAL worker-realm mount (`buildWorkerContext`, `wrapModuleSource`,
+the production hook dispatcher, `ALLOWLIST` validation and the capability ceiling) over an
+in-memory backend — in a sandboxed subprocess (scrubbed env, Node permission model, hard kill).
+A graded task scores `0.5·static + 0.5·grade` and cannot pass with a wrong value. Layer A pins
+every reference at grade 1.0, which is what keeps the fake backend's semantics honest.
+
+**Building the grade found two defects the whole ladder had missed, one severe.** (1) The corpus,
+this doc's own prompt (`BASE_SYSTEM`), and the assisted template all taught
+`context.expose('onClick', handler)` — and an exposed method named "onClick" NEVER receives a
+click: the product fires the `onClick` HOOK (`context.onClick(handler)`; the Controls click path
+even diagnoses the exposed-only script as "never registered a click handler"). Every AI-drafted
+button script therefore mounted cleanly and did nothing when clicked. Same fingerprint as the
+`export function setup` mount defect: the teaching drifted from the production form, and every
+test doubled the part that would have told. All 31 button references, both prompts, and the
+no-entry-point repair message now teach the hook form, and the grading harness fires the hook
+exactly as the product does — the exposed form grades 0 with a repair instruction naming the fix.
+(2) The sort reference passed static validation with `{ column: 0 }`, but the real
+`ScriptSortField` is `{ key }` and `vSortRange` rejects unknown properties — the reference itself
+failed the moment it actually ran. Layer A now RUNS every reference, so this class is closed, not
+just this instance. A third, smaller find: at a 4k budget the surface prompt omitted `onClick`
+itself for five canary tasks (nothing hints at it), so the ranker now always includes the object
+type's OWN members — the prompt on which the correct answer was unwritable cannot be assembled
+any more.
 
 **Owner decisions that shaped it** (2026-08-19):
 
@@ -409,12 +431,26 @@ Three deliberate choices:
 - **The hook is optional**, because the offline eval runner has no live workbook and the loop must
   still work without one.
 
-**What it does NOT do yet.** It cannot say whether the change was the RIGHT one — only that
-something ran, and something changed. Grading the diff against a task's expected result needs
-per-task expectations and a workbook fixture to run them against, which is a larger piece than the
-rung itself. `fixture` (seed cells into the clone before the run) and `readBack` (report named cell
-values after it) are BUILT, which is the half that has to exist first; the corpus expectations and
-the scorer that reads them are not.
+**~~What it does NOT do yet~~ — CLOSED 2026-08-20.** The corpus half of the grade exists:
+`tests/eval/tasks.json` v2 carries an `outcome` block on 21 of 36 tasks (10 of 12 canaries) —
+`fixture` seeds, the `event` hook to fire, `expect` cell input strings (or a case-insensitive
+`match` regex where several spellings are equally right) and `expectOutput` substrings. The
+executor is `scriptEval/harness.ts`: the production mount transform and the production `context`
+over an in-memory backend, with the production `ALLOWLIST` validators and the declared-capability
+ceiling enforced per call; a real member the backend does not serve is a HARNESS GAP and the run
+is ungradable, never wrong — the same decline discipline as the in-app rung. `gradeOutcome`
+(pure) compares, `scoreCandidate` folds the grade in at half weight and refuses `passed` below a
+perfect grade, `run-eval.mjs` executes candidates in a sandboxed subprocess and feeds the harness
+to the repair loop as its offline L3 hook, and Layer A requires every reference to grade 1.0 —
+the honesty anchor that keeps the fake backend from drifting from the product. The in-app
+`canaryScore` deliberately stays static: grading means executing model output, and the renderer
+is the wrong place to run it.
+
+The finished layer was adversarially reviewed (60 agents, 37 confirmed / 18 refuted, all fixed
+the same day); the as-fixed record is in `docs/design/open-items.md`'s closed row and
+`tests/eval/README.md`'s "Adding a task" section, whose fixture-discrimination patterns
+(decorrelated sort keys, two-click persistence, injected failures, anchored count regexes,
+intent-named expectations) came out of it.
 
 ### L3 answered a question it could not answer — three defects, 2026-08-20
 

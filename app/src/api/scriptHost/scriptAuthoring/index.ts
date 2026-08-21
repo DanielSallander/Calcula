@@ -101,10 +101,22 @@ export interface AuthorResult {
   summary: string;
 }
 
+// The event teaching here is load-bearing and was WRONG for the feature's
+// first two days: this prompt taught `context.expose('onClick', handler)`, and
+// an exposed method named "onClick" NEVER receives a click — the product fires
+// the onClick HOOK (`context.onClick(handler)`); `expose` is for named
+// commands (schedules, shortcuts, other scripts). Every draft this pipeline
+// produced for a button therefore mounted cleanly and did nothing when
+// clicked. Found by expected-diff grading, the first gate that actually RAN a
+// draft against the click path. Same fingerprint as the `export function
+// setup` mount defect: the teaching drifted from the production form and every
+// test doubled the part that would have told.
 const BASE_SYSTEM = [
   "You write Calcula object scripts.",
   "Reply with ONE fenced JavaScript code block and nothing else — no explanation.",
-  "The script must export `setup(context)`; register behaviour with `context.expose(name, handler)`.",
+  "The script must export `setup(context)`.",
+  "React to the object's events through its hooks: a button's click handler is `context.onClick(handler)`.",
+  "Use `context.expose(name, handler)` only for named commands (schedules, shortcuts, other scripts) — an exposed handler does NOT run when the object is clicked.",
   "Reach the API only through `context`, and only methods you were shown.",
   "Declare every privileged capability you use with a `// @capability <id>` line at the top.",
 ].join("\n");
@@ -119,11 +131,12 @@ const BASE_SYSTEM = [
  */
 const ASSISTED_SYSTEM = [
   "",
-  "Follow this shape exactly, replacing only the body:",
+  "Follow this shape exactly, replacing only the body (for a button; other",
+  "objects register their own hooks the same way):",
   "",
   "```javascript",
   "export function setup(context) {",
-  "  context.expose('onClick', async () => {",
+  "  context.onClick(async () => {",
   "    // your code here",
   "  });",
   "}",
