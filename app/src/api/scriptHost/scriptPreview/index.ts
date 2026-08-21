@@ -43,6 +43,8 @@ import { hostPreviewScript, type PreviewRunResult } from "../host";
 import { ALLOWLIST } from "../allowlist";
 import { createPreviewBackend, createPreviewState, type PreviewStubs } from "./backend";
 import { PreviewGrid } from "./grid";
+import { objectHooksFor } from "./objectHooks";
+import { backendEvaluator, recalculatePreviewGrid, type FormulaEvaluator } from "./formulaEval";
 import { buildReport, declined, diffGrid } from "./report";
 import { MAX_SNAPSHOT_CELLS, snapshotActiveSheet, type SnapshotResult, type SnapshotSource } from "./snapshot";
 import type { DryRunReport } from "../scriptAuthoring";
@@ -51,10 +53,16 @@ export interface PreviewRequest {
   source: string;
   /** The object type the draft is written for ("button", "shape", ...). */
   objectType: string;
-  /** A hook to fire after `setup` — for a button, "onClick". */
-  event?: string;
+  /**
+   * Hooks to fire after `setup` — for a button, "onClick".
+   *
+   * Omit it entirely to fire every hook the OBJECT TYPE has and the script
+   * registered, which is what a caller with no task description wants: the
+   * draft's own choice of handlers decides what runs.
+   */
+  event?: string | string[];
   eventCount?: number;
-  /** Fire `event` only if the script registered it; absence is not a failure. */
+  /** Fire only hooks the script registered; a missing one is not a failure. */
   eventOptional?: boolean;
   /** Cells to report the value of after the run, whether or not they changed. */
   readBack?: Array<{ row: number; col: number }>;
@@ -67,6 +75,8 @@ export interface PreviewRequest {
   /** Where the workbook copy comes from. Injected so this is testable headless. */
   snapshotSource?: SnapshotSource;
   tier?: "restricted" | "unlocked";
+  /** Where formula VALUES come from. Injected so this is testable headless. */
+  evaluator?: FormulaEvaluator;
 }
 
 /**
@@ -103,17 +113,41 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
   });
   const backend = createPreviewBackend(state);
 
+  // Formula VALUES. A preview grid holds formula TEXT and nothing that can
+  // evaluate it, so a script that writes `=SUM(B2:B100)` and reads the cell
+  // back saw an empty display, and a script that changed an input left every
+  // dependent holding its pre-run value. Recomputed at each settle point by the
+  // Rust evaluator (pure over the cells handed to it) — see formulaEval.ts for
+  // why not per-read, and why a failure here is silent.
+  const evaluate = req.evaluator ?? backendEvaluator;
+  const sheetName = snapshot.sheetNames[snapshot.activeSheet] ?? "Sheet1";
+  let unsettledFormulas: string | undefined;
+  const onSettle = async (): Promise<void> => {
+    unsettledFormulas =
+      (await recalculatePreviewGrid(snapshot.grid, sheetName, evaluate)) ?? unsettledFormulas;
+  };
+
   let run: PreviewRunResult;
   try {
     run = await hostPreviewScript({
+      onSettle,
       source: req.source,
       objectType: req.objectType,
       scriptName: "(preview)",
       tier: req.tier ?? "unlocked",
       backend,
-      event: req.event,
+      // No explicit event means "whatever this object type can fire" — the
+      // draft's own registrations then decide what actually runs. A caller that
+      // NAMES one is asserting the script must handle it, so absence is a
+      // failure there unless it also says otherwise.
+      events:
+        req.event === undefined
+          ? objectHooksFor(req.objectType)
+          : Array.isArray(req.event)
+            ? req.event
+            : [req.event],
       eventCount: req.eventCount,
-      eventOptional: req.eventOptional,
+      eventOptional: req.event === undefined ? true : req.eventOptional,
     });
   } catch (e) {
     return declined(
@@ -184,9 +218,14 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
     // data, just not all of it — so this is a note rather than a decline. It is
     // said out loud because a reviewer who cannot see the bound would read
     // "changed 3 cells" as a statement about the whole sheet.
-    note: snapshot.truncated
-      ? `only the first ${MAX_SNAPSHOT_CELLS} cells of the sheet were copied for this preview`
-      : undefined,
+    note: [
+      snapshot.truncated
+        ? `only the first ${MAX_SNAPSHOT_CELLS} cells of the sheet were copied for this preview`
+        : undefined,
+      unsettledFormulas,
+    ]
+      .filter(Boolean)
+      .join("; ") || undefined,
   });
 }
 
@@ -216,6 +255,8 @@ async function liveSnapshotSource(): Promise<SnapshotSource> {
 }
 
 export { MAX_SNAPSHOT_CELLS } from "./snapshot";
+export { objectHooksFor } from "./objectHooks";
+export { recalculatePreviewGrid, backendEvaluator, type FormulaEvaluator } from "./formulaEval";
 export { MAX_REPORTED_CHANGES, summarize } from "./report";
 export type { PreviewStubs } from "./backend";
 export { PreviewGapError } from "./backend";

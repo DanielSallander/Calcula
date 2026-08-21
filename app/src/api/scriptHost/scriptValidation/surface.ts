@@ -60,8 +60,29 @@ export function isKnownPrefix(chain: string): boolean {
  * call returned and is none of our business.
  */
 export function hasCallableAncestor(chain: string): boolean {
+  return callableAncestorOf(chain) !== undefined;
+}
+
+/**
+ * The surface member a chain ultimately reaches, or undefined for one that
+ * reaches none.
+ *
+ * `api.getCellValue.toString` resolves to `api.getCellValue`; `caps.fetch.json`
+ * resolves to `caps.fetch` (`.json()` is a method on the RESPONSE the shim
+ * built, not a surface member); `api.setCellValu` resolves to nothing, because
+ * its only known prefix is the `api` NAMESPACE — see the note below, which is
+ * the whole reason a namespace cannot end the surface.
+ *
+ * The rule lives here, once, because two consumers need it and they must agree:
+ * the reach check ("is this an invented member?") and the preview's coverage
+ * measurement ("which broker method would this actually call?").
+ */
+export function callableAncestorOf(chain: string): string | undefined {
+  if (CHAINS.has(chain) && !PREFIXES.has(chain)) return chain;
   const parts = chain.split(".");
-  for (let i = 1; i < parts.length; i++) {
+  // Longest first: `caps.storage.get.length` must resolve to `caps.storage.get`
+  // rather than stopping at `caps.storage` if both are callable.
+  for (let i = parts.length - 1; i >= 1; i--) {
     const ancestor = parts.slice(0, i).join(".");
     // A NAMESPACE is not a data-returning call. `api` and `caps` are listed as
     // members in their own right (the probe sees them as properties) AND are
@@ -69,9 +90,9 @@ export function hasCallableAncestor(chain: string): boolean {
     // suppress every finding under them -- `api.setCellValu` would sail through
     // as "a method on whatever api returned". Only an ancestor that is callable
     // and is NOT a namespace ends the surface.
-    if (CHAINS.has(ancestor) && !PREFIXES.has(ancestor)) return true;
+    if (CHAINS.has(ancestor) && !PREFIXES.has(ancestor)) return ancestor;
   }
-  return false;
+  return undefined;
 }
 
 /** The capabilities calling `chain` requires. Empty for unpoliced members. */

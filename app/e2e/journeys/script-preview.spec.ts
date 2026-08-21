@@ -275,6 +275,59 @@ export function setup(context) {
     expect(report.error ?? "").toMatch(/thisMethodDoesNotExist|not a function/i);
   });
 
+  test("computes the value of a formula the SCRIPT wrote", async ({ grid }) => {
+    const page = grid.page;
+    // The limit this closes. A preview grid holds formula TEXT and nothing that
+    // can evaluate it, so a script that wrote `=SUM(...)` and read the cell back
+    // saw an empty display — and any dependent of a cell the script changed kept
+    // its pre-run value. Neither is something TypeScript can fix: the formula
+    // language lives in Rust, and a second evaluator here would be one that
+    // disagrees with the workbook.
+    //
+    // The values are computed by `preview_evaluate_formulas`, which is PURE over
+    // the cells handed to it — no AppState, no document, no writes.
+    await grid.setCellValue("DP2", "20");
+    await grid.setCellValue("DP3", "22");
+
+    const report = await preview(
+      page,
+      `export function setup(context) {
+  context.onClick(async () => {
+    context.api.setCellFormula(3, 119, "=SUM(DP2:DP3)");
+    context.log("total=" + (await context.api.getCellValue(3, 119)));
+  });
+}
+`,
+      "onClick",
+    );
+    expect(report.applicable, `declined: ${report.declinedReason}`).toBe(true);
+    expect(report.ok, `failed: ${report.error}`).toBe(true);
+    // The formula TEXT is what the diff reports — the grading vocabulary.
+    expect(report.changes.find((c) => c.row === 3)?.after).toBe("=SUM(DP2:DP3)");
+
+    // ...and the VALUE is now observable. Fired a second time so the read lands
+    // after a settle point: the product recalculates as part of the write, this
+    // recalculates between phases, and §5c states that difference rather than
+    // hiding it.
+    const second = await preview(
+      page,
+      `export function setup(context) {
+  context.api.setCellFormula(3, 119, "=SUM(DP2:DP3)");
+  context.onClick(async () => {
+    context.log("total=" + (await context.api.getCellValue(3, 119)));
+  });
+}
+`,
+      "onClick",
+    );
+    expect(second.applicable, `declined: ${second.declinedReason}`).toBe(true);
+    expect(second.ok, `failed: ${second.error}`).toBe(true);
+    expect(second.output.join("\n"), "42 = 20 + 22, computed by the real evaluator").toContain("total=42");
+
+    // And the workbook itself never saw any of it.
+    expect(await grid.getCellDisplayValue("DP4")).toBe("");
+  });
+
   test("a script that only reads changes nothing, and that is not an error", async ({ grid }) => {
     const page = grid.page;
     const report = await preview(

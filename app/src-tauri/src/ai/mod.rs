@@ -20,6 +20,7 @@
 
 pub mod discovery;
 pub mod dryrun;
+pub mod preview_eval;
 pub mod providers;
 pub mod stream;
 pub mod tools;

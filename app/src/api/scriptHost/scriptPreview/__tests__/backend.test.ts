@@ -12,8 +12,10 @@
 //          failure the whole rung was built to stop.
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { PreviewGrid, cellShape, shapeOf } from "../grid";
-import { PreviewGapError, createPreviewBackend, createPreviewState, respond } from "../backend";
+import { PreviewGapError, UNPREVIEWABLE, createPreviewBackend, createPreviewState, respond } from "../backend";
 
 function stateWith(seed: Array<[number, number, string, string?]> = []) {
   const grid = new PreviewGrid();
@@ -138,6 +140,105 @@ describe("the served semantics that were chased from the Rust backend", () => {
       endCol: 5,
       empty: false,
     });
+  });
+});
+
+describe("the clipboard, formats and named ranges", () => {
+  it("copies and pastes values and formats over the preview grid", () => {
+    const state = stateWith([
+      [0, 0, "a"],
+      [0, 1, "b"],
+    ]);
+    respond(state, "api.setRangeFormat", [0, 0, 0, 1, { bold: true }, undefined]);
+    expect(respond(state, "api.copyRange", [0, 0, 0, 1, undefined])).toEqual({ rows: 1, cols: 2 });
+    expect(respond(state, "api.pasteRange", [5, 0, undefined])).toEqual({ rows: 1, cols: 2 });
+    expect([state.grid.input(5, 0), state.grid.input(5, 1)]).toEqual(["a", "b"]);
+    expect(state.grid.format(5, 0)).toMatchObject({ bold: true });
+  });
+
+  it("transposes when asked", () => {
+    const state = stateWith([
+      [0, 0, "a"],
+      [0, 1, "b"],
+    ]);
+    respond(state, "api.copyRange", [0, 0, 0, 1, undefined]);
+    expect(respond(state, "api.pasteRange", [5, 0, { transpose: true }])).toEqual({ rows: 2, cols: 1 });
+    expect([state.grid.input(5, 0), state.grid.input(6, 0)]).toEqual(["a", "b"]);
+  });
+
+  it("GAPS on pasting a formula, because the product SHIFTS its references", () => {
+    // The discipline that matters most in this whole file. Pasting `=A1+1`
+    // unshifted would write a formula the product would never have written —
+    // and then present it as what the script would do. A gap declines and says
+    // nothing; an approximation lies.
+    const state = stateWith([[0, 0, "=B1+1"]]);
+    respond(state, "api.copyRange", [0, 0, 0, 0, undefined]);
+    expect(() => respond(state, "api.pasteRange", [5, 0, undefined])).toThrow(PreviewGapError);
+    // ...but a formats-only paste moves no formula and is served.
+    expect(respond(state, "api.pasteRange", [5, 0, { mode: "formats" }])).toEqual({ rows: 1, cols: 1 });
+  });
+
+  it("reproduces the product's own empty-clipboard message", () => {
+    // A script with a catch branch around paste must see what it would really
+    // see, or the branch is exercised against a fiction.
+    expect(() => respond(stateWith(), "api.pasteRange", [0, 0, undefined])).toThrow(/call copyRange/);
+  });
+
+  it("reads a range's formats in the SAME shape as a single cell's", () => {
+    const state = stateWith([[0, 0, "x"]]);
+    respond(state, "api.setRangeFormat", [0, 0, 0, 0, { bold: true }, undefined]);
+    const one = respond(state, "api.getCellFormat", [0, 0, undefined]) as Record<string, unknown>;
+    const many = respond(state, "api.getRangeFormat", [0, 0, 1, 1, undefined]) as Array<Array<Record<string, unknown>>>;
+    expect(many.length).toBe(2);
+    expect(many[0].length).toBe(2);
+    // Same keys, or a guard written against one breaks against the other.
+    expect(Object.keys(many[0][0]).sort()).toEqual(Object.keys(one).sort());
+    expect(many[0][0]).toMatchObject({ bold: true });
+    expect(many[1][1]).toMatchObject({ bold: false });
+  });
+
+  it("clears formats without touching values", () => {
+    const state = stateWith([[0, 0, "keep"]]);
+    respond(state, "api.setRangeFormat", [0, 0, 0, 0, { bold: true }, undefined]);
+    respond(state, "api.clearRangeFormat", [0, 0, 0, 0, undefined]);
+    expect(state.grid.format(0, 0)).toEqual({});
+    expect(state.grid.input(0, 0)).toBe("keep");
+  });
+
+  it("keeps named ranges per-run and refuses the duplicate/missing cases", () => {
+    const state = stateWith();
+    respond(state, "api.createNamedRange", ["Totals", "A1:B2", undefined]);
+    expect(respond(state, "api.getNamedRanges", [])).toEqual([
+      { name: "Totals", refersTo: "A1:B2", scope: null },
+    ]);
+    expect(() => respond(state, "api.createNamedRange", ["Totals", "C1", undefined])).toThrow(/already exists/);
+    expect(() => respond(state, "api.deleteNamedRange", ["Nope"])).toThrow(/No named range/);
+    respond(state, "api.deleteNamedRange", ["Totals"]);
+    expect(respond(state, "api.getNamedRanges", [])).toEqual([]);
+  });
+});
+
+describe("what the preview declares it can NEVER serve", () => {
+  it("names a reason for each, and gaps them", () => {
+    // These are not a backlog. Serving any of them means fabricating something
+    // the preview does not have — another script's return value, a second
+    // sheet, a printer — and reporting the fabrication as the draft's effect.
+    for (const method of ["base.callMethod", "api.setActiveSheet", "api.createChart", "api.printPdf"]) {
+      expect(UNPREVIEWABLE.has(method), `${method} should be declared unpreviewable`).toBe(true);
+      expect(UNPREVIEWABLE.get(method)!.length, `${method} needs a REASON, not just an entry`).toBeGreaterThan(20);
+      expect(() => respond(stateWith(), method, [0])).toThrow(PreviewGapError);
+    }
+  });
+
+  it("does not list anything it actually serves", () => {
+    // A method in both places would be a contradiction: the coverage
+    // measurement would score it as out of reach while the backend answered it.
+    const src = readFileSync(resolve(__dirname, "../backend.ts"), "utf8");
+    const body = src.slice(src.indexOf("export function respond("));
+    const servedCases = new Set([...body.matchAll(/^\s*case "([a-z]+\.[A-Za-z0-9]+)":/gm)].map((m) => m[1]));
+    for (const method of UNPREVIEWABLE.keys()) {
+      expect(servedCases.has(method), `${method} is both served and declared unserveable`).toBe(false);
+    }
   });
 });
 

@@ -62,24 +62,40 @@ const ALLOW: GateVerdict = { allow: true };
  * draft in the realm it will actually be mounted into, against a copy of the
  * workbook (§5c).
  *
- * `onClick` is fired OPPORTUNISTICALLY: this gate has no task description and
- * cannot know what the draft is for, so the hook is fired when the script
- * registered it and skipped in silence when it did not. It is worth firing
- * because a handler that throws is invisible to `setup` alone — and because
- * `context.expose('onClick', …)`, the shape every early draft used, mounts
- * perfectly and never receives a click.
+ * HOOKS ARE FIRED OPPORTUNISTICALLY. This gate has no task description and
+ * cannot know what the draft is FOR, but it knows the object type — a required
+ * field of `draft_object_script` — and the object type determines which hooks
+ * exist. So the preview offers all of them and fires exactly the ones the draft
+ * registered, skipping the rest in silence. Worth doing because a handler that
+ * throws is invisible to `setup` alone, and because `context.expose('onClick',
+ * …)` — the shape every early draft used — mounts perfectly and never receives
+ * a click.
  */
-async function tryDryRun(source: string): Promise<DryRunReport | null> {
+async function tryDryRun(source: string, objectType: string): Promise<DryRunReport | null> {
   try {
-    return await previewObjectScript({
-      source,
-      objectType: "button",
-      event: "onClick",
-      eventOptional: true,
-    });
+    return await previewObjectScript({ source, objectType });
   } catch {
     return null;
   }
+}
+
+/**
+ * The object type the draft targets.
+ *
+ * `object_type` is REQUIRED by the tool schema and constrained to
+ * `DRAFT_OBJECT_TYPES`, so in practice it is always present and always valid.
+ * The fallback exists for the malformed call the gate deliberately does not
+ * police (`validate_draft` in mcp/drafts.rs answers that clearly), and "button"
+ * is the right one to fall back to: it is the overwhelmingly common target and
+ * its single `onClick` hook is the one shape the whole corpus is built around.
+ *
+ * Before this read the type, EVERY draft was previewed as a button — so a shape
+ * or sheet script was mounted against the wrong context and its own hooks were
+ * never fired.
+ */
+function objectTypeOf(input: unknown): string {
+  const raw = (input as { object_type?: unknown } | null)?.object_type;
+  return typeof raw === "string" && raw.trim() !== "" ? raw : "button";
 }
 
 /**
@@ -121,7 +137,7 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
   // its answer describes the emulator rather than the draft. Object scripts —
   // which is everything this gate sees — land there, and treating that as a
   // failure rejected every valid draft with "it FAILS when run".
-  const dry = await tryDryRun(source);
+  const dry = await tryDryRun(source, objectTypeOf(input));
   if (dry && dry.applicable !== false && !dry.ok) {
     return {
       allow: false,

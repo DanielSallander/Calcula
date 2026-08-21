@@ -104,6 +104,20 @@ export class PreviewGrid {
     if (cell) cell.cachedDisplay = cachedDisplay;
   }
 
+  /**
+   * Record a value COMPUTED for a cell that already exists.
+   *
+   * Separate from `seedFromDocument` because the two are different claims: a
+   * seed says "this is what the workbook holds", while this says "this is what
+   * the formula in this cell evaluates to". Only the evaluator may make the
+   * second claim, and it may not create cells — a value for a cell that is not
+   * there is a bug in the caller, not a cell to invent.
+   */
+  setCachedDisplay(row: number, col: number, display: string): void {
+    const cell = this.cells.get(this.key(row, col));
+    if (cell) cell.cachedDisplay = display;
+  }
+
   mergeFormat(row: number, col: number, fmt: Record<string, unknown>): void {
     const k = this.key(row, col);
     const existing = this.cells.get(k);

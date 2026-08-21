@@ -54,6 +54,41 @@ export type ScriptableObjectType =
   // UI objects (per-instance scripts, keyed by panel ID)
   | "panel";
 
+/**
+ * The same set as a runtime value, for code that has to ENUMERATE object types
+ * rather than accept one — the script preview, which asks each type which hooks
+ * it has, is the first such caller.
+ *
+ * PINNED TO THE UNION, not merely written beside it: the `satisfies` below fails
+ * to compile if an entry is not a `ScriptableObjectType`, and `MissingType`
+ * resolves to `never` only when every member of the union appears here — so
+ * adding a variant above without adding it here is a build error rather than a
+ * type that silently stops being enumerated.
+ */
+export const SCRIPTABLE_OBJECT_TYPES = [
+  "workbook",
+  "sheet",
+  "cell",
+  "row",
+  "column",
+  "slicer",
+  "chart",
+  "pivot",
+  "button",
+  "textbox",
+  "timeline",
+  "shape",
+  "table",
+  "namedRange",
+  "range",
+  "panel",
+] as const satisfies readonly ScriptableObjectType[];
+
+/** `never` when the list above is complete; the missing members otherwise. */
+type MissingType = Exclude<ScriptableObjectType, (typeof SCRIPTABLE_OBJECT_TYPES)[number]>;
+const _everyObjectTypeIsListed: MissingType[] = [];
+void _everyObjectTypeIsListed;
+
 /** Where a script came from — local (user-created) or distributed (from a .calp package). */
 export type ScriptProvenance = "local" | "distributed";
 

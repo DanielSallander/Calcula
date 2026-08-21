@@ -227,17 +227,34 @@ describe("the gate previews in the realm the draft will really run in", () => {
     expect(preview).toHaveBeenCalledWith(expect.objectContaining({ source: GOOD }));
   });
 
-  it("fires onClick OPPORTUNISTICALLY — its absence is not a defect here", async () => {
+  it("previews against the object type the TOOL supplied, not a guess", async () => {
+    // `object_type` is a required field of `draft_object_script`, and it decides
+    // which context the realm builds and which hooks exist at all. The gate
+    // previewed EVERY draft as a button until it read this, so a shape or sheet
+    // script was mounted against the wrong context and its own hooks — the
+    // handlers where the work actually lives — were never fired.
+    preview.mockResolvedValue(dryOk());
+    await gateToolCall("draft_object_script", { source: GOOD, object_type: "shape" });
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ objectType: "shape" }));
+  });
+
+  it("falls back to button for the malformed call it deliberately does not police", async () => {
+    preview.mockResolvedValue(dryOk());
+    await gateToolCall("draft_object_script", { source: GOOD });
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ objectType: "button" }));
+  });
+
+  it("names no event, so the DRAFT's own registrations decide what runs", async () => {
     // The gate has no task description and cannot know what the draft is for,
-    // so a script that only does setup-time work must not be failed for
-    // registering no click handler. Firing it when present is still worth
-    // doing: a handler that throws is invisible to `setup` alone, and
+    // so it must not fail a script for declining to handle a hook. Omitting
+    // `event` makes the preview offer every hook the object type HAS and fire
+    // exactly the ones the script registered. Firing them at all is worth it: a
+    // handler that throws is invisible to `setup` alone, and
     // `context.expose('onClick', …)` — the shape every early draft used —
     // mounts perfectly and never receives a click.
     preview.mockResolvedValue(dryOk());
-    await gateToolCall("draft_object_script", { source: GOOD });
-    expect(preview).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "onClick", eventOptional: true }),
-    );
+    await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    const arg = preview.mock.calls[0][0] as { event?: unknown };
+    expect(arg.event, "naming one would assert the draft MUST handle it").toBeUndefined();
   });
 });

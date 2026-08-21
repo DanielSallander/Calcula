@@ -1074,9 +1074,16 @@ export interface PreviewRunRequest {
   snapshot?: MountSpec["snapshot"];
   /** The substituted backend. Serves what it can; THROWS for anything else. */
   backend: PreviewBackend;
-  /** A hook to fire after `setup` returns — for a button, "onClick". */
-  event?: string;
-  /** How many times to fire it, sequentially (default 1). */
+  /**
+   * Hooks to fire after `setup` returns, in order — for a button, ["onClick"].
+   *
+   * A LIST rather than one, because an object type has as many hooks as it has,
+   * and which of them a draft cares about is the DRAFT's choice, not the
+   * caller's guess. With `eventOptional` the preview fires exactly the ones the
+   * script registered and skips the rest in silence.
+   */
+  events?: string[];
+  /** How many times to fire each, sequentially (default 1). */
   eventCount?: number;
   /**
    * The hook is fired IF the script registered it, and its absence is not a
@@ -1090,6 +1097,16 @@ export interface PreviewRunRequest {
    * script that legitimately only does setup-time work.
    */
   eventOptional?: boolean;
+  /**
+   * Called once the realm has gone quiet — after `setup`, and after each hook.
+   *
+   * The hook exists so the caller can bring its backend's state up to date
+   * between phases (the preview recalculates its formulas here) without this
+   * function needing to know what that state IS. It is awaited, so the next
+   * hook sees the result; a rejection is ignored, because an enrichment that
+   * failed must not turn a working preview into a failed one.
+   */
+  onSettle?: () => Promise<void>;
   setupTimeoutMs?: number;
   eventTimeoutMs?: number;
 }
@@ -1384,18 +1401,24 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
     const settledSetup = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
     if (settledSetup !== undefined) return finish(false, settledSetup);
     if (hookError !== undefined) return finish(false, `setup(context) threw: ${hookError}`);
+    await req.onSettle?.().catch(() => undefined);
 
-    if (req.event && (hooks.includes(req.event) || !req.eventOptional)) {
-      if (!hooks.includes(req.event)) {
+    for (const event of req.events ?? []) {
+      if (!hooks.includes(event)) {
+        // Optional: the caller offered a hook this object type HAS and this
+        // draft chose not to handle, which is not a defect. Required: the
+        // caller named the hook the script exists to handle, so not
+        // registering it means the script does not do the job.
+        if (req.eventOptional) continue;
         return finish(
           false,
-          `the script never registers the "${req.event}" hook (for a button, the click handler is ` +
-            `context.${req.event}(handler))`,
+          `the script never registers the "${event}" hook (for a button, the click handler is ` +
+            `context.${event}(handler))`,
         );
       }
       const fires = Math.max(1, req.eventCount ?? 1);
       for (let i = 0; i < fires; i++) {
-        send({ t: "event", hook: req.event, payload: hookPayload(req.event) });
+        send({ t: "event", hook: event, payload: hookPayload(event) });
         // A hook dispatch is FIRE-AND-FORGET in this protocol — the realm sends
         // no ack — so quiescence is the only signal there is that the handler
         // is over, and it is meaningless until the handler has STARTED.
@@ -1403,8 +1426,9 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
         const stuck = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
         if (stuck !== undefined) return finish(false, stuck);
         if (hookError !== undefined) {
-          return finish(false, `the "${req.event}" handler threw: ${hookError}`);
+          return finish(false, `the "${event}" handler threw: ${hookError}`);
         }
+        await req.onSettle?.().catch(() => undefined);
       }
     }
 

@@ -593,15 +593,69 @@ same misleading verdict — *"it ran and changed nothing"* — about CORRECT scr
 The offline harness needs none of this, because it dispatches in-process — which is exactly why
 none of it was visible below the E2E tier.
 
-**Stated limits.** No formula evaluation: a formula the SCRIPT writes reads back with an empty
-display, and grading pins the formula TEXT (`match`). This is parity with the Rust dry run rather
-than a shortfall of this one — `core/script-engine` has no parser either, every script write there
-stores `ast: None`, and formulas are only compiled on the APPLY path a preview never reaches. A
-formula the SNAPSHOT supplied does carry the value the workbook already computed, which the Rust
-path cannot offer for a fixture. Nothing recalculates, so a write a real dependent would react to
-leaves that dependent holding its snapshot value. A cell the script rewrites loses its cached
-display and reads back unformatted. Formats are not observable in a diff. And a hook that defers
-its work to a timer is not waited for — the product has no observation point there either.
+**Stated limits.** A cell the script rewrites loses its cached display and reads back unformatted
+(the preview has no number formatter; the backend owns that). Formats are not observable in a diff.
+A hook that defers its work to a timer is not waited for — the product has no observation point
+there either. And the coverage bound below.
+
+### 5c.1 The three follow-ons — 2026-08-21
+
+**The gap rate was unmeasured, so it was measured.** A rung that declines most of what it sees is
+dead again, and "how often does it gap" was being guessed at. `scriptPreview/__tests__/coverage.test.ts`
+computes it against the right denominator — *what the model is actually taught*, not the 233-row
+ALLOWLIST — using the generated surface's own `chain -> broker` mapping and the reach check's own
+`callableAncestorOf` (extracted so the measurement and the validator cannot disagree about what a
+script even calls). Findings:
+
+- **`PROMPT_CORE_CHAINS`: 19/19 served**, and asserted. That is the floor shown at every budget,
+  so a gap there would decline the most ordinary drafts there are.
+- **Every chain the 36 corpus references reach: served**, and asserted. Everything a correct
+  solution needs is previewable.
+- **Broad exposure at the runner's 8k default: 46.8% of what is OFFERED.** That number drove the
+  rest of the work.
+
+The offered-but-gapped tail split into two categories once looked at, and conflating them had made
+the number unactionable. `UNPREVIEWABLE` (backend.ts) now names what a preview can NEVER serve, with
+a reason each — cross-script calls (`base.callMethod`: a preview mounts one script), other sheets
+(`api.setActiveSheet`: it holds one sheet's copy), real objects, print. Capability methods are
+identified from the ALLOWLIST rather than listed, so that half cannot drift. Six methods were then
+served faithfully — `getRangeFormat`, `clearRangeFormat`, `copyRange`/`pasteRange`, the named-range
+family — taking addressable coverage **46.8% → 55.2%**. `pasteRange` GAPS on a range containing a
+formula, because the product SHIFTS relative references and this backend has no reference parser:
+pasting one unshifted would write a formula the product would never write and present it as the
+script's. The assertion is a **ratchet at 0.5, named as one** — chasing a high number would mean 25
+approximate implementations, and an approximation is strictly worse than a gap, because a gap
+declines while an approximation grades a WRONG script as right.
+
+**The gate previewed every draft as a button.** `object_type` is a REQUIRED field of
+`draft_object_script`, and it decides which context the realm builds and which hooks exist —
+`draftGate` simply never read it, so a shape or sheet script was mounted against the wrong context
+and its own handlers were never fired. It now reads it, and `objectHooksFor` derives the hook list
+from the generated surface (`ButtonContext` -> `onClick`) rather than from a hand-written map that
+would drift on the first new hook. The gate names no event at all: the preview offers every hook the
+type HAS and fires exactly the ones the DRAFT registered, so a script that only does setup-time work
+is not failed for declining to handle a click. Its guard immediately caught two wrong entries in my
+own list of types-without-a-context (`ColumnContext` and `TimelineContext` both exist).
+
+**Formula VALUES now exist, computed by Rust.** `ai/preview_eval.rs` +
+`preview_evaluate_formulas`: pure over the cells handed to it — no `AppState`, no document, no
+writes — iterating `evaluate_formula_multi_sheet` to a fixed point over the preview's own grid. A
+chain needs one pass per link, so it iterates; a circular reference stops at the budget and reports
+`converged: false` rather than presenting a half-iterated number as final. **This is the one thing
+TypeScript could not have supplied at any price**: the formula language lives in Rust, and a second
+evaluator here would be one that confidently disagrees with the workbook.
+
+It runs at the preview's SETTLE POINTS (after `setup`, after each hook), not per read — a stated
+approximation: the product recalculates as part of the write, so a read immediately after a write
+sees the new value there and on the next settle here. Per-read would mean an IPC round trip inside a
+synchronous backend call, which the backend's shape does not allow. A failure to evaluate is
+SILENT: the grid keeps what it had, which is exactly the behaviour before this existed — an
+enrichment must not turn a working preview into a failed one.
+
+So the earlier "no formula evaluation, parity with the Rust dry run" limit is now narrower than
+parity: a formula the SNAPSHOT supplied carries the workbook's own value, a formula the SCRIPT
+writes gets a computed one, and what remains is that dependents settle a phase later than the
+product would settle them.
 
 ### The same three shapes, swept for repo-wide — 2026-08-20
 

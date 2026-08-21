@@ -78,6 +78,54 @@ export interface PreviewStubs {
   failWrite?: { row: number; col: number };
 }
 
+/**
+ * Broker methods a preview can NEVER serve, and why.
+ *
+ * A MAP, not a set, because the value is the argument: each entry names the
+ * thing a preview structurally does not have. These are not a backlog — writing
+ * a case for any of them would mean fabricating something (another script's
+ * return value, a second sheet's contents, a printer) and reporting the
+ * fabrication as what the draft would do.
+ *
+ * It exists so the coverage measurement can tell "cannot" from "not yet". A
+ * single "gapped" bucket made 2,491 chains look like unfinished work when most
+ * of them are permanently, correctly out of reach, and a number nobody can act
+ * on is a number nobody reads.
+ *
+ * CAPABILITY-bearing methods are NOT listed here: they are identified from the
+ * ALLOWLIST itself (`policy.capability`), so the set cannot drift as
+ * capabilities are added.
+ */
+export const UNPREVIEWABLE: ReadonlyMap<string, string> = new Map([
+  ["base.callMethod", "reaches a method another script exposed; a preview mounts only this one"],
+  ["base.callImport", "reaches a shared library realm, which a preview does not mount"],
+  ["api.runMacro", "runs a second script, which a preview has no realm for"],
+  ["api.createFloatingRange", "a floating range is backed by a real sheet"],
+  ["api.floatingRangeSetCells", "a floating range is backed by a real sheet"],
+  ["api.floatingRangeResize", "a floating range is backed by a real sheet"],
+  ["api.createChart", "creates a real object with a store and a renderer behind it"],
+  ["api.createPivot", "a pivot is computed by the engine, not by a grid copy"],
+  ["api.createPicture", "introduces media, which only the Rust validator may admit"],
+  ["api.createShape", "creates a real object with a store and a renderer behind it"],
+  ["object.setState", "mutates the real object the script is attached to"],
+  ["object.getState", "reads the real object the script is attached to"],
+  ["api.printPdf", "there is no printer and no page model in a preview"],
+  ["api.addPageBreak", "page layout has no meaning without a page model"],
+  ["api.setPrintArea", "page layout has no meaning without a page model"],
+  ["api.setActiveSheet", "a preview holds ONE sheet's copy; switching is the state it does not have"],
+  ["api.moveSheet", "a preview holds ONE sheet's copy"],
+  ["api.copySheet", "a preview holds ONE sheet's copy"],
+  ["api.deleteSheet", "a preview holds ONE sheet's copy"],
+  ["api.renameSheet", "a preview holds ONE sheet's copy"],
+]);
+
+/** One range held in a script's private clipboard. */
+interface PreviewClipboard {
+  rows: number;
+  cols: number;
+  cells: Array<Array<PreviewCell | undefined>>;
+}
+
 export interface PreviewBackendState {
   grid: PreviewGrid;
   output: string[];
@@ -106,6 +154,10 @@ export interface PreviewBackendState {
   gap?: string;
   /** Per-run storage, so `cap.storageSet` never touches the workbook's. */
   storage: Map<string, string>;
+  /** The script's own clipboard — private and empty at the start of a run, as in the product. */
+  clipboard?: PreviewClipboard;
+  /** Named ranges, name -> refersTo. Seeded empty; a preview names its own. */
+  namedRanges: Map<string, string>;
 }
 
 /** Build the state a backend closure operates over. */
@@ -126,6 +178,7 @@ export function createPreviewState(opts: {
     failWriteSpent: false,
     activeSheetMoved: false,
     storage: new Map(),
+    namedRanges: new Map(),
   };
 }
 
@@ -170,6 +223,47 @@ function assertPreviewSheet(state: PreviewBackendState, method: string, sheet: u
   if (sheet === state.activeSheet) return;
   if (sheet === state.sheetNames[state.activeSheet]) return;
   throw new PreviewGapError(`${method} with a sheet argument (${JSON.stringify(sheet)})`);
+}
+
+/**
+ * One cell's format, as the PRODUCT reports it.
+ *
+ * FULLY populated on purpose: the product's readback carries every
+ * `ScriptCellFormat` key, borders as `{style,color}` and the resolved-colour
+ * twins. A partial default would hand a candidate `undefined` where the product
+ * hands a value, and its guard logic would branch differently — the script
+ * would be judged on a shape the product never produces.
+ */
+function formatReadback(grid: PreviewGrid, row: number, col: number): Record<string, unknown> {
+  const noBorder = { style: "none", color: "#000000" };
+  return {
+    bold: false,
+    italic: false,
+    underline: "none",
+    strikethrough: false,
+    fontSize: 11,
+    fontFamily: "Calibri",
+    textColor: "#000000",
+    textColorResolved: "#000000",
+    backgroundColor: "#ffffff",
+    backgroundColorResolved: "#ffffff",
+    textAlign: "general",
+    verticalAlign: "bottom",
+    numberFormat: "General",
+    wrapText: false,
+    textRotation: "none",
+    indent: 0,
+    shrinkToFit: false,
+    locked: true,
+    formulaHidden: false,
+    borderTop: { ...noBorder },
+    borderRight: { ...noBorder },
+    borderBottom: { ...noBorder },
+    borderLeft: { ...noBorder },
+    borderDiagonalDown: { ...noBorder },
+    borderDiagonalUp: { ...noBorder },
+    ...grid.format(row, col),
+  };
 }
 
 function formatLogArgs(args: unknown[]): string {
@@ -441,39 +535,122 @@ export function respond(state: PreviewBackendState, method: string, args: unknow
     case "api.getCellFormat": {
       const [row, col, sheet] = args as [number, number, unknown];
       assertPreviewSheet(state, method, sheet);
-      // The product's readback is FULLY populated (every ScriptCellFormat key,
-      // borders as {style,color}, resolved-color twins). A partial default
-      // shape here would hand a candidate `undefined` where the product hands
-      // a value, and its guard logic would branch differently.
-      const noBorder = { style: "none", color: "#000000" };
-      return {
-        bold: false,
-        italic: false,
-        underline: "none",
-        strikethrough: false,
-        fontSize: 11,
-        fontFamily: "Calibri",
-        textColor: "#000000",
-        textColorResolved: "#000000",
-        backgroundColor: "#ffffff",
-        backgroundColorResolved: "#ffffff",
-        textAlign: "general",
-        verticalAlign: "bottom",
-        numberFormat: "General",
-        wrapText: false,
-        textRotation: "none",
-        indent: 0,
-        shrinkToFit: false,
-        locked: true,
-        formulaHidden: false,
-        borderTop: { ...noBorder },
-        borderRight: { ...noBorder },
-        borderBottom: { ...noBorder },
-        borderLeft: { ...noBorder },
-        borderDiagonalDown: { ...noBorder },
-        borderDiagonalUp: { ...noBorder },
-        ...grid.format(row, col),
-      };
+      return formatReadback(grid, row, col);
+    }
+    case "api.getRangeFormat": {
+      // The inverse of setRangeFormat, and the SAME per-cell shape as
+      // getCellFormat — a script that reads a rectangle and one that reads a
+      // cell must see the same keys, or a guard written against one breaks
+      // against the other.
+      const [r1, c1, r2, c2, sheet] = args as [number, number, number, number, unknown];
+      assertPreviewSheet(state, method, sheet);
+      const rows: Array<Array<Record<string, unknown>>> = [];
+      for (let r = r1; r <= r2; r++) {
+        const row: Array<Record<string, unknown>> = [];
+        for (let c = c1; c <= c2; c++) row.push(formatReadback(grid, r, c));
+        rows.push(row);
+      }
+      return rows;
+    }
+    case "api.clearRangeFormat": {
+      const [r1, c1, r2, c2, sheet] = args as [number, number, number, number, unknown];
+      assertPreviewSheet(state, method, sheet);
+      for (let r = r1; r <= r2; r++) {
+        for (let c = c1; c <= c2; c++) {
+          const cell = grid.cells.get(`${r},${c}`);
+          if (cell) cell.format = {};
+        }
+      }
+      return undefined;
+    }
+
+    // ---- the script's own clipboard ----
+    case "api.copyRange": {
+      const [r1, c1, r2, c2, sheet] = args as [number, number, number, number, unknown];
+      assertPreviewSheet(state, method, sheet);
+      const cells: Array<Array<PreviewCell | undefined>> = [];
+      for (let r = r1; r <= r2; r++) {
+        const row: Array<PreviewCell | undefined> = [];
+        for (let c = c1; c <= c2; c++) {
+          const found = grid.cells.get(`${r},${c}`);
+          row.push(
+            found
+              ? { input: found.input, format: { ...found.format }, cachedDisplay: found.cachedDisplay }
+              : undefined,
+          );
+        }
+        cells.push(row);
+      }
+      state.clipboard = { rows: r2 - r1 + 1, cols: c2 - c1 + 1, cells };
+      return { rows: state.clipboard.rows, cols: state.clipboard.cols };
+    }
+    case "api.pasteRange": {
+      const [row, col, opts] = args as [
+        number,
+        number,
+        { mode?: string; transpose?: boolean; sheetIndex?: unknown } | undefined,
+      ];
+      assertPreviewSheet(state, method, opts?.sheetIndex);
+      const clip = state.clipboard;
+      if (!clip) {
+        // The product's own message, verbatim: a script that handles the empty
+        // case must see what it would really see.
+        throw new Error(
+          "nothing to paste: call copyRange(...) first (each script has its own clipboard, and it is empty when the script starts)",
+        );
+      }
+      const transpose = opts?.transpose === true;
+      const mode = opts?.mode ?? "all";
+      // A pasted FORMULA has its relative references SHIFTED by the product.
+      // This backend has no reference parser, so pasting one unshifted would
+      // write a formula the product would never have written — a wrong answer
+      // presented as the script's. Gap instead.
+      if (mode !== "formats") {
+        for (const r of clip.cells) {
+          for (const cell of r) {
+            if (cell?.input.startsWith("=")) {
+              throw new PreviewGapError("api.pasteRange of a range containing a formula (references shift)");
+            }
+          }
+        }
+      }
+      const destRows = transpose ? clip.cols : clip.rows;
+      const destCols = transpose ? clip.rows : clip.cols;
+      for (let dr = 0; dr < destRows; dr++) {
+        for (let dc = 0; dc < destCols; dc++) {
+          const src = transpose ? clip.cells[dc]?.[dr] : clip.cells[dr]?.[dc];
+          const tr = row + dr;
+          const tc = col + dc;
+          if (mode !== "formats") grid.setInput(tr, tc, src?.input ?? "");
+          if (mode !== "values" && src) grid.mergeFormat(tr, tc, src.format);
+        }
+      }
+      return { rows: destRows, cols: destCols };
+    }
+
+    // ---- named ranges ----
+    case "api.createNamedRange": {
+      const [name, refersTo] = args as [string, string];
+      if (state.namedRanges.has(name)) {
+        throw new Error(`A named range called "${name}" already exists`);
+      }
+      state.namedRanges.set(name, refersTo);
+      return undefined;
+    }
+    case "api.deleteNamedRange": {
+      const [name] = args as [string];
+      // The product raises a ValidationError naming the missing range; an
+      // ordinary Error is the closest this layer can produce and carries the
+      // same text, which is what a script's catch branch would read.
+      if (!state.namedRanges.delete(name)) throw new Error(`No named range "${name}"`);
+      return undefined;
+    }
+    case "api.getNamedRanges": {
+      return [...state.namedRanges.entries()].map(([name, refersTo]) => ({
+        name,
+        refersTo,
+        scope: null,
+      }));
     }
 
     // ---- workbook-level odds and ends ----
