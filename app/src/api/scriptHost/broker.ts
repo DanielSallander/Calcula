@@ -11,6 +11,7 @@
 //          Phase 2 it is the ScriptHandle the context builder closed over.
 
 import { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS, type CapabilityId, type MethodPolicy } from "./allowlist";
+import { decidePolicy } from "./brokerPolicy";
 import { CAPABILITY_ID_SET } from "./capabilityIds";
 import { appendAudit } from "./auditRing";
 import { getGrantSet } from "./capabilities";
@@ -49,6 +50,26 @@ export interface ScriptHandle {
    * scripts it is exactly what the package manifest declared.
    */
   declaredCapabilities: ReadonlySet<CapabilityId>;
+  /**
+   * This handle belongs to a DRY RUN, not to a mounted script (§5c).
+   *
+   * It changes exactly one thing — the call is not RECORDED — and changes
+   * nothing about whether it is ADMITTED. That asymmetry is the point. The
+   * audit trail answers "what did the scripts in this workbook do to it"; a
+   * preview mounts nothing, is registered nowhere, and reaches a backend that
+   * cannot touch the document, so a row attributed to it is not a redaction of
+   * a real event, it is a false statement about one that never happened. The
+   * subtle half is denials: a preview declares no capabilities, so every
+   * capability-bearing call it makes is refused — and `persistCapabilityAudit`
+   * PERSISTS broker-policy denials into the workbook's own audit log. Without
+   * this flag, the very mechanism that keeps a preview harmless would write
+   * permanent denial rows for a script the user never agreed to run.
+   *
+   * Settable only by `buildPreviewHandle`, which hard-codes empty grant and
+   * declared sets. So possession of a preview handle is proof the ceiling is
+   * empty — the flag can never travel with reach.
+   */
+  readonly preview?: true;
 }
 
 /** The recognized capability ids. Single source of truth: capabilityIds.ts
@@ -129,55 +150,71 @@ export function buildHandleFromDefinition(definition: {
   };
 }
 
+/**
+ * The identity a DRY RUN calls under (§5c) — a script that is being previewed,
+ * not one that is mounted.
+ *
+ * Everything that could grant it reach is fixed here rather than passed in:
+ * `grants` and `declaredCapabilities` are fresh EMPTY sets, never the live
+ * per-script set `buildHandleFromDefinition` hands out. Two consequences, both
+ * structural rather than remembered:
+ *
+ *  1. Every capability-bearing method is refused by the R19 ceiling, which
+ *     `decidePolicy` checks BEFORE the grant — so a preview cannot fetch, write
+ *     storage, schedule a job, publish a package or raise a dialog, and cannot
+ *     be JIT-prompted into any of them either.
+ *  2. A preview of a source the user previously granted "Always" does NOT
+ *     inherit those grants, because it never asks `getGrantSet` for them. That
+ *     inheritance is the trap: the persisted grant is keyed by workbook +
+ *     script + source hash, so re-previewing an already-trusted script would
+ *     silently have come back with real reach.
+ *
+ * `tier` is the caller's, because tier shapes which surface the script is even
+ * given and a preview of an unlocked script must exercise the unlocked surface
+ * to be worth anything. Tier alone reaches no capability.
+ */
+export function buildPreviewHandle(opts: {
+  scriptId: string;
+  scriptName: string;
+  objectType: string;
+  instanceId: string | null;
+  tier: ScriptTier;
+}): ScriptHandle {
+  return {
+    scriptId: opts.scriptId,
+    scriptName: opts.scriptName,
+    tier: opts.tier,
+    objectType: opts.objectType,
+    instanceId: opts.instanceId,
+    // Never "local": origin drives cross-script trust, and a preview must not
+    // be same-origin with anything the workbook actually mounted.
+    origin: "(preview)",
+    grants: new Set<CapabilityId>(),
+    declaredCapabilities: new Set<CapabilityId>(),
+    preview: true,
+  };
+}
+
 // ============================================================================
 // Policy check (shared by sync + async dispatch)
 // ============================================================================
 
+/**
+ * Admit or refuse one call, then AUDIT the refusal and raise it.
+ *
+ * The decision itself lives in `brokerPolicy.ts` — pure, dependency-free, and
+ * shared with the preview harness, which runs in a Node subprocess that cannot
+ * import this module. Keeping the order here would have meant keeping it twice
+ * (the harness's copy did not even check the tier). What stays here is what
+ * only the enforcement point may do: record the refusal and throw it.
+ */
 function checkPolicy(handle: ScriptHandle, method: string, args: unknown[]): MethodPolicy {
-  const policy = ALLOWLIST[method];
-  if (!policy) {
-    audit(handle, method, "emit", false, "UnknownMethod");
-    throw new BrokerError("UnknownMethod", `Unknown script method: ${method}`);
+  const decision = decidePolicy(handle, method, args);
+  if (!decision.admitted) {
+    audit(handle, method, decision.class, false, decision.code);
+    throw new BrokerError(decision.code, decision.message, decision.capability);
   }
-
-  // Validation FIRST (before tier) so error messages can't probe policy.
-  const valid = policy.validate(args);
-  if (valid !== true) {
-    audit(handle, method, policy.class, false, "ValidationError");
-    throw new BrokerError("ValidationError", `${method}: ${valid}`);
-  }
-
-  if (policy.tier === "unlocked" && handle.tier !== "unlocked") {
-    audit(handle, method, policy.class, false, "PermissionDenied");
-    throw new BrokerError(
-      "PermissionDenied",
-      `${method} requires unlocked access; this script is restricted`,
-    );
-  }
-
-  // R19 ceiling: a capability the script never DECLARED can never be used —
-  // denied here (PermissionDenied) before the grant check, so it is also never
-  // JIT-prompted. A distributed script's tampered source can't widen this set;
-  // the ceiling came from the package manifest.
-  if (policy.capability && !handle.declaredCapabilities.has(policy.capability)) {
-    audit(handle, method, policy.class, false, "PermissionDenied");
-    throw new BrokerError(
-      "PermissionDenied",
-      `${method} requires the '${policy.capability}' capability, which this script did not declare`,
-      policy.capability,
-    );
-  }
-
-  if (policy.capability && !handle.grants.has(policy.capability)) {
-    audit(handle, method, policy.class, false, "CapabilityRequired");
-    throw new BrokerError(
-      "CapabilityRequired",
-      `${method} requires the '${policy.capability}' capability`,
-      policy.capability,
-    );
-  }
-
-  return policy;
+  return decision.policy;
 }
 
 /**
@@ -330,6 +367,13 @@ function audit(
   ok: boolean,
   error?: string,
 ): void {
+  // A DRY RUN is not an event in the workbook's history (§5c). It mounts
+  // nothing, is registered nowhere, and its calls are served by a backend that
+  // cannot reach the document — so both the in-memory ring (which the
+  // transparency panel renders) and the PERSISTED capability log (which
+  // survives reload) must stay silent about it. This is the ONE thing
+  // `preview` changes; admission is decided above and is unaffected.
+  if (handle.preview) return;
   appendAudit({
     ts: Date.now(),
     scriptId: handle.scriptId,

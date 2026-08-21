@@ -11,6 +11,7 @@ import {
   brokerCall,
   BrokerError,
   buildHandleFromDefinition,
+  buildPreviewHandle,
   callExposed,
   hostCallExposed,
   listExposed,
@@ -23,6 +24,8 @@ import {
   type ScriptHandle,
 } from "./broker";
 import { assertMountAllowed } from "./mountGate";
+import { drainBrokerTraffic, hookPayload, withTimeout } from "./scriptPreview/runShape";
+import type { PreviewBackend } from "./scriptPreview/backend";
 import {
   PROTOCOL_VERSION,
   RENDER_TIMEOUT_MS,
@@ -1051,6 +1054,366 @@ export function hostValidateScript(source: string): Promise<{ valid: boolean; er
     };
     worker.postMessage({ t: "validate", source } satisfies H2W);
   });
+}
+
+// ============================================================================
+// The faithful dry run (§5c)
+// ============================================================================
+
+/** What a caller asks the preview to run, and how. */
+export interface PreviewRunRequest {
+  source: string;
+  objectType: string;
+  /** Display name used in error text; never an id and never persisted. */
+  scriptName?: string;
+  instanceId?: string | null;
+  /** Shapes which surface the realm builds. Reaches no capability by itself. */
+  tier?: "restricted" | "unlocked";
+  apiVersion?: string;
+  /** Mirror seeds for the sync getters (`context.workbook.*`, properties, ...). */
+  snapshot?: MountSpec["snapshot"];
+  /** The substituted backend. Serves what it can; THROWS for anything else. */
+  backend: PreviewBackend;
+  /** A hook to fire after `setup` returns — for a button, "onClick". */
+  event?: string;
+  /** How many times to fire it, sequentially (default 1). */
+  eventCount?: number;
+  /**
+   * The hook is fired IF the script registered it, and its absence is not a
+   * failure.
+   *
+   * The two callers want opposite things and both are right. A graded task
+   * NAMES the event its solution must handle, so a script that never registers
+   * it did not do the job — that caller leaves this false. A draft gate has no
+   * task and no expectation; it fires the object's usual hook opportunistically
+   * to catch a handler that throws, and must not invent a defect out of a
+   * script that legitimately only does setup-time work.
+   */
+  eventOptional?: boolean;
+  setupTimeoutMs?: number;
+  eventTimeoutMs?: number;
+}
+
+/**
+ * What the realm actually did. Says nothing about whether it was RIGHT.
+ *
+ * Note what is NOT here: the script's OUTPUT. `context.log` and
+ * `context.notify` are broker calls (`base.log` / `base.notify`), so the
+ * backend the caller supplied already collected them — reporting a second copy
+ * from here would be a second definition of "what the script said", and the two
+ * would disagree the first time a backend chose to filter one.
+ */
+export interface PreviewRunResult {
+  /** The realm was available and the script mounted and ran to completion. */
+  ran: boolean;
+  error?: string;
+  /** Hooks the script registered, as the realm reported them. */
+  hooks: string[];
+  /** Broker methods the script called, in order, admitted or not. */
+  calls: string[];
+  /**
+   * Calls the BROKER refused, with its own code and message.
+   *
+   * Reported rather than swallowed because a refusal the script ignored is
+   * otherwise invisible: it neither throws (nothing awaited it) nor changes a
+   * cell, so the run reads as a clean one that happened to do nothing. Whether
+   * a given refusal means "the script is wrong" or "the preview cannot judge
+   * this" is the CALLER's decision — a capability refusal here says only that
+   * a preview declares nothing, while a validation refusal is one the product
+   * would have made identically.
+   */
+  refusals: Array<{ method: string; code: string; message: string }>;
+  /** True when this environment has no Worker realm at all (jsdom). */
+  realmUnavailable?: boolean;
+}
+
+const PREVIEW_SETUP_TIMEOUT_MS = 5_000;
+const PREVIEW_EVENT_TIMEOUT_MS = 5_000;
+
+/** Monotonic, so two previews in one session can never share a script id. */
+let previewSeq = 0;
+
+/**
+ * Run a candidate script in the realm it ACTUALLY runs in — a real hardened
+ * Worker — against a substituted backend, and report what it did.
+ *
+ * WHY THIS EXISTS. `ai_dry_run_script` executes in the Rust QuickJS realm,
+ * which shares a small fraction of this realm's `context` and rejects `export`
+ * outright, so it declines every object script and its verdict would otherwise
+ * describe the emulator rather than the draft. This is the faithful version:
+ * the surface is the product's, the mount transform is the product's, hook
+ * dispatch is the product's, admission is the product's broker. Only what sits
+ * BEHIND the broker is substituted, because a preview has no document to write
+ * to — that is the one substitution, and it is the whole design.
+ *
+ * SAFETY IS PROVED BY ABSENCE, NOT BY A FLAG. This function deliberately does
+ * NOT call — and a source-reading guard pins that it does not:
+ *
+ *   - `assertMountAllowed`      … so no Script-Security modal, no session
+ *                                 approval, and no persistent workbook-trust
+ *                                 record can be created by previewing.
+ *   - `buildHandleFromDefinition`… so no LIVE grant set is fetched. It builds a
+ *                                 `buildPreviewHandle` instead, whose grant and
+ *                                 declared sets are fresh and EMPTY, so a source
+ *                                 the user once granted "Always" cannot inherit
+ *                                 that grant here.
+ *   - `restoreAndSyncGrants`    … so nothing is pushed to the authoritative Rust
+ *                                 capability store.
+ *   - `registerMountedHandle`   … so the preview never appears as a mounted
+ *                                 script in the transparency panel.
+ *   - `mounted.set` / `executeImpl` … so no call can reach a real Tauri command,
+ *                                 and `hostUnmountScript` — which REVOKES Rust
+ *                                 capabilities by script id — is never reached.
+ *
+ * Each of those is an absent call rather than a suppressed one, which is the
+ * same discipline `DocumentEffect` uses in reverse: there, possession of the
+ * value proves the flag is set; here, absence of the call proves nothing was
+ * granted. Four conditionals inside `mountWorker` would each have failed OPEN.
+ *
+ * THE WORKER IS ALWAYS TERMINATED, on every exit path including a throw, so a
+ * draft that leaves a live `setInterval` cannot outlive its own preview.
+ */
+export async function hostPreviewScript(req: PreviewRunRequest): Promise<PreviewRunResult> {
+  if (!workerRealmAvailable()) {
+    // NOT a verdict. jsdom has no Worker, and answering "it did not run" there
+    // would be a statement about the test environment reported as one about the
+    // script — the precise failure this whole rung exists to avoid.
+    return { ran: false, realmUnavailable: true, hooks: [], calls: [], refusals: [] };
+  }
+
+  const scriptName = req.scriptName || "(preview)";
+  const handle = buildPreviewHandle({
+    // A synthetic id that cannot collide with any real script's, so nothing
+    // keyed by script id — grants, audit rows, save throttles — can be
+    // attributed to, or clobbered on behalf of, a script the user has.
+    scriptId: `preview:${req.objectType}:${previewSeq++}`,
+    scriptName,
+    objectType: req.objectType,
+    instanceId: req.instanceId ?? null,
+    tier: req.tier === "restricted" ? "restricted" : "unlocked",
+  });
+
+  const worker = spawnWorker();
+  const hooks: string[] = [];
+  const calls: string[] = [];
+  const refusals: PreviewRunResult["refusals"] = [];
+  let inFlight = 0;
+  let hookError: string | undefined;
+  let mountSettle: ((ok: boolean, error?: string) => void) | null = null;
+  let pingSeq = 0;
+  let awaitingPong: { seq: number; resolve: () => void } | null = null;
+
+  const send = (msg: H2W): void => worker.postMessage(msg);
+
+  worker.onmessage = (e: MessageEvent<W2H>): void => {
+    const msg = e.data;
+    switch (msg.t) {
+      case "mounted":
+        mountSettle?.(msg.ok, msg.error);
+        break;
+      case "hookRegistered":
+        hooks.push(msg.hook);
+        break;
+      case "pong":
+        if (awaitingPong?.seq === msg.seq) {
+          const { resolve } = awaitingPong;
+          awaitingPong = null;
+          resolve();
+        }
+        break;
+      case "error":
+        // A hook handler that threw or rejected reports HERE and dispatch
+        // returns normally — reading only the dispatch result would call that a
+        // clean run. First error wins.
+        hookError ??= msg.message;
+        break;
+      case "call": {
+        calls.push(msg.method);
+        inFlight++;
+        // The REAL broker, with a preview handle: the same ALLOWLIST lookup,
+        // the same argument validators, the same tier check and the same R19
+        // declared-capability ceiling that govern a mounted script. The ONLY
+        // substitution is the executor — `executeImpl` is not reachable from
+        // here, so no call can fall through to a Tauri command.
+        void brokerCall(handle, msg.method, msg.args, async () => req.backend(msg.method, msg.args))
+          .then(
+            (value) => send({ t: "callResult", callId: msg.callId, ok: true, value }),
+            (err: unknown) => {
+              const error =
+                err instanceof BrokerError
+                  ? { code: err.code as string, message: err.message }
+                  : { code: "HostError", message: err instanceof Error ? err.message : String(err) };
+              refusals.push({ method: msg.method, ...error });
+              send({ t: "callResult", callId: msg.callId, ok: false, error });
+            },
+          )
+          .finally(() => {
+            inFlight--;
+          });
+        break;
+      }
+      // Every other message this realm can send — debug state, render results,
+      // methodCall relays, pong — belongs to a MOUNTED script's lifecycle and
+      // has no meaning for a preview. Ignoring them is deliberate: answering a
+      // `methodCall` would relay a preview into the live exposed-method
+      // registry, and answering `renderDraw` would put a draft's pixels on the
+      // grid.
+      default:
+        break;
+    }
+  };
+
+  let workerError: string | undefined;
+  worker.onerror = (e: ErrorEvent): void => {
+    workerError ??= e.message || "Worker error during preview";
+    mountSettle?.(false, workerError);
+  };
+
+  /**
+   * Wait until the realm has PROCESSED everything posted so far.
+   *
+   * WHY THIS IS NOT OPTIONAL, measured rather than reasoned: without it the
+   * event path reported every writing script as changing NOTHING. `{t:"event"}`
+   * is fire-and-forget, and `postMessage` is asynchronous — so the host began
+   * counting quiet turns while the event message was still in transit, saw zero
+   * calls in flight (the handler had not run yet), and declared the realm idle
+   * before the first write was even issued. "It ran and changed nothing" is the
+   * single most misleading verdict this ladder can produce, and here it would
+   * have been produced for CORRECT scripts, every time.
+   *
+   * `ping`/`pong` is a real protocol round trip and the realm handles messages
+   * IN ORDER, so a pong proves the event was dispatched and the handler ran at
+   * least to its first `await` — by which point any call it issues has already
+   * been posted, and (messages again being ordered) already counted here.
+   * Quiescence only means something after that.
+   *
+   * The offline harness needs none of this: it calls `dispatchEvent` in-process,
+   * so the handler has already run by the time it looks.
+   */
+  const realmCaughtUp = (timeoutMs: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      const seq = ++pingSeq;
+      awaitingPong = { seq, resolve };
+      // Resolve rather than reject on timeout: the drain that follows has its
+      // own budget and produces the better message, and a realm that stopped
+      // answering will be caught there.
+      setTimeout(() => {
+        if (awaitingPong?.seq === seq) {
+          awaitingPong = null;
+          resolve();
+        }
+      }, timeoutMs);
+      send({ t: "ping", seq });
+    });
+
+  /**
+   * Run the realm to a standstill: nothing in flight, and nothing the realm has
+   * yet to react to.
+   *
+   * ONE DRAIN IS NOT ENOUGH, and the reason is a full round trip. When a call
+   * is refused, the host settles it and `inFlight` drops to zero — but the
+   * WORKER has not seen the result yet. It processes the `callResult`
+   * afterwards, the handler's `await` throws, and only then is `{t:"error"}`
+   * posted. A single drain finishes before any of that and reports a failing
+   * script as a clean run. So each drain is followed by a ping/pong flush, and
+   * the pair repeats while new calls keep appearing — which is also what makes
+   * a `.then` chain that issues its next call from the previous one's result
+   * settle properly rather than being cut off half-way.
+   */
+  const settleRealm = async (timeoutMs: number): Promise<string | undefined> => {
+    const startedAt = Date.now();
+    for (;;) {
+      const seen = calls.length;
+      const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      const stuck = await drainBrokerTraffic(() => inFlight, remaining);
+      if (stuck !== undefined) return stuck;
+      // Flush: anything the realm posts while digesting the results above —
+      // an error, or the next call in a chain — arrives before the pong does,
+      // because the realm handles messages in order.
+      await realmCaughtUp(Math.max(0, timeoutMs - (Date.now() - startedAt)));
+      if (calls.length === seen && inFlight === 0) return undefined;
+      if (Date.now() - startedAt > timeoutMs) {
+        return `the script was still making calls ${timeoutMs / 1000}s after it was started`;
+      }
+    }
+  };
+
+  const finish = (ran: boolean, error?: string): PreviewRunResult => {
+    worker.terminate();
+    return { ran, error, hooks, calls, refusals };
+  };
+
+  try {
+    const mounted = new Promise<void>((resolve, reject) => {
+      mountSettle = (ok, error) => {
+        mountSettle = null;
+        if (ok) resolve();
+        else reject(new Error(error || "setup(context) failed"));
+      };
+    });
+
+    send({
+      t: "mount",
+      spec: {
+        protocolVersion: PROTOCOL_VERSION,
+        scriptId: handle.scriptId,
+        objectType: req.objectType,
+        instanceId: req.instanceId ?? undefined,
+        tier: handle.tier,
+        // The realm shapes `context.caps` from this list. It is EMPTY, matching
+        // the handle's empty grant set — so the surface a preview sees is the
+        // surface it can actually use, and a capability call fails at the
+        // broker rather than looking available and dying somewhere stranger.
+        capabilities: [],
+        apiVersion: req.apiVersion || "1.0",
+        source: req.source,
+        scriptName,
+        snapshot: req.snapshot ?? {},
+      },
+    });
+
+    try {
+      await withTimeout(mounted, req.setupTimeoutMs ?? PREVIEW_SETUP_TIMEOUT_MS, "setup(context)");
+    } catch (e) {
+      return finish(false, e instanceof Error ? e.message : String(e));
+    }
+
+    // `setup` itself may have issued calls whose tails are still in flight —
+    // the same `.then`-chain shape that made the offline harness misgrade a
+    // correct script. Settle before observing anything.
+    const settledSetup = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
+    if (settledSetup !== undefined) return finish(false, settledSetup);
+    if (hookError !== undefined) return finish(false, `setup(context) threw: ${hookError}`);
+
+    if (req.event && (hooks.includes(req.event) || !req.eventOptional)) {
+      if (!hooks.includes(req.event)) {
+        return finish(
+          false,
+          `the script never registers the "${req.event}" hook (for a button, the click handler is ` +
+            `context.${req.event}(handler))`,
+        );
+      }
+      const fires = Math.max(1, req.eventCount ?? 1);
+      for (let i = 0; i < fires; i++) {
+        send({ t: "event", hook: req.event, payload: hookPayload(req.event) });
+        // A hook dispatch is FIRE-AND-FORGET in this protocol — the realm sends
+        // no ack — so quiescence is the only signal there is that the handler
+        // is over, and it is meaningless until the handler has STARTED.
+        await realmCaughtUp(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
+        const stuck = await settleRealm(req.eventTimeoutMs ?? PREVIEW_EVENT_TIMEOUT_MS);
+        if (stuck !== undefined) return finish(false, stuck);
+        if (hookError !== undefined) {
+          return finish(false, `the "${req.event}" handler threw: ${hookError}`);
+        }
+      }
+    }
+
+    if (workerError !== undefined) return finish(false, workerError);
+    return finish(true);
+  } catch (e) {
+    // The realm must not survive an unexpected failure of its own driver.
+    return finish(false, e instanceof Error ? e.message : String(e));
+  }
 }
 
 function post(mw: MountedWorker, msg: H2W): void {

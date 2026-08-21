@@ -497,6 +497,112 @@ and every consumer branches on it before drawing a conclusion. The honest scope:
 it in the realm it actually runs in, which is a real piece of work and is filed as such; emulating
 5% of a surface and reporting the gaps as defects is not a cheaper version of it.
 
+### 5c. The faithful preview — BUILT 2026-08-21
+
+The piece of work filed above is done. `previewObjectScript`
+(`app/src/api/scriptHost/scriptPreview/`) runs a draft in a REAL hardened Worker against a copy of
+the workbook, and `draftGate` now calls it instead of `ai_dry_run_script` — which had declined 100%
+of what that gate handed it, so L3 was dead on the only surface the AI drafts for.
+
+**What the objection above was actually about, and why it does not bite.** "Emulating 5% of a
+surface" is about the SURFACE. Nothing here emulates it. Of the five layers a script passes
+through, four are the product's own code and one is substituted:
+
+| layer | preview uses |
+|---|---|
+| realm | a real hardened Worker — `hostPreviewScript`, `spawnWorker()` |
+| mount transform | `wrapModuleSource`, verbatim |
+| surface | `buildWorkerContext` — the whole `context` |
+| policy | the real `brokerCall`: ALLOWLIST lookup, argument validators, tier, R19 ceiling |
+| **backend** | **substituted** — an in-memory grid |
+
+The substitution is irreducible: a preview must not write to the document it is previewing. What
+the backend cannot serve is not reported as a defect — it GAPS, the run is `applicable: false`, and
+no conclusion is drawn. Same decline discipline, one layer finer: it used to be "wrong realm,
+always", and is now "this specific member, this run".
+
+**Safety is proved by ABSENCE, not by a flag.** `hostPreviewScript` never calls
+`assertMountAllowed` (no Script-Security modal, no session approval, no persistent workbook-trust
+record), never calls `buildHandleFromDefinition` (no live grant set, so a source the user once
+granted "Always" cannot inherit it), never calls `restoreAndSyncGrants` (nothing reaches the Rust
+capability store), never calls `registerMountedHandle` (never appears as a mounted script), never
+enters `mounted` (so `hostUnmountScript`, which REVOKES Rust capabilities by script id, is
+unreachable), and never calls `executeImpl` (so no call can fall through to a Tauri command). Each
+is an absent call rather than a suppressed one — the same discipline `DocumentEffect` uses, run in
+reverse: there, possession of the value proves the flag is set; here, absence of the call proves
+nothing was granted. The alternative — four conditionals inside `mountWorker` — would have put four
+fail-OPEN branches in the most security-sensitive function in the script host.
+`previewSafety.test.ts` reads the function body and pins every absence, on comment-stripped source
+(its first version failed on the comment that DOCUMENTS one of the protections, which is the same
+substring weakness that would have let a real call hide).
+
+**One flag, one branch: `ScriptHandle.preview` suppresses AUDIT only.** A preview mounts nothing
+and reaches nothing, so a row attributed to it is not a redaction of a real event but a false
+statement about one that never happened. The subtle half is denials — `persistCapabilityAudit`
+PERSISTS broker-policy refusals into the workbook's audit log, so without the flag the very
+mechanism that keeps a preview harmless would write permanent rows about a script the user never
+agreed to run. Only `buildPreviewHandle` can set it, and that function hard-codes empty grant and
+declared sets, so possession of a preview handle is proof the ceiling is empty.
+
+**ONE backend, TWO drivers.** The grid, the 39-method backend and the broker's admit/refuse
+decision moved out of `scriptEval/harness.ts` into `scriptPreview/` and `brokerPolicy.ts`. The
+offline corpus driver and the in-app realm driver now share all three, which is what makes the
+corpus evidence about the app: a corpus grading against different semantics than the app previews
+with certifies the wrong thing. The extraction also removed a second source of truth the harness
+had been carrying — its hand-rolled copy of the policy order, which never checked the tier.
+`decidePolicy` is pure and dependency-free precisely so the Node grading subprocess can import it
+without dragging Tauri along.
+
+**The document.** `snapshotActiveSheet` copies the active sheet's used range with read-class calls
+only, capped at 20,000 cells and clamped by whole ROWS (halving a row hands a script a record
+missing its own columns, which reads as corruption rather than as a bound); a capped copy says so
+in the report. Each cell carries BOTH halves: the input string (what the diff compares) and the
+display (what `api.getCellValue` actually returns in the product — a currency-formatted 42 reads
+back "$42.00"). Deriving the input from `display` instead would have made the diff report changes
+nothing made.
+
+**Capabilities DECLINE rather than stub, in-app.** The preview declares nothing, so the R19 ceiling
+refuses every capability-bearing call; the preview then reports that as a decline, not as the
+script's defect. The draft's declarations were already checked by L2, which runs first — so a
+capability call reaching here is one the script declared correctly, and the honest answer is that a
+preview cannot perform it. Answering from a canned stub would be worse than silence: a script
+parsing `{}` as an exchange rate throws, and the preview would report ITS OWN stub as the draft's
+runtime error. (The offline corpus does stub them, because its tasks SUPPLY the stub content. Same
+rule — serve only what you can serve truthfully — with different amounts of available truth.)
+
+**Three defects found by the E2E tier and by nothing else.** jsdom has no `Worker`, so no unit test
+has ever executed a script in the realm this feature is about; the unit tier covers the pure halves
+and reads the source for the rest. All three were in the async plumbing, and all three produced the
+same misleading verdict — *"it ran and changed nothing"* — about CORRECT scripts:
+
+1. **The host began draining before the event was delivered.** `{t:"event"}` is fire-and-forget and
+   `postMessage` is asynchronous, so the host counted quiet turns while the message was still in
+   transit, saw nothing in flight because the handler had not run, and declared the realm idle
+   before the first write was issued. Every writing script reported 0 changes. Fixed with a
+   `ping`/`pong` round trip — a real protocol message — which works because the realm handles
+   messages IN ORDER, so a pong proves the handler ran at least to its first `await`.
+2. **One drain is not enough.** When a call is refused the host settles it and `inFlight` drops to
+   zero, but the WORKER has not seen the result yet; it processes the `callResult` afterwards, the
+   continuation throws, and only then is `{t:"error"}` posted. A single drain finishes before all
+   of that. `settleRealm` now alternates drain and flush until no new calls appear.
+3. **A refused call was invisible.** A refusal the script never awaited neither throws nor changes
+   a cell. `PreviewRunResult.refusals` reports them; the preview module decides what each means —
+   a capability refusal is a preview limit, any other is a real finding the product would have made
+   identically.
+
+The offline harness needs none of this, because it dispatches in-process — which is exactly why
+none of it was visible below the E2E tier.
+
+**Stated limits.** No formula evaluation: a formula the SCRIPT writes reads back with an empty
+display, and grading pins the formula TEXT (`match`). This is parity with the Rust dry run rather
+than a shortfall of this one — `core/script-engine` has no parser either, every script write there
+stores `ast: None`, and formulas are only compiled on the APPLY path a preview never reaches. A
+formula the SNAPSHOT supplied does carry the value the workbook already computed, which the Rust
+path cannot offer for a fixture. Nothing recalculates, so a write a real dependent would react to
+leaves that dependent holding its snapshot value. A cell the script rewrites loses its cached
+display and reads back unformatted. Formats are not observable in a diff. And a hook that defers
+its work to a timer is not waited for — the product has no observation point there either.
+
 ### The same three shapes, swept for repo-wide — 2026-08-20
 
 Finding three defects stacked on each other is evidence about the CLASS, not just the instances, so

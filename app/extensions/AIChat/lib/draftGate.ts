@@ -25,7 +25,7 @@ import { validateScriptSource, repairPrompt } from "@api/scriptHost/scriptValida
 // consumes it. A second mirror here would be one more thing to drift from
 // `DryRunReport` in ai/dryrun.rs.
 import type { DryRunReport } from "@api/scriptHost/scriptAuthoring";
-import { aiChatBackend } from "./aiChatBackend";
+import { previewObjectScript } from "@api/scriptHost/scriptPreview";
 
 /** What the gate decided about one tool call. */
 export interface GateVerdict {
@@ -46,23 +46,36 @@ export interface GateVerdict {
 const ALLOW: GateVerdict = { allow: true };
 
 /**
- * Run a candidate through the dry run, tolerating an unavailable backend.
+ * Run a candidate through the dry run, tolerating a preview that cannot run.
  *
- * A dry run that cannot RUN must not block a draft: the command is new, and a
- * gate that turns its own failure into a rejection would make the chat refuse
- * work for a reason the user cannot act on. Returns null when no verdict could
- * be reached, which the caller treats as "no objection".
+ * A dry run that cannot RUN must not block a draft: a gate that turns its own
+ * failure into a rejection would make the chat refuse work for a reason the
+ * user cannot act on. Returns null when no verdict could be reached, which the
+ * caller treats as "no objection".
+ *
+ * WHY THIS NO LONGER CALLS `ai_dry_run_script`. That command runs in the Rust
+ * QuickJS realm, which rejects `export` and shares a small fraction of the
+ * Worker realm's `context` — so it declined every source this gate ever handed
+ * it, correctly and unconditionally, and L3 was dead here. It remains the right
+ * rung for a ONE-OFF script, which is that realm's own language; it was simply
+ * never the right rung for an object script. `previewObjectScript` runs the
+ * draft in the realm it will actually be mounted into, against a copy of the
+ * workbook (§5c).
+ *
+ * `onClick` is fired OPPORTUNISTICALLY: this gate has no task description and
+ * cannot know what the draft is for, so the hook is fired when the script
+ * registered it and skipped in silence when it did not. It is worth firing
+ * because a handler that throws is invisible to `setup` alone — and because
+ * `context.expose('onClick', …)`, the shape every early draft used, mounts
+ * perfectly and never receives a click.
  */
 async function tryDryRun(source: string): Promise<DryRunReport | null> {
   try {
-    // Labeled explicitly: this gate guards `draft_object_script` and nothing
-    // else, so the source is an object script BY DEFINITION — the backend
-    // declines authoritatively instead of guessing from substrings (which both
-    // under- and over-declined; see ai/dryrun.rs). The preview will apply to
-    // these drafts once it can run them in the Worker realm they belong to.
-    return await aiChatBackend.invoke<DryRunReport>("ai_dry_run_script", {
-      code: source,
-      surface: "object-script",
+    return await previewObjectScript({
+      source,
+      objectType: "button",
+      event: "onClick",
+      eventOptional: true,
     });
   } catch {
     return null;

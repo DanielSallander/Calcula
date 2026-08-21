@@ -20,6 +20,9 @@
 
 import { validateScriptSource } from "../scriptValidation";
 import { analyzeScript } from "../scriptValidation/analyze";
+// Type-only: this module is deliberately executor-free and stays importable
+// everywhere, so nothing from the preview backend enters it at runtime.
+import type { PreviewStubs } from "../scriptPreview/backend";
 
 /** A cell seeded into the harness grid before the run (input-string form). */
 export interface CellSeedSpec {
@@ -45,22 +48,15 @@ export interface CellExpectation {
   match?: string;
 }
 
-/** Canned answers for the capability stubs the outcome harness provides. */
-export interface OutcomeStubs {
-  /** What `caps.fetch(...)` responds with, as the parsed JSON body. */
-  fetchJson?: unknown;
-  /** What `caps.dialog.confirm(...)` answers. */
-  confirm?: boolean;
-  /** What `caps.dialog.prompt(...)` answers (`null` = user cancelled). */
-  promptText?: string | null;
-  /**
-   * Inject ONE write failure: the first `setCellValue` targeting this cell
-   * throws a host error. This is how a task about error HANDLING gets an error
-   * to handle — without it the "tell the user if something goes wrong" branch
-   * is unexercisable and an unconditional success-notify would grade 1.0.
-   */
-  failWrite?: { row: number; col: number };
-}
+/**
+ * Canned answers for the capability stubs the outcome harness provides.
+ *
+ * An ALIAS, not a second declaration: the backend that honours these lives in
+ * `scriptPreview/backend.ts` and is shared with the in-app dry run, so the
+ * vocabulary has to be one type. A parallel interface here would drift the
+ * moment either side gained a stub.
+ */
+export type OutcomeStubs = PreviewStubs;
 
 /**
  * The per-task expectations that turn L3 from a signal into a grade.
