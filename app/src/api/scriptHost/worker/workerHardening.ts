@@ -28,6 +28,76 @@ export const NEUTERED_GLOBALS: readonly string[] = [
 const MIN_INTERVAL_MS = 16;
 const MAX_LIVE_TIMERS = 32;
 
+/**
+ * Timer intrinsics captured at MODULE LOAD — before `hardenAmbientGlobals`
+ * replaces the globals, and therefore before any user source could have
+ * touched them. The memory watchdog schedules with these so a hostile script
+ * cannot disarm it by sweeping `clearInterval(1..N)` over guessed ids: the
+ * capped wrappers only clear ids the capped `setInterval` issued.
+ */
+const intrinsicScheduler: {
+  set: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  clear: (id: ReturnType<typeof setInterval>) => void;
+} = {
+  // BOUND NOW, at module evaluation — ES imports run before bootstrap's
+  // top-level `hardenAmbientGlobals()` call, so these are the real intrinsics.
+  // A lazy `(fn, ms) => setInterval(fn, ms)` would resolve the PATCHED global
+  // at call time and hand the watchdog back to the code it watches.
+  set: globalThis.setInterval.bind(globalThis),
+  clear: globalThis.clearInterval.bind(globalThis),
+};
+
+/** Preview memory ceiling. Generous for real drafts, far under the V8 heap
+ *  limit whose breach kills the whole renderer process. */
+export const PREVIEW_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
+
+export interface MemoryWatchdog {
+  stop(): void;
+}
+
+/**
+ * Poll a memory reading and fire ONCE when it crosses the limit.
+ *
+ * WHAT THIS IS AND IS NOT (§5c.2 follow-up, stated rather than implied). A
+ * preview runs un-consented model output in a Worker that shares the RENDERER
+ * process; a draft that allocates until the isolate's heap limit does not fail
+ * politely — it can take the whole UI down before the run budget fires. No
+ * browser API prevents that. What CAN be caught is the gradual case — a draft
+ * accumulating big arrays across awaits — because polling runs whenever the
+ * event loop turns. A tight synchronous allocation loop never yields, so it
+ * remains uncatchable IN the realm; that residual is documented in §5c.2, not
+ * hidden here.
+ *
+ * Pure wiring (injected reader/breach/schedule) so the threshold logic is
+ * unit-testable in a tier that has no Worker at all. `readUsage` returning
+ * undefined — the memory API is Chromium-specific and not guaranteed in a
+ * worker — makes the watchdog a silent no-op rather than a false alarm.
+ */
+export function armMemoryWatchdog(opts: {
+  limitBytes: number;
+  intervalMs: number;
+  readUsage: () => number | undefined;
+  onBreach: (usedBytes: number) => void;
+  schedule?: typeof intrinsicScheduler;
+}): MemoryWatchdog {
+  const scheduler = opts.schedule ?? intrinsicScheduler;
+  let fired = false;
+  const id = scheduler.set(() => {
+    if (fired) return;
+    const used = opts.readUsage();
+    if (used !== undefined && used > opts.limitBytes) {
+      fired = true;
+      scheduler.clear(id);
+      opts.onBreach(used);
+    }
+  }, opts.intervalMs);
+  return {
+    stop() {
+      scheduler.clear(id);
+    },
+  };
+}
+
 function neuter(target: object, name: string): void {
   try {
     Object.defineProperty(target, name, {

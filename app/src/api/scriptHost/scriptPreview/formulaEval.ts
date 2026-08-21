@@ -34,6 +34,15 @@ export interface PreviewFormulaValue {
 }
 
 export interface PreviewEvalResult {
+  /**
+   * Set when the evaluator DELIBERATELY refused the batch (the cell cap), with
+   * the reason. Distinct from the catch path on purpose: a missing backend is
+   * silent (the grid keeps what it had, as before the feature existed), but a
+   * refusal is an ANSWER and must reach the report — a script that grew the
+   * grid past the cap used to have its formulas read back empty with no
+   * indication anywhere.
+   */
+  refused?: string | null;
   values: PreviewFormulaValue[];
   /** False when the pass budget ran out — a cycle, or a volatile function. */
   converged: boolean;
@@ -101,6 +110,12 @@ export async function recalculatePreviewGrid(
     return undefined;
   }
 
+  if (result.refused) {
+    return (
+      `${result.refused} — formula values shown are the workbook's last computed ones, and ` +
+      `formulas the script wrote have none`
+    );
+  }
   if (result.spilled > 0) {
     return (
       `${result.spilled} formula${result.spilled === 1 ? "" : "s"} produce${result.spilled === 1 ? "s" : ""} ` +

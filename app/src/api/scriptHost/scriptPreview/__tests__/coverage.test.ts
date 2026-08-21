@@ -29,7 +29,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { SCRIPT_SURFACE } from "../../generated/scriptSurfacePolicy";
 import { ALLOWLIST } from "../../allowlist";
-import { UNPREVIEWABLE } from "../backend";
+import { PARTIAL_SERVES, UNPREVIEWABLE } from "../backend";
 import { callableAncestorOf, isKnownPrefix } from "../../scriptValidation/surface";
 import { PROMPT_CORE_CHAINS, buildSurfacePrompt } from "../../scriptPrompt";
 import { analyzeScript } from "../../scriptValidation/analyze";
@@ -238,7 +238,10 @@ describe("the preview serves what the model is actually taught", () => {
     // eslint-disable-next-line no-console
     console.log(
       `[preview exposure] across ${corpus.tasks.length} corpus tasks\n${rows.join("\n")}\n` +
-        `  most-offered ADDRESSABLE gaps @8k: ${top.map(([c, n]) => `${c}(${n})`).join(", ") || "none"}`,
+        `  most-offered ADDRESSABLE gaps @8k: ${top.map(([c, n]) => `${c}(${n})`).join(", ") || "none"}\n` +
+        `  caveat: "served" is method-granular — ${PARTIAL_SERVES.size} served methods still gap on ` +
+        `specific arguments (${[...PARTIAL_SERVES.keys()].join(", ")}), plus the universal ` +
+        `sheet-argument rule; the true rate on real drafts is slightly below the printed one.`,
     );
 
     expect(at8k.offered, "no chains were offered — the assembler is not being exercised").toBeGreaterThan(100);
@@ -270,6 +273,58 @@ describe("the preview serves what the model is actually taught", () => {
         `Serve the most-offered gaps printed above in scriptPreview/backend.ts — faithfully, ` +
         `with a corpus task that exercises each — or narrow what the prompt offers.`,
     ).toBeGreaterThan(0.5);
+  });
+
+  /**
+   * EVERY conditional gap inside a served case is DECLARED (§5c.2 follow-up).
+   *
+   * "Served" is counted at method granularity, so a `PreviewGapError` thrown
+   * for a specific argument inside a served case is invisible to the ratio —
+   * the one way the number can flatter itself. The declaration (PARTIAL_SERVES)
+   * is printed as a caveat by the exposure test above; this guard is what keeps
+   * the declaration TRUE: it scans `respond()`'s served cases for gap throws
+   * and fails when one belongs to an undeclared method.
+   */
+  it("declares every argument-level gap inside a served case", () => {
+    const src = readFileSync(BACKEND, "utf8");
+    const body = src.slice(src.indexOf("export function respond("));
+
+    // Walk case blocks: each starts at `case "x":` and runs to the next case
+    // or the default. A PreviewGapError thrown inside — other than through the
+    // universal assertPreviewSheet helper, declared once — must be declared.
+    const caseRe = /^\s*case "([a-z]+\.[A-Za-z0-9]+)":/gm;
+    const marks: Array<{ method: string; at: number }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = caseRe.exec(body)) !== null) marks.push({ method: m[1], at: m.index });
+    const defaultAt = body.indexOf("default:");
+    expect(marks.length, "no cases parsed — the guard is reading the wrong thing").toBeGreaterThan(30);
+
+    const undeclared: string[] = [];
+    for (let i = 0; i < marks.length; i++) {
+      const end = i + 1 < marks.length ? marks[i + 1].at : defaultAt;
+      const block = body.slice(marks[i].at, end);
+      if (!block.includes("PreviewGapError")) continue;
+      if (!PARTIAL_SERVES.has(marks[i].method)) undeclared.push(marks[i].method);
+    }
+    expect(
+      undeclared,
+      "these served cases gap on specific arguments but are not declared in " +
+        "PARTIAL_SERVES (backend.ts) — the coverage caveat would silently understate. " +
+        "Declare them, with the condition.",
+    ).toEqual([]);
+
+    // Both directions: a declaration for a case that no longer gaps (or is no
+    // longer served) is a stale caveat overstating the problem.
+    for (const method of PARTIAL_SERVES.keys()) {
+      const mark = marks.find((x) => x.method === method);
+      expect(mark, `${method} is declared partial but has no served case`).toBeDefined();
+      const idx = marks.indexOf(mark!);
+      const end = idx + 1 < marks.length ? marks[idx + 1].at : defaultAt;
+      expect(
+        body.slice(mark!.at, end).includes("PreviewGapError"),
+        `${method} is declared partial but its case no longer gaps`,
+      ).toBe(true);
+    }
   });
 
   /**

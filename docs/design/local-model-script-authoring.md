@@ -730,6 +730,42 @@ refusal, boolean IF among them), 14 E2E cases — four new discriminators, one p
 and three sabotage rounds, each resurrecting the original defect verbatim (the lost tail write,
 the error clobber, `Cannot destructure property 'startRow' of 'undefined'`).
 
+**The four review findings left unverified were then verified and closed (same day):**
+
+- **The evaluation cap was a SILENT regression path.** `preview_evaluate_formulas` returned `Err`
+  past 20,000 cells, and the TS catch is the "evaluator unavailable" path — silent by design — so
+  a script that grew the grid past the cap had its formulas read back empty with no indication
+  anywhere: the E2E-proven "total=42" case regressing to "total=" near the cap. A refusal is an
+  ANSWER, so it now travels IN the result (`PreviewEvalResult.refused`) and reaches the report as
+  a note; only a genuinely missing backend stays silent.
+- **The command ran its work on the MAIN thread.** Tauri executes sync commands there, and a full
+  batch is real CPU work — every settle point froze the UI for however long the sheet took. Now
+  `async` + `spawn_blocking` (the pivot-calc pattern), and the AGGREGATE is bounded:
+  `pass_budget(n) = min(n+1, 512, MAX_TOTAL_EVALS/n)`, trading depth for breadth on huge sheets —
+  a deep chain on one ends unconverged, which stores nothing and says so. (The per-formula budget
+  already existed: `eval_budget::apply` runs inside the raw eval path — the finding was narrower
+  than filed.)
+- **Preview memory is now watched, best-effort, and the residual is stated.** A preview runs
+  un-consented model output in a Worker sharing the RENDERER process, and heap exhaustion there
+  can take the whole UI down before the run budget fires; no browser API prevents it. Strict
+  mounts arm `armMemoryWatchdog` (256 MB, 250ms poll of `performance.memory.usedJSHeapSize`,
+  scheduled on intrinsics captured at module load so a hostile `clearInterval(1..N)` sweep cannot
+  disarm it): it catches the GRADUAL case — a draft accumulating heap across awaits — reports the
+  breach as the run's error and closes the realm. Two residuals, documented rather than implied:
+  a tight synchronous allocation loop never yields to the poll and remains uncatchable in-realm,
+  and the memory API is Chromium-specific (absent → silent no-op). The true fix is out-of-process
+  isolation, which is the §7 "renderer is the wrong place" question and an owner-scale decision.
+- **"Served" was method-granular and quietly flattered.** Several served backend cases gap at
+  ARGUMENT granularity (findAll/replaceAll options, sortRange orientation, pasteRange formulas) and
+  counted as fully served in the coverage ratio. `PARTIAL_SERVES` (backend.ts) now DECLARES every
+  such case with its condition; the exposure printout carries it as a caveat; and a guard walks
+  `respond()`'s served cases for `PreviewGapError` throws and fails on any undeclared one — in
+  both directions, so a stale declaration overstating the problem also reds.
+
+Verification for the four: 107,753 unit / 840 files, 13 Rust tests (`refused` structure, budget
+clamp, async-command source pin), 14 E2E green against the now-async command, and two more
+sabotage rounds (an undeclared argument-gap reds the guard; a silenced refusal reds its test).
+
 ### The same three shapes, swept for repo-wide — 2026-08-20
 
 Finding three defects stacked on each other is evidence about the CLASS, not just the instances, so

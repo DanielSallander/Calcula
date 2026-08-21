@@ -9,7 +9,7 @@
 
 import { MAX_SANDBOX_HIT_RECTS, RUN_TARGET_EXPOSED_PREFIX, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
 import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, registerRunTargetHandler, type WorkerRuntime } from "./contextShims";
-import { hardenAmbientGlobals, forwardConsole, liveTimerCount, safeClone } from "./workerHardening";
+import { armMemoryWatchdog, hardenAmbientGlobals, forwardConsole, liveTimerCount, PREVIEW_MEMORY_LIMIT_BYTES, safeClone } from "./workerHardening";
 import { DEBUG_GLOBAL, instrumentForDebug } from "./debugInstrument";
 import { createDebugRuntime, type DebugController } from "./debugRuntime";
 import {
@@ -278,6 +278,31 @@ async function handleMount(spec: MountSpec): Promise<void> {
     }
     debugMount = !!spec.debug;
     activityDepth = 0;
+    // STRICT mounts are PREVIEWS (§5c.2): un-consented model output. Arm the
+    // best-effort memory watchdog — it catches a draft accumulating heap
+    // ACROSS awaits before the isolate limit takes the whole renderer process
+    // down. Best-effort, stated plainly: the memory API is Chromium-specific
+    // (absent → silent no-op), and a tight synchronous allocation loop never
+    // yields to the poll at all. The realm dies with terminate(); no stop
+    // handle is needed.
+    if (spec.snapshot.strict === true) {
+      armMemoryWatchdog({
+        limitBytes: PREVIEW_MEMORY_LIMIT_BYTES,
+        intervalMs: 250,
+        readUsage: () =>
+          (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize,
+        onBreach: (usedBytes) => {
+          post({
+            t: "error",
+            message:
+              `the preview memory watchdog stopped this script: it was using ` +
+              `${Math.round(usedBytes / (1024 * 1024))} MB (limit ` +
+              `${Math.round(PREVIEW_MEMORY_LIMIT_BYTES / (1024 * 1024))} MB)`,
+          });
+          self.close();
+        },
+      });
+    }
     // An INERT debug mount (a module macro opened in the editor) prepares the
     // realm and executes NOTHING of the user's entry point. `moduleEntry` is
     // still called — it IS the module body, so the declarations and the

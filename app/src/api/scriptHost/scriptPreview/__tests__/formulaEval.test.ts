@@ -138,6 +138,26 @@ describe("recalculating the preview grid", () => {
     expect(note).toMatch(/kept the workbook's computed value/);
   });
 
+  it("REPORTS a deliberate refusal — a refusal is an answer, not an outage", async () => {
+    // The cap used to travel as an Err into the silent catch below, making
+    // "the evaluator refused this batch" indistinguishable from "there is no
+    // evaluator here" — a script that grew the grid past the cap had its
+    // formulas read back empty with no note anywhere.
+    const grid = gridWith([
+      [0, 0, "1"],
+      [1, 0, "=A1+1"],
+    ]);
+    const note = await recalculatePreviewGrid(
+      grid,
+      "Sheet1",
+      evaluator({ refused: "the sheet holds 20001 cells, more than the 20000 this preview will evaluate" }),
+    );
+    expect(note).toContain("20001 cells");
+    expect(note).toContain("workbook's last computed ones");
+    expect(note).toContain("formulas the script wrote have none");
+    expect(grid.cachedDisplay(1, 0), "a refused batch stores nothing").toBeUndefined();
+  });
+
   it("leaves the grid exactly as it was when the evaluator is unavailable", async () => {
     // An enrichment that cannot run must not turn a working preview into a
     // failed one — the grid keeps the values it had before this existed.

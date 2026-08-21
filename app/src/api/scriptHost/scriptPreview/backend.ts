@@ -119,6 +119,31 @@ export const UNPREVIEWABLE: ReadonlyMap<string, string> = new Map([
   ["api.renameSheet", "a preview holds ONE sheet's copy"],
 ]);
 
+/**
+ * Served methods that still GAP on specific arguments or content.
+ *
+ * The coverage measurement counts a method "served" when `respond()` has a
+ * case for it — but several cases refuse at ARGUMENT granularity (an option
+ * the grid model cannot express, content whose semantics the backend will not
+ * approximate), and an undeclared conditional gap flatters the ratio while
+ * still declining real drafts (§5c.2 follow-up). This map is the DECLARATION:
+ * the measurement prints it as a caveat, and a guard scans `respond()` for
+ * `PreviewGapError` throws inside served cases and fails when one is not
+ * declared here — so a new conditional gap cannot slip in silently.
+ *
+ * NOT listed: the two UNIVERSAL rules, declared once here rather than per
+ * method — `assertPreviewSheet` (every grid method gaps on a sheet argument
+ * naming anything but the preview's own sheet, and on every unqualified call
+ * after `addSheet` moved the active sheet), because repeating it on ~20 rows
+ * would bury the method-specific entries it exists to surface.
+ */
+export const PARTIAL_SERVES: ReadonlyMap<string, string> = new Map([
+  ["api.findAll", "gaps on options.searchFormulas and options.range"],
+  ["api.replaceAll", "gaps on options.searchFormulas and options.range"],
+  ["api.sortRange", "gaps on orientation:\"columns\""],
+  ["api.pasteRange", "gaps when the copied range contains a formula (the product shifts relative references)"],
+]);
+
 /** One range held in a script's private clipboard. */
 interface PreviewClipboard {
   rows: number;

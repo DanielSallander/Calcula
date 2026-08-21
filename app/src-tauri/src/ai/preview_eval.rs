@@ -56,6 +56,14 @@ pub struct PreviewFormulaValue {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewEvalResult {
+    /// Set when the evaluator REFUSED the batch (the cell cap), with the
+    /// reason. Structured rather than an `Err`, deliberately: the TS caller's
+    /// catch is the "evaluator unavailable" path and is SILENT by design, so a
+    /// deliberate refusal travelling as an error was indistinguishable from a
+    /// missing backend — a script that grew the grid past the cap had its
+    /// formulas read back empty with no indication anywhere (§5c.2 follow-up).
+    /// A refusal is an ANSWER, and answers go in the result.
+    pub refused: Option<String>,
     pub values: Vec<PreviewFormulaValue>,
     /// The fixed point was NOT reached within the pass budget.
     ///
@@ -80,6 +88,31 @@ pub struct PreviewEvalResult {
 /// is impossible by construction, and a bound here keeps a hostile or runaway
 /// draft from turning a preview into an unbounded calculation.
 pub const MAX_PREVIEW_EVAL_CELLS: usize = 20_000;
+
+/// The total-work bound: formulas × passes may not exceed this.
+///
+/// The per-formula evaluation is already budgeted (`eval_budget::apply` inside
+/// the raw eval path), but the AGGREGATE was not: 20,000 formulas × a
+/// depth-adequate pass budget is tens of millions of evaluations, and this
+/// work runs synchronously inside one command invocation. The clamp trades
+/// depth for breadth on huge sheets — a deep chain on one ends UNCONVERGED,
+/// which stores nothing and says so, the honest outcome for work the preview
+/// cannot afford.
+const MAX_TOTAL_EVALS: u32 = 2_000_000;
+
+/// The pass budget for `n` formulas: depth-adequate (n + 1: one pass per
+/// dependency link plus the observation pass), bounded by the runaway cap and
+/// by the total-work clamp. Pure, so the clamping is testable without
+/// evaluating anything.
+fn pass_budget(formula_count: u32) -> u32 {
+    if formula_count == 0 {
+        return 0;
+    }
+    formula_count
+        .saturating_add(1)
+        .min(PASS_CAP)
+        .min((MAX_TOTAL_EVALS / formula_count).max(1))
+}
 
 /// The CAP on evaluation passes — a runaway bound, not the working budget.
 ///
@@ -154,7 +187,7 @@ pub fn evaluate_preview(cells: &[PreviewCellInput], sheet_name: &str) -> Preview
         .map(|(row, col, f)| (*row, *col, crate::parse_formula_to_engine_ast(f).ok()))
         .collect();
 
-    let budget = (parsed.len() as u32).saturating_add(1).min(PASS_CAP);
+    let budget = pass_budget(parsed.len() as u32);
     let mut passes = 0;
     let mut converged = parsed.is_empty();
     let mut spilled_cells: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
@@ -217,6 +250,7 @@ pub fn evaluate_preview(cells: &[PreviewCellInput], sheet_name: &str) -> Preview
         .collect();
 
     PreviewEvalResult {
+        refused: None,
         values,
         converged,
         passes,
@@ -224,25 +258,52 @@ pub fn evaluate_preview(cells: &[PreviewCellInput], sheet_name: &str) -> Preview
     }
 }
 
+/// The structured refusal for an oversized batch, or None when it fits.
+///
+/// A REFUSAL IS AN ANSWER, so it travels in the result: the TS caller's catch
+/// is the "evaluator unavailable" path and is silent by design, and when the
+/// cap was an `Err` a script that grew the grid past 20,000 cells had every
+/// settle-point recalc fail indistinguishably from a missing backend — its
+/// formulas read back empty with no note anywhere, the exact silent regression
+/// of the E2E-proven "total=42" case near the cap.
+pub(crate) fn refuse_if_oversized(cell_count: usize) -> Option<PreviewEvalResult> {
+    if cell_count <= MAX_PREVIEW_EVAL_CELLS {
+        return None;
+    }
+    Some(PreviewEvalResult {
+        refused: Some(format!(
+            "the sheet holds {} cells, more than the {} this preview will evaluate",
+            cell_count, MAX_PREVIEW_EVAL_CELLS
+        )),
+        values: Vec::new(),
+        converged: true,
+        passes: 0,
+        spilled: 0,
+    })
+}
+
 /// Compute the values of the formulas a preview grid holds. Touches no state.
+///
+/// ASYNC + `spawn_blocking`, not a sync fn: Tauri runs synchronous commands on
+/// the MAIN thread, and a full batch here is real CPU work (bounded by
+/// `MAX_TOTAL_EVALS`, but that bound is millions of evaluations) — as a sync
+/// command every settle point froze the UI for however long the sheet took.
+/// The same pattern the pivot calc commands use.
 #[tauri::command]
-pub fn preview_evaluate_formulas(
+pub async fn preview_evaluate_formulas(
     cells: Vec<PreviewCellInput>,
     sheet_name: Option<String>,
     window: tauri::Window,
 ) -> Result<PreviewEvalResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    if cells.len() > MAX_PREVIEW_EVAL_CELLS {
-        return Err(format!(
-            "a preview may evaluate at most {} cells (got {})",
-            MAX_PREVIEW_EVAL_CELLS,
-            cells.len()
-        ));
+    if let Some(refused) = refuse_if_oversized(cells.len()) {
+        return Ok(refused);
     }
-    Ok(evaluate_preview(
-        &cells,
-        sheet_name.as_deref().unwrap_or("Sheet1"),
-    ))
+    tokio::task::spawn_blocking(move || {
+        evaluate_preview(&cells, sheet_name.as_deref().unwrap_or("Sheet1"))
+    })
+    .await
+    .map_err(|e| format!("the preview evaluation thread failed: {}", e))
 }
 
 #[cfg(test)]
@@ -365,6 +426,62 @@ mod tests {
         assert!(r.converged);
         assert_eq!(r.passes, 0);
         assert!(r.values.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_batch_is_REFUSED_in_the_result_never_as_an_error() {
+        // The TS catch is the "evaluator unavailable" path and is SILENT by
+        // design — a deliberate refusal travelling as Err was indistinguishable
+        // from a missing backend, and the script's formulas read back empty
+        // with no note anywhere.
+        assert!(refuse_if_oversized(MAX_PREVIEW_EVAL_CELLS).is_none(), "the cap itself fits");
+        let refused = refuse_if_oversized(MAX_PREVIEW_EVAL_CELLS + 1).expect("one past the cap refuses");
+        let reason = refused.refused.as_deref().expect("the refusal carries its reason");
+        assert!(reason.contains("20001"), "names the actual size: {}", reason);
+        assert!(reason.contains("20000"), "names the cap: {}", reason);
+        // A refusal claims NOTHING about the formulas.
+        assert!(refused.values.is_empty());
+        assert!(refused.converged, "refusing is not a failed iteration");
+        assert_eq!(refused.spilled, 0);
+        // And it serializes with the flag the TS side branches on.
+        let v = serde_json::to_value(&refused).unwrap();
+        assert!(v["refused"].as_str().is_some());
+    }
+
+    #[test]
+    fn the_pass_budget_is_depth_adequate_but_never_unbounded_work() {
+        // Small sheets get full depth: n+1.
+        assert_eq!(pass_budget(0), 0);
+        assert_eq!(pass_budget(1), 2);
+        assert_eq!(pass_budget(40), 41);
+        // The runaway cap holds for mid-size sheets.
+        assert_eq!(pass_budget(600), 512);
+        // The TOTAL-work clamp takes over on huge sheets: formulas × passes
+        // stays ≤ MAX_TOTAL_EVALS, because the whole batch runs inside one
+        // command invocation. Depth is traded for breadth; a deep chain on a
+        // huge sheet ends unconverged, which stores nothing and says so.
+        assert_eq!(pass_budget(20_000), 100);
+        assert!(u64::from(pass_budget(20_000)) * 20_000 <= u64::from(MAX_TOTAL_EVALS));
+        // Degenerate: more formulas than the work bound still gets ONE pass —
+        // the refusal for absurd sizes lives at the cell cap, not here.
+        assert_eq!(pass_budget(3_000_000), 1);
+    }
+
+    /// The command must stay ASYNC: Tauri runs sync commands on the MAIN
+    /// thread, and a batch here is bounded-but-real CPU work — as a sync fn
+    /// every settle point froze the UI. Pinned by source scan because invoking
+    /// the command needs a running app.
+    #[test]
+    fn the_command_is_async_and_evaluates_off_the_calling_thread() {
+        let source = include_str!("preview_eval.rs");
+        assert!(
+            source.contains("pub async fn preview_evaluate_formulas"),
+            "the command reverted to a sync fn — that runs on the MAIN thread"
+        );
+        assert!(
+            source.contains("spawn_blocking"),
+            "an async fn alone still blocks a runtime worker; the CPU work must move"
+        );
     }
 
     #[test]
