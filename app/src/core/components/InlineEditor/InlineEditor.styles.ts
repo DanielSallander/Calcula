@@ -41,7 +41,17 @@ export const EditorTextArea = styled.textarea<EditorInputProps>`
      a soft wrap. The expansion geometry measures the widest line on that
      assumption, and a soft wrap would silently disagree with it. */
   white-space: pre;
-  overflow: auto;
+  /* NEVER auto. A cell is ~64x20px, so a scrollbar is most of the box: an entry
+     too long for a column that cannot expand (an occupied neighbour, or a
+     neighbour lookup that has not answered yet) drew a horizontal bar, that bar
+     ate the 16px content height, and the vertical bar appeared too -- scrollbars
+     painted over the user's half-typed value. Excel clips instead, and so does
+     the Floating Range in-cell editor
+     (app/extensions/FloatingRange/editor/frEditor.ts).
+     hidden is not "cannot scroll": the box stays programmatically scrollable, so
+     Chromium goes on scrolling the caret into view as the user types past the
+     edge. Only the bars, and the layout space they stole, are gone. */
+  overflow: hidden;
   /* Chromium puts a drag handle on every textarea; this one is positioned by
      the grid, so the handle would only offer to break that. */
   resize: none;
