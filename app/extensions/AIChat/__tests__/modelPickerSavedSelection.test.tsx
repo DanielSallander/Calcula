@@ -240,6 +240,99 @@ describe("re-opening the picker on a saved selection", () => {
   });
 });
 
+describe("a saved model the runtime no longer offers", () => {
+  // The failure this closes: a <select> whose `value` matches no <option> renders
+  // as UNSELECTED. So a model that had been pulled showed as "Select…" while the
+  // setting still named it and "Done" stayed enabled — the user left the picker
+  // believing they had chosen, and the next chat message failed against a model
+  // that no longer exists. The picker knew; it just did not say.
+
+  /** Ollama is running and serving two models; the saved one is not among them. */
+  function modelPulled(): void {
+    saveSelection("ollama", "deepseek-r1:70b");
+    backend({ discovered: [RUNNING_OLLAMA] });
+  }
+
+  it("shows the missing model instead of silently reading as \"Select…\"", async () => {
+    modelPulled();
+    await mountPicker();
+
+    const sel = modelSelect();
+    expect(sel.value, "the stored model must be visible, not swallowed").toBe("deepseek-r1:70b");
+    expect(
+      [...sel.querySelectorAll("option")].map((o) => o.textContent),
+      "and it must be LABELLED as unavailable, or it reads like a working choice",
+    ).toContain("deepseek-r1:70b — no longer available");
+  });
+
+  it("says plainly that the provider no longer offers it", async () => {
+    modelPulled();
+    await mountPicker();
+
+    expect(container.textContent).toContain("no longer offers");
+    expect(container.textContent).toContain("deepseek-r1:70b");
+  });
+
+  it("blocks the exit until a model that exists is chosen", async () => {
+    modelPulled();
+    await mountPicker();
+
+    const done = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Done",
+    ) as HTMLButtonElement;
+    expect(done, "the Done button is not rendered").toBeTruthy();
+    expect(
+      done.disabled,
+      "leaving on a model that cannot answer is what turned this into a chat-time failure",
+    ).toBe(true);
+  });
+
+  it("withholds a verdict for a model that cannot run", async () => {
+    // Offering "Test this model" here buys a guaranteed failure, and a stored
+    // score describes something that is gone.
+    modelPulled();
+    await mountPicker();
+
+    expect(container.textContent).not.toContain("Test this model");
+    expect(container.textContent).not.toContain("Not tested yet.");
+  });
+
+  it("clears the warning as soon as an available model is picked", async () => {
+    modelPulled();
+    await mountPicker();
+
+    // Asserted BEFORE the change, or the "warning is gone" check below is true
+    // of a picker that never warned at all.
+    expect(container.textContent).toContain("no longer offers");
+
+    const sel = modelSelect();
+    await act(async () => {
+      sel.value = "qwen3:8b";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain("no longer offers");
+    const done = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Done",
+    ) as HTMLButtonElement;
+    expect(done.disabled).toBe(false);
+    // ...and the choice is persisted, not just displayed.
+    expect(store.get("calcula.ai-chat:model")).toBe("qwen3:8b");
+  });
+
+  it("does NOT cry \"unavailable\" while the list is empty", async () => {
+    // An empty list means we know nothing — still loading, or the runtime
+    // stopped. Announcing the model missing on that evidence is a second lie in
+    // the other direction, and that case has its own message already.
+    saveSelection("ollama", "qwen3:8b");
+    backend({ discovered: [], listed: new Error("connection refused") });
+    await mountPicker();
+
+    expect(container.textContent).not.toContain("no longer offers");
+    expect(container.textContent).toContain("connection refused");
+  });
+});
+
 describe("first run is still the silent happy path (§11.1 rule 1)", () => {
   it("lists no models and contacts no provider when nothing has been chosen", async () => {
     backend({ discovered: [RUNNING_OLLAMA] });

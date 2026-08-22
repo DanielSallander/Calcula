@@ -14,7 +14,35 @@ vi.mock("@api", () => ({
   setSetting: (ext: string, k: string, v: string) => void store.set(`${ext}:${k}`, String(v)),
 }));
 
-const { readProfile, writeProfile, runProbe, summarizeProfile } = await import("../lib/probeRunner");
+const { readProfile, writeProfile, runProbe, summarizeProfile, TOOL_SURFACE_REFUSED } =
+  await import("../lib/probeRunner");
+const { TOOLS } = await import("../lib/chatTools");
+
+/**
+ * The two pre-flight completions `checkToolSurface` sends before the canary run:
+ * one plain, one carrying the real tool surface.
+ */
+const PREFLIGHTS = 2;
+
+/** What `probeRunner` posts to `ai_chat_complete`, as far as these tests read it. */
+interface CompleteArgs {
+  request: {
+    providerId?: string;
+    model?: string;
+    tools?: Array<{ inputSchema?: unknown }>;
+    maxTokens?: number;
+  };
+}
+
+/** The second argument of the n-th `invoke` call, typed. */
+function argsOf(call: number): CompleteArgs {
+  return invoke.mock.calls[call][1] as CompleteArgs;
+}
+
+/** The calls a probe makes AFTER the pre-flight — i.e. the canary tasks. */
+function canaryArgs(index: number): CompleteArgs {
+  return argsOf(PREFLIGHTS + index);
+}
 
 const GOOD_REPLY = {
   blocks: [
@@ -66,12 +94,16 @@ describe("the profile is remembered per model", () => {
 describe("the probe drives the real provider command", () => {
   it("asks for a completion per canary task, with no tools", async () => {
     const profile = await runProbe({ providerId: "ollama", model: "qwen" });
-    expect(invoke).toHaveBeenCalledTimes(profile.tasksTotal);
-    const [command, args] = invoke.mock.calls[0];
-    expect(command).toBe("ai_chat_complete");
-    expect((args as any).request.providerId).toBe("ollama");
-    expect((args as any).request.model).toBe("qwen");
-    expect((args as any).request.tools).toEqual([]);
+    expect(invoke).toHaveBeenCalledTimes(PREFLIGHTS + profile.tasksTotal);
+    expect(invoke.mock.calls[PREFLIGHTS][0]).toBe("ai_chat_complete");
+    const args = canaryArgs(0);
+    expect(args.request.providerId).toBe("ollama");
+    expect(args.request.model).toBe("qwen");
+    // The canary scores WRITTEN CODE. Handing it two dozen workbook tools would
+    // measure something else entirely — a model that answers by calling
+    // get_sheet_summary instead of emitting a fenced script is not a model that
+    // failed the task. The tool surface is proved separately, below.
+    expect(args.request.tools).toEqual([]);
   });
 
   it("reports progress so a minutes-long probe is not a frozen dialog", async () => {
@@ -87,11 +119,151 @@ describe("the probe drives the real provider command", () => {
     let calls = 0;
     const profile = await runProbe({
       providerId: "p", model: "m",
-      isCancelled: () => calls++ >= 2,
+      // Offset by the pre-flight, which polls the same flag: cancelling during
+      // it would abort before a single task ran, which is a different case from
+      // the partial run this test is about.
+      isCancelled: () => calls++ >= PREFLIGHTS + 2,
     });
     // Cancellation surfaces as a failed completion per task, which is NOT
     // counted as a model failure — so a cancelled probe reports a partial run.
     expect(profile.tasksScored).toBeLessThan(profile.tasksTotal);
+  });
+});
+
+describe("the probe proves the TOOL SURFACE, not just the model", () => {
+  // §4b calls this probe "the only honest answer to 'will this model work for
+  // Calcula?'". Until 2026-08-22 it sent `tools: []`, so it could not answer
+  // that question at all: a running Ollama rejected every real chat message
+  // (`cube_kpi` declared `enum: [1, 2, 3]`, which Ollama decodes into a Go
+  // []string) while "Test this model" reported the model as perfectly healthy.
+  // The chat sends every tool on every turn; a probe that sends none is
+  // measuring a payload the product never produces.
+
+  /** The first non-string enum member in a schema, or null. Ollama's rule. */
+  function nonStringEnumMember(node: unknown): unknown {
+    if (node === null || typeof node !== "object") return null;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const hit = nonStringEnumMember(item);
+        if (hit !== null) return hit;
+      }
+      return null;
+    }
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.enum)) {
+      const bad = obj.enum.find((v) => typeof v !== "string");
+      if (bad !== undefined) return bad;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === "enum") continue;
+      const hit = nonStringEnumMember(v);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+
+  const OLLAMA_400 =
+    'Ollama error 400: {"error":{"message":"json: cannot unmarshal number into Go struct ' +
+    'field .tools.function.parameters.properties.enum of type string","type":"invalid_request_error"}}';
+
+  /**
+   * A backend double that decodes tool schemas the way Ollama does.
+   *
+   * Modelled on the REAL failure rather than on a generic throw: the whole point
+   * is that the request dies at JSON-decode time, before inference, so a double
+   * that fails for some other reason would prove nothing about this bug.
+   */
+  function ollamaLike(): void {
+    invoke.mockImplementation(async (_cmd: string, args: CompleteArgs) => {
+      for (const t of args.request.tools ?? []) {
+        if (nonStringEnumMember(t.inputSchema) !== null) throw new Error(OLLAMA_400);
+      }
+      return GOOD_REPLY;
+    });
+  }
+
+  it("sends the real tool surface in a pre-flight, before any canary task", async () => {
+    await runProbe({ providerId: "ollama", model: "qwen" });
+    const plain = argsOf(0);
+    const withTools = argsOf(1);
+    // Plain first: it is what makes the diagnosis a deduction rather than a
+    // guess. Without it, a failure cannot be pinned on the tools.
+    expect(plain.request.tools).toEqual([]);
+    // ...and the second carries the surface VERBATIM. A trimmed or synthetic
+    // copy would pass while the payload the chat actually sends still failed.
+    expect(withTools.request.tools).toEqual(TOOLS);
+    // Non-vacuity: `toEqual` against an empty surface would pass while proving
+    // nothing about the payload the chat sends.
+    expect(TOOLS.length).toBeGreaterThan(20);
+  });
+
+  it("the Ollama double has teeth (it rejects a numeric enum)", async () => {
+    // Proved before it is relied upon: a double that accepted everything would
+    // make the regression test below pass without testing anything.
+    ollamaLike();
+    await expect(
+      invoke("ai_chat_complete", {
+        request: { tools: [{ inputSchema: { properties: { p: { type: "integer", enum: [1, 2, 3] } } } }] },
+      }),
+    ).rejects.toThrow(/cannot unmarshal number/);
+    // ...and it must reach a NESTED enum too, the way the real decoder does.
+    await expect(
+      invoke("ai_chat_complete", {
+        request: {
+          tools: [{ inputSchema: { properties: { a: { items: { properties: { p: { enum: [7] } } } } } } }],
+        },
+      }),
+    ).rejects.toThrow(/cannot unmarshal number/);
+  });
+
+  it("today's tool surface survives an Ollama-strict provider end to end", async () => {
+    // The regression, run through the REAL pre-flight against a decoder with the
+    // real rule. This is what would have failed on 2026-08-22.
+    ollamaLike();
+    const profile = await runProbe({ providerId: "ollama", model: "qwen" });
+    expect(profile.tasksScored).toBe(profile.tasksTotal);
+  });
+
+  it("names the tool surface when tools are the only thing that changed", async () => {
+    // Plain request accepted, tools-laden one refused => the tools did it.
+    let seen = 0;
+    invoke.mockImplementation(async (_cmd: string, args: CompleteArgs) => {
+      seen++;
+      if ((args.request.tools ?? []).length > 0) throw new Error(OLLAMA_400);
+      return GOOD_REPLY;
+    });
+    await expect(runProbe({ providerId: "ollama", model: "qwen" })).rejects.toThrow(
+      TOOL_SURFACE_REFUSED,
+    );
+    // The server's own words are kept: the user needs the field name to fix it.
+    await expect(runProbe({ providerId: "ollama", model: "qwen" })).rejects.toThrow(
+      /cannot unmarshal number/,
+    );
+    // ...and it gave up at the pre-flight rather than burning a dozen completions.
+    expect(seen).toBe(PREFLIGHTS * 2);
+  });
+
+  it("banks NO profile for a model whose tools were refused", async () => {
+    invoke.mockImplementation(async (_cmd: string, args: CompleteArgs) => {
+      if ((args.request.tools ?? []).length > 0) throw new Error(OLLAMA_400);
+      return GOOD_REPLY;
+    });
+    await expect(runProbe({ providerId: "ollama", model: "qwen" })).rejects.toThrow();
+    expect(
+      readProfile("ollama", "qwen"),
+      "a stored verdict for a model that never ran is the same lie in a more convincing shape",
+    ).toBeNull();
+  });
+
+  it("blames the endpoint, NOT the tool surface, when nothing answers at all", async () => {
+    // The deduction has to work in both directions. A runtime that is simply
+    // down must not send the user hunting through JSON schemas.
+    invoke.mockRejectedValue(new Error("error sending request: connection refused"));
+    const failure = runProbe({ providerId: "ollama", model: "qwen" });
+    await expect(failure).rejects.toThrow(/connection refused/);
+    await expect(runProbe({ providerId: "ollama", model: "qwen" })).rejects.not.toThrow(
+      TOOL_SURFACE_REFUSED,
+    );
   });
 });
 

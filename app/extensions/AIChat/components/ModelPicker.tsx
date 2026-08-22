@@ -30,6 +30,8 @@ const btn: React.CSSProperties = { padding: "6px 12px", border: "none", borderRa
 const subtle: React.CSSProperties = { color: "#666", margin: 0, lineHeight: 1.45 };
 const linkBtn: React.CSSProperties = { background: "none", border: "none", color: "#0078D4", cursor: "pointer", padding: 0, fontSize: 11, textDecoration: "underline" };
 const errorBox: React.CSSProperties = { background: "#FDECEA", border: "1px solid #F5C6C2", color: "#A1241B", padding: "6px 8px", borderRadius: 4 };
+// Amber, not red: a model that has gone away is a choice to redo, not a fault.
+const warnBox: React.CSSProperties = { background: "#FFF4CE", border: "1px solid #F2D57E", color: "#6B5200", padding: "6px 8px", borderRadius: 4, margin: 0, lineHeight: 1.45 };
 
 export interface ModelPickerProps {
   onDone: () => void;
@@ -224,6 +226,22 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
   const running = new Set((discovered ?? []).map((d) => d.providerId));
   const nothingLocalFound = discovered !== null && discovered.length === 0;
 
+  /**
+   * The saved model is gone — pulled, renamed, or removed since it was chosen.
+   *
+   * A `<select>` whose `value` matches no `<option>` renders as UNSELECTED, so
+   * this used to show "Select…" while the setting still named the missing model
+   * and "Done" stayed enabled: the user left the picker believing they had
+   * chosen, and the chat failed on the next message against a model that no
+   * longer exists.
+   *
+   * `models.length > 0` is the guard that keeps this honest. An empty list means
+   * we know NOTHING — still loading, or the runtime stopped — and announcing a
+   * model missing on that evidence would be a second lie in the other direction.
+   * That case already has its own message from the load.
+   */
+  const savedModelGone = Boolean(sel.model) && models.length > 0 && !models.includes(sel.model);
+
   return h("div", { style: wrap },
     embedded ? null : h("h3", { key: "t", style: { margin: 0 } }, "Choose a model"),
 
@@ -285,14 +303,28 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
             onChange: (e: React.ChangeEvent<HTMLSelectElement>) => chooseModel(e.target.value),
           },
             h("option", { key: "", value: "" }, busy ? "Loading…" : "Select…"),
+            // The missing model gets an option of its own so the select SHOWS
+            // what is stored. Dropping it would leave the field reading
+            // "Select…" — which is how a stale selection passed for no
+            // selection at all.
+            savedModelGone
+              ? h("option", { key: sel.model, value: sel.model }, `${sel.model} — no longer available`)
+              : null,
             models.map((m) => h("option", { key: m, value: m }, m)),
           ),
+          savedModelGone
+            ? h("p", { key: "gone", style: warnBox },
+                `${provider.label} no longer offers "${sel.model}". It was pulled, renamed or removed ` +
+                "since you chose it. Pick another model — this one cannot answer.")
+            : null,
         )
       : null,
 
     // The measured verdict. §10: a weak model must SAY it is weak before the
     // user relies on it, or they blame the product rather than the model.
-    provider && sel.model
+    // Withheld once the model is gone: a score for something that cannot run is
+    // not a verdict, and "Test this model" would only buy a guaranteed failure.
+    provider && sel.model && !savedModelGone
       ? h("div", { key: "probe", style: { display: "flex", flexDirection: "column", gap: 6 } },
           h("p", { key: "s", style: subtle }, summarizeProfile(profile)),
           probing
@@ -315,9 +347,12 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
 
     error ? h("div", { key: "e", style: errorBox }, error) : null,
 
+    // `savedModelGone` blocks the exit too. Letting the user leave on a model
+    // that cannot answer is what turned this into a chat-time failure rather
+    // than a picker-time one — and the list they need is on screen already.
     h("button", {
-      key: "done", style: { ...btn, opacity: sel.providerId && sel.model ? 1 : 0.5 },
-      disabled: !sel.providerId || !sel.model,
+      key: "done", style: { ...btn, opacity: sel.providerId && sel.model && !savedModelGone ? 1 : 0.5 },
+      disabled: !sel.providerId || !sel.model || savedModelGone,
       onClick: onDone,
     }, embedded ? "Done" : "Start chatting"),
   );
