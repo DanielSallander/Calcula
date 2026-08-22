@@ -71,13 +71,27 @@ const ALLOW: GateVerdict = { allow: true };
  * …)` — the shape every early draft used — mounts perfectly and never receives
  * a click.
  */
-async function tryDryRun(source: string, objectType: string): Promise<DryRunReport | null> {
+async function tryDryRun(
+  source: string,
+  objectType: string,
+  tier: "restricted" | "unlocked",
+): Promise<DryRunReport | null> {
   try {
-    return await previewObjectScript({ source, objectType });
+    return await previewObjectScript({ source, objectType, tier });
   } catch {
     return null;
   }
 }
+
+/**
+ * The note appended when a draft only runs at the unlocked tier.
+ *
+ * Exported so the test asserts the real string rather than a copy of it.
+ */
+export const NEEDS_UNLOCKED =
+  " NOTE: this script does NOT run at the Restricted access level a draft is mounted with — it " +
+  "only ran once the preview was raised to Unlocked. Tell the user they must raise the script's " +
+  "access level to Unlocked in the Object Script Editor before it will work.";
 
 /**
  * The object type the draft targets.
@@ -137,8 +151,31 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
   // its answer describes the emulator rather than the draft. Object scripts —
   // which is everything this gate sees — land there, and treating that as a
   // failure rejected every valid draft with "it FAILS when run".
-  const dry = await tryDryRun(source, objectTypeOf(input));
+  //
+  // AT THE TIER IT ACTUALLY MOUNTS AT. `previewObjectScript` defaults to
+  // "unlocked" while `draftToScriptDefinition` (ScriptableObjects/lib/
+  // scriptDrafts.ts) mounts every draft "restricted" — an AI-authored script
+  // must never arrive pre-escalated. So the rung was answering a question nobody
+  // asked: it green-lit scripts reaching `context.api.*`, the user pressed Save,
+  // and the script was refused by a gate the preview had never consulted.
+  const objectType = objectTypeOf(input);
+  const dry = await tryDryRun(source, objectType, "restricted");
+
   if (dry && dry.applicable !== false && !dry.ok) {
+    // THE DIAGNOSIS IS A DEDUCTION, NOT A REGEX. Re-run at the unlocked tier: it
+    // is the only thing that changed, so if the script now passes, the tier is
+    // the only thing that can have been wrong. Matching the broker's denial text
+    // instead would be a coupling to a message that has no guard on it — and
+    // would miss the case where a restricted surface lacks the member entirely
+    // and fails as a TypeError rather than as a refusal.
+    const unlocked = await tryDryRun(source, objectType, "unlocked");
+    if (unlocked && unlocked.applicable !== false && unlocked.ok) {
+      // ALLOWED, NOT REJECTED (§11.2's "notices never block"). The script is
+      // sound; it needs a permission only the user can grant, and rejecting it
+      // would teach the model to avoid `context.api.*` — which for a button is
+      // the ONLY way to reach the grid.
+      return { allow: true, note: describeDryRun(unlocked) + NEEDS_UNLOCKED };
+    }
     return {
       allow: false,
       message:

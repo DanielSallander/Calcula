@@ -106,24 +106,77 @@ function makeComplete(opts: RunProbeOptions) {
 /**
  * One cheap completion, carrying exactly the tools it is given.
  *
- * The RESPONSE IS DISCARDED on purpose. A model handed two dozen workbook tools
- * and asked whether it is ready may well answer with a tool call, and that is a
- * perfectly good outcome: nothing here executes it, and the only question being
- * asked is whether the request was ACCEPTED.
+ * Returns the response so a caller can inspect it. `checkToolSurface` DISCARDS
+ * it on purpose — a model handed two dozen workbook tools and asked whether it
+ * is ready may well answer with a tool call, and that is a perfectly good
+ * outcome: nothing here executes it, and the only question being asked is
+ * whether the request was ACCEPTED. `probeNativeToolCall` below is the caller
+ * that does look.
  */
-async function preflight(opts: RunProbeOptions, tools: ChatToolDef[]): Promise<void> {
+async function preflight(
+  opts: RunProbeOptions,
+  tools: ChatToolDef[],
+  message = "ready?",
+  system = "Reply with the single word: ready.",
+): Promise<ChatResponse> {
   if (opts.isCancelled?.()) throw new Error("cancelled");
-  await aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
+  return aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
     request: {
       providerId: opts.providerId,
       model: opts.model,
-      system: "Reply with the single word: ready.",
-      messages: [{ role: "user", content: [{ type: "text", text: "ready?" }] }],
+      system,
+      messages: [{ role: "user", content: [{ type: "text", text: message }] }],
       tools,
       maxTokens: PREFLIGHT_MAX_TOKENS,
     },
     baseUrlOverride: opts.baseUrl || null,
   });
+}
+
+/**
+ * The one tool used to ask "can you actually emit a tool call?".
+ *
+ * Deliberately trivial and deliberately NOT one of Calcula's: a real tool's
+ * description competes for the model's attention with the instruction, and a
+ * zero-argument tool removes every reason to fail other than the mechanism
+ * itself. It is never dispatched — `ai_chat_run_tool` has no arm for this name,
+ * and nothing here calls it.
+ */
+const TOOL_CALL_CANARY: ChatToolDef = {
+  name: "probe_ping",
+  description: "Confirm you can call a tool. Takes no arguments. Call it now.",
+  inputSchema: { type: "object", properties: {} },
+};
+
+/**
+ * Does this model emit a NATIVE tool call, or write one as text?
+ *
+ * WHY THIS EXISTS. §4b claims the probe is "the only honest answer to 'will this
+ * model work for Calcula?'" — and until now it measured the opposite of what the
+ * chat needs. `emitsFencedCode` is true for essentially every model and is a
+ * VIRTUE for script authoring; for the chat, answering a request for action with
+ * a fenced tool call is total failure, and that is exactly what a user hit on
+ * 2026-08-22. The probe scored the model at a respectable number and said
+ * nothing, because it sent `tools: []`.
+ *
+ * ADVISORY, NEVER FATAL. Calcula now recovers a textual call, so a model that
+ * fails this is degraded, not unusable — and a false negative (a model that
+ * would have called a REAL tool but not this canary) must not lock out something
+ * that works. Returns undefined when the request itself failed, so a transport
+ * blip records no verdict rather than a wrong one.
+ */
+async function probeNativeToolCall(opts: RunProbeOptions): Promise<boolean | undefined> {
+  try {
+    const resp = await preflight(
+      opts,
+      [TOOL_CALL_CANARY],
+      "Call the probe_ping tool now. Do not reply with text.",
+      "You are being tested for tool-calling support. Emit a tool call, not a description of one.",
+    );
+    return resp.blocks.some((b) => b.type === "toolUse");
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -173,6 +226,11 @@ export async function runProbe(opts: RunProbeOptions): Promise<ModelProfile> {
   // verdict for a model that never ran.
   await checkToolSurface(opts);
 
+  // Before the canary run, because it is two cheap completions against that
+  // run's dozen, and because a user who abandons a slow probe should still have
+  // learned the one thing that decides whether the chat works at all.
+  const emitsNativeToolCalls = await probeNativeToolCall(opts);
+
   const profile = await probeModel({
     providerId: opts.providerId,
     model: opts.model,
@@ -180,8 +238,13 @@ export async function runProbe(opts: RunProbeOptions): Promise<ModelProfile> {
     complete: makeComplete(opts),
     onProgress: opts.onProgress,
   });
-  writeProfile(profile);
-  return profile;
+  // Merged rather than passed in: `probeModel` has only a text `CompleteFn` and
+  // structurally cannot observe a tool call. Omitted entirely when undecided, so
+  // `describeProfile` can tell "measured false" from "never measured".
+  const merged: ModelProfile =
+    emitsNativeToolCalls === undefined ? profile : { ...profile, emitsNativeToolCalls };
+  writeProfile(merged);
+  return merged;
 }
 
 /**

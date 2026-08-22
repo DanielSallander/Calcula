@@ -15,7 +15,7 @@ vi.mock("@api/scriptHost/scriptPreview", () => ({
   previewObjectScript: (...a: unknown[]) => preview(...a),
 }));
 
-const { gateToolCall, describeDryRun } = await import("../lib/draftGate");
+const { gateToolCall, describeDryRun, NEEDS_UNLOCKED } = await import("../lib/draftGate");
 
 const GOOD = "export function setup(context) {\n  context.log('x');\n}\n";
 const INVENTED = "export function setup(context) {\n  context.api.setCellValu(0, 0, 'x');\n}\n";
@@ -105,6 +105,56 @@ describe("L3 — a draft that runs badly is rejected too", () => {
     // gate does not know the task. A read-and-report script is legitimate.
     preview.mockResolvedValue(dryOk(0));
     expect((await gateToolCall("draft_object_script", { source: GOOD })).allow).toBe(true);
+  });
+});
+
+describe("L3 runs at the tier the draft actually MOUNTS at", () => {
+  // `draftToScriptDefinition` (ScriptableObjects/lib/scriptDrafts.ts) mounts
+  // every AI draft "restricted" — never pre-escalated. The preview defaulted to
+  // "unlocked", so the rung green-lit scripts reaching `context.api.*`, the user
+  // pressed Save, and the script was refused by a gate the preview had never
+  // consulted.
+
+  it("previews at the restricted tier, not the preview default", async () => {
+    await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(preview).toHaveBeenCalledTimes(1);
+    expect(preview.mock.calls[0][0]).toMatchObject({ objectType: "button", tier: "restricted" });
+  });
+
+  it("does NOT reject a sound script that merely needs the unlocked tier", async () => {
+    // The diagnosis is a DEDUCTION: the tier is the only thing that changed
+    // between the two runs, so passing at unlocked means the tier was the issue.
+    preview
+      .mockResolvedValueOnce(dryFailed("api.setRangeFormat requires unlocked access; this script is restricted"))
+      .mockResolvedValueOnce(dryOk(4));
+
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.allow, "notices never block").toBe(true);
+    expect(preview.mock.calls[0][0]).toMatchObject({ tier: "restricted" });
+    expect(preview.mock.calls[1][0]).toMatchObject({ tier: "unlocked" });
+    // The user is told what to do, and the model is told to tell them.
+    expect(v.note).toContain(NEEDS_UNLOCKED);
+    expect(v.note).toContain("Unlocked");
+    // ...and it still says what the script would DO.
+    expect(v.note).toContain("4 cells");
+  });
+
+  it("still rejects a script that fails at BOTH tiers", async () => {
+    // A real runtime error is not a permissions problem, and re-running at a
+    // higher tier must not launder it into one.
+    preview.mockResolvedValue(dryFailed("TypeError: v.map is not a function"));
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.allow).toBe(false);
+    expect(v.message).toContain("TypeError: v.map is not a function");
+    expect(preview).toHaveBeenCalledTimes(2);
+  });
+
+  it("pays for the second run only when the first one failed", async () => {
+    preview.mockResolvedValue(dryOk(2));
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.allow).toBe(true);
+    expect(preview, "a passing draft costs one preview, not two").toHaveBeenCalledTimes(1);
+    expect(v.note).not.toContain("Unlocked");
   });
 });
 

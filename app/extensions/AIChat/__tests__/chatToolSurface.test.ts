@@ -24,7 +24,7 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import { TOOLS, DRAFT_OBJECT_TYPES } from "../lib/chatTools";
+import { TOOLS, DRAFT_OBJECT_TYPES, TOOL_NAMES, SALVAGE_AUTORUN, SYSTEM_PROMPT } from "../lib/chatTools";
 
 const REPO = path.resolve(__dirname, "../../../..");
 const AI_CHAT_RS = path.join(REPO, "app/src-tauri/src/ai/tools.rs");
@@ -275,5 +275,72 @@ describe("draft object types mirror the Rust validator", () => {
     expect(objectType.enum, "object_type must constrain the model to the valid set").toEqual([
       ...DRAFT_OBJECT_TYPES,
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The system prompt and the surface must agree
+// ---------------------------------------------------------------------------
+
+describe("SYSTEM_PROMPT teaches the mechanism and the closed set", () => {
+  // WHY. On 2026-08-22 a local model asked to "create a script that formats the
+  // background color of each selected cell" replied with a fenced ```json block
+  // naming `format_cells` — a tool that does not exist — and nothing ran. Two
+  // separate defects, and the prompt is the cheapest place to address both.
+
+  it("names every tool that exists, so the set is closed", () => {
+    // Built from TOOLS, so a rename cannot leave the prompt promising a tool the
+    // surface no longer offers. Non-vacuous: assert the surface is real first.
+    expect(TOOL_NAMES.length).toBeGreaterThanOrEqual(20);
+    expect(TOOL_NAMES).toEqual(TOOLS.map((t) => t.name));
+    for (const name of TOOL_NAMES) {
+      expect(SYSTEM_PROMPT, `${name} is offered to the model but never named in the prompt`)
+        .toContain(name);
+    }
+  });
+
+  it("says that writing a tool call as text does nothing", () => {
+    expect(SYSTEM_PROMPT).toContain("EMIT A TOOL CALL");
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain("does nothing");
+    // The exact failure shape, named so the model can recognise it.
+    expect(SYSTEM_PROMPT).toContain("```json");
+  });
+
+  it("tells the model not to invent a name", () => {
+    expect(SYSTEM_PROMPT).toMatch(/never call a name outside/i);
+  });
+
+  it("tells the model where the selection comes from", () => {
+    // No tool reads it; the coordinates are appended to this prompt at send
+    // time by selectionContext.ts. A model told nothing invents a range.
+    expect(SYSTEM_PROMPT).toMatch(/no tool reads the selection/i);
+  });
+
+  it("warns that a draft mounts at the restricted tier", () => {
+    // draftToScriptDefinition mounts every AI draft "restricted", and every
+    // `api.*` chain needs "unlocked".
+    expect(SYSTEM_PROMPT).toContain("RESTRICTED");
+    expect(SYSTEM_PROMPT).toContain("Unlocked");
+  });
+});
+
+describe("the salvage auto-run allowlist is a subset of the real surface", () => {
+  it("names only tools that exist", () => {
+    for (const name of SALVAGE_AUTORUN) {
+      expect(TOOL_NAMES, `${name} is allowlisted for auto-run but is not a tool`).toContain(name);
+    }
+  });
+
+  it("admits nothing that writes to the workbook or runs code", () => {
+    // A salvaged call is recovered from prose by a heuristic. Reads and drafting
+    // are harmless; everything else asks the user first (ChatView).
+    const writesOrExecutes = TOOL_NAMES.filter(
+      (n) => n.startsWith("set_") || n.startsWith("create_") || n.startsWith("apply_") || n === "run_script",
+    );
+    expect(writesOrExecutes.length, "the mutating set must not be empty or this is vacuous")
+      .toBeGreaterThanOrEqual(6);
+    for (const name of writesOrExecutes) {
+      expect(SALVAGE_AUTORUN.has(name), `${name} mutates and must never auto-run from prose`).toBe(false);
+    }
   });
 });

@@ -113,6 +113,75 @@ export function draftArrivalMessage(draft: ScriptDraft): string {
 }
 
 // ============================================================================
+// The session's drafts, remembered so they can be RE-opened
+// ============================================================================
+
+/**
+ * Drafts seen this session, newest last.
+ *
+ * WHY A SECOND COPY. The authoritative queue is the Rust process-global in
+ * `mcp/drafts.rs`, and it is reachable — but only through `get_script_draft`,
+ * which is a TOOL: it runs behind `ai_chat_run_tool` / the MCP server, is gated
+ * on the script-security tier, and is written to be called by a model. Wiring a
+ * UI button through the model's own tool dispatcher to fetch something the
+ * frontend was already handed, as data, on `mcp:script-draft`, would be a round
+ * trip through the wrong layer for no gain.
+ *
+ * This is display state for a review affordance: it is never persisted, never
+ * mounted, and never consulted by anything that runs code. `draftToScriptDefinition`
+ * remains the only path from a draft to something the editor can save.
+ */
+const seen = new Map<string, ScriptDraft>();
+
+/**
+ * Matches `MAX_DRAFTS` in `mcp/drafts.rs`, so this map cannot outgrow the queue
+ * it mirrors. A review queue is a queue, not an archive — and a "Open in editor"
+ * button for a draft the backend has already evicted would be a lie either way.
+ */
+const MAX_REMEMBERED = 50;
+
+/** Remember an arriving draft, evicting oldest-first past the cap. */
+export function rememberDraft(draft: ScriptDraft): void {
+  // Re-inserted rather than updated so the eviction order stays insertion order.
+  seen.delete(draft.id);
+  seen.set(draft.id, draft);
+  while (seen.size > MAX_REMEMBERED) {
+    const oldest = seen.keys().next();
+    if (oldest.done) break;
+    seen.delete(oldest.value);
+  }
+}
+
+/** Every draft seen this session, oldest first. */
+export function rememberedDrafts(): ScriptDraft[] {
+  return [...seen.values()];
+}
+
+/** Test hook: empty the map. The session store is dropped with the window. */
+export function clearRememberedDrafts(): void {
+  seen.clear();
+}
+
+/**
+ * Re-open a remembered draft in the Object Script Editor.
+ *
+ * The implementation behind `@api/scriptEditorService`'s `openDraftInEditor`.
+ * THROWS on an unknown id rather than opening an empty editor: a draft can be
+ * evicted by the cap, and "nothing happened" is the failure mode this whole
+ * feature exists to stop repeating.
+ */
+export async function openRememberedDraft(draftId: string): Promise<void> {
+  const draft = seen.get(draftId);
+  if (!draft) {
+    throw new Error(
+      `Script draft "${draftId}" is no longer available. Drafts live only for the current ` +
+        `session and the oldest are dropped past ${MAX_REMEMBERED}. Ask the AI to draft it again.`,
+    );
+  }
+  await openObjectScriptEditorWithDraft(draft);
+}
+
+// ============================================================================
 // Installation
 // ============================================================================
 
@@ -132,6 +201,9 @@ export function installScriptDraftReview(): () => void {
       console.warn("[ScriptableObjects] Ignored a malformed mcp:script-draft payload:", payload);
       return;
     }
+    // Remembered BEFORE the editor is opened, so the AI Chat's "Open in editor"
+    // button works even if opening the window fails right now.
+    rememberDraft(payload);
     showToast(draftArrivalMessage(payload), { type: "info" });
     void openObjectScriptEditorWithDraft(payload).catch((e) => {
       console.warn("[ScriptableObjects] Failed to open the script draft for review:", e);

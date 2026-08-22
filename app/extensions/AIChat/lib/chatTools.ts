@@ -336,15 +336,100 @@ export const TOOLS: ChatToolDef[] = [
   },
 ];
 
+/**
+ * Every tool name, derived from `TOOLS` so it cannot drift from what is actually
+ * offered.
+ *
+ * Two consumers depend on this being the SAME list the model is sent: the closed
+ * set named in `SYSTEM_PROMPT` below, and the exact-match filter in
+ * `textToolCalls.ts`. A hand-maintained second copy is how a salvaged call for a
+ * tool that no longer exists would reach the dispatcher.
+ */
+export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
+
+/**
+ * Tool calls that may be SALVAGED from prose and run without asking the user.
+ *
+ * Read-only tools plus `draft_object_script`. A salvaged call is the model's
+ * intent recovered by a heuristic rather than delivered by the transport, and a
+ * heuristic is exactly the wrong thing to have sole authority over a silent edit
+ * — so anything that mutates the document or executes code is confirmed with the
+ * user first (`confirmAsync`, awaited). `draft_object_script` is here because it
+ * neither mounts nor runs anything: its whole output is a review queue entry that
+ * a human must then approve in the editor.
+ *
+ * FAIL-CLOSED: membership is required to auto-run, so a tool added to `TOOLS`
+ * later is confirmed by default until someone deliberately adds it here.
+ * `__tests__/chatToolSurface.test.ts` pins that every member exists and that no
+ * mutating tool is in the set.
+ */
+export const SALVAGE_AUTORUN: ReadonlySet<string> = new Set<string>([
+  "get_sheet_summary",
+  "read_cell_range",
+  "list_charts",
+  "list_named_ranges",
+  "list_tables",
+  "list_pivots",
+  "get_chart",
+  "list_bi_connections",
+  "describe_bi_model",
+  "run_bi_query",
+  "cube_value",
+  "cube_kpi",
+  "cube_members",
+  "list_script_drafts",
+  "get_script_draft",
+  "draft_object_script",
+]);
+
+/**
+ * The system prompt.
+ *
+ * WHY IT NOW OPENS WITH THE CALLING MECHANISM. A local model was asked to "create
+ * a script that formats the background colour of each selected cell" and replied
+ * with a fenced ```json block containing `{"name": "format_cells", "arguments":
+ * {...}}`. Two separate failures in one reply, and this prompt is the cheapest
+ * place to address both:
+ *
+ *   1. It PRINTED a tool call instead of emitting one. Nothing ran, and the turn
+ *      ended looking exactly like a normal conversational answer. Frontier models
+ *      rarely need to be told the difference; a 3B-14B local model frequently
+ *      does, because "show the JSON" is a very well-represented pattern in its
+ *      training data. `textToolCalls.ts` recovers the call when it happens —
+ *      but recovery is a net, not a fix, and the prompt is what lowers the rate.
+ *   2. It INVENTED `format_cells`, a plausible near-neighbour of the real
+ *      `apply_formatting`. A model cannot avoid a name it was never shown as
+ *      closed, so the set is named here, built from TOOLS so it cannot drift.
+ *
+ * The names are interpolated rather than typed out for the same reason
+ * `TOOL_NAMES` exists: a prompt that promises a tool the surface no longer offers
+ * teaches the model to call something that will come back "Unknown tool".
+ */
 export const SYSTEM_PROMPT =
   "You are an AI assistant embedded in Calcula, a spreadsheet application. You help the user " +
-  "read and edit the open workbook using the provided tools. Prefer get_sheet_summary to orient " +
-  "yourself before reading/writing. Cell coordinates are 0-based (row 0 = row 1, col 0 = column A). " +
+  "read and edit the open workbook using the provided tools.\n\n" +
+  "HOW TO ACT — READ THIS FIRST.\n" +
+  "To do anything at all you must EMIT A TOOL CALL through the tool-calling interface. " +
+  "Writing a tool call as text does nothing: a fenced ```json block containing " +
+  '{"name": ..., "arguments": ...} is just prose. No tool runs, the workbook does not change, ' +
+  "and the user sees only your message. If you intend to use a tool, emit the call — do not " +
+  "describe it, do not print it, and do not ask the user to run it for you.\n\n" +
+  "THE TOOLS THAT EXIST — this list is complete and closed:\n" +
+  TOOL_NAMES.join(", ") +
+  ".\nNever call a name outside that list; an invented name does nothing. If nothing in the " +
+  "list can do what the user asked, say so in plain text instead of inventing a tool.\n\n" +
+  "ORIENTATION. Prefer get_sheet_summary before reading/writing. Cell coordinates are 0-based " +
+  "(row 0 = row 1, col 0 = column A). " +
   "If the workbook has BI/cube connections (list_bi_connections), you can query them read-only with " +
-  "describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members. " +
-  "When the user asks for automation they will keep — something to re-run, or to attach to a button, " +
-  "sheet, chart or the workbook — author it with draft_object_script rather than run_script. " +
-  "A draft is NOT mounted and does NOT execute: it goes to the user, who reads it in the Object " +
-  "Script Editor and decides whether it becomes live code. Say so plainly when you draft one, and " +
-  "never imply the automation is already running. " +
+  "describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members.\n\n" +
+  "THE USER'S SELECTION. No tool reads the selection. When the user has one it is stated at the " +
+  "end of this prompt — use those coordinates. If the user says \"the selected cells\" and no " +
+  "selection is stated, ask them to select a range rather than guessing one.\n\n" +
+  "WRITING AUTOMATION. When the user asks for automation they will keep — something to re-run, or " +
+  "to attach to a button, sheet, chart or the workbook — author it with draft_object_script rather " +
+  "than run_script. A draft is NOT mounted and does NOT execute: it goes to the user, who reads it " +
+  "in the Object Script Editor and decides whether it becomes live code. Say so plainly when you " +
+  "draft one, and never imply the automation is already running. A drafted script arrives at the " +
+  "RESTRICTED access level; if yours calls context.api.* it will not run until the user raises it " +
+  "to Unlocked in the editor, so tell them that when it applies.\n\n" +
   "Keep replies concise. Confirm destructive or large edits before making them.";

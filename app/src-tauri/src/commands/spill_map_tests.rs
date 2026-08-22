@@ -1139,6 +1139,8 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
     // (file relative to src/, function, reason it needs no spill maintenance)
     const EXEMPT: &[(&str, &str, &str)] = &[
         ("mcp/tools.rs", "apply_seeds", "IS NOT A DOCUMENT WRITE: seeds a DETACHED CLONE for a dry run (ai/dryrun.rs). The grid it writes never reaches AppState, is discarded when the run ends, and has no spill map to orphan."),
+        ("ai/preview_eval.rs", "build_grid", "IS NOT A DOCUMENT WRITE: fills a `Grid::new()` built inside the function for the script preview's formula evaluator. It never reaches AppState and has no spill map to orphan."),
+        ("ai/preview_eval.rs", "evaluate_preview", "IS NOT A DOCUMENT WRITE: iterates formulas to a fixed point over that same detached grid. It cannot orphan a spill because it REFUSES to store one — a dynamic-array result is counted in `spilled` and the caller rejects the whole batch rather than fabricating half a spill."),
         // -- It IS the spill machinery, or an inner step of it ---------------
         ("commands/data.rs", "erase_released_spill_cells", "IS the tear-down's grid half: it erases exactly the cells take_spills_* released"),
         // §3bm REMOVED SIX ENTRIES FROM THIS LIST, and that is the point of the

@@ -47,6 +47,24 @@ export interface ModelProfile {
   /** How many of the canary tasks were attempted without a transport error. */
   tasksScored: number;
   tasksTotal: number;
+  /**
+   * Whether the model emitted a NATIVE tool call when handed a tool and told to
+   * use it.
+   *
+   * OPTIONAL because `probeModel` does not measure it — it has no provider, only
+   * a `CompleteFn` returning text, and a native tool call is by definition not
+   * text. The AI Chat's own probe runner fills it in (`probeRunner.ts`), so an
+   * older profile simply carries `undefined` and says nothing.
+   *
+   * WHY IT IS WORTH A FIELD. `emitsFencedCode` above is TRUE for essentially
+   * every model, and for script authoring that is exactly what you want. For the
+   * CHAT it is the failure mode: a model that answers a request for action with
+   * a fenced ```json tool call does nothing at all. The profile scored such a
+   * model at 60% and pronounced it fine while the chat was unusable, because
+   * nothing in the probe had ever sent a tool. Advisory only — Calcula now
+   * recovers a textual call, so `false` is a warning, never a lock-out.
+   */
+  emitsNativeToolCalls?: boolean;
   /** ISO date, so a stale profile can be re-run rather than trusted forever. */
   measuredAt: string;
 }
@@ -124,7 +142,15 @@ export function describeProfile(profile: ModelProfile): string {
     profile.decodeTokensPerSec > 0
       ? ` It generates at about ${Math.round(profile.decodeTokensPerSec)} tokens/sec.`
       : "";
-  return `${planFor(profile).rationale}${speed}`;
+  // Only stated when it was actually MEASURED false. `undefined` means the probe
+  // predates the check, and inventing a verdict for it would be the same lie in
+  // a smaller shape.
+  const toolCalls =
+    profile.emitsNativeToolCalls === false
+      ? " It did NOT emit a native tool call in the probe: expect it to write tool calls as text. " +
+        "Calcula recovers those, and asks you before running anything that changes the workbook."
+      : "";
+  return `${planFor(profile).rationale}${speed}${toolCalls}`;
 }
 
 const PROBE_SYSTEM = [

@@ -19,10 +19,15 @@ const { readProfile, writeProfile, runProbe, summarizeProfile, TOOL_SURFACE_REFU
 const { TOOLS } = await import("../lib/chatTools");
 
 /**
- * The two pre-flight completions `checkToolSurface` sends before the canary run:
- * one plain, one carrying the real tool surface.
+ * The pre-flight completions sent before the canary run:
+ *   1. plain, no tools           — is the provider reachable at all?
+ *   2. carrying the real surface — does it accept OUR tool schemas?
+ *   3. one trivial tool, "call it" — does it emit a NATIVE tool call, or write
+ *      one as text? (The failure a user hit on 2026-08-22.)
  */
-const PREFLIGHTS = 2;
+const PREFLIGHTS = 3;
+/** The index of the native-tool-call probe among them. */
+const TOOL_CALL_PROBE = 2;
 
 /** What `probeRunner` posts to `ai_chat_complete`, as far as these tests read it. */
 interface CompleteArgs {
@@ -104,6 +109,59 @@ describe("the probe drives the real provider command", () => {
     // get_sheet_summary instead of emitting a fenced script is not a model that
     // failed the task. The tool surface is proved separately, below.
     expect(args.request.tools).toEqual([]);
+  });
+
+  it("measures whether the model emits a NATIVE tool call", async () => {
+    // The gap that let the reported bug through: the probe sent `tools: []`,
+    // scored `emitsFencedCode` — which is TRUE for essentially every model and
+    // is exactly the behaviour that breaks the chat — and called it healthy.
+    const profile = await runProbe({ providerId: "ollama", model: "qwen" });
+    const probeCall = argsOf(TOOL_CALL_PROBE);
+    expect(probeCall.request.tools, "the probe must carry a tool to call").toHaveLength(1);
+    // GOOD_REPLY is text only, so this model writes rather than emits.
+    expect(profile.emitsNativeToolCalls).toBe(false);
+    expect(readProfile("ollama", "qwen")?.emitsNativeToolCalls).toBe(false);
+  });
+
+  it("records true when the model does emit one", async () => {
+    invoke.mockImplementation((_cmd: string, args: CompleteArgs) => {
+      const tools = args.request.tools ?? [];
+      if (tools.length === 1) {
+        return Promise.resolve({
+          blocks: [{ type: "toolUse", id: "c1", name: "probe_ping", input: {} }],
+          stopReason: "toolUse", model: "m",
+        });
+      }
+      return Promise.resolve(GOOD_REPLY);
+    });
+    const profile = await runProbe({ providerId: "ollama", model: "qwen" });
+    expect(profile.emitsNativeToolCalls).toBe(true);
+  });
+
+  it("is ADVISORY: a model that fails it still gets a full profile", async () => {
+    // A false negative must never lock out a model that works — Calcula now
+    // recovers a textual call, so this is a warning, not a gate.
+    const profile = await runProbe({ providerId: "ollama", model: "qwen" });
+    expect(profile.emitsNativeToolCalls).toBe(false);
+    expect(profile.tasksTotal).toBeGreaterThan(0);
+    expect(profile.canaryScore).toBeGreaterThanOrEqual(0);
+    expect(summarizeProfile(profile)).toContain("did NOT emit a native tool call");
+  });
+
+  it("records NO verdict when the probe request itself failed", async () => {
+    // A transport blip must not be reported as "this model cannot call tools".
+    let n = 0;
+    invoke.mockImplementation((_cmd: string, args: CompleteArgs) => {
+      n++;
+      if ((args.request.tools ?? []).length === 1 && (args.request.tools ?? []).length !== TOOLS.length) {
+        return Promise.reject(new Error("connection reset"));
+      }
+      return Promise.resolve(GOOD_REPLY);
+    });
+    const profile = await runProbe({ providerId: "ollama", model: "qwen" });
+    expect(n).toBeGreaterThan(0);
+    expect(profile.emitsNativeToolCalls, "undecided, not false").toBeUndefined();
+    expect(summarizeProfile(profile)).not.toContain("did NOT emit");
   });
 
   it("reports progress so a minutes-long probe is not a frozen dialog", async () => {
@@ -239,8 +297,11 @@ describe("the probe proves the TOOL SURFACE, not just the model", () => {
     await expect(runProbe({ providerId: "ollama", model: "qwen" })).rejects.toThrow(
       /cannot unmarshal number/,
     );
-    // ...and it gave up at the pre-flight rather than burning a dozen completions.
-    expect(seen).toBe(PREFLIGHTS * 2);
+    // ...and it gave up at the SECOND pre-flight rather than burning a dozen
+    // completions — the tool-surface refusal is fatal, so the native-tool-call
+    // probe after it never runs either. Two calls per attempt, two attempts.
+    const CALLS_BEFORE_REFUSAL = 2;
+    expect(seen).toBe(CALLS_BEFORE_REFUSAL * 2);
   });
 
   it("banks NO profile for a model whose tools were refused", async () => {

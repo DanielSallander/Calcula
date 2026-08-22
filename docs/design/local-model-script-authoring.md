@@ -1310,3 +1310,129 @@ easy to forget, and the failure it causes is silent and late.
 
 **Both read the same task definitions**, so the number a user sees in the picker and the number CI
 reports cannot diverge.
+
+---
+
+## 12. The chat that would not act — post-ship repair, 2026-08-22
+
+Reported from live use against a local model. Prompt:
+
+> create a script that formats the background color of each selected cell, using the content of the
+> cell, for example: #FFFF00
+
+The model replied with a fenced json code block containing
+`{"name": "format_cells", "arguments": {"cells": ["A1","B3","C5"], "color_map": {...}}}`.
+Nothing ran. No script was created. The turn ended looking exactly like a normal conversational
+answer.
+
+**Four separate defects in one reply**, and the interesting part is that none of them was in the
+tool-use loop, the wire translation or the sandbox — all of which behaved exactly as specified.
+
+### 12.1 It printed a tool call instead of emitting one — and nothing noticed
+
+`push_openai` fills `acc.tool_calls` only from `delta.tool_calls`, so a call written into `content`
+produced zero `toolUse` blocks and `stopReason: "endTurn"`; the loop broke and rendered the prose.
+Correct behaviour at every layer, and a total product failure.
+
+**Decided: recover it, and say so.** `AIChat/lib/textToolCalls.ts` searches the assistant text for a
+tool call when — and only when — the turn produced no native one. Three rules keep the net from
+catching prose that merely *discusses* a tool: names are matched EXACTLY against the live surface
+(no fuzzy mapping, ever), the object must carry only tool-call envelope keys, and nothing is
+evaluated (`JSON.parse` only).
+
+**The prompt is the real fix; the parser is the floor.** `SYSTEM_PROMPT` now opens with the calling
+mechanism ("writing a tool call as text does nothing") and names the closed set, interpolated from
+`TOOLS` so it cannot drift. A 3B model has "here is the JSON you asked for" heavily represented in
+its training data and will regress to it; Calcula's premise is that a local model is a first-class
+way to use the product, so the floor is what the user experiences.
+
+**Security posture — the one real decision here.** A salvaged call is dispatched through the same
+`ai_chat_run_tool` as a native one, so it inherits the identical window guard, script-security tier
+and audit trail: this adds no reach. What it adds is a heuristic in the provenance of the parse, and
+a heuristic must not be the sole authority for a silent edit to someone's workbook. So:
+`SALVAGE_AUTORUN` (fail-closed) lets read-only tools and `draft_object_script` run — the latter
+because it neither mounts nor executes anything, and its entire output is a review-queue entry a
+human must then approve — while every mutating tool is confirmed with an awaited `confirmAsync`.
+A NATIVE call is never subject to this; the model used the interface built for the purpose.
+
+### 12.2 It invented `format_cells`
+
+A plausible near-neighbour of the real `apply_formatting`. Nothing had ever shown the model the tool
+list as CLOSED, and an unknown name reached the Rust dispatcher and came back as a bare
+`Unknown tool 'x'.` with no hint. Now: the prompt names the set, and an invented name produces a
+repair message naming the closed set and the nearest real tools by edit distance, fed back through
+the model's own agentic loop (the same mechanism `draftGate` uses, not a second loop).
+
+### 12.3 There was no way for it to know what "selected" meant
+
+A grep of `chatTools.ts` for `selection` returned nothing: not one tool exposed it, and
+`mcp/tools.rs` hardcodes `selection_context: None`. The model's `["A1","B3","C5"]` was not laziness,
+it was filling a hole.
+
+**Decided: prompt injection, not a tool.** `AIChat/lib/selectionContext.ts` tracks
+`AppEvents.SELECTION_CHANGED` and appends one line to the system string at send time, in BOTH A1 and
+0-based coordinates (the tools are 0-based; a drafted script is read by a human in A1, and the
+conversion is where a small model goes off by one). A tool would need a Rust arm, a new command, a
+backend that does not have the state, and a turn for the model to spend calling it — and, unlike a
+prompt line, could be forgotten by a weak model, which is the failure being fixed.
+
+### 12.4 The dry run judged the draft at a tier it will never run at
+
+`previewObjectScript` defaults to `tier: "unlocked"`; `draftToScriptDefinition` mounts every AI
+draft `"restricted"`, deliberately. So L3 green-lit scripts reaching `context.api.*`, the user
+pressed Save, and the script was refused by a gate the preview had never consulted.
+
+Now previewed at `"restricted"`. **A tier failure is a NOTICE, not a rejection** (§11.2): the second
+run at `"unlocked"` makes the diagnosis a DEDUCTION rather than a regex — the tier is the only thing
+that changed — and a script that passes there is allowed through with a note telling the user to
+raise the access level. Rejecting would teach the model to avoid `context.api.*`, which for a button
+is the only route to the grid.
+
+### 12.5 And the user could not see any of it happening
+
+> you just see an empty field and you have no idea of where the progress is at the moment
+
+Measured, not guessed: the earliest event of any kind was emitted from inside the chunk loop, so
+everything before the first token rendered as a literal "…" — for up to the full 180-second
+timeout, during which a cold local model loading into VRAM and a runtime that is not running looked
+identical. Three new `StreamEvent` variants (`Requested`, `Opened`, `ReasoningDelta`) report
+transitions that actually happened; none invents a percentage. `reasoning_content` had always been
+ACCUMULATED and never emitted, so on a reasoning model the entire visible turn produced nothing.
+
+Also fixed on the same screen: a tool call was announced by the stream AND appended again by the
+dispatch loop (two bubbles, neither resolving); a tool that THREW produced no UI at all while the
+model was told, so the loop could burn all eight turns in silence; `CONNECT_TIMEOUT_SECS` (10s)
+separates "Ollama is not running" from "the model is thinking"; and `ai_chat_cancel_stream` makes
+Stop real — it abandons Calcula's side and says plainly that it does not reach the provider.
+
+### 12.6 The probe measured the opposite of what the chat needs
+
+`emitsFencedCode` is TRUE for essentially every model and is a VIRTUE for script authoring. For the
+chat it is the failure mode. The probe sent `tools: []`, scored the model at a respectable number,
+and said nothing. `emitsNativeToolCalls` is now measured with one trivial tool — **advisory, never
+fatal**, since a textual call is now recovered and a false negative must not lock out a working
+model.
+
+### 12.7 The draft was created and then unreachable
+
+The editor auto-opens once on `mcp:script-draft`. After that window is closed the only route back
+was asking the model in English to call `list_script_drafts` — a tool for the model, not a surface
+for the person the draft was written for. `ScriptEditorProvider.openDraftInEditor(draftId)` is a
+REQUIRED member of the existing `@api` seam (a missed registration should be a compile error, not a
+button that silently does nothing), and the chat renders "Open in Object Script Editor" beside the
+call that produced the draft.
+
+### 12.8 What this cost, and the standing lesson
+
+Every layer was individually correct. The tool-use loop, the wire translation, the sandbox, the
+draft queue and the review path all did exactly what they were specified to do — and the product
+did nothing, twice over: no action, and no report that no action had been taken. **A pipeline of
+correct components fails silently at the seam where nobody owns the outcome.** The guards added here
+are therefore about OUTCOMES, not layers: does a printed call still get the work done, does an
+invented name teach the model, does every tool call reach a terminal state on screen, does a draft
+stay reachable.
+
+`ChatView.tsx` had no test of any kind before this — no unit test imported it, no E2E journey drove
+it. It is where all four defects met. It now has `__tests__/chatViewSalvage.test.tsx`, and the
+logic that can be wrong was moved into pure modules (`textToolCalls`, `toolTimeline`,
+`selectionContext`) that are tested without jsdom.

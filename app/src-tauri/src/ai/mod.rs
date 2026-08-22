@@ -44,6 +44,14 @@ use wire::{ChatRequest, ChatResponse};
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Cloud round trips can be slow; a local model on a cold load can be slower.
 const REQUEST_TIMEOUT_SECS: u64 = 180;
+/// How long to wait for the TCP/TLS handshake alone.
+///
+/// Separate from the overall timeout because the two failures are nothing alike.
+/// "Ollama is not running" is answerable in milliseconds on loopback, and it used
+/// to present as the chat sitting silent for the full three minutes — the single
+/// worst case of the dead air this module now reports on. A generous ten seconds
+/// still covers a cold cloud TLS handshake on a bad connection.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -306,6 +314,59 @@ struct StreamEnvelope<'a> {
     event: &'a stream::StreamEvent,
 }
 
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+/// Stream ids the user has asked to stop.
+///
+/// A process-global set rather than managed state, for the same reason the draft
+/// queue is: this is transport bookkeeping that outlives nothing, persists
+/// nowhere, and has no business in the workbook's state graph. Ids are removed
+/// when observed, so the set holds only the requests in flight.
+fn cancelled_streams() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static CANCELLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    CANCELLED.get_or_init(Default::default)
+}
+
+/// Consume a cancellation request. True exactly once per `ai_chat_cancel_stream`.
+fn take_cancel(stream_id: &str) -> bool {
+    cancelled_streams()
+        .lock()
+        .map(|mut s| s.remove(stream_id))
+        .unwrap_or(false)
+}
+
+/// Ask a streaming turn to stop at its next chunk boundary.
+///
+/// HONEST ABOUT WHAT IT DOES. This aborts Calcula's side: the response body is
+/// dropped, the partial answer is discarded rather than fed back to the model as
+/// though the turn had finished, and the UI is freed. It does NOT reach into the
+/// provider — a local runtime keeps generating until it notices the closed
+/// socket, and a cloud vendor has already been billed. The UI says so.
+///
+/// Checked at chunk boundaries, which is where a wedged turn actually sits: a
+/// model producing tokens slowly, or an agentic loop the user has changed their
+/// mind about. A request that has not yet connected is covered by
+/// `CONNECT_TIMEOUT_SECS` instead.
+///
+/// No `DocumentEffect`: nothing persisted changes.
+#[tauri::command]
+pub fn ai_chat_cancel_stream(stream_id: String, window: tauri::Window) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    cancelled_streams()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(stream_id);
+    Ok(())
+}
+
+/// The message a cancelled turn fails with. Matched by the frontend so it can be
+/// shown as a neutral status line rather than as an error the user must worry
+/// about.
+pub const STREAM_CANCELLED: &str = "The turn was stopped.";
+
 /// Stream one turn, emitting deltas as they arrive and returning the same
 /// `ChatResponse` the non-streaming command returns.
 ///
@@ -339,6 +400,7 @@ pub async fn ai_chat_complete_stream(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -369,6 +431,24 @@ pub async fn ai_chat_complete_stream(
         },
     };
 
+    // DECLARED BEFORE THE SEND, not after it. This closure used to be defined
+    // below the request, which meant the earliest event of any kind reached the
+    // UI from inside the chunk loop — everything before the first token was a
+    // literal "…" with no way to tell a loading model from a dead runtime.
+    let emit = |event: &stream::StreamEvent| {
+        let _ = app.emit(
+            AI_STREAM_EVENT,
+            StreamEnvelope { stream_id: &stream_id, event },
+        );
+    };
+
+    // Last thing the user hears if the runtime is unreachable, so it names the
+    // endpoint that was tried.
+    emit(&stream::StreamEvent::Requested {
+        model: request.model.clone(),
+        endpoint: url.clone(),
+    });
+
     let mut resp = req
         .json(&body)
         .send()
@@ -381,21 +461,31 @@ pub async fn ai_chat_complete_stream(
         return Err(format!("{} error {}: {}", def.label, status.as_u16(), text));
     }
 
+    // Accepted. The gap between here and the first TextDelta is the model
+    // thinking or loading — on a cold local model, minutes of it.
+    emit(&stream::StreamEvent::Opened { status: status.as_u16() });
+
     let mut decoder = stream::SseDecoder::new();
     let mut acc = stream::StreamAccumulator::new();
     let mut failure: Option<String> = None;
 
-    let emit = |event: &stream::StreamEvent| {
-        let _ = app.emit(
-            AI_STREAM_EVENT,
-            StreamEnvelope { stream_id: &stream_id, event },
-        );
-    };
+    // A cancellation that arrived while the request was in flight, before a
+    // single chunk landed, must still be honoured.
+    if take_cancel(&stream_id) {
+        return Err(STREAM_CANCELLED.to_string());
+    }
 
     // `Response::chunk` rather than `bytes_stream()`, matching net_commands.rs:
     // it is an inherent reqwest method, so no external Stream trait and no
     // futures-util (not a direct dependency of this crate).
     loop {
+        // Between chunks, which is where a wedged turn sits. Dropping `resp`
+        // closes the body; the partial answer is DISCARDED rather than returned,
+        // because a partial turn fed back to the model as complete is the
+        // silent-corruption case `Failed` exists to prevent.
+        if take_cancel(&stream_id) {
+            return Err(STREAM_CANCELLED.to_string());
+        }
         match resp.chunk().await {
             Ok(Some(bytes)) => {
                 for frame in decoder.push(&bytes) {
@@ -431,6 +521,14 @@ pub async fn ai_chat_complete_stream(
         }
     }
 
+    // A stop that raced the last chunk still stops: returning a finished turn
+    // the user has just abandoned would append an answer under their Stop click.
+    // This also drops the id, so a request that arrives at the very end cannot
+    // sit in the set forever.
+    if take_cancel(&stream_id) {
+        return Err(STREAM_CANCELLED.to_string());
+    }
+
     if let Some(message) = failure {
         return Err(message);
     }
@@ -462,6 +560,38 @@ mod tests {
         assert_eq!(resolve_base(&def, None).unwrap(), "http://127.0.0.1:11434/v1");
         // Blank is not an override; it falls back rather than producing "".
         assert_eq!(resolve_base(&def, Some("   ")).unwrap(), "http://127.0.0.1:11434/v1");
+    }
+
+    #[test]
+    fn a_cancel_request_is_observed_exactly_once() {
+        // The set must not hold an id after it has been acted on, or the NEXT
+        // turn with a recycled id would stop before it started.
+        let id = "s-cancel-once";
+        assert!(!take_cancel(id), "nothing pending to begin with");
+        cancelled_streams().lock().unwrap().insert(id.to_string());
+        assert!(take_cancel(id), "the pending request is observed");
+        assert!(!take_cancel(id), "and only once");
+    }
+
+    #[test]
+    fn cancelling_one_stream_does_not_stop_another() {
+        // Two panes, or a turn racing one the user just abandoned.
+        cancelled_streams().lock().unwrap().insert("s-a".to_string());
+        assert!(!take_cancel("s-b"), "an unrelated turn must be untouched");
+        assert!(take_cancel("s-a"));
+    }
+
+    #[test]
+    fn the_cancelled_message_is_the_one_the_frontend_matches() {
+        // Shown as a neutral status line rather than an error, so the string is
+        // part of the contract with ChatView.
+        assert_eq!(STREAM_CANCELLED, "The turn was stopped.");
+    }
+
+    #[test]
+    fn the_connect_timeout_is_far_shorter_than_the_request_timeout() {
+        // "Ollama is not running" used to present as three minutes of silence.
+        assert!(CONNECT_TIMEOUT_SECS < REQUEST_TIMEOUT_SECS / 10);
     }
 
     #[test]

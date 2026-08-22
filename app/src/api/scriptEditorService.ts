@@ -23,13 +23,35 @@
 // resolves the authoritative record itself from the id, so the seam carries only
 // the id — the one durable handle both sides already agree on.
 
-/** What the ScriptableObjects extension provides: open a macro for editing. */
+/** What the ScriptableObjects extension provides: open a script for editing. */
 export interface ScriptEditorProvider {
   /**
    * Focus (or create) the Object Script Editor window and load the module macro
    * with this id into it. Rejects if the editor window cannot be reached.
    */
   openMacroInEditor(macroId: string): Promise<void>;
+
+  /**
+   * Focus (or create) the Object Script Editor on an AI-authored DRAFT, by id.
+   *
+   * A draft arrives from the backend on `mcp:script-draft` and the editor opens
+   * once, automatically. This is the way BACK: after that window is closed, the
+   * only remaining route to the draft was to ask the model in English to call
+   * `list_script_drafts` — which is a tool for the model, not a surface for the
+   * person the draft was written for. The AI Chat now renders an "Open in
+   * editor" button beside the call that produced it, and this is what that
+   * button reaches.
+   *
+   * CARRIES AN ID, NOT A DRAFT, for the same reason `openMacroInEditor` does:
+   * the owning extension already holds the authoritative record, and hoisting a
+   * `ScriptDraft` type into `@api` would put the MCP wire shape in the facade
+   * for one consumer's convenience. Rejects when the id is unknown — a draft
+   * evicted by the session cap must fail loudly, not open an empty editor.
+   *
+   * REQUIRED, not optional: a missed registration should be a compile error
+   * rather than a button that silently does nothing at runtime.
+   */
+  openDraftInEditor(draftId: string): Promise<void>;
 }
 
 let provider: ScriptEditorProvider | null = null;

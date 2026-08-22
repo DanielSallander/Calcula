@@ -4998,6 +4998,7 @@ pub fn run() {
             ai::ai_list_models,
             ai::ai_chat_complete,
             ai::ai_chat_complete_stream,
+            ai::ai_chat_cancel_stream,
             ai::dryrun::ai_dry_run_script,
             ai::preview_eval::preview_evaluate_formulas,
             ai::tools::ai_chat_run_tool,

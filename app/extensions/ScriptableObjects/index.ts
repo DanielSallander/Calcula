@@ -60,7 +60,7 @@ import { installObjectScriptDebugBridge, reloadPersistedBreakpoints } from "./li
 import type { DialogProps } from "@api/uiTypes";
 import { openObjectScriptEditor, openMacroInEditor } from "./lib/openObjectScriptWindow";
 import { registerScriptEditorProvider } from "@api/scriptEditorService";
-import { installScriptDraftReview } from "./lib/scriptDrafts";
+import { installScriptDraftReview, openRememberedDraft } from "./lib/scriptDrafts";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
 import {
   onSaveAndApply,
@@ -857,9 +857,13 @@ async function activate(context: ExtensionContext): Promise<void> {
   // extension's internals. We are the only place that can drive the editor
   // window, so we register the provider; the seam throws for the Macro Recorder
   // to surface if this extension is disabled, never a menu action that no-ops.
+  // `openDraftInEditor` is the AI Chat's route BACK to a draft after its
+  // auto-opened window has been closed — the chat renders an "Open in editor"
+  // button beside the call that produced it, and may not import this extension.
   cleanupFunctions.push(
     registerScriptEditorProvider({
       openMacroInEditor: (macroId: string) => openMacroInEditor(macroId),
+      openDraftInEditor: (draftId: string) => openRememberedDraft(draftId),
     }),
   );
 

@@ -765,6 +765,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
     // (file relative to src/, function, reason it does not recalculate)
     const EXEMPT: &[(&str, &str, &str)] = &[
         ("mcp/tools.rs", "apply_seeds", "IS NOT A DOCUMENT WRITE: seeds a DETACHED CLONE for a dry run (ai/dryrun.rs). Nothing downstream observes it, so there are no dependents to recalculate."),
+        ("ai/preview_eval.rs", "build_grid", "IS NOT A DOCUMENT WRITE: fills a `Grid::new()` built inside the function from the caller's cell list, for the script preview's formula evaluator. The grid is dropped when `evaluate_preview` returns; the workbook is never reached, so there is nothing to recalculate."),
+        ("ai/preview_eval.rs", "evaluate_preview", "IT IS AN EVALUATION LOOP, over a detached grid: it iterates its own formulas to a fixed point (PASS_CAP) and returns values. Pure — no Tauri state, no I/O — which is the same class as data_tables/goal_seek below, minus even the document."),
         // -- It IS recalculation, or an inner step of it -------------------
         ("calculation.rs", "run_calculation_pass", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet)"),
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the SHEET-scoped pass: reports a cycle the pass already detected on the sheets it does not evaluate"),

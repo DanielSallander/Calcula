@@ -61,8 +61,24 @@ describe("scriptEditorService seam", () => {
       openMacroInEditor: async (id) => {
         opened.push(id);
       },
+      openDraftInEditor: async () => {},
     });
     await requireScriptEditorProvider().openMacroInEditor("macro-x");
     expect(opened).toEqual(["macro-x"]);
+  });
+
+  it("carries an AI draft id back to the editor, distinct from a macro id", () => {
+    // The AI Chat's route back to a draft after its auto-opened window is
+    // closed. Two members rather than one overloaded id, because a draft id is
+    // not an object-script id and the editor resolves them differently.
+    const macros: string[] = [];
+    const drafts: string[] = [];
+    registerScriptEditorProvider({
+      openMacroInEditor: async (id) => { macros.push(id); },
+      openDraftInEditor: async (id) => { drafts.push(id); },
+    });
+    void requireScriptEditorProvider().openDraftInEditor("draft-abc123");
+    expect(drafts).toEqual(["draft-abc123"]);
+    expect(macros, "a draft must not be routed through the macro path").toEqual([]);
   });
 });

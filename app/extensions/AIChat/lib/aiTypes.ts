@@ -70,6 +70,22 @@ export interface ProviderStatus {
 
 /** Mirrors `StreamEvent` + the envelope's `streamId` (serde `flatten`). */
 export type StreamEvent =
+  /**
+   * The request is about to leave the process, naming the endpoint it is going
+   * to. The first three variants exist because everything before the first token
+   * — connect, accept, and on a local runtime the tens of seconds spent loading
+   * a model into VRAM — used to render as a literal "…" with no way to tell a
+   * loading model from a runtime that is not running.
+   */
+  | { streamId: string; type: "requested"; model: string; endpoint: string }
+  /** The server accepted the request. The gap to the first delta is thinking. */
+  | { streamId: string; type: "opened"; status: number }
+  /**
+   * Vendor "thinking" output. Rendered SEPARATELY from the answer and never
+   * merged into it — it is not prose the model is saying to the user, and the
+   * streamed answer is replaced wholesale by the authoritative blocks.
+   */
+  | { streamId: string; type: "reasoningDelta"; text: string }
   | { streamId: string; type: "textDelta"; text: string }
   | { streamId: string; type: "toolCallStarted"; id: string; name: string }
   | { streamId: string; type: "done"; response: ChatResponse }
@@ -79,6 +95,15 @@ export type StreamEvent =
    * the turn had completed.
    */
   | { streamId: string; type: "failed"; message: string };
+
+/**
+ * The error `ai_chat_complete_stream` rejects with when the user pressed Stop.
+ *
+ * MUST equal `STREAM_CANCELLED` in `app/src-tauri/src/ai/mod.rs`. Matched rather
+ * than inferred so a stopped turn renders as a neutral status line instead of as
+ * a failure the user has to worry about.
+ */
+export const STREAM_CANCELLED = "The turn was stopped.";
 
 /** The Tauri event every stream chunk arrives on, correlated by `streamId`. */
 export const AI_STREAM_EVENT = "ai:chat-stream";

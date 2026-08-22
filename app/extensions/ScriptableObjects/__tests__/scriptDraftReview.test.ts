@@ -62,6 +62,10 @@ import {
   installScriptDraftReview,
   isScriptDraft,
   draftToScriptDefinition,
+  rememberDraft,
+  rememberedDrafts,
+  clearRememberedDrafts,
+  openRememberedDraft,
 } from "../lib/scriptDrafts";
 import type { ScriptDraft } from "../lib/crossWindowEvents";
 
@@ -220,5 +224,80 @@ describe("promoting a draft to a script", () => {
     expect(script.source).toBe(draft.source);
     expect(script.name).toBe(draft.name);
     expect(script.provenance).toBeUndefined();
+  });
+});
+
+describe("a draft stays reachable after its editor window is closed", () => {
+  // The AI Chat renders "Open in Object Script Editor" beside the tool call that
+  // produced a draft, reaching through @api/scriptEditorService. Before this,
+  // the editor opened exactly once on arrival and the only route back was asking
+  // the model in English to call `list_script_drafts` — a tool for the model,
+  // not a surface for the person the draft was written for.
+
+  beforeEach(() => {
+    clearRememberedDrafts();
+    listeners.clear();
+    openObjectScriptEditorWithDraft.mockClear();
+    showToast.mockClear();
+  });
+
+  it("remembers a draft the moment it arrives", async () => {
+    const dispose = installScriptDraftReview();
+    await flush();
+    emitDraft(makeDraft());
+    expect(rememberedDrafts().map((d) => d.id)).toEqual(["draft-0123456789abcdef"]);
+    dispose();
+  });
+
+  it("remembers it even when opening the window fails", async () => {
+    // Remembered BEFORE the open is attempted, so a transient window failure
+    // does not also destroy the way back.
+    openObjectScriptEditorWithDraft.mockRejectedValueOnce(new Error("no window"));
+    const dispose = installScriptDraftReview();
+    await flush();
+    emitDraft(makeDraft());
+    await flush();
+    expect(rememberedDrafts()).toHaveLength(1);
+    dispose();
+  });
+
+  it("never remembers a malformed payload", async () => {
+    const dispose = installScriptDraftReview();
+    await flush();
+    emitDraft({ id: "draft-x" });
+    emitDraft(makeDraft({ mounted: true }));
+    expect(rememberedDrafts()).toEqual([]);
+    dispose();
+  });
+
+  it("re-opens a remembered draft through the same editor path", async () => {
+    rememberDraft(makeDraft());
+    openObjectScriptEditorWithDraft.mockClear();
+    await openRememberedDraft("draft-0123456789abcdef");
+    expect(openObjectScriptEditorWithDraft).toHaveBeenCalledTimes(1);
+    const passed = openObjectScriptEditorWithDraft.mock.calls[0][0] as unknown as ScriptDraft;
+    expect(passed.source).toBe(makeDraft().source);
+  });
+
+  it("throws readably for an id it no longer has, rather than opening an empty editor", async () => {
+    await expect(openRememberedDraft("draft-gone")).rejects.toThrow(/no longer available/);
+    expect(openObjectScriptEditorWithDraft).not.toHaveBeenCalled();
+  });
+
+  it("evicts oldest-first past the cap the backend queue uses", () => {
+    // Matches MAX_DRAFTS in mcp/drafts.rs: this map must not outgrow the queue
+    // it mirrors, or the button would offer a draft the backend has dropped.
+    const CAP = 50;
+    for (let i = 0; i < CAP + 5; i++) rememberDraft(makeDraft({ id: `draft-${i}` }));
+    const ids = rememberedDrafts().map((d) => d.id);
+    expect(ids).toHaveLength(CAP);
+    expect(ids[0]).toBe("draft-5");
+    expect(ids[ids.length - 1]).toBe(`draft-${CAP + 4}`);
+  });
+
+  it("re-arriving does not create a duplicate entry", () => {
+    rememberDraft(makeDraft());
+    rememberDraft(makeDraft());
+    expect(rememberedDrafts()).toHaveLength(1);
   });
 });

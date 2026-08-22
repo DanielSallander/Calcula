@@ -25,9 +25,43 @@ use serde_json::{json, Map, Value};
 use super::wire::{ChatBlock, ChatResponse, StopReason};
 
 /// What the frontend is told as the answer arrives.
+///
+/// THE FIRST THREE VARIANTS EXIST FOR DEAD AIR. Until 2026-08-22 the earliest
+/// event of any kind was emitted from inside the chunk loop, so everything
+/// before the first token — DNS, connect, the server accepting the request, and
+/// on a local runtime the tens of seconds it spends loading a model into VRAM —
+/// was a single literal `"…"` in the transcript. The user's words: "you just see
+/// an empty field and you have no idea where the progress is at the moment."
+/// A cold local model and a runtime that is simply down are indistinguishable in
+/// that state, for up to the full 180-second request timeout.
+///
+/// None of the three invent a percentage. They report transitions that actually
+/// happened, which is all that can be honestly known: the request left, the
+/// server accepted it, the model is thinking.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StreamEvent {
+    /// The request is about to leave the process. Emitted BEFORE `send()`, so it
+    /// is the last thing the user hears if the runtime is unreachable — which is
+    /// exactly when they need to be told which endpoint was tried.
+    #[serde(rename_all = "camelCase")]
+    Requested { model: String, endpoint: String },
+    /// The server accepted the request and the body is open. No token yet.
+    ///
+    /// The gap between this and the first `TextDelta` is the model THINKING (or
+    /// loading), and the gap before it is the network. Splitting them is what
+    /// lets the UI say "waiting for the first token" rather than "…".
+    #[serde(rename_all = "camelCase")]
+    Opened { status: u16 },
+    /// Vendor reasoning text, as it arrives.
+    ///
+    /// The accumulator has always COLLECTED this (`reasoning_content` on the
+    /// OpenAI side, `thinking_delta` on Anthropic's) and never told anyone. On a
+    /// reasoning model that is the entire visible turn spent producing nothing
+    /// the user can see. Rendered separately from the answer, never merged into
+    /// it: it is not prose the model is saying to the user.
+    #[serde(rename_all = "camelCase")]
+    ReasoningDelta { text: String },
     /// More prose. Append it to the assistant bubble.
     #[serde(rename_all = "camelCase")]
     TextDelta { text: String },
@@ -121,6 +155,28 @@ impl StreamAccumulator {
     }
 }
 
+/// The displayable text inside a reasoning delta, if any.
+///
+/// Providers disagree on the shape: a bare string, `{ "text": ... }`, or
+/// `{ "content": ... }`. An unrecognised shape yields None — the value is still
+/// accumulated for round-tripping, it simply is not RENDERED, because printing
+/// `{"redacted":true}` at the user as though it were the model's thoughts is
+/// worse than printing nothing.
+fn reasoning_text(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(s) => s.as_str(),
+        Value::Object(_) => value
+            .get("text")
+            .or_else(|| value.get("content"))
+            .and_then(|v| v.as_str())?,
+        _ => return None,
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI-compatible
 // ---------------------------------------------------------------------------
@@ -155,8 +211,19 @@ pub fn push_openai(acc: &mut StreamAccumulator, payload: &Value) -> Vec<StreamEv
             out.push(StreamEvent::TextDelta { text: text.to_string() });
         }
     }
-    if let Some(reasoning) = delta.get("reasoning_content").filter(|v| !v.is_null()) {
+    // Two spellings in the wild: `reasoning_content` (DeepSeek, vLLM, most
+    // self-hosted reasoning models) and `reasoning` (OpenRouter). Both are
+    // accumulated for round-tripping AND surfaced, which they were not before —
+    // on a reasoning model, the whole visible turn was spent here producing
+    // nothing the user could see.
+    for key in ["reasoning_content", "reasoning"] {
+        let Some(reasoning) = delta.get(key).filter(|v| !v.is_null()) else {
+            continue;
+        };
         acc.reasoning.push(reasoning.clone());
+        if let Some(text) = reasoning_text(reasoning) {
+            out.push(StreamEvent::ReasoningDelta { text });
+        }
     }
 
     if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
@@ -250,6 +317,9 @@ pub fn push_anthropic(acc: &mut StreamAccumulator, event: &str, payload: &Value)
                     // Append into the reasoning block opened above, so the
                     // signature and the text stay in one object.
                     if let Some(part) = delta.and_then(|d| d.get("thinking")).and_then(|t| t.as_str()) {
+                        if !part.is_empty() {
+                            out.push(StreamEvent::ReasoningDelta { text: part.to_string() });
+                        }
                         if let Some(last) = acc.reasoning.last_mut() {
                             let existing = last
                                 .get("thinking")
@@ -678,6 +748,107 @@ mod tests {
 
         let v2 = serde_json::to_value(StreamEvent::TextDelta { text: "x".into() }).unwrap();
         assert_eq!(v2["type"], json!("textDelta"));
+
+        // The three dead-air variants, same rule. Their TypeScript mirror is the
+        // `StreamEvent` union in AIChat/lib/aiTypes.ts.
+        let requested = serde_json::to_value(StreamEvent::Requested {
+            model: "qwen2.5-coder:3b".into(),
+            endpoint: "http://127.0.0.1:11434/v1/chat/completions".into(),
+        })
+        .unwrap();
+        assert_eq!(requested["type"], json!("requested"));
+        assert_eq!(requested["model"], json!("qwen2.5-coder:3b"));
+        assert_eq!(requested["endpoint"], json!("http://127.0.0.1:11434/v1/chat/completions"));
+
+        let opened = serde_json::to_value(StreamEvent::Opened { status: 200 }).unwrap();
+        assert_eq!(opened["type"], json!("opened"));
+        assert_eq!(opened["status"], json!(200));
+
+        let thinking =
+            serde_json::to_value(StreamEvent::ReasoningDelta { text: "hmm".into() }).unwrap();
+        assert_eq!(thinking["type"], json!("reasoningDelta"));
+        assert_eq!(thinking["text"], json!("hmm"));
+    }
+
+    // ---- Reasoning is now SHOWN, not only collected ------------------------
+
+    #[test]
+    fn openai_reasoning_is_emitted_as_well_as_accumulated() {
+        // It was accumulated and never emitted, so on a reasoning model the whole
+        // visible turn produced nothing the user could see.
+        let mut acc = StreamAccumulator::new();
+        let events = push_openai(
+            &mut acc,
+            &json!({ "choices": [{ "delta": { "reasoning_content": "weighing options" } }] }),
+        );
+        assert_eq!(events, vec![StreamEvent::ReasoningDelta { text: "weighing options".into() }]);
+        // ...and it is still round-trippable.
+        match &acc.finish().blocks[0] {
+            ChatBlock::Reasoning { raw } => assert_eq!(raw, &json!("weighing options")),
+            other => panic!("expected reasoning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn openrouters_reasoning_spelling_is_handled_too() {
+        let mut acc = StreamAccumulator::new();
+        let events = push_openai(
+            &mut acc,
+            &json!({ "choices": [{ "delta": { "reasoning": { "text": "step one" } } }] }),
+        );
+        assert_eq!(events, vec![StreamEvent::ReasoningDelta { text: "step one".into() }]);
+    }
+
+    #[test]
+    fn an_unrenderable_reasoning_shape_is_kept_but_not_shown() {
+        // Printing `{"redacted":true}` at the user as though it were the model's
+        // thoughts is worse than printing nothing.
+        let mut acc = StreamAccumulator::new();
+        let events = push_openai(
+            &mut acc,
+            &json!({ "choices": [{ "delta": { "reasoning_content": { "redacted": true } } }] }),
+        );
+        assert!(events.is_empty(), "got {:?}", events);
+        assert_eq!(acc.finish().blocks.len(), 1, "but it is still round-tripped");
+    }
+
+    #[test]
+    fn reasoning_never_becomes_part_of_the_answer_text() {
+        // The property that keeps thinking out of the assistant bubble: it must
+        // not touch `acc.text`, or the finished turn would say it out loud.
+        let mut acc = StreamAccumulator::new();
+        push_openai(&mut acc, &json!({ "choices": [{ "delta": { "reasoning_content": "secret" } }] }));
+        push_openai(&mut acc, &json!({ "choices": [{ "delta": { "content": "42" } }] }));
+        let done = acc.finish();
+        let text: Vec<&String> = done
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                ChatBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, vec![&"42".to_string()]);
+    }
+
+    #[test]
+    fn anthropic_thinking_streams_to_the_user_and_still_keeps_its_signature() {
+        let mut acc = StreamAccumulator::new();
+        push_anthropic(&mut acc, "content_block_start", &json!({ "index": 0, "content_block": { "type": "thinking", "thinking": "" } }));
+        let e1 = push_anthropic(&mut acc, "content_block_delta", &json!({ "index": 0, "delta": { "type": "thinking_delta", "thinking": "step one " } }));
+        let e2 = push_anthropic(&mut acc, "content_block_delta", &json!({ "index": 0, "delta": { "type": "thinking_delta", "thinking": "step two" } }));
+        push_anthropic(&mut acc, "content_block_delta", &json!({ "index": 0, "delta": { "type": "signature_delta", "signature": "sig-abc" } }));
+
+        assert_eq!(e1, vec![StreamEvent::ReasoningDelta { text: "step one ".into() }]);
+        assert_eq!(e2, vec![StreamEvent::ReasoningDelta { text: "step two".into() }]);
+        // Emitting must not have disturbed the block Anthropic requires back.
+        match &acc.finish().blocks[0] {
+            ChatBlock::Reasoning { raw } => {
+                assert_eq!(raw["thinking"], json!("step one step two"));
+                assert_eq!(raw["signature"], json!("sig-abc"));
+            }
+            other => panic!("expected reasoning, got {:?}", other),
+        }
     }
 
     #[test]
