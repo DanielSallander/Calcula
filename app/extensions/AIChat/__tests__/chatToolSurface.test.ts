@@ -158,6 +158,104 @@ describe("the chat can hand the user a script to review (M1)", () => {
   });
 });
 
+describe("the tool schemas reach the STRICTEST provider in the picker", () => {
+  // WHY THIS EXISTS, measured live against Ollama 2026-08-22:
+  //
+  //   Ollama error 400: json: cannot unmarshal number into Go struct field
+  //   .tools.function.parameters.properties.enum of type string
+  //
+  // `cube_kpi` declared `property: { type: "integer", enum: [1, 2, 3] }` — valid
+  // JSON Schema, accepted by Anthropic and OpenAI, and rejected by Ollama, whose
+  // tool type declares the per-property `enum` as a Go `[]string`. The failure is
+  // at JSON-DECODE time, so it lands before any inference: no model is loaded, no
+  // token is generated, and the message the user typed never matters.
+  //
+  // The blast radius is what makes it worth a guard rather than a fix. ChatView
+  // sends the WHOLE `TOOLS` array on every turn, so a single unportable member in
+  // a tool nobody invoked broke every message to that runtime. Nothing else could
+  // catch it: `probeRunner` sends `tools: []`, so "Test this model" reported the
+  // model as perfectly healthy while the chat was unusable, and every cloud
+  // provider accepted the schema, so no amount of testing against Claude or GPT
+  // would ever have shown it.
+  //
+  // Local runtimes are the DEFAULT posture (providers.rs §11.1: "Local is the
+  // DEFAULT because the workbook never leaves the machine"), so the tool surface
+  // is held to the lowest common denominator of the providers actually offered,
+  // not to what the spec permits.
+
+  interface EnumSite {
+    /** Dotted path from the tool name, for a failure that names the offender. */
+    path: string;
+    values: unknown[];
+    /** The `type` declared beside it, if any. */
+    declaredType: unknown;
+  }
+
+  /** Every `enum` in a schema — nested objects and array `items` included. */
+  function enumSites(node: unknown, path: string, out: EnumSite[]): void {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach((item, i) => enumSites(item, `${path}[${i}]`, out));
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.enum)) {
+      out.push({ path: `${path}.enum`, values: obj.enum, declaredType: obj.type });
+    }
+    for (const [key, value] of Object.entries(obj)) {
+      // `enum` itself is a value list, not a subschema: descending into it would
+      // report each member as its own site.
+      if (key !== "enum") enumSites(value, `${path}.${key}`, out);
+    }
+  }
+
+  const ENUM_SITES = TOOLS.flatMap((t) => {
+    const out: EnumSite[] = [];
+    enumSites(t.inputSchema, t.name, out);
+    return out;
+  });
+
+  it("finds the enums at all (a walker that returns nothing passes vacuously)", () => {
+    // Four string enums are declared today. If this ever drops to zero, the two
+    // assertions below are meaningless rather than satisfied.
+    expect(ENUM_SITES.length).toBeGreaterThanOrEqual(4);
+    // ...and the walk must reach NESTED ones, not just the top level of
+    // `properties`. This one is four levels down, inside an array's `items`, and
+    // a walker that only scanned `inputSchema.properties` would silently miss it
+    // — which is the exact shape of the bug this whole block is here to stop.
+    expect(ENUM_SITES.map((e) => e.path)).toContain(
+      "run_bi_query.properties.filters.items.properties.operator.enum",
+    );
+  });
+
+  it("declares no enum member that is not a string", () => {
+    const bad = ENUM_SITES.flatMap((e) =>
+      e.values.filter((v) => typeof v !== "string").map((v) => `${e.path}: ${JSON.stringify(v)}`),
+    );
+    expect(
+      bad,
+      "Unportable enum member(s). Ollama decodes a tool schema's `enum` into a Go []string, " +
+        "so a number or boolean is an HTTP 400 before any inference — and since every tool is " +
+        "sent on every turn, ONE of these breaks EVERY message to that runtime. " +
+        "FIX: express the constraint in `description` (as cube_kpi.property does), or make the " +
+        "members strings and widen the Rust param type to match.",
+    ).toEqual([]);
+  });
+
+  it("declares `type: \"string\"` beside every enum", () => {
+    // The other half of the same trap. `type: "integer"` next to string members
+    // would pass the check above while still telling the model — and a stricter
+    // server — two different things about the same field.
+    const contradictory = ENUM_SITES.filter(
+      (e) => e.declaredType !== undefined && e.declaredType !== "string",
+    ).map((e) => `${e.path}: type ${JSON.stringify(e.declaredType)}`);
+    expect(
+      contradictory,
+      "An enum's members are strings, so its `type` must say \"string\".",
+    ).toEqual([]);
+  });
+});
+
 describe("draft object types mirror the Rust validator", () => {
   it("matches VALID_OBJECT_TYPES in mcp/drafts.rs exactly, in order", () => {
     // Rust is the source of truth: it is the validator that actually refuses,

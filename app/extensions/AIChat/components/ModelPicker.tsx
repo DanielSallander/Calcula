@@ -37,6 +37,28 @@ export interface ModelPickerProps {
   embedded?: boolean;
 }
 
+/**
+ * A provider's model list: discovery already knows it for a local runtime,
+ * otherwise ask the backend.
+ *
+ * Module-level and taking `discovered` as an ARGUMENT rather than reading state,
+ * because it has two callers whose knowledge differs: `loadModels` (below) holds
+ * the discovery result in state, while the mount effect has only just awaited it
+ * and its `[]`-dep closure would still see `null`. One function, no stale read.
+ */
+async function fetchModels(
+  providerId: string,
+  baseUrl: string,
+  discovered: DiscoveredRuntime[] | null,
+): Promise<string[]> {
+  const hit = discovered?.find((d) => d.providerId === providerId);
+  if (hit && hit.models.length > 0) return hit.models;
+  return aiChatBackend.invoke<string[]>("ai_list_models", {
+    providerId,
+    baseUrlOverride: baseUrl || null,
+  });
+}
+
 export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.ReactElement {
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [discovered, setDiscovered] = useState<DiscoveredRuntime[] | null>(null);
@@ -45,45 +67,81 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
   const [keyInput, setKeyInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [profile, setProfile] = useState<ModelProfile | null>(null);
+  // Restored, not reset: the SAME fresh-mount amnesia that emptied `models`
+  // also dropped the stored verdict, so re-opening the picker reported a model
+  // measured as weak with `summarizeProfile(null)` — "Not tested yet." §10 says
+  // a weak model must SAY it is weak before the user relies on it, and a verdict
+  // that survives only until the panel is reopened does not say it.
+  const [profile, setProfile] = useState<ModelProfile | null>(() =>
+    sel.providerId && sel.model ? readProfile(sel.providerId, sel.model) : null,
+  );
   const [probing, setProbing] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const cancelRef = React.useRef(false);
 
   const provider = providers.find((p) => p.id === sel.providerId);
 
+  /**
+   * Read the provider list, probe for local runtimes, and — this is the part
+   * that was missing — LIST THE MODELS OF AN ALREADY-SAVED SELECTION.
+   *
+   * Rule 1: probe quietly. Four loopback GETs; nothing is said if nothing is
+   * there, and the result only ever ADDS options.
+   *
+   * Rule 3, never interrupt a working setup, is what the last block serves.
+   * "Change model" MOUNTS A FRESH PICKER, so `models` starts empty — and an
+   * empty list disables the Model select. The list was only ever filled by the
+   * Provider dropdown's `onChange`, which means the one path that never filled
+   * it was the one a returning user always takes: their saved provider was
+   * restored and named correctly while their saved model sat behind a greyed-out
+   * select, displaying as "Select…" because no matching option existed. The only
+   * escape was to switch provider and switch back, since re-picking the same
+   * value fires no change event.
+   */
   useEffect(() => {
     void (async () => {
+      let list: ProviderStatus[] = [];
       try {
-        const list = await aiChatBackend.invoke<ProviderStatus[]>("ai_providers_list");
+        list = await aiChatBackend.invoke<ProviderStatus[]>("ai_providers_list");
         setProviders(list);
       } catch (e) {
         setError(`Could not read the provider list: ${e}`);
       }
-      // Rule 1: probe quietly. Four loopback GETs; nothing is said if nothing
-      // is there, and the result only ever ADDS options.
+
+      let found: DiscoveredRuntime[] = [];
       try {
-        setDiscovered(await aiChatBackend.invoke<DiscoveredRuntime[]>("ai_discover_local_runtimes"));
+        found = await aiChatBackend.invoke<DiscoveredRuntime[]>("ai_discover_local_runtimes");
       } catch {
-        setDiscovered([]);
+        found = [];
+      }
+      setDiscovered(found);
+
+      const saved = readSelection();
+      const def = list.find((p) => p.id === saved.providerId);
+      // No saved provider is FIRST RUN, and rule 1 governs there: say nothing,
+      // load nothing. A provider still waiting for its key has nothing to list.
+      if (!def || (def.requiresKey && !def.hasKey)) return;
+      setBusy(true);
+      try {
+        setModels(await fetchModels(def.id, saved.baseUrl, found));
+      } catch (e) {
+        // Reported rather than swallowed: the user is standing in the picker
+        // with a saved selection, and an empty list with no explanation is the
+        // very failure this block exists to end.
+        setModels([]);
+        setError(`${e}`);
+      } finally {
+        setBusy(false);
       }
     })();
   }, []);
 
   /** Models for the current provider. Discovery already has them for a local one. */
   const loadModels = useCallback(async (providerId: string, baseUrl: string) => {
-    const fromDiscovery = discovered?.find((d) => d.providerId === providerId);
-    if (fromDiscovery && fromDiscovery.models.length > 0) {
-      setModels(fromDiscovery.models);
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
-      const list = await aiChatBackend.invoke<string[]>("ai_list_models", {
-        providerId,
-        baseUrlOverride: baseUrl || null,
-      });
+      const list = await fetchModels(providerId, baseUrl, discovered);
       setModels(list);
       if (list.length === 0) {
         // Answered, but has nothing. A real state for a fresh local runtime, and

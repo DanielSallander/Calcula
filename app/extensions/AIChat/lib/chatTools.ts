@@ -309,7 +309,15 @@ export const TOOLS: ChatToolDef[] = [
       properties: {
         connection: { type: "string", description: "Connection name or id" },
         kpi: { type: "string" },
-        property: { type: "integer", enum: [1, 2, 3], description: "1 = value, 2 = goal, 3 = status" },
+        // NO `enum: [1, 2, 3]` HERE, however tempting — see the enum-portability
+        // guard in __tests__/chatToolSurface.test.ts. Ollama decodes a tool's
+        // schema into a Go struct whose per-property `enum` is `[]string`, so a
+        // numeric member is a 400 at JSON-DECODE time, before any inference. And
+        // because ChatView sends the whole TOOLS array on every turn, one bad
+        // member broke every message to that runtime, whatever the user asked.
+        // The closed set lives in the description instead; `CubeKpiParams.property`
+        // (mcp/server.rs) is an i64 and still refuses anything else.
+        property: { type: "integer", description: "Which KPI part: 1 = value, 2 = goal, 3 = status" },
       },
       required: ["connection", "kpi", "property"],
     },
