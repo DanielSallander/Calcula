@@ -1,34 +1,45 @@
 //! FILENAME: app/src/core/components/InlineEditor/InlineEditor.expansion.test.tsx
-// PURPOSE: The REAL inline editor expands over adjacent empty cells while
-//          editing, never over occupied ones, never past the viewport, and
-//          collapses again when the entry no longer needs the room.
-// CONTEXT: The editor had no expansion logic at all, so at the (correct)
-//          64.29px default column width a longer entry scrolled inside one
-//          column instead of being visible. This drives the component itself —
-//          the width asserted is the width the styled input is rendered with.
+// PURPOSE: The REAL inline editor grows to fit the entry the way Excel's does —
+//          over its neighbours whatever they hold, never past the grid edge, and
+//          collapsing again when the entry no longer needs the room.
+// CONTEXT: This file used to assert the opposite of its own title. It pinned
+//          "does NOT expand when the immediate neighbour holds data", which
+//          meant an entry in a dense table — the common case — had nowhere to
+//          grow and scrolled inside one 64.29px column while it was being
+//          typed. Excel's in-cell editor is an overlay: it covers the
+//          neighbours, and they repaint untouched the moment the edit ends.
+//
+//          The strongest assertion here is now a NEGATIVE one: the editor makes
+//          no backend call at all. That is what "overlay" means operationally —
+//          nothing underneath is read, so nothing underneath can be wrong, slow
+//          or unanswered. It also takes an IPC round trip out of the path
+//          between a keypress and the character appearing.
 //
 //          Measurement note: jsdom has no 2D canvas, so `measureEditorTextWidth`
 //          takes its documented character-count fallback. That is deterministic
-//          and monotonic in text length, which is exactly what these assertions
-//          need; the exact-pixel arithmetic is pinned in expansion.test.ts.
+//          and monotonic in text length, which is what these assertions need;
+//          the exact-pixel arithmetic is pinned in expansion.test.ts.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-// --- The backend lookup the editor uses to find occupied neighbours ----------
-/** Columns (on the edited row) that hold data. */
-let occupiedCols = new Set<number>();
+// The backend lookup this editor no longer makes. Mocked so that a regression
+// which reintroduces it is a FAILED ASSERTION here rather than a real IPC call
+// in a unit test.
 const getViewportCells = vi.fn(
-  async (startRow: number, startCol: number, _endRow: number, endCol: number) => {
-    const out: Array<{ row: number; col: number; display: string; value: string; styleIndex: number }> = [];
+  async (
+    startRow: number,
+    startCol: number,
+    _endRow: number,
+    endCol: number
+  ): Promise<Array<{ row: number; col: number; display: string }>> => {
+    const out: Array<{ row: number; col: number; display: string }> = [];
     for (let c = startCol; c <= endCol; c++) {
-      if (occupiedCols.has(c)) {
-        out.push({ row: startRow, col: c, display: "taken", value: "taken", styleIndex: 0 });
-      }
+      out.push({ row: startRow, col: c, display: "taken" });
     }
     return out;
-  },
+  }
 );
 vi.mock("../../lib/tauri-api", () => ({
   getViewportCells: (...args: [number, number, number, number]) => getViewportCells(...args),
@@ -95,12 +106,7 @@ function renderedWidth(): number {
 }
 
 async function renderEditor(value: string, cell: Partial<EditingCell> = {}): Promise<void> {
-  const editing: EditingCell = {
-    row: 3,
-    col: 2,
-    value,
-    ...cell,
-  } as EditingCell;
+  const editing: EditingCell = { row: 3, col: 2, value, ...cell } as EditingCell;
 
   await act(async () => {
     root.render(
@@ -117,7 +123,8 @@ async function renderEditor(value: string, cell: Partial<EditingCell> = {}): Pro
       </GridProvider>,
     );
   });
-  // Let the neighbour lookup resolve and the width recompute.
+  // Flush anything the editor might still be waiting on. Nothing should be, and
+  // `asks the grid nothing` below is what proves it.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -128,11 +135,11 @@ async function renderEditor(value: string, cell: Partial<EditingCell> = {}): Pro
 const LONG = "Quarterly revenue for the EMEA region, restated";
 const SHORT = "42";
 
-describe("InlineEditor expands over neighbouring cells (Excel parity)", () => {
+describe("InlineEditor grows like Excel's in-cell editor", () => {
   beforeEach(() => {
-    occupiedCols = new Set();
     getViewportCells.mockClear();
     window.innerWidth = 1200;
+    window.innerHeight = 800;
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
@@ -143,7 +150,7 @@ describe("InlineEditor expands over neighbouring cells (Excel parity)", () => {
     expect(renderedWidth()).toBeCloseTo(COL_W, 2);
   });
 
-  it("EXPANDS over adjacent empty cells for a long entry", async () => {
+  it("expands for a long entry", async () => {
     await renderEditor(LONG);
     const width = renderedWidth();
     expect(width).toBeGreaterThan(COL_W);
@@ -151,27 +158,30 @@ describe("InlineEditor expands over neighbouring cells (Excel parity)", () => {
     expect(width).toBeGreaterThan(COL_W * 2);
   });
 
-  it("does NOT expand when the immediate neighbour holds data", async () => {
-    occupiedCols = new Set([3]); // the cell being edited is col 2
+  it("expands even though every neighbouring cell holds data", async () => {
+    // The mocked backend reports EVERY column as occupied. Under the old rule
+    // this rendered at exactly one column wide and the entry scrolled out of
+    // sight as it was typed. An overlay covers them instead.
     await renderEditor(LONG);
-    expect(renderedWidth()).toBeCloseTo(COL_W, 2);
+    expect(renderedWidth()).toBeGreaterThan(COL_W * 2);
   });
 
-  it("stops at the first occupied cell instead of obscuring it", async () => {
-    occupiedCols = new Set([5]); // two empty neighbours (3, 4), then data
+  it("asks the grid nothing about what it is covering", async () => {
+    // The operational meaning of "overlay", and the reason there is no IPC in
+    // the typing path. A reintroduced lookup fails here immediately.
     await renderEditor(LONG);
-    const width = renderedWidth();
-    expect(width).toBeGreaterThan(COL_W);
-    expect(width).toBeLessThanOrEqual(COL_W * 3 + 0.01);
+    await renderEditor(LONG + "!");
+    expect(getViewportCells).not.toHaveBeenCalled();
   });
 
-  it("clamps at the viewport edge", async () => {
+  it("clamps at the grid edge", async () => {
     // A narrow window: the editor's own cell starts at 50 + 2*64.29 = 178.58,
-    // so there is ~121px of room to the right edge and no more.
+    // so there is ~121px of room to the right edge and no more. (With no layout
+    // engine the editor falls back to the window bound; the grid-layer bound it
+    // uses in the product is pinned in InlineEditor.wrap.test.tsx.)
     window.innerWidth = 300;
     await renderEditor(LONG);
-    const el = editorEl();
-    const left = parseFloat(window.getComputedStyle(el).left);
+    const left = parseFloat(window.getComputedStyle(editorEl()).left);
     expect(left + renderedWidth()).toBeLessThanOrEqual(300 + 0.01);
     // ...and it did use the room it had.
     expect(renderedWidth()).toBeGreaterThan(COL_W);
@@ -190,11 +200,7 @@ describe("InlineEditor expands over neighbouring cells (Excel parity)", () => {
     expect(editorEl()).toBeTruthy();
 
     await act(async () => {
-      root.render(
-        <GridProvider initialState={getInitialState()}>
-          {null}
-        </GridProvider>,
-      );
+      root.render(<GridProvider initialState={getInitialState()}>{null}</GridProvider>);
     });
     expect(host.querySelector("[data-inline-editor]")).toBeNull();
   });
@@ -205,31 +211,27 @@ describe("InlineEditor expands over neighbouring cells (Excel parity)", () => {
     expect(renderedWidth()).toBeCloseTo(COL_W * 3, 2);
   });
 
-  it("looks the neighbours up once per edited cell, not once per keystroke", async () => {
-    await renderEditor("a");
-    const afterFirst = getViewportCells.mock.calls.length;
-    await renderEditor("ab");
-    await renderEditor("abc");
-    expect(getViewportCells.mock.calls.length).toBe(afterFirst);
-  });
-
-  it("does not cover anything while the neighbour lookup is still unanswered", async () => {
-    let release: (() => void) | null = null;
-    getViewportCells.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          release = () => resolve([]);
-        }),
-    );
-    await renderEditor(LONG);
-    // Unknown neighbours count as occupied.
-    expect(renderedWidth()).toBeCloseTo(COL_W, 2);
-
+  it("grows without a round trip, so the FIRST render is already the right size", async () => {
+    // The old lookup meant the box spent its first frames at one column wide and
+    // widened once the backend answered. Nothing is awaited now, so the width is
+    // correct in the render that first shows the entry.
+    const editing: EditingCell = { row: 3, col: 2, value: LONG } as EditingCell;
     await act(async () => {
-      release?.();
-      await Promise.resolve();
-      await Promise.resolve();
+      root.render(
+        <GridProvider initialState={getInitialState()}>
+          <InlineEditor
+            editing={editing}
+            config={CONFIG}
+            viewport={VIEWPORT}
+            dimensions={createEmptyDimensionOverrides()}
+            onValueChange={() => {}}
+            onCommit={async () => true}
+            onCancel={() => {}}
+          />
+        </GridProvider>,
+      );
     });
-    expect(renderedWidth()).toBeGreaterThan(COL_W);
+    // No extra microtask flush here on purpose.
+    expect(renderedWidth()).toBeGreaterThan(COL_W * 2);
   });
 });

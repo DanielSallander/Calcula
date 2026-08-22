@@ -1,5 +1,6 @@
 //! FILENAME: app/src/core/components/InlineEditor/InlineEditor.styles.ts
 import styled from 'styled-components';
+import { EDITOR_BORDER_PX, EDITOR_PADDING_X_PX } from './expansion';
 
 // Helper to keep syntax clean and consistent
 const v = (name: string) => `var(${name})`;
@@ -8,12 +9,15 @@ export interface EditorInputProps {
   $x: number;
   $y: number;
   $width: number;
-  /** Expanded height: one row, plus one line per Alt+Enter break. */
+  /** Box height in DEVICE px: measured from real layout once the entry has been
+   *  laid out, so it already accounts for every soft wrap. */
   $height: number;
   /**
-   * Height of a SINGLE line, i.e. the unexpanded cell's height less its border.
-   * Kept separate from `$height` on purpose: line-height must stay per-line as
-   * the box grows, or three lines would each try to fill the whole box.
+   * Height of a SINGLE line, device px — the unexpanded cell's height less its
+   * border. Kept separate from `$height` on purpose: line-height must stay
+   * per-line as the box grows, or three lines would each try to fill the whole
+   * box. It is also what makes the measured and counted height paths agree
+   * exactly (see expansion.ts).
    */
   $lineHeight: number;
   $zoom?: number;
@@ -24,6 +28,11 @@ export interface EditorInputProps {
  * CR/LF from <input type="text">, which did not merely render an Alt+Enter
  * entry on one line — it destroyed the newline as soon as the next character
  * was typed, because the change handler reads back the sanitized value.
+ *
+ * The chrome numbers below are imported, not typed in. expansion.ts sizes the
+ * box by adding this exact padding and border back on; two hand-kept copies of
+ * "4" and "2px" would drift on the first restyle and the box would be wrong by
+ * a few pixels in a way nothing would fail on.
  */
 export const EditorTextArea = styled.textarea<EditorInputProps>`
   position: absolute;
@@ -33,24 +42,30 @@ export const EditorTextArea = styled.textarea<EditorInputProps>`
   height: ${(p) => p.$height}px;
 
   /* Layout & Spacing */
-  padding: 0 ${(p) => 4 * (p.$zoom ?? 1)}px;
+  padding: 0 ${(p) => EDITOR_PADDING_X_PX * (p.$zoom ?? 1)}px;
   margin: 0;
   box-sizing: border-box;
 
-  /* The entry is laid out exactly as it will be stored: hard breaks only, never
-     a soft wrap. The expansion geometry measures the widest line on that
-     assumption, and a soft wrap would silently disagree with it. */
-  white-space: pre;
+  /* Excel's in-cell editor wraps: out of horizontal room it takes another line
+     and grows downward over the rows beneath, rather than scrolling the entry
+     out of sight. pre-wrap (not plain pre) is what allows that while still
+     honouring the hard breaks Alt+Enter puts in the buffer, and overflow-wrap
+     anywhere is what lets it break a long unbroken token -- a formula has no
+     spaces to break at, and a formula is the entry most likely to outgrow its
+     column.
+     The box's HEIGHT is measured from this layout rather than predicted, so the
+     wrap the browser chooses is by definition the wrap the box is sized for. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+
   /* NEVER auto. A cell is ~64x20px, so a scrollbar is most of the box: an entry
-     too long for a column that cannot expand (an occupied neighbour, or a
-     neighbour lookup that has not answered yet) drew a horizontal bar, that bar
-     ate the 16px content height, and the vertical bar appeared too -- scrollbars
-     painted over the user's half-typed value. Excel clips instead, and so does
-     the Floating Range in-cell editor
-     (app/extensions/FloatingRange/editor/frEditor.ts).
+     too long for its column drew a horizontal bar, that bar ate the 16px content
+     height, and the vertical bar appeared too -- scrollbars painted over the
+     user's half-typed value. Excel shows none, ever; it wraps instead, which is
+     what the rule above now does.
      hidden is not "cannot scroll": the box stays programmatically scrollable, so
-     Chromium goes on scrolling the caret into view as the user types past the
-     edge. Only the bars, and the layout space they stole, are gone. */
+     Chromium goes on carrying the caret into view in the one case wrapping
+     cannot solve -- an entry so long it outgrows the grid itself. */
   overflow: hidden;
   /* Chromium puts a drag handle on every textarea; this one is positioned by
      the grid, so the handle would only offer to break that. */
@@ -63,7 +78,7 @@ export const EditorTextArea = styled.textarea<EditorInputProps>`
   line-height: ${(p) => p.$lineHeight}px;
 
   /* Appearance */
-  border: 2px solid ${v('--accent-color')};
+  border: ${EDITOR_BORDER_PX}px solid ${v('--accent-color')};
   border-radius: 0;
   outline: none;
   background-color: ${v('--bg-surface')};

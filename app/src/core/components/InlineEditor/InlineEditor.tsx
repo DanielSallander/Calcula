@@ -2,15 +2,15 @@
 // PURPOSE: Inline cell editor component that renders directly over the cell being edited.
 // CONTEXT: Refactored to separate styles into .styles.ts file using styled-components.
 
-import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
 import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
 import { useGridContext } from "../../state/GridContext";
-import { getViewportCells } from "../../lib/tauri-api";
 import {
-  EDITOR_CHROME_PX,
+  editorChromePx,
   computeExpandedEditorWidth,
   computeExpandedEditorHeight,
+  heightForMeasuredContent,
   countEditorLines,
   editorLineHeight,
   measureEditorTextWidth,
@@ -163,50 +163,12 @@ function getMergedHeight(
   return totalHeight;
 }
 
-/**
- * How many columns to the right the editor is ever willing to look at. Bounds
- * both the neighbour lookup and the expansion walk; nothing sensible needs more
- * than a screen's worth of columns.
- */
-const MAX_EXPANSION_COLUMNS = 64;
-
 /** Cell font when the live computed style cannot be read (tests, early mount).
- *  Excel's Calibri 11pt = 11 * 96/72 px. */
+ *  Excel's Calibri 11pt = 11 * 96/72 px. LOGICAL px: scaled by zoom at use. */
 const FALLBACK_FONT_PX = 11 * (96 / 72);
 const FALLBACK_FONT_FAMILY = "Calibri, sans-serif";
 /** Character-width estimate used where no canvas exists to measure with. */
 const FALLBACK_CHAR_RATIO = 0.6;
-
-/**
- * The columns to the right of `col` that could be covered, and how wide each is.
- * Stops at the viewport edge, so the walk never considers a column the user
- * cannot see anyway.
- */
-function neighbourColumnWidths(
-  col: number,
-  editorX: number,
-  editorWidth: number,
-  viewportRight: number,
-  config: GridConfig,
-  dimensions: DimensionOverrides
-): { columns: number[]; widths: number[] } {
-  const columns: number[] = [];
-  const widths: number[] = [];
-  let right = editorX + editorWidth;
-  const lastCol = (config.totalCols ?? 0) - 1;
-
-  for (let n = 1; n <= MAX_EXPANSION_COLUMNS; n++) {
-    const c = col + n;
-    if (lastCol >= 0 && c > lastCol) break;
-    if (right >= viewportRight) break;
-    if (dimensions.hiddenCols?.has(c)) continue;
-    const w = getColumnWidth(c, config, dimensions);
-    columns.push(c);
-    widths.push(w);
-    right += w;
-  }
-  return { columns, widths };
-}
 
 /**
  * Calculate the position and visibility of the inline editor.
@@ -297,105 +259,68 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   const logicalPos = calculateEditorPosition(editing, config, viewport, dims);
 
   // ==========================================================================
-  // Excel-parity expansion over adjacent EMPTY cells
+  // Excel-parity geometry: the box is an OVERLAY
   // ==========================================================================
   //
-  // Which neighbours hold data. Read once per edited cell (and per sheet), not
-  // per keystroke: an entry can only grow while the user types, and refetching
-  // on every character would put an IPC round trip in the typing path.
-  const [occupiedNeighbours, setOccupiedNeighbours] = useState<{
-    row: number;
-    col: number;
-    sheetIndex: number;
-    occupied: Set<number>;
+  // It grows right over whatever is beside it and down over whatever is beneath
+  // it, covers both regardless of content, and everything it covered repaints
+  // untouched when the edit ends. Nothing under it is read — which is why there
+  // is no backend lookup here at all any more, and no IPC round trip in the
+  // path between pressing a key and seeing it. See expansion.ts for the rules.
+  //
+  // From here down the arithmetic is in DEVICE px. The box's chrome is what
+  // makes it exact and the chrome does not scale uniformly (flat 2px border,
+  // scaled padding), so logical grid coordinates are converted once, here, and
+  // the two units are never mixed again.
+  const z = zoom || 1;
+  const boxX = logicalPos.x * z;
+  const boxY = logicalPos.y * z;
+  const baseWidth = logicalPos.width * z;
+  const baseHeight = logicalPos.height * z;
+
+  /**
+   * Live layout, read in one pass by the effect below:
+   *   - the grid layer's inner size, which is the edge the box may not cross;
+   *   - the height the browser says this entry needs once wrapped.
+   *
+   * `null` until the first measurement lands, and in any environment with no
+   * layout engine (jsdom under vitest), where both fall back to a count-based
+   * estimate that agrees with the measurement whenever nothing soft-wraps.
+   */
+  const [measured, setMeasured] = useState<{
+    layerWidth: number;
+    layerHeight: number;
+    contentHeight: number;
   } | null>(null);
 
-  // Logical right edge the editor may not cross.
-  const viewportRight = (typeof window !== "undefined" ? window.innerWidth : 0) / (zoom || 1);
-
-  const neighbours = useMemo(
-    () =>
-      neighbourColumnWidths(
-        editing.col,
-        logicalPos.x,
-        logicalPos.width,
-        viewportRight,
-        config,
-        dims
-      ),
-    // `dims` is rebuilt on every render when the caller passes nothing, so key
-    // on the maps it actually reads rather than on the object identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [editing.col, logicalPos.x, logicalPos.width, viewportRight, config, dims.columnWidths, dims.hiddenCols]
-  );
-
-  useEffect(() => {
-    if (!logicalPos.visible || disabled) return;
-    const cols = neighbours.columns;
-    if (cols.length === 0) {
-      setOccupiedNeighbours({
-        row: editing.row,
-        col: editing.col,
-        sheetIndex: currentSheetIndex,
-        occupied: new Set(),
-      });
-      return;
-    }
-    let cancelled = false;
-    const firstCol = cols[0];
-    const lastColumn = cols[cols.length - 1];
-    void getViewportCells(editing.row, firstCol, editing.row, lastColumn)
-      .then((cells) => {
-        if (cancelled) return;
-        const occupied = new Set<number>();
-        for (const cell of cells) {
-          if (cell.row !== editing.row) continue;
-          const shown = cell.display ?? "";
-          if (shown !== "") occupied.add(cell.col);
-        }
-        setOccupiedNeighbours({
-          row: editing.row,
-          col: editing.col,
-          sheetIndex: currentSheetIndex,
-          occupied,
-        });
-      })
-      .catch(() => {
-        // Unknown stays unknown, and unknown means "do not cover it".
-        if (!cancelled) setOccupiedNeighbours(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Deliberately NOT keyed on the neighbour column list: it changes with the
-    // editor's own width, and refetching from inside the expansion would loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing.row, editing.col, currentSheetIndex, logicalPos.visible, disabled]);
+  // The bound is the GRID's edge, not the window's. They are not the same
+  // number: the canvas layer is inset by the scrollbar gutters and sits to the
+  // right of the sidebar, so measuring the window put the box under the
+  // scrollbar — where the layer's own `overflow: hidden` silently clipped it.
+  const maxRight = measured
+    ? measured.layerWidth
+    : typeof window !== "undefined"
+      ? window.innerWidth
+      : 0;
+  const maxBottom = measured
+    ? measured.layerHeight
+    : typeof window !== "undefined"
+      ? window.innerHeight
+      : 0;
 
   const expandedWidth = useMemo(() => {
     // A merged cell already spans its columns; growing past a merge is not a
-    // thing Excel does, and the geometry below assumes single-column steps.
-    if ((editing.colSpan ?? 1) > 1) return logicalPos.width;
-
-    const knownFor =
-      occupiedNeighbours &&
-      occupiedNeighbours.row === editing.row &&
-      occupiedNeighbours.col === editing.col &&
-      occupiedNeighbours.sheetIndex === currentSheetIndex
-        ? occupiedNeighbours.occupied
-        : null;
-    // No answer yet -> every neighbour is "unknown" -> no expansion.
-    const neighbourOccupied = knownFor
-      ? neighbours.columns.map((c) => knownFor.has(c))
-      : [];
+    // thing Excel does.
+    if ((editing.colSpan ?? 1) > 1) return baseWidth;
 
     const el = inputRef.current;
     let font = "";
-    let fontPx = FALLBACK_FONT_PX;
+    let fontPx = FALLBACK_FONT_PX * z;
     if (el && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
       const cs = window.getComputedStyle(el);
       const parsed = parseFloat(cs.fontSize);
-      if (Number.isFinite(parsed) && parsed > 0) fontPx = parsed / (zoom || 1);
+      // Already device px: the rule is `calc(var(--font-size-cell) * zoom)`.
+      if (Number.isFinite(parsed) && parsed > 0) fontPx = parsed;
       if (cs.font) font = cs.font;
     }
     if (!font) font = `${fontPx}px ${FALLBACK_FONT_FAMILY}`;
@@ -407,49 +332,79 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     );
 
     return computeExpandedEditorWidth({
-      x: logicalPos.x,
-      baseWidth: logicalPos.width,
-      desiredWidth: textWidth + EDITOR_CHROME_PX,
-      neighbourWidths: neighbours.widths,
-      neighbourOccupied,
-      maxRight: viewportRight,
+      x: boxX,
+      baseWidth,
+      desiredWidth: textWidth + editorChromePx(z),
+      maxRight,
     });
-  }, [
-    editing.value,
-    editing.row,
-    editing.col,
-    editing.colSpan,
-    currentSheetIndex,
-    occupiedNeighbours,
-    neighbours,
-    logicalPos.x,
-    logicalPos.width,
-    viewportRight,
-    zoom,
-  ]);
+  }, [editing.value, editing.colSpan, boxX, baseWidth, maxRight, z]);
 
-  // Logical bottom edge the editor may not cross.
-  const viewportBottom = (typeof window !== "undefined" ? window.innerHeight : 0) / (zoom || 1);
-
-  // Vertical growth for Alt+Enter entries. Unlike the horizontal walk this
-  // needs no neighbour lookup — see computeExpandedEditorHeight for why the two
-  // rules are deliberately asymmetric.
-  const expandedHeight = useMemo(
-    () =>
-      computeExpandedEditorHeight({
-        y: logicalPos.y,
-        baseHeight: logicalPos.height,
+  // Height follows the width: once the box is as wide as it may get, whatever
+  // still does not fit wraps, and the wrapped height is MEASURED rather than
+  // predicted — a JavaScript imitation of Chromium's line breaking would
+  // disagree by a line eventually, and a line is the whole error budget.
+  const expandedHeight = measured
+    ? heightForMeasuredContent({
+        y: boxY,
+        baseHeight,
+        contentHeight: measured.contentHeight,
+        maxBottom,
+      })
+    : computeExpandedEditorHeight({
+        y: boxY,
+        baseHeight,
         lineCount: countEditorLines(editing.value),
-        maxBottom: viewportBottom,
-      }),
-    [editing.value, logicalPos.y, logicalPos.height, viewportBottom]
-  );
+        maxBottom,
+      });
+
+  /**
+   * Measure the wrapped entry and the grid layer, before the browser paints.
+   *
+   * `height: auto` FIRST, and this is the subtle part: `scrollHeight` never
+   * reports less than the element's own client height, so measuring at the
+   * height the box currently has would latch it at its high-water mark — the
+   * box would grow as the entry grew and then never shrink back when the user
+   * deleted the text again. Both writes happen inside one layout pass, so
+   * nothing paints in between and there is no flicker.
+   *
+   * Deliberately no dependency array. The layer's size can change without any
+   * prop of this component changing (a task pane opening, a window resize), and
+   * the state update below is a no-op when nothing moved, so re-running per
+   * render costs one layout read and converges immediately.
+   */
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+
+    const previousHeight = el.style.height;
+    el.style.height = "auto";
+    const contentHeight = el.scrollHeight;
+    el.style.height = previousHeight;
+
+    // No layout engine (jsdom): leave the count-based estimate in charge rather
+    // than collapsing the box to its chrome.
+    if (!(contentHeight > 0)) return;
+
+    const layer = el.offsetParent as HTMLElement | null;
+    const layerWidth = layer?.clientWidth ?? 0;
+    const layerHeight = layer?.clientHeight ?? 0;
+    if (!(layerWidth > 0) || !(layerHeight > 0)) return;
+
+    setMeasured((prev) =>
+      prev &&
+      prev.contentHeight === contentHeight &&
+      prev.layerWidth === layerWidth &&
+      prev.layerHeight === layerHeight
+        ? prev
+        : { layerWidth, layerHeight, contentHeight }
+    );
+  });
 
   const position = {
-    x: logicalPos.x * zoom,
-    y: logicalPos.y * zoom,
-    width: expandedWidth * zoom,
-    height: expandedHeight * zoom,
+    x: boxX,
+    y: boxY,
+    width: expandedWidth,
+    height: expandedHeight,
     visible: logicalPos.visible,
   };
 
@@ -991,7 +946,9 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       $y={position.y}
       $width={position.width}
       $height={position.height}
-      $lineHeight={editorLineHeight(logicalPos.height) * zoom}
+      // Device px already — `baseHeight` is post-zoom, and the border the line
+      // height is netted against is a flat 2px at any zoom.
+      $lineHeight={editorLineHeight(baseHeight)}
       $zoom={zoom}
       value={editing.value}
       onChange={handleChange}

@@ -1,48 +1,36 @@
 //! FILENAME: app/src/core/components/InlineEditor/InlineEditor.overflow.test.tsx
-// PURPOSE: The in-cell editor never presents a scrollbar.
+// PURPOSE: The in-cell editor never presents a scrollbar — and the reason that
+//          is safe rather than lossy is pinned here too.
 //
 // CONTEXT: The editor carried `overflow: auto`. That reads as harmless until you
 //          notice the box it is on: a default cell is 64.29 x 20 logical px, and
 //          the content area inside the 2px accent border is SIXTEEN pixels tall.
 //          A Chromium scrollbar is 8px here (`::-webkit-scrollbar` in
-//          app/src/index.css), so:
+//          app/src/index.css), so an entry too long for its column overflowed
+//          horizontally and drew a horizontal bar; that bar took 8 of the 16
+//          content pixels, so the single 16px line no longer fitted vertically
+//          and the VERTICAL bar appeared too. Both bars plus the corner, painted
+//          over the user's half-typed value. Excel shows neither, ever.
 //
-//            1. An entry too long for its column that CANNOT expand — the
-//               neighbour holds data, or the neighbour lookup has not answered
-//               yet and "unknown" deliberately counts as occupied — overflows
-//               horizontally and draws a horizontal bar.
-//            2. That bar takes 8 of the 16 content pixels, so the single 16px
-//               line no longer fits vertically and the VERTICAL bar appears too.
+//          `hidden` ALONE would trade a scrollbar for silently clipped text,
+//          which is not parity either — so the two declarations that make it
+//          honest are asserted together: the box wraps (`pre-wrap`, and
+//          `overflow-wrap: anywhere` so an unbroken formula can break at all)
+//          and grows downward to fit what it wrapped. Clipping is then reserved
+//          for the one case wrapping cannot solve, an entry that outgrows the
+//          whole grid, where `hidden` still leaves the box programmatically
+//          scrollable so Chromium carries the caret along as the user types.
 //
-//          The user sees both bars, plus the corner, painted over their
-//          half-typed value. Excel clips; so does the Floating Range in-cell
-//          editor (`app/extensions/FloatingRange/editor/frEditor.ts`, which sets
-//          `overflow: hidden` on its own textarea for the same reason).
-//
-//          `hidden` is not "cannot scroll": the box stays programmatically
-//          scrollable, so Chromium keeps scrolling the caret into view as the
-//          user types past the right edge. Only the bars go away. jsdom has no
-//          layout and therefore cannot grow a real scrollbar, so what is pinned
-//          here is the declaration that decides whether one may exist at all.
+//          jsdom has no layout and therefore cannot grow a real scrollbar, so
+//          what is pinned here is the set of declarations that decide whether
+//          one may exist at all.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-interface ProbedCell {
-  row: number;
-  col: number;
-  display: string;
-}
-
-/** Declared with the real 4-argument shape so a test can answer BASED ON the
- *  range asked for; `vi.fn(async () => [])` infers a nullary mock and rejects
- *  any implementation that reads its arguments. */
-const getViewportCells = vi.fn(
-  async (_r1: number, _c1: number, _r2: number, _c2: number): Promise<ProbedCell[]> => []
-);
 vi.mock("../../lib/tauri-api", () => ({
-  getViewportCells: (...args: [number, number, number, number]) => getViewportCells(...args),
+  getViewportCells: async () => [],
 }));
 vi.mock("../../../api/formulaAutocomplete", () => ({
   isFormulaAutocompleteVisible: () => false,
@@ -89,9 +77,6 @@ const VIEWPORT: Viewport = {
   colCount: 20,
 };
 
-const ROW = 3;
-const COL = 2;
-
 let root: Root;
 let host: HTMLDivElement;
 
@@ -116,11 +101,17 @@ function scrollableAxes(): string[] {
     .filter((value) => value !== "" && value !== undefined);
 }
 
+function expectNoScrollbarAnywhere(): void {
+  const axes = scrollableAxes();
+  expect(axes.length).toBeGreaterThan(0);
+  for (const value of axes) expect(value).toBe("hidden");
+}
+
 let mountSeq = 0;
 
 async function mount(value: string): Promise<void> {
   mountSeq += 1;
-  const editing = { row: ROW, col: COL, value } as EditingCell;
+  const editing = { row: 3, col: 2, value } as EditingCell;
   await act(async () => {
     root.render(
       <GridProvider key={mountSeq} initialState={getInitialState()}>
@@ -136,20 +127,18 @@ async function mount(value: string): Promise<void> {
       </GridProvider>
     );
   });
-  // Let the neighbour lookup settle, so the expansion this test depends on has
-  // actually been applied rather than still being "unknown".
   await act(async () => {
-    await Promise.resolve();
     await Promise.resolve();
   });
 }
 
 describe("InlineEditor overflow", () => {
   beforeEach(() => {
+    window.innerWidth = 1200;
+    window.innerHeight = 800;
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
-    getViewportCells.mockReset();
     mountSeq += 1;
   });
 
@@ -158,46 +147,46 @@ describe("InlineEditor overflow", () => {
     host.remove();
   });
 
-  it("never allows a scrollbar, even when the entry cannot fit its column", async () => {
-    // Every neighbour holds data, so the Excel-parity expansion refuses to
-    // cover any of them and the editor stays exactly one cell wide. This is the
-    // reported case: a long entry with nowhere to grow.
-    getViewportCells.mockImplementation(async (r1, c1, _r2, c2) => {
-      const cells: ProbedCell[] = [];
-      for (let c = c1; c <= c2; c++) cells.push({ row: r1, col: c, display: "occupied" });
-      return cells;
+  it("wraps rather than clipping, which is what makes hiding the bars honest", () => {
+    // Asserted on a mounted editor rather than by reading the stylesheet, so it
+    // pins what the user's box actually resolves to.
+    const cs = { whiteSpace: "", overflowWrap: "" };
+    return mount("=1+5000").then(() => {
+      const live = computed();
+      cs.whiteSpace = live.whiteSpace;
+      cs.overflowWrap = live.overflowWrap;
+      // pre-wrap, never plain pre: plain pre cannot wrap, so `overflow: hidden`
+      // would mean an entry too long for the grid is simply invisible.
+      expect(cs.whiteSpace).toBe("pre-wrap");
+      // A formula has no spaces, so without `anywhere` there is no break
+      // opportunity in it at all and pre-wrap alone would not save it.
+      if (cs.overflowWrap !== "") expect(cs.overflowWrap).toBe("anywhere");
     });
+  });
 
+  it("never allows a scrollbar on an entry far longer than its column", async () => {
     await mount("=1+5000000000000000000000000000");
+    expect(editorEl()).toBeTruthy();
+    expectNoScrollbarAnywhere();
+  });
 
-    const el = editorEl();
-    expect(el).toBeTruthy();
-    // The premise: the box really did stay at its cell's width, so the entry
-    // really does overflow. Without this the assertion below could pass for the
-    // wrong reason (an editor wide enough to need no scrollbar in the first
-    // place proves nothing about the declaration).
-    expect(parseFloat(computed().width)).toBeCloseTo(COL_W, 1);
-
-    const axes = scrollableAxes();
-    expect(axes.length).toBeGreaterThan(0);
-    for (const value of axes) expect(value).toBe("hidden");
+  it("never allows a scrollbar when the box is clamped hard against the grid edge", async () => {
+    // A window barely wider than the cell: the box cannot grow, so everything
+    // that follows has to wrap. This is the case that used to draw both bars.
+    window.innerWidth = 200;
+    await mount("=SUM(A1:A100)+VLOOKUP(B2,Sheet2!A:D,4,FALSE)+INDEX(C:C,MATCH(D2,E:E,0))");
+    expectNoScrollbarAnywhere();
   });
 
   it("never allows a scrollbar on a multi-line entry either", async () => {
-    // Vertical growth is bounded by the viewport, so a tall enough Alt+Enter
-    // entry overflows downward no matter how much room the row has.
-    getViewportCells.mockResolvedValue([]);
-
+    // Vertical growth is bounded by the grid, so a tall enough Alt+Enter entry
+    // outgrows the box no matter how much room the row has.
     await mount(Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n"));
-
     expect(editorEl()).toBeTruthy();
-    const axes = scrollableAxes();
-    expect(axes.length).toBeGreaterThan(0);
-    for (const value of axes) expect(value).toBe("hidden");
+    expectNoScrollbarAnywhere();
   });
 
   it("keeps the resize handle off, which would be the other way to get chrome", async () => {
-    getViewportCells.mockResolvedValue([]);
     await mount("short");
     expect(computed().resize).toBe("none");
   });
