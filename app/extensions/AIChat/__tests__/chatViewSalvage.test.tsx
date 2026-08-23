@@ -653,3 +653,90 @@ describe("the tool surface shrinks when the model cannot hold it", () => {
     expect(container.textContent).not.toContain("Retrying with a smaller set");
   });
 });
+
+describe("the model is shown the script API before being asked to write one", () => {
+  // MEASURED 2026-08-23, live Ollama, the reporter's own prompt, 10-tool core,
+  // temperature 0: qwen2.5:7b with no API docs was 3/3 TEXT-ONLY — it explained
+  // what it would write and never called a tool. With the docs: 2/3 drafts whose
+  // source passes the whole validation ladder. The chat had never sent them.
+
+  it("prefixes the API surface onto the system prompt", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await ask("create a script that colours the selected cells");
+    const system = sentSystem(0);
+    expect(system).toContain("Calcula object-script API");
+    expect(system, "the exhaustiveness claim is the point").toContain("do not invent one");
+    // The rules survive alongside the reference.
+    expect(system).toContain("EMIT A TOOL CALL");
+  });
+
+  it("ranks the surface by the USER's words, not a fixed slice", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await ask("format the background of each selected cell");
+    // Without hints drawn from the request, api.getSelection falls outside the
+    // budget entirely — and a script about "selected cells" cannot be written
+    // without it, because it reads the selection at RUN time.
+    expect(sentSystem(0)).toContain("api.getSelection");
+  });
+
+  it("keeps the system prompt byte-identical across the turns of one message", async () => {
+    // A varying prompt misses the provider's prefix cache on every round, which
+    // on a local model means re-processing ~6k tokens per turn.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "list_charts", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("None.");
+      }
+      return "(none)";
+    });
+    await ask("what charts are there?");
+    expect(sentSystem(1)).toBe(sentSystem(0));
+  });
+});
+
+describe("the narrowing is remembered for the session", () => {
+  // Measured: BOTH the 3b and the 7b invent a name at 24 tools, so the narrowing
+  // fires on essentially every first message to a local model. Re-learning it
+  // per message would burn one round trip each time for no new information.
+
+  function toolCounts(): number[] {
+    return invoke.mock.calls
+      .filter((c) => c[0] === "ai_chat_complete_stream")
+      .map((c) => (c[1] as { request: { tools: unknown[] } }).request.tools.length);
+  }
+
+  it("a second message starts narrowed, with no wasted turn", async () => {
+    let invented = true;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        if (invented) {
+          invented = false;
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "madeUpTool", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("ok");
+      }
+      return "";
+    });
+
+    await ask("first message");
+    const afterFirst = toolCounts();
+    // Turn 1 full, turn 2 narrowed.
+    expect(afterFirst[0]).toBeGreaterThan(afterFirst[1]);
+
+    invoke.mockClear();
+    invoke.mockImplementation(async () => textReply("ok"));
+    await ask("second message");
+    const second = toolCounts();
+    expect(second, "the second message must not re-learn it").toHaveLength(1);
+    expect(second[0], "and must start narrowed").toBeLessThan(afterFirst[0]);
+  });
+});

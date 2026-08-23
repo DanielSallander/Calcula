@@ -1492,3 +1492,66 @@ real defect — but the defect the user actually hit twice was decided by a numb
 script and four minutes to measure against the model on their own machine. Two of the fixes shipped
 in that round (the prompt's closed set, temperature) are now known to be worth less than they
 looked. Measure the model before theorising about it.
+### 12.10 The prompts carried no API documentation at all (2026-08-23)
+
+Owner question: *"Are the prompts prefixed with the proper documentation from the app?"*
+
+**No. Not a line of it.** A repo-wide grep for `buildSurfacePrompt` found no reference anywhere
+under `app/extensions/AIChat/`. M4 — the budget-aware, ranked rendering of the script surface, whose
+own header tells the model *"a method not listed here does not exist -- do not invent one"* — was
+called only by the standalone probe (`modelProfile`), the standalone authoring loop
+(`scriptAuthoring`), and tests. The shipping chat handed the model `draft_object_script` and asked
+it to write against an API it had never been shown.
+
+**What that cost, measured** — live Ollama, the reporter's own prompt, 10-tool core surface,
+temperature 0, 3 trials, source graded by the real `validateScriptSource`:
+
+| model | API docs | outcome |
+|---|---|---|
+| qwen2.5:7b | none | **3/3 TEXT-ONLY** — explains what it would write, never calls a tool |
+| qwen2.5:7b | included | **2/3 DRAFT-VALID** (passes the whole L0-L2 ladder), 1/3 invalid |
+| qwen2.5-coder:3b | none | 4/4 `apply_formatting` |
+| qwen2.5-coder:3b | included | 4/4 `apply_formatting` — unchanged |
+
+So the missing documentation was not a quality problem. It was the difference between a script and
+a paragraph about a script, on the only model tested that was capable of the task at all. On the
+smaller model it changes nothing, so it is free where it does not help.
+
+**Why it is sent on every turn rather than on demand.** The obvious cheaper design — wait for a
+draft to fail validation, then supply the surface in the repair — cannot work: without the surface
+the capable model never DRAFTED anything to repair. There was no failure to react to, only silence.
+`repairPrompt` remains the reactive half and is good at what it does (per-finding messages plus
+"Did you mean:" suggestions), but it can only correct a guess that was made.
+
+**Three details that decide whether it works** (`AIChat/lib/apiSurface.ts`):
+- **Hints come from the user's own message.** Not cosmetic: ranked with no hints at a 6,000-token
+  budget, 103 chains are included and `api.getSelection` is NOT one of them. A task phrased "each
+  selected cell" cannot be written without it — and note the prompt's own selection line does not
+  substitute, because a button script reads the selection at RUN time, not at authoring time.
+- **The object type is guessed as "button"**, for the same reason `draftGate.objectTypeOf` falls
+  back to it. The chat cannot know the target until the model picks one, and the surface has to be
+  in the prompt before that. The shared grid surface is identical across object types, so a wrong
+  guess costs a handful of context members, not a wrong API.
+- **Built once per user message and reused across the loop's turns.** The system prompt must stay
+  byte-identical or the provider's prefix cache misses every round, which on a local model means
+  re-processing ~6,000 tokens per turn.
+
+### 12.11 Correction: the ceiling is the surface, not the model size
+
+§12.9 measured 24-vs-12 tools on the 3b only, and the natural reading — "use a bigger model" — is
+**wrong**. Re-measured on the SHIPPED configuration:
+
+| model | tools | API docs | outcome |
+|---|---|---|---|
+| qwen2.5:7b | 24 | included | **3/3 INVENTED** `format_selected_cells` |
+| qwen2.5:7b | 10 | included | **2/3 DRAFT-VALID** |
+
+The 7b invents at 24 tools exactly as the 3b does. Model size did not fix it; the surface size did,
+at both sizes. The adaptive narrowing recovers this in one turn, but it therefore fires on
+essentially every first message to a local model — so `narrowedRef` makes it **sticky for the
+session**, reset only when the user picks a different model. Re-learning the same fact about the
+same model once per message is a round trip for no information.
+
+What is still honestly unknown: whether a frontier cloud model handles 24 tools here. Nothing in
+this session measured one, and the narrowing never fires for a model that does not invent, so the
+cost of being wrong about that is zero.

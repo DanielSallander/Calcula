@@ -51,6 +51,7 @@ import { isComplete, readSelection } from "../lib/providerSelection";
 import { gateToolCall } from "../lib/draftGate";
 import { salvageTextualToolCalls, stripSpans, unknownToolMessage } from "../lib/textToolCalls";
 import { installSelectionTracking, withSelection } from "../lib/selectionContext";
+import { apiSurfaceSection } from "../lib/apiSurface";
 import {
   startTool, finishTool, failTool, settleRunning, formatToolBubble, truncate, draftIdFromResult,
   type Bubble,
@@ -156,6 +157,20 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
   /** Set by Stop, so a rejected invoke can be told from a real failure. */
   const stoppedRef = useRef(false);
   /**
+   * Whether this model has already proved it cannot hold the full tool surface.
+   *
+   * STICKY FOR THE SESSION, not per message. Measured 2026-08-23: with 24 tool
+   * schemas, BOTH qwen2.5-coder:3b and qwen2.5:7b invented a tool name on 3-4 of
+   * 4 trials; with 10, both named a real tool every time and the 7b produced
+   * valid drafts. The narrowing therefore fires on essentially every first
+   * message to a local model, and re-learning it each time would burn one round
+   * trip per message for no new information.
+   *
+   * Reset when the user picks a different model — the lesson is about the model,
+   * not about the pane.
+   */
+  const narrowedRef = useRef(false);
+  /**
    * Draft ids seen on `mcp:script-draft` during the turn, oldest first.
    *
    * The PREFERRED source of a draft id: it arrives as data. The result string is
@@ -251,9 +266,16 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
   const addBubble = useCallback((b: Bubble) => setBubbles((prev) => [...prev, b]), []);
 
   const closePicker = useCallback(() => {
-    setSelection(readSelection());
+    const next = readSelection();
+    // A new model has not proved anything yet: what the previous one could not
+    // hold says nothing about this one, and starting it narrowed would silently
+    // withhold pivots, charts and the BI tools from a model that can use them.
+    if (next.model !== selection.model || next.providerId !== selection.providerId) {
+      narrowedRef.current = false;
+    }
+    setSelection(next);
     setPicking(false);
-  }, []);
+  }, [selection.model, selection.providerId]);
 
   /** Ask the backend to abandon the turn in flight. */
   const stop = useCallback(() => {
@@ -315,7 +337,16 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
      * model nothing (it never triggers), and it reacts to the thing that
      * actually went wrong instead of to a prediction about it.
      */
-    let narrowed = false;
+    let narrowed = narrowedRef.current;
+
+    // Built ONCE, from this message's own words, and reused for every turn of
+    // its loop — the system prompt must stay byte-identical across turns or the
+    // provider's prefix cache misses on each round. Measured: without this the
+    // capable model explains what it would write and never calls the tool at
+    // all (qwen2.5:7b, 3/3 text-only -> 2/3 valid drafts). See apiSurface.ts.
+    // Awaited: the surface module is imported lazily so 167 KB of generated
+    // reference data stays out of the extension's activation path.
+    const surface = await apiSurfaceSection(text);
     try {
       for (turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         const streamId = newStreamId();
@@ -336,7 +367,9 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
             // while sending 10 would be worse than the bug it fixes.
             // The selection is appended here rather than baked in, so it is
             // whatever the user has selected at the moment they send.
-            system: withSelection(buildSystemPrompt(narrowed ? CORE_TOOL_NAMES : TOOL_NAMES)),
+            system: withSelection(
+              buildSystemPrompt(narrowed ? CORE_TOOL_NAMES : TOOL_NAMES) + surface,
+            ),
             messages,
             tools: narrowed ? CORE_TOOLS : TOOLS,
             temperature: TOOL_USE_TEMPERATURE,
@@ -533,6 +566,9 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
         // model again. This is the measured fix — 0/4 at 24 tools, 4/4 at 12.
         if (inventedStreak >= 1 && !narrowed) {
           narrowed = true;
+          // Remembered, so the next message does not pay the same round trip to
+          // learn the same thing about the same model.
+          narrowedRef.current = true;
           addBubble({
             kind: "notice",
             text:
