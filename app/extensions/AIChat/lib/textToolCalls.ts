@@ -101,8 +101,16 @@ const ENVELOPE_KEYS: ReadonlySet<string> = new Set([
   "index",
 ]);
 
-/** Keys that may carry the name. Checked in order. */
-const NAME_KEYS = ["name", "tool", "tool_name", "toolName"] as const;
+/**
+ * Keys that may carry the name. Checked in order.
+ *
+ * `function` is here because a model imitating OpenAI's format from memory
+ * flattens it: `{"function": "format_selected_cells", "arguments": {...}}`,
+ * observed from qwen2.5-coder:3b on 2026-08-22. The nested form
+ * (`{"function": {"name": ...}}`) is handled separately above, so this branch is
+ * reached only when the value is a plain string.
+ */
+const NAME_KEYS = ["name", "tool", "tool_name", "toolName", "function"] as const;
 
 /** Keys that may carry the arguments. Checked in order. */
 const ARG_KEYS = ["arguments", "args", "parameters", "params", "input"] as const;

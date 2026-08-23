@@ -46,7 +46,23 @@ export interface ChatRequest {
   messages: ChatMessage[];
   tools: ChatToolDef[];
   maxTokens?: number;
+  /** Sampling temperature. Omitted from the wire when undefined. */
+  temperature?: number;
 }
+
+/**
+ * Temperature for a turn that may call a tool.
+ *
+ * WHICH tool answers a request is not a creative decision, and Calcula was
+ * sampling it: no temperature was ever sent, so every turn ran at the runtime's
+ * default (0.8 for Ollama's qwen builds). Measured 2026-08-22 against a live
+ * Ollama — the same prompt with the same 24 tools produced a different choice on
+ * four consecutive runs, twice inventing a tool name outright.
+ *
+ * Zero rather than "low": there is a single best tool for a request, and the
+ * repair loop is a far better recovery mechanism than a lucky sample.
+ */
+export const TOOL_USE_TEMPERATURE = 0;
 
 export interface ChatResponse {
   blocks: ChatBlock[];

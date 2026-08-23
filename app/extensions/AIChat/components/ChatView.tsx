@@ -40,9 +40,11 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { listenTauriEvent, confirmAsync, hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
-import { TOOLS, TOOL_NAMES, SALVAGE_AUTORUN, SYSTEM_PROMPT } from "../lib/chatTools";
 import {
-  AI_STREAM_EVENT, STREAM_CANCELLED,
+  TOOLS, TOOL_NAMES, CORE_TOOLS, CORE_TOOL_NAMES, SALVAGE_AUTORUN, buildSystemPrompt,
+} from "../lib/chatTools";
+import {
+  AI_STREAM_EVENT, STREAM_CANCELLED, TOOL_USE_TEMPERATURE,
   type ChatBlock, type ChatMessage, type ChatResponse, type StreamEvent,
 } from "../lib/aiTypes";
 import { isComplete, readSelection } from "../lib/providerSelection";
@@ -287,6 +289,33 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
       { role: "user", content: [{ type: "text", text }] },
     ];
     let turn = 0;
+    /**
+     * Consecutive turns in which EVERY tool call named something that does not
+     * exist.
+     *
+     * A weak model that has started inventing names tends to keep inventing
+     * them: measured against qwen2.5-coder:3b, the repair message is answered
+     * with a second invented name about as often as with a real one. Two such
+     * turns is enough to stop and say so — burning all eight while the user
+     * watches a column of red is worse than an honest verdict about the model.
+     */
+    let inventedStreak = 0;
+    /**
+     * Whether the tool surface has been cut down to `CORE_TOOLS` for this turn
+     * onward.
+     *
+     * MEASURED (see `CORE_TOOL_NAMES`): handed 24 tool schemas, qwen2.5-coder:3b
+     * named a real tool 0 times out of 4; handed 12, it did so 4 times out of 4.
+     * The surface SIZE is the lever, so the recovery for "this model keeps
+     * inventing names" is to give it fewer names to hold — not to keep repeating
+     * the list at it.
+     *
+     * ADAPTIVE rather than a setting, and rather than keyed off the model
+     * profile: it needs no probe the user may never have run, it costs a capable
+     * model nothing (it never triggers), and it reacts to the thing that
+     * actually went wrong instead of to a prediction about it.
+     */
+    let narrowed = false;
     try {
       for (turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         const streamId = newStreamId();
@@ -303,11 +332,14 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
           request: {
             providerId: selection.providerId,
             model: selection.model,
-            // The selection is appended HERE and not baked into SYSTEM_PROMPT,
-            // so it is whatever the user has selected at the moment they send.
-            system: withSelection(SYSTEM_PROMPT),
+            // The prompt names the tools ACTUALLY being sent. Naming all 24
+            // while sending 10 would be worse than the bug it fixes.
+            // The selection is appended here rather than baked in, so it is
+            // whatever the user has selected at the moment they send.
+            system: withSelection(buildSystemPrompt(narrowed ? CORE_TOOL_NAMES : TOOL_NAMES)),
             messages,
-            tools: TOOLS,
+            tools: narrowed ? CORE_TOOLS : TOOLS,
+            temperature: TOOL_USE_TEMPERATURE,
           },
           streamId,
           baseUrlOverride: selection.baseUrl || null,
@@ -387,11 +419,38 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
         if (toolUses.length === 0) break;
 
         const results: ChatBlock[] = [];
+        let unknownThisTurn = 0;
         for (const tu of toolUses) {
           const salvaged = salvagedIds.has(tu.id);
           setBubbles((prev) => startTool(prev, tu.id, summarizeToolCall(tu.name, tu.input), { salvaged }));
           setActivity(`Running ${tu.name}...`);
           const started = performance.now();
+
+          // A NAME THAT DOES NOT EXIST IS ANSWERED HERE, not by the backend.
+          //
+          // This check covers NATIVE calls too, and that is the whole point: a
+          // small model invents names just as readily through the tool-calling
+          // interface as in prose (measured — qwen2.5-coder:3b emitted
+          // `formatSelectedCellsBackgroundColor` as a real tool call). Reaching
+          // `ai_chat_run_tool` for it returns a bare `Unknown tool 'x'.` with no
+          // hint, and a 3B model answers that by inventing a SECOND name, then
+          // giving up. The repair names the closed set and the nearest real
+          // tools, delivered as a tool RESULT so the model's own agentic loop
+          // performs the fix — the same mechanism draftGate uses.
+          if (!TOOL_NAMES.includes(tu.name)) {
+            unknownThisTurn++;
+            setBubbles((prev) =>
+              failTool(prev, tu.id, `No tool named "${tu.name}". Told the model what exists.`, performance.now() - started),
+            );
+            results.push({
+              type: "toolResult",
+              toolUseId: tu.id,
+              content: unknownToolMessage(tu.name, TOOL_NAMES),
+              isError: true,
+            });
+            continue;
+          }
+
           try {
             // A recovered call that would MUTATE the workbook is confirmed with
             // the user first. `confirmAsync` is awaited and fails CLOSED — a
@@ -463,6 +522,40 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
         }
         setActivity("");
         messages = [...messages, { role: "user", content: results }];
+
+        // Every call this turn named something that does not exist. Once is a
+        // slip the repair message usually fixes; twice running means the model
+        // cannot work this tool surface, and saying so is more use than eight
+        // rounds of red.
+        inventedStreak = unknownThisTurn === toolUses.length ? inventedStreak + 1 : 0;
+
+        // FIRST all-invented turn: shrink the surface rather than lecture the
+        // model again. This is the measured fix — 0/4 at 24 tools, 4/4 at 12.
+        if (inventedStreak >= 1 && !narrowed) {
+          narrowed = true;
+          addBubble({
+            kind: "notice",
+            text:
+              `${selection.model} called a tool that does not exist. Retrying with a smaller set of ` +
+              `${CORE_TOOL_NAMES.length} core tools — smaller models pick the right one far more ` +
+              `reliably from a shorter list.`,
+          });
+          continue;
+        }
+
+        // Still inventing with ten tools in front of it. Further rounds will not
+        // help, and eight of them is worse than an honest verdict.
+        if (inventedStreak >= 2) {
+          addBubble({
+            kind: "notice",
+            text:
+              `${selection.model} keeps calling tools that do not exist, even from a short list. ` +
+              `That is a limit of the model, not of your request. Try a larger model from ` +
+              `"Change model", or ask for one step at a time ("read A1:A3", then "set the ` +
+              `background of A1 to #FFFF00").`,
+          });
+          break;
+        }
       }
       if (turn >= MAX_TOOL_TURNS) {
         addBubble({

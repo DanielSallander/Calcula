@@ -103,6 +103,18 @@ pub struct ChatRequest {
     pub tools: Vec<ChatToolDef>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Sampling temperature. Omitted from the request when None, so a provider
+    /// keeps its own default.
+    ///
+    /// WHY IT EXISTS. Calcula never sent one, so every turn ran at whatever the
+    /// runtime chose — 0.8 for Ollama's qwen builds. Measured 2026-08-22 against
+    /// a live Ollama: the SAME prompt with the SAME 24 tools produced a
+    /// different tool choice on four consecutive runs, including two invented
+    /// names. Which tool best answers a request is not a creative decision, and
+    /// sampling it is how a model that KNOWS about `apply_formatting` reaches
+    /// for `formatSelectedCellsBackgroundColor` instead.
+    #[serde(default)]
+    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,6 +168,9 @@ pub fn anthropic_request_body(req: &ChatRequest) -> Value {
     });
     if let Some(sys) = req.system.as_ref().filter(|s| !s.trim().is_empty()) {
         body["system"] = json!(sys);
+    }
+    if let Some(t) = req.temperature {
+        body["temperature"] = json!(t);
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -290,6 +305,9 @@ pub fn openai_request_body(req: &ChatRequest) -> Value {
         "max_tokens": req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "messages": messages,
     });
+    if let Some(t) = req.temperature {
+        body["temperature"] = json!(t);
+    }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
             req.tools
@@ -425,6 +443,7 @@ mod tests {
                 input_schema: json!({ "type": "object", "properties": {} }),
             }],
             max_tokens: Some(1234),
+            temperature: Some(0.0),
         }
     }
 
@@ -479,6 +498,7 @@ mod tests {
             messages: vec![ChatMessage { role: ChatRole::Assistant, content: parsed.blocks.clone() }],
             tools: vec![],
             max_tokens: None,
+            temperature: None,
         });
         assert_eq!(echoed["messages"][0]["content"][0]["signature"], json!("sig"));
     }
@@ -599,6 +619,24 @@ mod tests {
         let parsed = openai_parse_response(&raw).unwrap();
         assert_eq!(parsed.stop_reason, StopReason::EndTurn);
         assert_eq!(parsed.blocks, vec![ChatBlock::Text { text: "42".into() }]);
+    }
+
+    #[test]
+    fn temperature_reaches_both_vendors_and_is_omitted_when_unset() {
+        // Calcula sent NO temperature until 2026-08-22, so every turn ran at the
+        // runtime's own default (0.8 for Ollama's qwen builds). Measured against
+        // a live Ollama: four identical requests, four different tool choices,
+        // two of them invented names. Tool selection is not a creative decision.
+        let req = sample_request();
+        assert_eq!(openai_request_body(&req)["temperature"], json!(0.0));
+        assert_eq!(anthropic_request_body(&req)["temperature"], json!(0.0));
+
+        // Omitted entirely when None, so a provider keeps its own default rather
+        // than being handed a null it may reject.
+        let mut unset = sample_request();
+        unset.temperature = None;
+        assert!(openai_request_body(&unset).get("temperature").is_none());
+        assert!(anthropic_request_body(&unset).get("temperature").is_none());
     }
 
     #[test]

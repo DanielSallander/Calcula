@@ -211,3 +211,37 @@ describe("the auto-run allowlist is fail-closed", () => {
     }
   });
 });
+
+describe("shapes observed from a live Ollama (2026-08-22)", () => {
+  // Captured by replaying the user's exact prompt against qwen2.5-coder:3b.
+  // Every one of these was a real reply; none of them is hypothetical.
+
+  it("reads a FLATTENED function key, where the name is a plain string", () => {
+    // {"function": "x"} rather than {"function": {"name": "x"}} — a model
+    // imitating OpenAI's format from memory. Unrecognised, this shape reported
+    // no unknown name either, so the model got no repair hint at all.
+    const text = '```json\n{ "function": "list_charts", "arguments": {} }\n```';
+    expect(salvageTextualToolCalls(text, KNOWN).calls.map((c) => c.name)).toEqual(["list_charts"]);
+  });
+
+  it("still reports the flattened shape's INVENTED name so the model can be told", () => {
+    const text = '```json\n{ "function": "format_selected_cells", "arguments": {"color": "#FFFF00"} }\n```';
+    const r = salvageTextualToolCalls(text, KNOWN);
+    expect(r.calls).toEqual([]);
+    expect(r.unknownNames).toEqual(["format_selected_cells"]);
+  });
+
+  it("does not confuse the flattened key with the nested one", () => {
+    const nested = '{"type":"function","function":{"name":"list_tables","arguments":"{}"}}';
+    expect(salvageTextualToolCalls(nested, KNOWN).calls.map((c) => c.name)).toEqual(["list_tables"]);
+  });
+
+  it("reads the trailing-comment JSON the model actually emits", () => {
+    // The reply in the user's first screenshot had `// Replace with...` inside
+    // the block. That is not JSON, so nothing is recovered — but it must also
+    // not throw, and the surrounding prose must survive.
+    const text = '```json\n{ "name": "list_charts", "arguments": {} // do it\n}\n```';
+    expect(() => salvageTextualToolCalls(text, KNOWN)).not.toThrow();
+    expect(salvageTextualToolCalls(text, KNOWN).calls).toEqual([]);
+  });
+});

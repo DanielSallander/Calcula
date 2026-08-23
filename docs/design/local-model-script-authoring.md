@@ -1436,3 +1436,59 @@ stay reachable.
 it. It is where all four defects met. It now has `__tests__/chatViewSalvage.test.tsx`, and the
 logic that can be wrong was moved into pure modules (`textToolCalls`, `toolTimeline`,
 `selectionContext`) that are tested without jsdom.
+### 12.9 It still did not work — and the cause was none of the above (2026-08-23)
+
+The user retried the same prompt after §12.1-§12.8 shipped and got three red bubbles: two
+**native** tool calls naming `formatSelectedCellsBackgroundColor` and `setSelectionForegroundStyle`,
+then the model giving up with `{"error": "Unknown tool"}`. So the model WAS emitting real tool
+calls through the real interface. It was inventing the names.
+
+Two things were wrong, and only one of them had been guessed.
+
+**The repair was wired to the wrong half.** §12.2's unknown-name message was reachable only from
+the SALVAGE path — a native invention went straight to `ai_chat_run_tool` and came back as a bare
+`Unknown tool 'x'.` with no list of what exists, which is precisely the input that made the model
+invent a second name and stop. Moved into the dispatch loop, so provenance no longer decides
+whether the model is told anything.
+
+**And then it was measured, against the live Ollama on this machine.** Replaying the user's exact
+request through the real `chatTools.ts`, `qwen2.5-coder:3b`, 4 trials per cell:
+
+| tool surface | temperature | named a real tool |
+|---|---|---|
+| 24 (all) | provider default | **0 / 4** — 2 invented natively, 2 printed an invented name |
+| 24 (all) | 0 | **0 / 4** — deterministically invented `format_selected_cells` |
+| 12 (first twelve) | 0 | **4 / 4** — `apply_formatting` |
+| 10 (designed core) | 0 | **4 / 4** — `apply_formatting`, natively emitted |
+
+**The surface SIZE is the lever.** Not the prompt — the closed set was already named in it, and the
+model invented anyway. Not the temperature — temperature 0 changed 0/4 into a *reproducible* 0/4,
+which is worth having for support and for a repair loop that would otherwise thrash, but it fixed
+nothing on its own. Two dozen tool schemas is ~14k characters of JSON, and a 3B model handed that
+reaches for a plausible name it made up instead of the `apply_formatting` sitting in its own list.
+
+**So the recovery is to give it fewer names, not to repeat the list at it.** `CORE_TOOL_NAMES` (10)
+covers orientation, read, write, format and both script paths; `ChatView` narrows to it after a
+turn in which EVERY call was invented, tells the user why, and retries. Adaptive rather than a
+setting or a profile lookup: it needs no probe the user may never have run, costs a capable model
+nothing because it never fires, and reacts to what actually happened instead of to a prediction.
+A second all-invented turn stops and names the model as the limit.
+
+`draft_object_script` is in the core set because the naive "first twelve" slice DROPS it — that
+slice scored 4/4 on tool names while answering "create a script" by formatting cells. And
+`buildSystemPrompt` now takes the surface, because a prompt still naming 24 tools while the request
+carries 10 would be worse than the bug it fixes.
+
+**Honest residue.** With the core set the model reliably calls `apply_formatting` — a real, correct,
+undoable action that colours the cells. It does not choose `draft_object_script`, so it answers
+"create a script that formats X" by formatting X. That is a 3B model failing to distinguish a
+request for automation from a request for the outcome, and no prompt wording tested here changed
+it. The product now does something real and says what it did, instead of nothing; getting a small
+model to prefer the script path is a separate piece of work, and belongs to the eval corpus rather
+than to another prompt tweak.
+
+**The method is the lesson.** §12.1-§12.8 were reasoned from the code and every one of them was a
+real defect — but the defect the user actually hit twice was decided by a number that took one
+script and four minutes to measure against the model on their own machine. Two of the fixes shipped
+in that round (the prompt's closed set, temperature) are now known to be worth less than they
+looked. Measure the model before theorising about it.

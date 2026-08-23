@@ -439,3 +439,217 @@ describe("the selection reaches the model", () => {
     __setSelectionForTest(null);
   });
 });
+
+describe("an invented name is answered the same way however it arrives", () => {
+  // Measured against a live Ollama on 2026-08-22: qwen2.5-coder:3b emits
+  // `formatSelectedCellsBackgroundColor` as a REAL, NATIVE tool call — not as
+  // prose. The first fix only taught the salvage path, so a native invention
+  // reached `ai_chat_run_tool`, came back as a bare `Unknown tool 'x'.` with no
+  // hint, and the model answered by inventing a second name and giving up.
+
+  function nativeInvention(name: string, then: ChatResponse) {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "call_1", name, input: { backgroundColor: "#FFFF00" } }],
+            stopReason: "toolUse", model: "qwen2.5-coder:3b",
+          } as ChatResponse;
+        }
+        return then;
+      }
+      return "ok";
+    });
+  }
+
+  it("never dispatches a NATIVE call whose name does not exist", async () => {
+    nativeInvention("formatSelectedCellsBackgroundColor", textReply("Sorry."));
+    await ask("colour the selected cells");
+    expect(
+      runToolCalls(),
+      "the backend must not be asked for a tool that cannot exist",
+    ).toEqual([]);
+  });
+
+  it("tells the model what DOES exist, and points at the nearest real tool", async () => {
+    nativeInvention("formatSelectedCellsBackgroundColor", textReply("Understood."));
+    await ask("colour the selected cells");
+    const repair = JSON.stringify(sentMessages(1));
+    expect(repair).toContain("There is no tool called");
+    expect(repair, "the real neighbour").toContain("apply_formatting");
+    // The closed set is restated, which is what the bare backend error lacked.
+    expect(repair).toContain("draft_object_script");
+  });
+
+  it("shows the user the failed call rather than a silent 4ms nothing", async () => {
+    nativeInvention("formatSelectedCellsBackgroundColor", textReply("Understood."));
+    await ask("colour the selected cells");
+    expect(container.textContent).toContain("[!]");
+    expect(container.textContent).toContain("No tool named");
+  });
+
+  it("stops and blames the MODEL after two all-invented turns", async () => {
+    // A weak model answers the repair with a second invention about as often as
+    // with a real name. Eight rounds of red is worse than an honest verdict.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        return {
+          blocks: [{ type: "toolUse", id: `call_${nth}`, name: `madeUpTool${nth}`, input: {} }],
+          stopReason: "toolUse", model: "qwen2.5-coder:3b",
+        } as ChatResponse;
+      }
+      return "ok";
+    });
+    await ask("colour the selected cells");
+    const streamCalls = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream");
+    expect(streamCalls.length, "must not burn all 8 turns").toBe(2);
+    expect(container.textContent).toContain("keeps calling tools that do not exist");
+    expect(container.textContent, "the model is named, so the user knows what to change")
+      .toContain("qwen2.5-coder:3b");
+  });
+
+  it("does not blame the model when it recovers after one bad name", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "formatCells", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        if (nth === 2) {
+          return {
+            blocks: [{ type: "toolUse", id: "c2", name: "list_charts", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("There are no charts.");
+      }
+      return "(no charts)";
+    });
+    await ask("charts?");
+    expect(runToolCalls().map((c) => c.name)).toEqual(["list_charts"]);
+    expect(container.textContent).not.toContain("keeps calling tools that do not exist");
+  });
+});
+
+describe("the tool surface shrinks when the model cannot hold it", () => {
+  // MEASURED against a live Ollama, 2026-08-22, replaying the user's exact
+  // request: qwen2.5-coder:3b named a real tool 0/4 times with 24 tool schemas
+  // and 4/4 with 12. The surface SIZE is the lever — not the prompt, and not the
+  // temperature (temp 0 at 24 tools was 0/4, just deterministically wrong).
+
+  function toolsSent(call: number): string[] {
+    const streamCalls = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream");
+    const req = streamCalls[call][1] as { request: { tools: Array<{ name: string }> } };
+    return req.request.tools.map((t) => t.name);
+  }
+
+  it("sends the FULL surface first — a capable model loses nothing", async () => {
+    invoke.mockImplementation(async () => textReply("Nothing to do."));
+    await ask("hello");
+    expect(toolsSent(0).length).toBeGreaterThanOrEqual(20);
+  });
+
+  it("narrows to the core set after one all-invented turn, and retries", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "formatSelectedCellsBackgroundColor", input: {} }],
+            stopReason: "toolUse", model: "qwen2.5-coder:3b",
+          } as ChatResponse;
+        }
+        if (nth === 2) {
+          return {
+            blocks: [{ type: "toolUse", id: "c2", name: "apply_formatting", input: { start_row: 0, start_col: 0, end_row: 2, end_col: 0, background_color: "#FFFF00" } }],
+            stopReason: "toolUse", model: "qwen2.5-coder:3b",
+          } as ChatResponse;
+        }
+        return textReply("Done.");
+      }
+      return "formatted";
+    });
+
+    await ask("colour the selected cells by their content");
+
+    const first = toolsSent(0);
+    const second = toolsSent(1);
+    expect(second.length, "the retry must carry FEWER tools").toBeLessThan(first.length);
+    expect(container.textContent).toContain("Retrying with a smaller set");
+    // ...and the retry actually worked.
+    expect(runToolCalls().map((c) => c.name)).toEqual(["apply_formatting"]);
+  });
+
+  it("keeps the script path in the core set — it is the headline use case", async () => {
+    // The naive "first twelve tools" slice drops draft_object_script, which
+    // produced a model that formatted cells when asked for a SCRIPT.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "madeUp", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("ok");
+      }
+      return "";
+    });
+    await ask("make me a script");
+    const narrowed = toolsSent(1);
+    expect(narrowed).toContain("draft_object_script");
+    expect(narrowed).toContain("apply_formatting");
+    expect(narrowed).toContain("get_sheet_summary");
+  });
+
+  it("narrows the PROMPT with the tools, never promising an absent one", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "madeUp", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("ok");
+      }
+      return "";
+    });
+    await ask("do something");
+
+    const prompt = sentSystem(1);
+    const sent = toolsSent(1);
+    // Every name the narrowed prompt claims exists must actually be offered.
+    for (const dropped of ["create_pivot", "cube_kpi", "list_bi_connections"]) {
+      expect(sent).not.toContain(dropped);
+      expect(prompt, `${dropped} is not offered and must not be named`).not.toContain(dropped);
+    }
+    for (const kept of sent) expect(prompt).toContain(kept);
+  });
+
+  it("does not narrow when the model simply used a real tool", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "list_charts", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("None.");
+      }
+      return "(none)";
+    });
+    await ask("charts?");
+    expect(toolsSent(1).length).toBe(toolsSent(0).length);
+    expect(container.textContent).not.toContain("Retrying with a smaller set");
+  });
+});

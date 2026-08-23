@@ -24,7 +24,10 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import { TOOLS, DRAFT_OBJECT_TYPES, TOOL_NAMES, SALVAGE_AUTORUN, SYSTEM_PROMPT } from "../lib/chatTools";
+import {
+  TOOLS, DRAFT_OBJECT_TYPES, TOOL_NAMES, SALVAGE_AUTORUN, SYSTEM_PROMPT,
+  CORE_TOOLS, CORE_TOOL_NAMES, buildSystemPrompt,
+} from "../lib/chatTools";
 
 const REPO = path.resolve(__dirname, "../../../..");
 const AI_CHAT_RS = path.join(REPO, "app/src-tauri/src/ai/tools.rs");
@@ -341,6 +344,68 @@ describe("the salvage auto-run allowlist is a subset of the real surface", () =>
       .toBeGreaterThanOrEqual(6);
     for (const name of writesOrExecutes) {
       expect(SALVAGE_AUTORUN.has(name), `${name} mutates and must never auto-run from prose`).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The narrowed surface a small model falls back to
+// ---------------------------------------------------------------------------
+
+describe("CORE_TOOLS is a real, usable subset", () => {
+  // Measured 2026-08-22 against a live Ollama with the user's exact request:
+  // qwen2.5-coder:3b named a real tool 0/4 times at 24 tool schemas and 4/4 at
+  // 12. ChatView narrows to this set after a turn in which every call was
+  // invented.
+
+  it("is a strict subset of the real surface", () => {
+    for (const name of CORE_TOOL_NAMES) {
+      expect(TOOL_NAMES, `${name} is in the core set but is not a tool`).toContain(name);
+    }
+    expect(CORE_TOOLS.map((t) => t.name).sort()).toEqual([...CORE_TOOL_NAMES].sort());
+  });
+
+  it("is meaningfully smaller than the full surface, or it fixes nothing", () => {
+    expect(CORE_TOOLS.length).toBeLessThanOrEqual(12);
+    expect(CORE_TOOLS.length).toBeLessThan(TOOLS.length / 1.5);
+  });
+
+  it("keeps the script path — the naive slice drops it", () => {
+    // Taking "the first twelve tools" excludes draft_object_script, which
+    // produced a model that formatted cells when asked to write a SCRIPT.
+    expect(CORE_TOOL_NAMES).toContain("draft_object_script");
+    expect(CORE_TOOL_NAMES).toContain("run_script");
+  });
+
+  it("keeps enough to orient, read, write and format", () => {
+    for (const essential of [
+      "get_sheet_summary", "read_cell_range", "set_cell_value", "apply_formatting",
+    ]) {
+      expect(CORE_TOOL_NAMES).toContain(essential);
+    }
+  });
+});
+
+describe("buildSystemPrompt never promises a tool it is not sending", () => {
+  it("names exactly the surface it was given", () => {
+    const prompt = buildSystemPrompt(CORE_TOOL_NAMES);
+    for (const name of CORE_TOOL_NAMES) expect(prompt).toContain(name);
+    // The BI paragraph must not survive into a prompt whose surface lacks them.
+    for (const dropped of TOOL_NAMES.filter((n) => !CORE_TOOL_NAMES.includes(n))) {
+      expect(prompt, `${dropped} is not offered and must not be named`).not.toContain(dropped);
+    }
+  });
+
+  it("the exported full prompt is just the full-surface case", () => {
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt(TOOL_NAMES));
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt());
+  });
+
+  it("keeps the mechanism rules whichever surface it builds", () => {
+    for (const prompt of [buildSystemPrompt(TOOL_NAMES), buildSystemPrompt(CORE_TOOL_NAMES)]) {
+      expect(prompt).toContain("EMIT A TOOL CALL");
+      expect(prompt).toMatch(/never call a name outside/i);
+      expect(prompt).toMatch(/no tool reads the selection/i);
     }
   });
 });

@@ -348,6 +348,50 @@ export const TOOLS: ChatToolDef[] = [
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
 /**
+ * The tools a SMALL model is offered once the full surface has defeated it.
+ *
+ * MEASURED, not guessed. Against a live Ollama on 2026-08-22, replaying the
+ * exact request a user reported, qwen2.5-coder:3b was asked to format the
+ * selected cells:
+ *
+ *   24 tools, provider default temperature ... 0 of 4 named a real tool
+ *   24 tools, temperature 0 ................. 0 of 4 (deterministically invented)
+ *   12 tools, temperature 0 ................. 4 of 4 named a real tool
+ *
+ * The surface SIZE is the lever — not the prompt, and not the temperature. Two
+ * dozen tool schemas is roughly 14k characters of JSON, and a 3B model handed
+ * that reaches for a plausible-sounding name it made up
+ * (`formatSelectedCellsBackgroundColor`) instead of the `apply_formatting` that
+ * is sitting in its own tool list.
+ *
+ * WHAT IS IN, AND WHY. Orientation, read, write, format, and BOTH script paths.
+ * `draft_object_script` is non-negotiable: "create a script" is the product's
+ * headline use case, and the naive "just take the first twelve" slice drops it —
+ * which produced a model that correctly called `apply_formatting` while the user
+ * had asked for a script. What is OUT is everything a small model will not
+ * reach for unprompted and can still get by naming explicitly on a later turn:
+ * charts-from-spec, pivots, the BI/cube family, and the draft-inspection pair.
+ *
+ * This is a FALLBACK, never the default. A capable model is handed everything;
+ * `ChatView` narrows only after a turn in which every call was invented.
+ */
+export const CORE_TOOL_NAMES: readonly string[] = [
+  "get_sheet_summary",
+  "read_cell_range",
+  "set_cell_value",
+  "set_cell_range",
+  "apply_formatting",
+  "draft_object_script",
+  "run_script",
+  "list_charts",
+  "list_tables",
+  "create_named_range",
+];
+
+/** `TOOLS` filtered to `CORE_TOOL_NAMES`, preserving the declared order. */
+export const CORE_TOOLS: ChatToolDef[] = TOOLS.filter((t) => CORE_TOOL_NAMES.includes(t.name));
+
+/**
  * Tool calls that may be SALVAGED from prose and run without asking the user.
  *
  * Read-only tools plus `draft_object_script`. A salvaged call is the model's
@@ -404,8 +448,30 @@ export const SALVAGE_AUTORUN: ReadonlySet<string> = new Set<string>([
  * The names are interpolated rather than typed out for the same reason
  * `TOOL_NAMES` exists: a prompt that promises a tool the surface no longer offers
  * teaches the model to call something that will come back "Unknown tool".
+ *
+ * The prompt was NOT enough on its own — measured, see `CORE_TOOL_NAMES`. It
+ * lowers the rate; the surface size is what decides it.
+ *
+ * The system prompt for a given tool surface.
+ *
+ * TAKES THE NAMES rather than closing over `TOOL_NAMES`, because the surface is
+ * not always the full one: `ChatView` narrows to `CORE_TOOLS` after a model has
+ * proved it cannot handle two dozen. A prompt that kept naming all 24 while the
+ * request carried 10 would be strictly worse than the bug it is fixing — it
+ * would be telling the model to call tools that are genuinely not there.
+ *
+ * The BI paragraph is emitted only when those tools are actually offered, for
+ * the same reason.
  */
-export const SYSTEM_PROMPT =
+export function buildSystemPrompt(names: readonly string[] = TOOL_NAMES): string {
+  const bi = names.includes("list_bi_connections")
+    ? "If the workbook has BI/cube connections (list_bi_connections), you can query them read-only " +
+      "with describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members.\n\n"
+    : "";
+  return SYSTEM_PROMPT_HEAD + names.join(", ") + SYSTEM_PROMPT_MIDDLE + bi + SYSTEM_PROMPT_TAIL;
+}
+
+const SYSTEM_PROMPT_HEAD =
   "You are an AI assistant embedded in Calcula, a spreadsheet application. You help the user " +
   "read and edit the open workbook using the provided tools.\n\n" +
   "HOW TO ACT — READ THIS FIRST.\n" +
@@ -414,14 +480,15 @@ export const SYSTEM_PROMPT =
   '{"name": ..., "arguments": ...} is just prose. No tool runs, the workbook does not change, ' +
   "and the user sees only your message. If you intend to use a tool, emit the call — do not " +
   "describe it, do not print it, and do not ask the user to run it for you.\n\n" +
-  "THE TOOLS THAT EXIST — this list is complete and closed:\n" +
-  TOOL_NAMES.join(", ") +
+  "THE TOOLS THAT EXIST — this list is complete and closed:\n";
+
+const SYSTEM_PROMPT_MIDDLE =
   ".\nNever call a name outside that list; an invented name does nothing. If nothing in the " +
   "list can do what the user asked, say so in plain text instead of inventing a tool.\n\n" +
   "ORIENTATION. Prefer get_sheet_summary before reading/writing. Cell coordinates are 0-based " +
-  "(row 0 = row 1, col 0 = column A). " +
-  "If the workbook has BI/cube connections (list_bi_connections), you can query them read-only with " +
-  "describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members.\n\n" +
+  "(row 0 = row 1, col 0 = column A).\n\n";
+
+const SYSTEM_PROMPT_TAIL =
   "THE USER'S SELECTION. No tool reads the selection. When the user has one it is stated at the " +
   "end of this prompt — use those coordinates. If the user says \"the selected cells\" and no " +
   "selection is stated, ask them to select a range rather than guessing one.\n\n" +
@@ -433,3 +500,11 @@ export const SYSTEM_PROMPT =
   "RESTRICTED access level; if yours calls context.api.* it will not run until the user raises it " +
   "to Unlocked in the editor, so tell them that when it applies.\n\n" +
   "Keep replies concise. Confirm destructive or large edits before making them.";
+
+/**
+ * The full-surface prompt — what a capable model is sent.
+ *
+ * Declared last so every part it composes is initialised. `ChatView` uses
+ * `buildSystemPrompt(CORE_TOOL_NAMES)` instead once it has narrowed.
+ */
+export const SYSTEM_PROMPT = buildSystemPrompt();
